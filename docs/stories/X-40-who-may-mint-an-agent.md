@@ -95,3 +95,19 @@ resolves would ship a revocation mechanism that does not revoke.
   gate makes descendants impossible so revocation is complete again, but if X-38 or a later story
   wants an audit trail of minting, `Agent` has no field for it and this was the cheapest moment to
   add one.
+- **Reviewed PASS**, verified with four mutations rather than by re-running the report: removing
+  **both** gates reproduces the defect verbatim (a `201` carrying a real minted token for
+  `successor-of-an-agent`); removing **either one** leaves the other carrying it, each with its own
+  failing pin. So neither layer is dead code masking the other's absence.
+- The reviewer also checked the filter change I would have missed: `the_surface_publishes_a_route_that_requires_a_principal`
+  moving from `== Access::Principal` to `!= Access::Anonymous` **did not hollow it out** — its only
+  assertion is an emptiness check, and the old filter would still pass today regardless.
+- **`Service` locks nobody out**: `PrincipalKind::Service` is constructed in exactly one production
+  place (the development roster), `Oidc` constructs `User` unconditionally, and `AppState` binds one
+  identity port — so there is no composition where a `Service` is the only principal an operator can
+  present.
+- **Two claims corrected at integration, both stronger than the code:** `AgentError::MayNotMint.kind`
+  was documented "for the log line" and nothing emits it (it is write-only, and the doc now says so
+  and why it is kept); and `Display`'s doc named `a_kind_renders_as_it_serialises` as what keeps the
+  two spellings from drifting, when that test **hand-enumerates** three variants — a fourth would
+  force an arm without forcing a correct one.

@@ -881,8 +881,11 @@ pub enum AgentError {
     /// The minting principal is not of a kind that may create a principal. See
     /// [`AgentStore::mint`], and `routes::agents::MAY_MINT` for why.
     MayNotMint {
-        /// The kind that asked. For the **log line**, which is where an agent reaching for this is
-        /// worth seeing — never for the answer, which quotes the rule instead.
+        /// The kind that asked. **Currently write-only**, and this doc used to claim otherwise:
+        /// nothing emits it, because the published route is gated by its declaration and the guard
+        /// logs the whole principal instead. It is kept because a caller reaching `mint` without a
+        /// declared access — the case this variant exists for — has no other record of *what* asked,
+        /// and it must never reach the answer, which quotes the rule rather than the caller.
         kind: PrincipalKind,
     },
 

@@ -8,6 +8,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A connector can be connected from the console** (X-44). The console could show what was wired and
+  offered no way to wire anything, so an operator read their connections in a browser and created
+  them with `curl` — it could do neither of the two jobs the charter gives it.
+
+  The inputs come from **the connector's own declaration**, not a list the console keeps, so a
+  connector that gains a credential gains an input with nobody editing the console. No value is ever
+  rendered back: after a write the page shows addresses and whether each credential is held, through
+  the same renderer the read-only listing uses. An already-connected connector points at **rotation**,
+  never at delete.
+
 - **Only a human mints an agent** (X-40). Nothing gated minting by principal kind, so once agent
   tokens authenticate, a leaked one could mint successors — and revoking the first would not kill the
   descendants. Revocation would have stopped being a remedy **invisibly**, because those descendants

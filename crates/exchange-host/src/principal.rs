@@ -94,7 +94,9 @@ impl std::fmt::Display for PrincipalKind {
     ///
     /// Deliberately the same string [`Serialize`] emits and the same one the development identity's
     /// roster is written in, so a caller told which kinds a route admits is told them in a spelling
-    /// it has already seen. `a_kind_renders_as_it_serialises` is what keeps the two from drifting.
+    /// it has already seen. `a_kind_renders_as_it_serialises` checks the three variants that exist
+    /// — it enumerates them by hand, so a **fourth** variant would force an arm here without
+    /// forcing a *correct* one. Add it to that test in the same commit that adds the variant.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::User => "user",
