@@ -1,7 +1,7 @@
 ---
 id: X-02
 title: "Serve HTTP, and refuse a reachable bind with no way to authenticate"
-status: ready
+status: in-progress
 priority: 1
 epic: serve
 note: "flux-server's precedent: a non-loopback bind without a token is refused AT STARTUP, because a daemon that auto-approves behind an open listener is RCE"
