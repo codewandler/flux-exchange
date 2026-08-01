@@ -13,10 +13,11 @@
 //! and can say nothing about paths nobody wrote a test for. **This file is what speaks to absence**,
 //! and it does so twice:
 //!
-//! - **Lock 1** — the dispatching crate's own `[dependencies]` table is an **allow-list**. Not a
-//!   deny-list: a deny-list only catches the transports somebody thought of, and passes for `ureq`,
-//!   `isahc`, `attohttpc` and whatever ships next year. An allow-list fails on *any* new dependency,
-//!   and whoever adds one has to write down why it is not a transport.
+//! - **Lock 1** — the dispatching crate's own **normal** dependency tables are an **allow-list**.
+//!   Not a deny-list: a deny-list only catches the transports somebody thought of, and passes for
+//!   `ureq`, `isahc`, `attohttpc` and whatever ships next year. An allow-list fails on any new
+//!   dependency *in the tables it reads* — see [`header_of`] for which those are and why the rest
+//!   are out — and whoever adds one has to write down why it is not a transport.
 //! - **Lock 2** — one seam, counted, over this crate's sources.
 //!
 //! # What lock 2 is, and what it is not
@@ -25,29 +26,66 @@
 //! than one that admits its edge — this repository has had to correct exactly that more than once.
 //!
 //! **Lock 2 checks names, not values.** Every rule below is a string, and it refuses a source that
-//! writes that string. It cannot see a capability that arrives under a name nobody listed, and
-//! X-48's review found one: [`rules::FORBIDDEN`] catches the crate name `flux_system`, but this
-//! crate **re-exports `ToolContext`**, and `ctx.system()` hands back the `flux_system::System` by
-//! inference — process spawn and the workspace filesystem, reached without writing any forbidden
-//! string. That particular door is now shut by [`rules::REACHES_THE_SYSTEM`]. The *class* of hole
-//! is not shut, and a source scanner cannot shut it.
+//! writes that string. It cannot see a capability that arrives under a name nobody listed, and a
+//! previous attempt at this section got that wrong twice in the same paragraph, so the corrections
+//! are recorded rather than quietly applied.
+//!
+//! The demonstration, which is worth more than the argument. X-48's review added one file to this
+//! crate:
+//!
+//! ```ignore
+//! let handle = ctx.workspace_context().active();
+//! handle.run(&argv, Duration::from_secs(5)).await
+//! ```
+//!
+//! That reaches `System::run` — a process spawn — naming nothing in [`rules::FORBIDDEN`], no
+//! `.tool()`, and not even [`rules::REACHES_THE_SYSTEM`], which was written believing `.system(`
+//! was the only spelling. It is not: `ToolContext::workspace_context` is public, and
+//! `WorkspaceContext::active` returns the same `Arc<System>` under a different name. The whole
+//! workspace stayed green. **A rule that chases accessor spellings will always be one accessor
+//! behind**, because the set of ways to get a value out of a public type is not a set this file
+//! can enumerate.
+//!
+//! So the instrument changed rather than the string list growing. [`rules::HOLDS_A_TOOL_CONTEXT`]
+//! bounds **possession** instead of use: a `ToolContext` is the handle every IO capability hangs
+//! off, and only the seam and the crate root may hold one — the same two files that may hold an
+//! `Egress`, and the same shape of rule. A file that cannot name the handle cannot call anything on
+//! it, whatever the accessor is called this release. [`rules::REACHES_THE_SYSTEM`] stays underneath
+//! it as a second, narrower net.
+//!
+//! That is a real narrowing and it is still a name check. What it does not catch: a `ToolContext`
+//! obtained without naming the type — which today requires a public accessor for `Invoker`'s
+//! private `contexts` field, and there is none. If one is ever added, this rule is back to being
+//! one accessor behind.
 //!
 //! So what covers the rest, in the order it bites:
 //!
-//! - **Lock 1**, above, is not a name check. Its allow-list fails on *any* `[dependencies]` entry
-//!   nobody wrote a reason for, so a new capability that arrives as a dependency is caught whether
-//!   or not anyone thought of it. Its blind spot is the mirror of lock 2's: a capability reached
-//!   *transitively*, through a crate already on the list.
+//! - **Lock 1**, above, is not a name check — it fails on a *name it has never heard of*. Its scope
+//!   is this crate's normal dependency tables: `[dependencies]`, `[dependencies.name]`, and both
+//!   under `[target.…]`. That list is narrower than the "any entry" this section used to claim: the
+//!   review appended `[dependencies.reqwest]` and lock 1 reported `5 passed`, because the parser
+//!   matched one spelling of the header. [`the_manifest_parser_reads_every_shape_cargo_allows`] is
+//!   the test that was missing, and `dev-`/`build-dependencies` remain deliberately out of scope
+//!   with reasons on [`header_of`]. Its standing blind spot is the mirror of lock 2's: a capability
+//!   reached *transitively*, through a crate already on the list — which is exactly how
+//!   `flux-system` is reachable at all.
 //! - **Lock 3** (`tests/invoke.rs`) is behavioural: a counting transport, one dispatch per invoke,
 //!   and zero for every refusal. It proves things about the paths its tests drive and nothing about
 //!   paths nobody wrote a test for.
-//! - **The composition's own posture.** `exchange-server`'s `execution::guarded_system` builds the
-//!   one `System` a `ToolContext` here is ever made over, with `SandboxMode::Require` — so a spawn
-//!   that did slip past all three locks is confined by bubblewrap/Seatbelt or refuses. That is the
-//!   backstop for the reach this file does not have, and `the_sandbox_posture_is_chosen_and_not_inherited`
-//!   holds it.
+//! - **The composition's posture, and read the boundary before leaning on it.**
+//!   `exchange-server`'s `execution::guarded_system` builds its `System` with
+//!   `SandboxMode::Require`, so `System::run`/`run_with_env` are confined or refuse. **That file is
+//!   in the other crate and this scanner never reads it**, which is the honest shape of the thing:
+//!   it is a property of *this repository's* composition, not of the published crate. A downstream
+//!   binary implements `Contexts` itself and supplies whatever `System` it built — quite possibly
+//!   `System::new`, whose sandbox is disabled. So for a consumer of
+//!   `codewandler-flux-exchange-host`, this backstop **does not exist**, and locks 1–2 are the
+//!   whole of what ships with the crate. It is also narrower than "a spawn": `build_command` only
+//!   consults `Sandbox::ensure_available` for `Confinement::Sandboxed`, so the `Exempt` paths
+//!   (`run_exempt`, `spawn_debug_pipe`) skip it entirely.
 //!
-//! Four mechanisms, and they fail differently. None of them is the argument on its own.
+//! Four mechanisms, and they fail differently. None of them is the argument on its own, and the
+//! fourth is not part of the published artifact at all.
 //!
 //! # If this test is red and your change is not about transports
 //!
@@ -156,23 +194,39 @@ mod rules {
     /// Dispatching a tool. Only the seam may, and only on the operation the pack resolved.
     pub const DISPATCH: &str = ".execute(";
 
-    /// **Reaching the guarded `System` out of a `ToolContext`** (X-48).
+    /// **Holding the handle every IO capability hangs off** (X-48, round 2).
     ///
-    /// Upstream's own words for `ToolContext::system` are *"the only way tools reach IO"*: it hands
-    /// back the `flux_system::System`, whose `run`/`run_with_env` spawn processes and whose
-    /// `read_file`/`write_file` reach the workspace root.
+    /// `ToolContext` is what a tool is called with, and upstream builds it over a
+    /// `flux_system::System`. Everything reachable from one — process spawn, the workspace
+    /// filesystem, the worktree ops — is reachable *through some accessor or other*, and this file
+    /// cannot enumerate accessors: the round-1 rule below picked `.system(` and the review walked
+    /// past it with `ctx.workspace_context().active()`, which is a different public accessor
+    /// returning the same `Arc<System>`.
     ///
-    /// It is a rule of its own rather than an entry in [`FORBIDDEN`] because [`FORBIDDEN`] could
-    /// not see it, and that is the point worth keeping. That list catches the *crate name*
-    /// `flux_system` — but this crate re-exports `ToolContext` for a composition to implement
-    /// `Contexts` with, so `ctx.system().run(&argv, timeout)` reaches process spawn while naming
-    /// nothing on the list. A name check missed a value.
+    /// So this rule bounds **possession** rather than use. A file that never names `ToolContext`
+    /// cannot take one as a parameter, store one, or return one, so it has nothing to call an
+    /// accessor on — and that holds however many accessors upstream adds. It is the same shape as
+    /// [`MAY_NAME_EGRESS`]: a capability that travels to a bounded, readable set of places.
     ///
-    /// Refusing this one call syntax closes the door rather than narrowing it: `ToolContext`'s
-    /// `workspace` field is private, so `system()` is the only accessor, and the second one
-    /// (`WorkspaceContext::system`) is spelled `.system(` too. There is no file on an exception
-    /// list, deliberately — the crate that dispatches has no business holding a `System`, and the
-    /// day one does, that is a design decision and not a scanner update.
+    /// Still a name check, and the residual is named rather than left to be found: a context
+    /// obtained purely by inference, without the type appearing. That needs a public accessor for
+    /// `Invoker`'s private `contexts` field, and there is none — add one and this rule is back to
+    /// being one accessor behind.
+    pub const HOLDS_A_TOOL_CONTEXT: &str = "ToolContext";
+
+    /// Files allowed to name [`HOLDS_A_TOOL_CONTEXT`]: the seam that dispatches with one, and the
+    /// crate root that re-exports the type so a composition can implement `Contexts` without
+    /// naming `flux-runtime` and guessing an engine version. The same two files as
+    /// [`MAY_NAME_EGRESS`], which is not a coincidence — they are the two halves of one invocation.
+    pub const MAY_HOLD_A_TOOL_CONTEXT: &[&str] = &["invoke.rs", "lib.rs"];
+
+    /// **The narrower net under [`HOLDS_A_TOOL_CONTEXT`]**: the shortest spelling of "give me the
+    /// guarded `System`".
+    ///
+    /// Kept, and deliberately not trusted. It catches `ctx.system()` and `WorkspaceContext`'s own
+    /// accessor if it is ever spelled that way; it did **not** catch `.workspace_context().active()`,
+    /// which is how round 1's claim that this "closes the door" was disproved. Read it as the
+    /// spelling somebody would reach for by accident, caught cheaply — not as a boundary.
     pub const REACHES_THE_SYSTEM: &str = ".system(";
 
     /// Names no source in this crate may carry. `flux-system` is where flux's real IO lives —
@@ -239,6 +293,113 @@ fn the_allow_list_carries_no_entry_for_a_dependency_that_is_gone() {
             "`{allowed}` is on the allow-list and is no longer a dependency; drop the entry",
         );
     }
+}
+
+/// **The parser, proved over every shape Cargo allows — the check lock 1 never had.**
+///
+/// X-48's review appended six lines to this crate's manifest:
+///
+/// ```toml
+/// [dependencies.reqwest]
+/// version = "0.13"
+/// features = ["json"]
+/// ```
+///
+/// and lock 1 reported `5 passed`. An HTTP client had become a direct dependency of the crate whose
+/// entire safety argument is that it holds no transport, and the allow-list said nothing — because
+/// [`dependencies_of`] tested `line == "[dependencies]"` and a per-dependency table is not that
+/// string.
+///
+/// The lesson is not "fix the parser". It is that **the parser had no test**, so nothing measured
+/// the distance between what it read and what Cargo accepts. The rules of lock 2 have had a
+/// self-test since X-12 for exactly this reason; lock 1's parser is the older half and never got
+/// one. This is it, and it is driven in both directions — a fixture whose every entry must be
+/// found, and a fixture whose every entry must be ignored — because a parser that returned
+/// everything would pass a one-directional test while making the allow-list refuse the world.
+#[test]
+fn the_manifest_parser_reads_every_shape_cargo_allows() {
+    let declares = "\
+[package]
+name = \"whatever\"
+
+[dependencies]
+serde.workspace = true
+thiserror = \"1\"
+tokio = { version = \"1\", features = [\"rt\"] }
+
+[dependencies.reqwest]
+version = \"0.13\"
+features = [\"json\"]
+
+[dependencies.\"quoted-name\"]
+version = \"2\"
+
+[target.'cfg(unix)'.dependencies]
+nix = \"0.29\"
+
+[target.'cfg(unix)'.dependencies.libc]
+version = \"0.2\"
+";
+
+    let found = dependencies_of(declares);
+    for expected in [
+        "serde",
+        "thiserror",
+        "tokio",
+        "reqwest",
+        "quoted-name",
+        "nix",
+        "libc",
+    ] {
+        assert!(
+            found.iter().any(|name| name == expected),
+            "`{expected}` is a normal dependency in this manifest and the parser did not see it, \
+             so the allow-list would pass while it sat in a consumer's graph. Found: {found:?}",
+        );
+    }
+
+    // The other direction. `version`/`features` are a per-dependency table's *keys*, and a parser
+    // that reported them would make the allow-list fail on noise until somebody added them to
+    // `ALLOWED` — which is how a guard gets weakened by the person maintaining it.
+    let ignores = "\
+[package]
+name = \"whatever\"
+description = \"not a dependency\"
+
+[lib]
+name = \"whatever\"
+
+[features]
+default = []
+
+[dev-dependencies]
+criterion = \"0.5\"
+
+[dev-dependencies.proptest]
+version = \"1\"
+
+[target.'cfg(unix)'.dev-dependencies]
+tempfile = \"3\"
+
+[build-dependencies]
+cc = \"1\"
+";
+
+    let found = dependencies_of(ignores);
+    assert!(
+        found.is_empty(),
+        "the parser reported {found:?} from a manifest with no normal dependencies at all; \
+         `dev-`/`build-dependencies` and every non-dependency table are out of scope on purpose \
+         — see `header_of`",
+    );
+
+    // And the keys under a per-dependency table are not themselves dependencies.
+    let entry_keys = dependencies_of("[dependencies.reqwest]\nversion = \"0.13\"\n");
+    assert_eq!(
+        entry_keys,
+        vec!["reqwest".to_owned()],
+        "a per-dependency table names one dependency; its keys are not more of them",
+    );
 }
 
 /// **The complementary assertion, and it is one line of intent.**
@@ -346,6 +507,14 @@ fn the_scanner_catches_what_it_claims_to() {
             "the guarded system behind a tool context",
             "let out = ctx.system().run(&argv, timeout).await?;",
         ),
+        // **The review's proof-of-concept, verbatim in shape.** This is the one that walked past
+        // round 1's `.system(` rule: a different public accessor, the same `Arc<System>`, a real
+        // process spawn. It is caught now by possession — the file has to name `ToolContext` to
+        // receive one — and it is kept here as the case that decides whether that rule is alive.
+        (
+            "a spawn reached through a second accessor",
+            "async fn ping(ctx: &ToolContext) { ctx.workspace_context().active().run(&argv, t); }",
+        ),
     ];
 
     for (what, line) in must_reject {
@@ -355,6 +524,28 @@ fn the_scanner_catches_what_it_claims_to() {
             "the scanner accepted {what} (`{line}`), so the rule that should catch it is dead",
         );
     }
+
+    // Possession, driven in both directions — a rule that rejected the seam's own context would be
+    // one somebody deletes rather than one that guards anything.
+    let holding = |name: &str| {
+        (
+            name.to_owned(),
+            format!(
+                "fn fresh(&self) -> {} {{ todo!() }}",
+                rules::HOLDS_A_TOOL_CONTEXT
+            ),
+        )
+    };
+    assert!(
+        violations(&[seam(), holding("lib.rs")]).is_empty(),
+        "the scanner rejects the crate root re-exporting the context type a composition needs",
+    );
+    assert!(
+        !violations(&[seam(), holding("helper.rs")]).is_empty(),
+        "the scanner accepted a third file holding a `{}`, which is the handle every guarded IO \
+         capability hangs off",
+        rules::HOLDS_A_TOOL_CONTEXT,
+    );
 
     // A second file naming the seam is a second request path by definition.
     let found = violations(&[seam(), ("other.rs".to_owned(), seam().1)]);
@@ -492,6 +683,25 @@ fn violations(sources: &[(String, String)]) -> Vec<String> {
         }
     }
 
+    for path in naming(rules::HOLDS_A_TOOL_CONTEXT) {
+        if !rules::MAY_HOLD_A_TOOL_CONTEXT
+            .iter()
+            .any(|allowed| path.ends_with(allowed))
+        {
+            found.push(format!(
+                "`{path}` names `{}`, which is the handle every guarded IO capability hangs off — \
+                 process spawn, the workspace filesystem, the worktree ops, each through some \
+                 accessor this file cannot enumerate (`ctx.system()`, \
+                 `ctx.workspace_context().active()`, and whatever upstream adds next).\n\n\
+                 The rule is possession, not use: the seam dispatches with one and the crate root \
+                 re-exports the type, and no third file in this crate has a reason to hold one. If \
+                 yours does, that is a design decision — take it deliberately and add the file to \
+                 `MAY_HOLD_A_TOOL_CONTEXT` with a sentence, exactly as `Egress` works.",
+                rules::HOLDS_A_TOOL_CONTEXT,
+            ));
+        }
+    }
+
     for path in naming(rules::REHEARSAL) {
         if !rules::MAY_NAME_REHEARSAL
             .iter()
@@ -529,12 +739,67 @@ fn code_of(source: &str) -> String {
         .join("\n")
 }
 
-/// The names in one manifest's `[dependencies]` table.
+/// What a `[…]` header in a manifest is, as far as lock 1 cares.
+///
+/// Classifying the header before reading anything under it is the whole fix for X-48's second
+/// finding: the previous parser tested `line == "[dependencies]"` and therefore saw **only** that
+/// one spelling, so `[dependencies.reqwest]` made `reqwest` a direct dependency of the dispatching
+/// crate with lock 1 reporting `5 passed`.
+#[derive(Debug, PartialEq, Eq)]
+enum Header<'a> {
+    /// `[dependencies]` or `[target.…​.dependencies]` — the entries are the lines that follow.
+    Table,
+    /// `[dependencies.serde]` or `[target.…​.dependencies.serde]` — the header **is** the entry,
+    /// and the lines under it (`version`, `features`, …) are that entry's keys rather than more
+    /// dependencies.
+    Entry(&'a str),
+    /// `[package]`, `[lib]`, `[features]`, `[dev-dependencies]`, `[build-dependencies]`, and their
+    /// `target`-scoped and per-entry forms. Nothing lock 1 reads.
+    Other,
+}
+
+/// Classify one `[…]` header line.
+///
+/// `dev-dependencies` and `build-dependencies` are [`Header::Other`] deliberately, and the reasons
+/// differ. A dev-dependency is absent from a published crate's requirements, so it reaches no
+/// consumer's graph — the manifest says so where the table is declared. A build-dependency is
+/// reachable only from a build script, and **this crate has no `build.rs`**; adding one would make
+/// that reasoning false and is the moment to widen this function rather than to argue about it.
+fn header_of(line: &str) -> Header<'_> {
+    let header = line
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim();
+
+    if header == "dependencies" || header.ends_with(".dependencies") {
+        return Header::Table;
+    }
+
+    let named = header
+        .strip_prefix("dependencies.")
+        .or_else(|| header.find(".dependencies.").map(|at| &header[at + 14..]));
+
+    match named {
+        // A per-dependency table's name may be quoted (`[dependencies."my-crate"]`), which is legal
+        // TOML and rare enough that only the trimming is worth carrying.
+        Some(name) => Header::Entry(name.trim().trim_matches('"').trim_matches('\'')),
+        None => Header::Other,
+    }
+}
+
+/// The names of every **normal** dependency one manifest declares.
+///
+/// Covers `[dependencies]`, `[dependencies.name]`, and both of those under a
+/// `[target.'cfg(…)'.…]` scope — every table whose entries land in a consumer's graph. See
+/// [`header_of`] for what is deliberately out of scope.
 ///
 /// Deliberately not a TOML parse: reading these lines needs no dependency, and the shapes it accepts
-/// are the shapes this workspace actually writes (`name.workspace = true`, `name = { … }`,
-/// `name = "…"`). `the_dispatching_crate_…` asserts it found some, so a table it cannot read is a
-/// failure rather than a silent pass — which is the failure mode a hand-rolled parser has.
+/// are the shapes Cargo actually allows (`name.workspace = true`, `name = { … }`, `name = "…"`, and
+/// the per-dependency table). Two things keep a hand-rolled parser from failing the way hand-rolled
+/// parsers fail: `the_dispatching_crate_…` asserts it found *some* entries, so a table it cannot
+/// read is a failure rather than a silent pass; and [`the_manifest_parser_reads_every_shape_cargo_allows`]
+/// drives it over a fixture holding every shape, in both directions.
 fn dependencies_of(manifest: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut inside = false;
@@ -543,7 +808,16 @@ fn dependencies_of(manifest: &str) -> Vec<String> {
         let line = line.trim();
 
         if line.starts_with('[') {
-            inside = line == "[dependencies]";
+            match header_of(line) {
+                Header::Table => inside = true,
+                Header::Entry(name) => {
+                    inside = false;
+                    if !name.is_empty() {
+                        names.push(name.to_owned());
+                    }
+                }
+                Header::Other => inside = false,
+            }
             continue;
         }
         if !inside || line.is_empty() || line.starts_with('#') {

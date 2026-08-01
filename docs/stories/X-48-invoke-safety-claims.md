@@ -172,3 +172,51 @@ matches upstream; `SandboxSettings` is not `#[non_exhaustive]`; nothing on the i
 **Open for whoever owns the boundary:** lock 2 scans `crates/exchange-host/src` only, and
 `guarded_system` — presented as the backstop for lock 2's blind spot — lives in the unscanned
 `exchange-server`.
+
+## Progress 2026-08-01 — rework round 1, on `impl/X-48-r2`
+
+All three findings reproduced first, at `0d7c1f7`, before anything was changed. Finding 3's three
+mutations each left `--test runtime_gate` at `4 passed`. Finding 1's proof-of-concept —
+`crates/exchange-host/src/pinger.rs` calling `ctx.workspace_context().active().run(…)` — reached
+process spawn with the **whole workspace green, lock 2 included**. Finding 2 reproduced with a
+table-form dependency the ALLOWED list has no entry for: `5 passed`.
+
+**Finding 3 — the claim moved out of the scanner and into the type system.** The three mutations are
+not patchable in a text scanner; the third put the marker in a string literal, and classifying
+string literals only moves the goalposts to the next thing text cannot see. So `admit_runtime` now
+returns `Admitted` (`runtime.rs`), a struct with a private field, no public constructor, no
+`Default` and no `Clone`, and `Admitted::resolve` is the **only** route from `invoke` to
+`connector_pack::resolve`. All three mutations, plus forging the witness inside `invoke.rs`, are now
+compile errors. The chain and — importantly — the one link nothing covers are written out on
+`Admitted` itself: a future edit could still call `Admitted::of(deployment, Runtime::Http)` with a
+hardcoded runtime, and no test would see it, because `Http` is the honest answer for every shipped
+connector.
+
+`runtime_gate.rs` kept the job it can actually do — **ordering**, which the compiler does not hold —
+and its doc now opens by quoting the three mutations that defeated the previous version of itself.
+
+**Finding 2 — the parser was made true and given the test it never had.** `header_of` classifies
+`[dependencies]`, `[dependencies.name]` and both under `[target.…]`; `dev-`/`build-dependencies`
+stay out of scope with reasons. The real defect was that **lock 1's parser had no self-test** while
+lock 2's rules have had one since X-12, so nothing measured the gap between what it read and what
+Cargo accepts. `the_manifest_parser_reads_every_shape_cargo_allows` drives it in both directions.
+
+**Finding 1 — the instrument changed rather than the string list growing.** Chasing accessor
+spellings is unwinnable: `.system(` was written believing it was the only door and
+`.workspace_context().active()` walked past it. `HOLDS_A_TOOL_CONTEXT` bounds **possession** instead
+— only the seam and the crate root may name `ToolContext`, the same two files that may name
+`Egress` — so a file that cannot name the handle has nothing to call any accessor on. `.system(`
+stays underneath as a cheap second net, explicitly demoted from "closes the door".
+
+**The boundary question, answered.** `guarded_system` is in `exchange-server` and lock 2 never reads
+it. That is now stated where it matters: the sandbox posture is a property of **this repository's
+composition, not of the published crate**. A downstream binary implements `Contexts` itself and
+supplies whatever `System` it built — quite possibly `System::new`, whose sandbox is disabled. For a
+consumer of `codewandler-flux-exchange-host` that backstop does not exist, and locks 1–2 are the
+whole of what ships. It is also narrower than "a spawn": the `Exempt` paths skip
+`ensure_available` entirely.
+
+**Both halves of the `guarded_system` claim were measured rather than asserted.** Reverting
+`invoker` to `System::new(workspace)` leaves `the_sandbox_posture_is_chosen_and_not_inherited`
+**green** and fails clippy with `function `guarded_system` is never used`. The doc now names
+`dead_code` as the mechanism instead of implying the test is.
