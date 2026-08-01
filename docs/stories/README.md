@@ -58,6 +58,7 @@ _**You cannot use this console without standing up an OIDC provider.** That is t
 ### a public documentation site
 _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
 - [X-64 — Every page's \"is this built\" is derived, not written](X-64-status-is-derived-not-written.md) · the mechanism that makes a large speculative site safe — status badges read the same descriptor artifact whose live flags are held to the route table by X-42/X-52's tests
+- [X-69 — The public site shows how to run this and sign in, in five minutes](X-69-run-it-yourself.md) · X-57 made signing in without an identity provider actually work on loopback; nothing public says so. This is the page that turns a charter into something a stranger can run
 - [X-65 — The whole intended surface is on the page, including what is not built](X-65-the-whole-surface-is-on-the-page.md) · channels, subscribe, leases, workflows — the brief's \"scaffold the whole future surface\", safe to write only once X-64 makes status derived
 - [X-66 — The credential-boundary argument is readable by someone who has never seen this repository](X-66-the-boundary-argument-in-public.md) · the page that justifies the platform existing: the credential never crosses the boundary, the authority does — written for an evaluator rather than for a contributor
 
