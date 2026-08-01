@@ -50,8 +50,9 @@ jobs:
         # The same pin `crates-io.yml` carries, and the same one ../flux and ../flux-connectors
         # release with, so a green run here and a green release build are the same cargo.
         #
-        # This is NOT the workspace's `rust-version` (1.87). That is the MSRV a consumer must have;
-        # this is the toolchain we build with. Two numbers for two reasons — see AGENTS.md.
+        # This is NOT the workspace's `rust-version`. That is the MSRV a consumer must have; this is
+        # the toolchain we build with. Two numbers for two reasons — see AGENTS.md. The `msrv` job
+        # below covers the other one, and reads it out of `Cargo.toml` rather than restating it here.
         #
         # Pinned rather than `stable`: every Rust release ships new clippy lints that `-D warnings`
         # promotes to errors, so a floating CI toolchain breaks on code that is clean locally. To
@@ -84,6 +85,70 @@ jobs:
 
       - name: Format
         run: cargo fmt --all -- --check
+
+  msrv:
+    name: the workspace builds on the Rust version it promises
+    runs-on: ubuntu-latest
+    # X-33. `Cargo.toml` tells every consumer the oldest Rust that works here, and until this job
+    # existed nothing checked whether that was true. It was not: `rust-version = "1.87"` shipped in
+    # v0.1.0, v0.2.0 and v0.3.0, while `jsonwebtoken`, `time`, `time-core` and `time-macros` each
+    # declare 1.88.0 — so cargo refused before compiling a line, and had done since X-04 brought
+    # `jsonwebtoken` in. A promise nobody checks is a promise that is already false and nobody knows.
+    #
+    # THE NUMBER IS NOT WRITTEN HERE. It is read out of `Cargo.toml` and fed to the toolchain
+    # installer, because a job with the version hardcoded is a fourth place holding one number —
+    # exactly the shape X-27 and X-30 just finished removing from this repository. There is one
+    # `rust-version`, and this job builds on whatever it currently says.
+    #
+    # WHEN THIS GOES RED, THE FIX IS A DECISION, NOT AN EDIT. Raising `rust-version` to match
+    # whatever a new dependency demands makes the job green again while silently breaking every
+    # consumer still on the old toolchain — that is a compatibility break and it belongs in the
+    # CHANGELOG. It is also, precisely, what happened in X-30: the number was corrected to 1.88 after
+    # the fact, to match a reality it had been wrong about for three releases. That was the repair,
+    # not the pattern. If the MSRV is ever raised again it should be because this job went red and
+    # someone decided to raise it.
+    #
+    # `cargo build --workspace --locked` and nothing else. This answers "does this compile for a
+    # consumer on the oldest toolchain we claim", not "are the tests green" — the `check` job above
+    # already owns the gate, and duplicating it here would double the cost of every pull request to
+    # re-prove something.
+    permissions:
+      contents: read # restates the workflow default, so the job is readable on its own
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      # The whole trick: the toolchain installer takes a version string, so the manifest becomes the
+      # input. `head -n1` because `[workspace.package]` declares it once and the member crates
+      # inherit with `rust-version.workspace = true`; an empty result is a broken parse, not a
+      # missing MSRV, so it fails loudly rather than silently installing something arbitrary.
+      - name: Read the MSRV out of Cargo.toml
+        id: msrv
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^rust-version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n1)"
+          if [ -z "$version" ]; then
+            echo "could not read rust-version from Cargo.toml — the parse is broken, or the manifest is" >&2
+            exit 1
+          fi
+          echo "MSRV declared in Cargo.toml: $version"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+
+      - name: Install the declared MSRV toolchain
+        # Same action and same pin as `check` above. No `components`: this job neither lints nor
+        # formats, and clippy's output on an old toolchain is not something we act on.
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - name: Cache cargo
+        # Keyed by toolchain version, so this gets its own entry rather than fighting `check` for one.
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # `--locked`: a consumer builds the dependency versions we committed. Letting cargo resolve
+      # something newer here would test a tree nobody ships, and a dependency that has raised its own
+      # `rust-version` is exactly the failure this job is watching for.
+      - name: Build on the declared MSRV
+        run: cargo build --workspace --locked
 
   console:
     name: console · test · build

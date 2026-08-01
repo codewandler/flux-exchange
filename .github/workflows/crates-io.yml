@@ -62,8 +62,9 @@ jobs:
       - name: Install Rust toolchain
         # The same pin as ../flux and ../flux-connectors, so a release built here is built by the
         # cargo the rest of the family releases with. Note this is NOT the workspace's
-        # `rust-version` (1.87) — that is the MSRV a consumer must have, not the toolchain we ship
-        # from.
+        # `rust-version` — that is the MSRV a consumer must have, not the toolchain we ship from.
+        # The number is deliberately not restated here; `ci.yml`'s `msrv` job reads it out of
+        # `Cargo.toml` and proves the workspace still builds on it.
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: "1.97.0"
