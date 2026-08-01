@@ -33,8 +33,15 @@ Replace `console/src/fixtures/catalog.ts` with the served catalogue.
   makes `ProviderCard` render "not configured" in the danger colour on every card. Filed as
   flux-connectors **C-408**; `catalog.mts`'s `Operation` also lacks `effects`/`admitted`, so the
   console carries them alongside for now.
-- Known limits, stated rather than discovered later: the console and API must share an origin (no
-  CORS story), the catalogue loads N+1 requests, and one failing connector fails the whole load by
+- **Follow-up fix, same day:** `npm run dev` served the console on Vite's origin while the service
+  answered on 8080, so an origin-relative `/api/...` fetch was answered by Vite's SPA fallback with
+  `index.html` — reported by an operator as "answered 200 with a body this console could not read".
+  Fixed with a dev-server proxy in `console/vite.config.ts`; verified end to end (list `200`
+  `application/json`, operations `200`, unknown connector `404`). The console's own error path
+  behaved correctly throughout: it named the endpoint and refused to render rather than showing an
+  empty catalogue, which is the Acceptance item working.
+- Known limits, stated rather than discovered later: the console and API must share an origin in
+  deployment (no CORS story), the catalogue loads N+1 requests, and one failing connector fails the whole load by
   design — a partial catalogue rendered as complete is the same lie as an empty one.
 
 ## Notes
