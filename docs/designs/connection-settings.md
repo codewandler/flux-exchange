@@ -81,10 +81,15 @@ Keyed exactly as `connector-pack`'s own port is, which this host does not get to
 
 The surface:
 
-| Route | Method | What the caller supplies |
-| --- | --- | --- |
-| `/api/connections/{connector}/settings` | `GET` | a connector id |
-| `/api/connections/{connector}/settings/{service}/{field}` | `PUT`, `DELETE` | a connector id, a service, a `binds` target, and on `PUT` a value |
+| Route | Method | Who | What the caller supplies |
+| --- | --- | --- | --- |
+| `/api/connections/{connector}/settings` | `GET` | any principal | a connector id |
+| `/api/connections/{connector}/settings/{service}/{field}` | `PUT`, `DELETE` | a `User` only | a connector id, a service, a `binds` target, and on `PUT` a value |
+
+The two differ in kind, not only in verb, and §4 § *Who may supply a value* is the argument. Reading
+what a connection needs is any principal's business — the answer carries `binds` targets and a `set`
+boolean and no values, and an agent that can see *"this connection is missing `endpoint.subdomain`"*
+is one that can say so to the human who can supply it. Writing a value into it is a human's.
 
 `{service}` and `{field}` are keys into what the connector's operations declare, exactly as
 `{connector}` is a key into the catalogue — refused when nothing declares them, and never a segment
@@ -134,9 +139,13 @@ entirely, which needs a username and nothing else.
 
 ## §4 Supplying configuration does not become a way to name a host
 
-**This section is a correction.** The first cut of X-47 argued that `connector-pack` already
-prevents this, and shipped a hole. The argument is recorded here with its flaw, because the flaw is
-the interesting part.
+**This section is a correction, twice over.** The first cut of X-47 argued that `connector-pack`
+already prevents this, and shipped a hole. The rework closed that one and left a second, on the
+connectors it had just finished calling safe. Both arguments are recorded here with their flaws,
+because the flaws are the interesting part and they are the same flaw one level apart:
+
+> a character allow-list constrains what a value **looks like**, not where the request goes —
+> and **a suffix pin constrains which vendor a request reaches, not whose account at that vendor.**
 
 ### What the first cut argued, and why it was vacuous
 
@@ -150,8 +159,12 @@ subdomain = "acme.zendesk.com@evil.example"
 
 and the defence was correctly located: `connector-pack` holds the composed authority to an
 allow-list of host characters, so `@`, `:`, `/` and `%` cannot appear and no admissible value can
-delimit. That defence is real, and against **zendesk** it is complete — the template pins
+delimit. That defence is real, and against **zendesk** it does what it claims: the template pins
 `.zendesk.com`, so every authority any admissible value composes is inside the vendor's domain.
+
+~~That makes the property complete for zendesk.~~ **It does not, and § *The second correction* below
+is why.** What the character check buys is that the composed authority is exactly the string the
+template produced — which is a claim about the *vendor*, not about the *account*.
 
 The flaw is that a character allow-list constrains **what a value looks like** and says nothing
 about **where the request goes**. Those two coincide only when the template pins a suffix. Where the
@@ -183,11 +196,16 @@ would also answer it and is `pub(crate)`, so the catalogue is what carries this.
 
 `exchange_host::host_pinning` returns one of three answers:
 
-| answer | example | tenant may supply |
+| answer | example | may a value be supplied |
 | --- | --- | --- |
-| `OutsideTheAuthority` | `bitbucket` `workspace` — in no host template | yes |
-| `PinnedTo(".zendesk.com")` | `zendesk` `hosts: ["{subdomain}.zendesk.com"]` | yes |
-| `WholeAuthority("{host}")` | `newrelic` `hosts: ["{host}"]` | **no** |
+| `OutsideTheAuthority` | `bitbucket` `workspace` — in no host template | yes, by a `User` |
+| `PinnedTo(".zendesk.com")` | `zendesk` `hosts: ["{subdomain}.zendesk.com"]` | yes, by a `User` |
+| `WholeAuthority("{host}")` | `newrelic` `hosts: ["{host}"]` | **no, by nobody** |
+
+The *kind* column is a second rule and is decided somewhere else — see § *Who may supply a value*.
+`host_pinning` answers only whether there is an address here at all; it says nothing about who may
+reach it, and deliberately does not, because it is `&'static` catalogue data with no principal in
+scope.
 
 "Pins" means: the text after the last placeholder is a literal beginning with `.` and carrying at
 least two further labels. Two rather than one because `.com` pins nothing anybody cannot register
@@ -234,6 +252,96 @@ rewrote a file it found suspicious would destroy the evidence of how the value g
 An operator who genuinely needs one of these four binds their own `ConfigStore` in a composition
 they control. That is a decision made once at startup by somebody who can read this section — not
 one a request can make.
+
+**The `get` side is now held by a test.** Deleting that second branch used to leave the whole gate
+green — 331 passed, 0 failed — because every other test on this axis drives `set`, so all of them
+were satisfied by the first enforcement point alone. `a_planted_whole_authority_value_is_refused_on_the_way_out`
+reaches the file the way the three scenarios above reach it: the value is **written straight into
+the store file**, `set` is never called, and what is then measured is that the port answers `None`,
+that `newrelic-application-list` dispatches nothing, that the credential stays off the wire, and
+that the file is byte-identical afterwards. Falsified rather than reported: with the branch deleted
+it fails by dispatching to `https://evil.example` with the tenant's `X-Api-Key` on the request.
+
+### The second correction: a suffix pin is not a safety argument
+
+The paragraph above says the composed authority is *"always inside the vendor's own domain"*. That
+is **true, and it is not a safety argument.** `*.zendesk.com`, `*.atlassian.net`, `*.myshopify.com`,
+`*.supabase.co` and `*.my.salesforce.com` are **self-service registrable namespaces**: anybody can
+have one in the time it takes to fill in a signup form. "Inside the vendor" and "not the caller's"
+are two different claims, and the rule above only ever established the first.
+
+Measured end to end on the seven suffix-pinned connectors — the ones this design had just finished
+calling safe:
+
+```text
+stored endpoint.subdomain = "attacker-controlled"
+url:     "https://attacker-controlled.zendesk.com/api/v2/tickets/1.json"
+headers: {"Authorization":"Basic …"}  →  ops@acme.test/token:quiggle-marrow-plimth-42
+```
+
+The sentence worth keeping out of all of this is the one at the top of §4: **a suffix pin constrains
+which vendor a request reaches, not whose account at that vendor.**
+
+What a suffix pin *does* buy is still real and is why the `WholeAuthority` rule stays: it bounds the
+blast radius to one vendor's namespace, so the value cannot become an arbitrary origin, and it keeps
+the four unpinned connectors — where there is no bound at all — refused for everyone. It is a bound,
+not a boundary.
+
+### Who may supply a value, and why that is the fix rather than a value rule
+
+**Decision: `PUT` and `DELETE` on `/api/connections/{connector}/settings/{service}/{field}` are
+`Access::PrincipalOfKind(&[PrincipalKind::User])`. The `GET` collection stays open to every kind.**
+
+The route was `Access::Principal`, which `require_principal` admits for *any* kind, and an agent
+token resolves to `PrincipalKind::Agent`. So an agent holding nothing but an operation grant could
+name the origin its tenant's credential is delivered to — `AGENTS.md` § Invariants, verbatim: *"An
+agent's token grants access to an operation, never to a credential."* `Access::PrincipalOfKind` is
+the mechanism `/api/agents` already uses; nothing new was invented for this.
+
+**The gate is the whole write surface, not only the fields whose `host_pinning` is `PinnedTo`.** The
+narrower rule was available and is not taken:
+
+- `PrincipalKind` **already publishes this division of labour**, and this reads it rather than
+  inventing one. `User` is documented as the kind that *"manages connections, credentials and
+  grants"*; `Agent` as the kind for which *"humans sign in to wire things up"* while *"agents are
+  what call operations all day"*. Supplying a connector's per-connection value is wiring up.
+- A per-field rule would make a **stated invariant depend on an approximation**. `host_pinning`'s
+  notion of "pins a suffix" is `suffix_of`'s two-label threshold, which this design already records
+  as a stand-in for a public-suffix list. That is the right basis for *may a tenant supply this at
+  all*, where it errs closed and costs four connectors. It is the wrong basis for *is this the
+  invariant's boundary*: one template read as unpinned that is not, and the gate has a hole.
+- **The gate has to be enumerable.** `Access` is declared as data precisely so the whole surface can
+  be walked — `the_kind_gated_surface_is_only_what_was_declared` compares it against a list with an
+  argument beside every entry. A rule that could only be applied inside the handler, once the field
+  is known, is the *"a route is guarded by its handler remembering to ask"* that `Access` exists to
+  refuse.
+
+**The cost, stated rather than discovered:** an agent also cannot supply bitbucket's `workspace` or
+contentful's `space_id`, and those are `OutsideTheAuthority` — they land in a path or a query and
+move no request anywhere. That is a bound nobody asked for, and it is accepted because nothing
+shipped configures a connection from an agent (§7: there is no client for these routes at all), and
+because widening it later is one kind added to a list with an argument beside it while narrowing it
+after something depends on it is not.
+
+This is deliberately **not** a rule about values. `attacker-controlled` is refused by no value check
+and could not be: a rule that inspected values would be a blocklist of subdomains, and a blocklist
+catches only what somebody enumerated — the same argument this design already makes one level up.
+
+### What this does not close
+
+**A `User` of the tenant who did not supply the credential can still read it out this way.** They
+write `endpoint.subdomain`, invoke the operation, and the credential arrives at an origin they
+control inside the vendor's namespace. Credential values are **write-only** on this surface by
+design — §2 — and this path makes one readable to anybody who can name an origin.
+
+The kind gate does not touch this and is not pretended to. Within-tenant it is a smaller boundary
+than the agent one, but it is a real one: the model says a stored credential is not readable, and
+this is a way to read it.
+
+Closing it needs somewhere an **operator** can pin an allowed host per tenant — the same surface §7
+already says the four refused connectors need, with the same authorization question attached, and it
+does not exist. Until it does, this is an accepted exposure and it is written down here rather than
+inferred from the absence of a test.
 
 ## §5 A missing value is still refused by name
 
@@ -283,6 +391,13 @@ The reasoning for the order:
 - **No validation of what a value means.** This host refuses a value at an address the connector
   never declared, and one past a bound. Whether `acme` is a real Zendesk subdomain is a question only
   Zendesk can answer, and it answers it with a `404` that reaches the caller whole.
+- **No protection from a `User` of the tenant who did not supply the credential.** §4 § *What this
+  does not close* states it in full: a suffix-pinned setting plus an invocation reads a write-only
+  credential out to an origin inside the vendor's namespace, and the kind gate does not touch it.
+  The same operator-scoped surface the four refused connectors need is the thing that would.
+- **No authorization model.** The kind gate on the write route asks *what kind of principal is
+  this*, which this host answers from the credential it issued. *What may this principal do with
+  this connection* is the grant model, and it is still X-13's.
 - **The store is single-process**, like `ConnectionGuard`: the read-decide-write around the tenant
   allowance is claimed within this process and not across a cluster. The same limit `connections.md`
   already records, in the same words.

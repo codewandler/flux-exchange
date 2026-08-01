@@ -345,6 +345,14 @@ pub fn declared_settings(
 /// the character check admits it, and the request — carrying that tenant's `X-Api-Key` — goes
 /// wherever the caller said. Four shipped connectors are in that state.
 ///
+/// **This distinction is about the vendor and not about the account**, and it is the whole of what
+/// this function decides. A pinned suffix keeps the origin at zendesk; it does not keep it at *this
+/// tenant's* zendesk, because a vendor subdomain is something anybody can register. Who may write a
+/// value at a pinned address is therefore a second question, answered by
+/// `routes::connections::MAY_CONFIGURE` rather than here — there is no principal in scope at this
+/// call, and deliberately so: this is a question about `&'static` catalogue data, decided once per
+/// variable and the same answer for every caller.
+///
 /// # Why the rule is about the template and never about the value
 ///
 /// A rule that inspected values would be a blocklist of hosts, and a blocklist only ever catches
@@ -359,6 +367,14 @@ pub enum HostPinning {
     OutsideTheAuthority,
     /// Every host template carrying this variable ends in this literal suffix, so the composed
     /// authority is always inside the vendor's own domain.
+    ///
+    /// **That is true and it is not a safety argument.** `*.zendesk.com`, `*.atlassian.net`,
+    /// `*.myshopify.com`, `*.supabase.co` and `*.my.salesforce.com` are self-service registrable
+    /// namespaces: a suffix pin constrains **which vendor** a request reaches, never **whose
+    /// account** at that vendor. What it buys is a bound rather than a boundary — the value cannot
+    /// become an arbitrary origin — and what keeps a caller from choosing an account inside that
+    /// bound is a different rule in a different place: only a `User` may write a setting at all
+    /// (`routes::connections::MAY_CONFIGURE`). See `docs/designs/connection-settings.md` § 4.
     ///
     /// The suffix is what is quoted in a listing, so an operator can see *why* a value is accepted.
     PinnedTo(String),
