@@ -433,3 +433,99 @@ and an allowance that did not hold.
 
 **Still single-process, and no more than before.** Both claims are in-process, and two replicas over
 one store race exactly as the section above already records. Nothing here narrows that.
+
+## Addendum, 2026-08-01 — a credential is replaced in place, and that is not an upsert (X-39)
+
+"**No update or rotation**" above is no longer true, and the sentence it sat next to still is: `POST`
+on an existing connection is the X-14 refusal and **nothing about that changed**. What was missing is
+the other operation — an operator saying *replace this, I know it is there* — and its absence meant
+that rotating a leaked secret was `DELETE` then `POST`, with a window in between where the tenant has
+no connection and everything relying on it fails. On a revocation path that also hands the operator
+X-18's partial delete, which is the one place a live vendor credential can survive a `DELETE`.
+
+```text
+PUT /api/connections/{connector}/credentials/{credential}   {"value": "…"}
+```
+
+**Decision: rotation replaces one credential, named in the path, and is refused when that credential
+is not already there.**
+
+### Why it is not an upsert, and cannot be reached from one
+
+An upsert is a create that does not know whether it is replacing something. A rotation knows: it
+names the credential it expects to find, and where a create would write into an empty address this
+**refuses** — `not_connected` when the tenant has no connection to the connector, and a new
+`nothing_to_rotate` when the connection is there and does not hold that credential. The second is an
+ordinary case rather than damage, since a connection may legally carry a subset of what the connector
+declares, and answering it by writing would be the `409` undone through the other door.
+
+The separation is structural rather than a flag: a different **path**, a different **method**, and an
+**incompatible body**. `{"credentials": {…}}` does not deserialise as a rotation and `{"value": "…"}`
+does not deserialise as a create, so reaching a replacement takes all three being deliberate.
+`a_create_cannot_slip_into_a_rotation` drives every crossing and asserts the stored value is
+unchanged after each.
+
+### One credential, not the declared set
+
+The alternative — `PUT` the whole connection, replacing every declared credential at once — is
+refused, and the argument is this repository's north star rather than taste. **This host never hands
+a credential value back out**: `GET` answers with addresses, and there is no route that returns a
+value. So a wholesale replace would require a caller to re-send every value it wants to *keep*, which
+an operator rotating one of `slack`'s two credentials has no way to obtain. A body carrying only what
+they hold would destroy the rest. A surface whose safe use depends on reading values back out cannot
+exist on the host whose whole claim is that the credential never crosses the boundary.
+
+Per credential also matches the failure it exists for: it is one secret that leaks. Rotating several
+is several requests, each atomic on its own, and a credential nobody named is untouched.
+
+### The window, closed by using the store rather than working around it
+
+`SecretStore::put` is an atomic whole-file replace, so a rotation is **one `put`** and the address
+holds the old value until it holds the new one. "No observable state in which the tenant has no
+connection" is therefore a property of the operation, not a promise about it, and it is asserted two
+ways in `a_credential_is_rotated_in_place_and_the_connection_is_never_gone`: a reader hammering
+`GET /api/connections/{connector}` throughout, with the test store's window widened, never sees the
+connection incomplete; and the store served **zero deletes**, which is the structural half, since a
+`delete` is the only operation that could empty the address.
+
+That is also why there is no third `partly_*` refusal. `partly_written` and `partly_destroyed` exist
+because their operations loop over several addresses and can stop in the middle. A rotation cannot:
+`rotation_failed` reads the same `store_failure` mapping, so the kind survives exactly as X-18 and
+X-20 established, and says the thing that is actually true instead of naming a half — **the value at
+that address is the one that was there before the request**, `"replaced": false`.
+
+### A refused rotation destroys nothing, including at the allowance
+
+Every refusal is ordered before the only write there is, so the guarantee is structural rather than
+maintained. The case that matters is X-22's: a rotation to a *larger* value that would take the
+tenant past `MAX_TENANT_STORE_BYTES` is refused and the old value survives —
+`a_rotation_past_the_tenant_allowance_is_refused_and_the_old_value_survives`. The naive shape here is
+delete-then-write with the bound checked between the two, which leaves the tenant holding neither.
+
+The allowance is decided on the **difference**, since a rotation is a replacement: the value being
+replaced is taken out of the tenant's occupancy before the new one is added in. Counting the whole
+new value against an occupancy that still includes the old one would refuse rotations that fit, and
+telling somebody with a leaked secret to go and disconnect something is the wrong instruction at the
+worst moment. Both claims are taken exactly as `create` takes them — `(tenant, connector)` across the
+probe-decide-write, and the tenant across the allowance decision.
+
+### What it does not do
+
+- **It does not add a credential to an existing connection.** `POST` refuses with `already_connected`
+  and there is no other route, so an operator wanting `slack.signing_secret` on a connection that has
+  only `bot_token` still has to `DELETE` and re-`POST` the set. `nothing_to_rotate` says so rather
+  than naming a remedy that would answer `409`. That is a gap this story deliberately did not widen,
+  because "add" is a create and creates are what the `409` governs.
+- **It does not touch the instance dimension.** A rotation addresses the same single address X-14
+  will make plural, through the same `address_of_declared` seam.
+
+### A path parameter that is a catalogue key, not an address
+
+`{credential}` is the flat-namespace name the catalogue publishes, and it is admitted on exactly
+`{connector}`'s argument: it is a key into a declaration compiled into this host, refused when the
+connector declares no such name, and it never reaches the address — the address carries the declared
+`leaf`, which the catalogue supplies. `no_route_here_accepts_an_address` widened its allowed set by
+that one name and paid for it with `a_hostile_credential_name_cannot_reach_the_address`, which drives
+rendered addresses and traversals at the route and asserts the store is untouched — and, because the
+`UndeclaredCredential` refusal echoes the caller's own name back, asserts the refusals are **byte
+identical** whether or not another tenant holds a connection. A mirror is not an oracle.

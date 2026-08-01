@@ -6,6 +6,8 @@
 //! POST   /api/connections/{connector}   connect one, with the values it declares
 //! GET    /api/connections/{connector}   one connection, as addresses and never as values
 //! DELETE /api/connections/{connector}   disconnect, destroying every credential it holds
+//! PUT    /api/connections/{connector}/credentials/{credential}
+//!                                       replace one credential's value, in place
 //! ```
 //!
 //! # Where the tenant comes from, and what a caller may say
@@ -64,6 +66,29 @@
 //! does not declare is already refused, so the count is the catalogue's number rather than the
 //! caller's.
 //!
+//! # Rotation is not an upsert, and is not reachable from the create path
+//!
+//! `POST` refuses a connection that already exists and **that refusal is unchanged**: an upsert is
+//! a create that does not know whether it is replacing something, and the silent overwrite it
+//! produces is the thing this whole module exists to prevent. A rotation is the opposite statement
+//! — an operator saying *replace this, I know it is there* — so [`rotate`] refuses when the value
+//! is **not** there ([`not_connected`], [`nothing_to_rotate`]), which is exactly where `POST`
+//! writes.
+//!
+//! The two are kept apart structurally rather than by a flag, so nothing reaches a replacement by
+//! accident from a create: a different **path**, a different **method**, and a different **body**,
+//! all three of which have to be right at once. `{"credentials": {…}}` sent to the rotation route
+//! does not deserialise, and `{"value": "…"}` sent to `POST` does not either.
+//!
+//! **It replaces one credential, not the declared set.** A connector may declare several — `slack`
+//! declares two — and the wholesale form would require a caller to re-send every value it wants to
+//! keep. This host never hands a credential value back out, so an operator rotating one of two has
+//! no way to obtain the other, and a wholesale rotation carrying only what they hold would destroy
+//! the rest. A surface whose safe use needs values read back out cannot exist on the host whose
+//! north star is that the credential never crosses the boundary. So the operation is per
+//! credential, an unmentioned credential is untouched, and rotating several is several requests —
+//! which is also the granularity a leak has, since it is one secret that leaks.
+//!
 //! # A half connection is one an operator cannot tell from a whole one
 //!
 //! Which is why `POST` resolves every address before writing any value, and why a write that fails
@@ -108,7 +133,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, MethodRouter};
+use axum::routing::{get, put, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
@@ -153,6 +178,19 @@ pub(super) const MODULE: Module = Module {
             access: Access::Principal,
             method_router: connection_route,
         },
+        Route {
+            // A path of its own, so replacing a credential is not a method away from creating one.
+            // `{credential}` is the flat-namespace name the catalogue publishes —
+            // `zendesk.api_token` — and it is a key into the connector's own declaration exactly
+            // as `{connector}` is a key into the catalogue: refused when the connector declares no
+            // such name, and never a path segment of the credential address. What the address
+            // carries is the declared `leaf`, which the catalogue supplies and the request does
+            // not; `tests::a_hostile_credential_name_cannot_reach_the_address` drives that
+            // directly.
+            path: "/api/connections/{connector}/credentials/{credential}",
+            access: Access::Principal,
+            method_router: credential_route,
+        },
     ],
 };
 
@@ -162,6 +200,10 @@ fn collection_route() -> MethodRouter<AppState> {
 
 fn connection_route() -> MethodRouter<AppState> {
     get(show).post(create).delete(remove)
+}
+
+fn credential_route() -> MethodRouter<AppState> {
+    put(rotate)
 }
 
 /// The values a caller supplies when it connects a connector.
@@ -181,6 +223,25 @@ fn connection_route() -> MethodRouter<AppState> {
 struct NewConnection {
     /// Declared credential name to value. At least one, and every name declared by the connector.
     credentials: BTreeMap<String, String>,
+}
+
+/// The one value a caller supplies when it rotates a credential.
+///
+/// **Deliberately not [`NewConnection`]'s shape**, and that is the point rather than a
+/// consequence: the two bodies are incompatible, so a create body sent to the rotation route and a
+/// rotation body sent to `POST` both fail to deserialise. Together with the separate path and the
+/// separate method, replacing a credential takes three things being right at once, and none of
+/// them is a default. See the module documentation for why an upsert is the thing being kept out.
+///
+/// A rotation replaces exactly one credential and names it in the path, so there is no map here
+/// and nothing to say about the credentials it did not name — they are untouched.
+///
+/// **No `Debug`**, for [`NewConnection`]'s reason: this holds a credential value as a plain
+/// `String`, so a derived formatter is one `debug!(?body)` away from logging it.
+#[derive(Deserialize)]
+struct RotatedCredential {
+    /// The value to put at the credential's existing address.
+    value: String,
 }
 
 /// Every connection this tenant holds.
@@ -386,6 +447,125 @@ async fn rollback(
     } else {
         Err(remaining)
     }
+}
+
+/// Replace one credential's value, at the address the connection already uses.
+///
+/// The operation an operator reaches for when a secret has leaked, and the reason it exists is
+/// that the alternative — `DELETE` then `POST` — has a window in it where the tenant has no
+/// connection and everything relying on it fails. It is also the alternative that hands the
+/// operator the partial-delete failure X-18 documents, on the one path where a live vendor
+/// credential surviving matters most.
+///
+/// # Why there is no window here
+///
+/// The whole of the change is a single [`SecretStore::put`], and that is an **atomic whole-file
+/// replace**: the address holds the old value until it holds the new one. There is no moment in
+/// between and nothing for this host to sequence, so "no observable state where the tenant has no
+/// connection" is a property of the operation rather than a promise about it. `rotate` issues no
+/// `delete` at all, and [`tests::a_credential_is_rotated_in_place_and_the_connection_is_never_gone`]
+/// asserts both halves: that a concurrent reader never sees the connection incomplete, and that
+/// the store served zero deletes.
+///
+/// # Why it refuses where `create` writes
+///
+/// Everything before the `put` is a refusal, and they are ordered so that the destructive step is
+/// last: an unknown connector, an undeclared credential, a value that is not a credential, a
+/// connection that is not there, a credential that is not there, and the tenant's allowance. Only
+/// after all of them does anything get written — so a refused rotation cannot have destroyed what
+/// it failed to replace, because the only way this host could destroy the old value is by writing
+/// over it, and it has not.
+async fn rotate(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, credential)): Path<(String, String)>,
+    Json(body): Json<RotatedCredential>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let addresses = match declaration.addresses(principal.tenant()) {
+        Ok(addresses) => addresses,
+        Err(refusal) => return connection_refused(&refusal),
+    };
+
+    // The same seam `create` writes through, in its single-value form: `write_of` resolves the
+    // supplied name to an address and admits the value against the per-value bound, so the bound
+    // is not a check this handler remembers to make and the name in the path is refused here if
+    // the connector does not declare it. It is also what keeps `{credential}` from reaching the
+    // address — the address is composed from the *declared* leaf this lookup returns.
+    let (reference, secret) =
+        match declaration.write_of(principal.tenant(), &credential, &body.value) {
+            Ok(write) => write,
+            Err(refusal) => return connection_refused(&refusal),
+        };
+
+    // The claim `create` and `remove` take, for the same reason and against the same neighbours: a
+    // rotation deciding against a value a `DELETE` is in the middle of destroying would put a
+    // fresh credential back at an address an operator has just revoked.
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+
+    // **Where a rotation stops being an upsert.** A create that finds nothing writes; a rotation
+    // that finds nothing refuses. The probe is inside the claim, so what it read is still true
+    // when the `put` below acts on it.
+    let held_now = match held(store, &addresses).await {
+        Err(error) => return store_failed(&error),
+        Ok(held) if held.is_empty() => return not_connected(provider, &addresses),
+        Ok(held) => held,
+    };
+    if !held_now.iter().any(|name| name == &credential) {
+        return nothing_to_rotate(provider, &credential, &reference);
+    }
+
+    // The allowance, at the width it is decided at — see `create` for the whole argument. A
+    // rotation reaches for it because a *larger* value spends allowance the tenant may not have.
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+
+    // A rotation is a replacement, so what it spends is the difference: the tenant's occupancy
+    // with the value being replaced taken out of it, plus the value going in. Counting the whole
+    // new value against an occupancy that already includes the old one would refuse rotations that
+    // fit — an operator with a leaked secret told to disconnect something first.
+    let replacing = match store.get(&reference).await {
+        // The length and nothing else, exactly as `occupied` measures: no plaintext is bound to a
+        // name here.
+        Ok(current) => stored_bytes(&current),
+        // The probe above saw a value at this address under this same claim, so a not-found here
+        // is a store that changed underneath a claim rather than an empty address. Counted as
+        // nothing, which is the strict reading — it can only make the decision below tighter.
+        Err(error) if error.is_not_found() => 0,
+        Err(error) => return store_failed(&error),
+    };
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) =
+        admit_tenant_occupancy(held_bytes.saturating_sub(replacing), stored_bytes(&secret))
+    {
+        // Nothing has been written, so the value this refused to replace is untouched. That is the
+        // guarantee, and it is structural: the `put` is below this line.
+        return connection_refused(&refusal);
+    }
+
+    if let Err(error) = store.put(&reference, &secret).await {
+        return rotation_failed(provider, &credential, &reference, &error);
+    }
+
+    // `200` and not `201`: nothing was created, and the connection is the one that was already
+    // there. The answer is the same view every other route gives — addresses, and which
+    // credentials are held — and the set of held credentials is unchanged, because a rotation
+    // replaces one that was already among them.
+    Json(view(provider, &addresses, &held_now)).into_response()
 }
 
 /// Disconnect, destroying every credential the connection holds.
@@ -778,6 +958,96 @@ fn already_connected(
                  in flux-connectors (C-406) and is not published yet; this host pins \
                  connector-spec 0.8. Wiring it up, including resolving a name you choose to that \
                  uuid, is X-14. Until then, delete the existing connection before creating another",
+        }),
+    )
+}
+
+/// The connection is there, and this credential is not one of the values it holds.
+///
+/// A rotation replaces a value it expects to find; it does not create one. Writing here would be
+/// the upsert [`already_connected`] refuses, arriving through the other door — a write that does
+/// not know whether it is replacing something.
+///
+/// Distinct from [`not_connected`] because the two send an operator to different places: that one
+/// says the tenant has no connection to this connector at all, and telling somebody whose
+/// connection is fine that they have none is a false statement about their own state. A connector
+/// may legitimately hold a subset of what it declares
+/// ([`tests::a_connection_may_carry_a_subset_of_what_is_declared`]), so this is an ordinary case
+/// rather than a damaged connection.
+///
+/// **The remedy named is the one that works.** Adding a credential to a connection that already
+/// exists is not something this surface can do today — `POST` refuses with [`already_connected`]
+/// and there is no other route — so the refusal says that plainly, including what the available
+/// route costs, rather than naming a remedy that would answer `409`.
+fn nothing_to_rotate(
+    provider: &'static Provider,
+    credential: &str,
+    reference: &CredentialRef,
+) -> Response {
+    refuse(
+        StatusCode::NOT_FOUND,
+        format!(
+            "this tenant's `{}` connection holds no `{credential}` to rotate; nothing is stored at \
+             the address below. A rotation replaces a value it expects to find and does not create \
+             one, because a write that does not know whether it is replacing something is the \
+             silent overwrite this surface refuses. Adding a credential to a connection that \
+             already exists is not on this surface today: `DELETE /api/connections/{}` and `POST` \
+             the whole set, which does destroy the credentials it already holds",
+            provider.id, provider.id,
+        ),
+        json!({
+            "connector": provider.id,
+            "credential": credential,
+            "address": address_path(reference),
+        }),
+    )
+}
+
+/// The store refused the one write a rotation makes.
+///
+/// The kind survives, as it does for every refusal on this surface: a `Denied` answered `503`
+/// "retrying may work" sends an operator to retry, which is the one thing that cannot restore this
+/// host's access to the store. [`store_failure`] is the shared mapping X-18 and X-20 established,
+/// and this reads it rather than restating it.
+///
+/// # There is no partial state here, and that is why this is not a third `partly_*`
+///
+/// [`partly_written`] and [`partly_destroyed`] exist because their operations are **loops** over
+/// several addresses that can stop in the middle: a create writes every supplied value, a delete
+/// destroys every declared one, and each therefore owes the caller an account of which half
+/// happened. A rotation is one [`SecretStore::put`] at one address, and that is an atomic
+/// whole-file replace — it lands or it does not. So there is no `left_behind` to name, nothing
+/// half-old and half-new to admit, and no rollback to attempt or to report the failure of.
+///
+/// What this says instead is the thing that is actually true, and it is the stronger statement:
+/// **the value at that address is the one that was there before the request.** That is also this
+/// refusal's half of "a refused rotation must not destroy what it failed to replace" — made true
+/// by there being no `delete` on this path at all and by the `put` being last, and reported here
+/// so an operator does not have to infer it.
+fn rotation_failed(
+    provider: &'static Provider,
+    credential: &str,
+    reference: &CredentialRef,
+    error: &StoreError,
+) -> Response {
+    error!(%error, connector = provider.id, "a credential could not be rotated");
+
+    let (status, _, advice) = store_failure(error);
+
+    refuse(
+        status,
+        format!(
+            "the credential store failed while rotating the `{}` credential `{credential}`, so \
+             nothing was replaced: the value at the address below is the one it held before this \
+             request. A rotation is one atomic write, so there is no half-old and half-new state \
+             to account for and the credential you were replacing is still live. {advice}",
+            provider.id,
+        ),
+        json!({
+            "connector": provider.id,
+            "credential": credential,
+            "address": address_path(reference),
+            "replaced": false,
         }),
     )
 }
@@ -1272,6 +1542,15 @@ mod tests {
                 .insert(path, "v".repeat(bytes));
         }
 
+        /// How many `delete`s this store has served.
+        ///
+        /// For the one assertion that cannot be made from the outside: a rotation must never make
+        /// the address empty, and `delete` is the only operation that could. Counting them to zero
+        /// is the property rather than a sample of it.
+        fn deletes(&self) -> usize {
+            *self.deletes.lock().expect("no test poisons this")
+        }
+
         fn addresses(&self) -> Vec<String> {
             let mut addresses: Vec<String> = self
                 .held
@@ -1617,6 +1896,459 @@ mod tests {
             Some(SENTINEL.to_string()),
             "the first connection's value must be exactly what it was — a refusal that had \
              already written is the failure this test exists for",
+        );
+    }
+
+    /// **X-39's first Acceptance item.** A credential is replaced in place, and there is **no
+    /// observable state in which the tenant has no connection** — asserted rather than argued.
+    ///
+    /// Two independent assertions, because either alone would be satisfiable by an implementation
+    /// with a window in it:
+    ///
+    /// - A reader hammers `GET /api/connections/{connector}` for the whole duration of the
+    ///   rotation, with the store's window widened so its reads really do interleave, and **every
+    ///   one** of them must answer `200` with the credential `held`. A `DELETE`-then-`POST`
+    ///   rotation fails this on the read that lands between the two.
+    /// - The store served **no `delete` at all**. That is the structural half: `SecretStore::put`
+    ///   is an atomic whole-file replace, so a rotation that only ever `put`s cannot have a window
+    ///   — the address goes from the old value to the new one and is never empty. A `delete` is the
+    ///   only operation that could make it empty, so counting them to zero is the property itself
+    ///   rather than a sample of it.
+    ///
+    /// The rotated value is a second sentinel, so the answer is also checked not to hand back what
+    /// it was just given.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_credential_is_rotated_in_place_and_the_connection_is_never_gone() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        /// What the rotation puts there. Distinct from [`SENTINEL`] so the assertion below is
+        /// about the *new* value having landed, not merely about something being there.
+        const ROTATED: &str = "ROTATED-NOT-A-REAL-SECRET-EITHER";
+
+        let (app, store) = connected_app();
+        let (status, _) = connect_zendesk(&app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Every `get` yields, so the reader below reliably lands inside the rotation's own
+        // read-decide-write rather than only sometimes.
+        store.widen_the_window();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = tokio::spawn({
+            let app = app.clone();
+            let stop = stop.clone();
+            let reads = reads.clone();
+            async move {
+                let mut gone = Vec::new();
+
+                while !stop.load(Ordering::Relaxed) {
+                    let (status, body) =
+                        call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+                    reads.fetch_add(1, Ordering::Relaxed);
+                    if status != StatusCode::OK || body["credentials"][0]["held"] != true {
+                        gone.push((status, body));
+                    }
+                }
+
+                gone
+            }
+        });
+
+        // The reader has to be running before the rotation starts, or the window it exists to
+        // watch closes unobserved and the assertions below are about nothing.
+        while reads.load(Ordering::Relaxed) == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let (status, rotated) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": ROTATED })),
+        )
+        .await;
+
+        stop.store(true, Ordering::Relaxed);
+        let gone = reader.await.expect("the reader task must not panic");
+        let reads = reads.load(Ordering::Relaxed);
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a rotation replaces a value that is there, so it is not a creation: {rotated}",
+        );
+        assert!(
+            reads > 1,
+            "the reader made {reads} reads, so none of them can have been concurrent with the \
+             rotation and this test proves nothing",
+        );
+        assert!(
+            gone.is_empty(),
+            "the connection was unreadable or incomplete during the rotation, in {reads} reads: \
+             {gone:?}",
+        );
+        assert_eq!(
+            store.deletes(),
+            0,
+            "a rotation that deletes has a window in which the tenant has no credential at that \
+             address; the store's write is an atomic whole-file replace and that is what a \
+             rotation is",
+        );
+        assert_eq!(
+            store
+                .at("tenants/acme/com.zendesk.api/api_token")
+                .as_deref(),
+            Some(ROTATED),
+            "the new value must be the one at the address the connection was already using",
+        );
+        assert!(
+            !rotated.to_string().contains(ROTATED),
+            "an answer must not repeat the value it was given: {rotated}",
+        );
+    }
+
+    /// **X-39's second Acceptance item.** A rotation names the connection it expects to exist and
+    /// is refused when it does not — which is the whole of the difference between it and an
+    /// upsert. An upsert writes where it finds nothing; this refuses there.
+    ///
+    /// Two refusals, because the two facts send an operator to different places: no connection to
+    /// this connector at all, and a connection that does not hold *this* credential. The second is
+    /// an ordinary case rather than damage — a connector may legally hold a subset of what it
+    /// declares — and answering it by writing would be the create path's `409` undone through the
+    /// other door.
+    #[tokio::test]
+    async fn a_rotation_is_refused_where_there_is_nothing_to_replace() {
+        let (app, store) = connected_app();
+
+        // Nothing connected at all.
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": "ROTATED-NOT-A-REAL-SECRET-EITHER" })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a rotation with nothing to replace must refuse, not create: {refusal}",
+        );
+        assert!(
+            refusal.to_string().contains("holds no connection"),
+            "the refusal must say the connection is missing, not the credential: {refusal}",
+        );
+        assert!(
+            store.addresses().is_empty(),
+            "a refused rotation must have written nothing: {:?}",
+            store.addresses(),
+        );
+
+        // Connected, and this credential is not one of the values it holds. `slack` declares two
+        // and this connection carries one.
+        let (status, created) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({ "credentials": { "slack.bot_token": SENTINEL } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/slack/credentials/slack.signing_secret",
+            Some(json!({ "value": "ROTATED-NOT-A-REAL-SECRET-EITHER" })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "rotation replaces a value it expects to find; it does not create one: {refusal}",
+        );
+        assert_eq!(refusal["credential"], "slack.signing_secret", "{refusal}");
+        assert_eq!(
+            refusal["address"], "tenants/acme/com.slack.api/signing_secret",
+            "the refusal names the address this host looked at: {refusal}",
+        );
+        assert!(
+            refusal.to_string().contains("does not create one"),
+            "and says why, rather than reading as a broken connection: {refusal}",
+        );
+
+        assert_eq!(
+            store.addresses(),
+            vec!["tenants/acme/com.slack.api/bot_token".to_string()],
+            "a refused rotation must not have created the credential it could not replace",
+        );
+        assert_eq!(
+            store.at("tenants/acme/com.slack.api/bot_token"),
+            Some(SENTINEL.to_string()),
+            "nor touched the one the connection does hold",
+        );
+    }
+
+    /// **The `409` on create is untouched, and rotation is not a slip away from it.**
+    ///
+    /// The two operations are kept apart by three independent things — a different path, a
+    /// different method, and an incompatible body — so reaching a replacement from a create takes
+    /// all three being deliberate. Each is driven here against a connection that already holds a
+    /// value, and the value is asserted unchanged after every one: the failure this guards against
+    /// is a mistyped request quietly overwriting a credential.
+    #[tokio::test]
+    async fn a_create_cannot_slip_into_a_rotation() {
+        let (app, store) = connected_app();
+
+        let (status, _) = connect_zendesk(&app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let create_body = json!({ "credentials": { "zendesk.api_token": "SLIPPED-NOT-A-SECRET" } });
+        let rotate_body = json!({ "value": "SLIPPED-NOT-A-SECRET" });
+
+        for (method, path, body, why) in [
+            (
+                // The create path itself, which still refuses exactly as X-10 wrote it.
+                Method::POST,
+                "/api/connections/zendesk",
+                create_body.clone(),
+                "a second create is still the X-14 refusal and never an upsert",
+            ),
+            (
+                // A create body at the rotation route: the shapes do not overlap.
+                Method::PUT,
+                "/api/connections/zendesk/credentials/zendesk.api_token",
+                create_body.clone(),
+                "a create body must not be a rotation",
+            ),
+            (
+                // And the other way round.
+                Method::POST,
+                "/api/connections/zendesk",
+                rotate_body.clone(),
+                "a rotation body must not be a create",
+            ),
+            (
+                // The rotation body at the connection route, where `PUT` is not answered at all —
+                // so the collection has no whole-set replace hiding behind a method.
+                Method::PUT,
+                "/api/connections/zendesk",
+                rotate_body.clone(),
+                "there is no whole-set replace on the connection route",
+            ),
+            (
+                Method::POST,
+                "/api/connections/zendesk/credentials/zendesk.api_token",
+                rotate_body.clone(),
+                "and no create on the credential route",
+            ),
+        ] {
+            let (status, body) = call(&app, "alice", method.clone(), path, Some(body)).await;
+
+            assert!(
+                status.is_client_error(),
+                "{why}, so `{method} {path}` must be refused: {status} {body}",
+            );
+            assert_eq!(
+                store.at("tenants/acme/com.zendesk.api/api_token"),
+                Some(SENTINEL.to_string()),
+                "{why}: `{method} {path}` changed the stored credential",
+            );
+        }
+
+        // And the create refusal is the one X-10 wrote, unchanged — asserted here as well as in
+        // `a_second_connection_to_one_connector_is_refused_rather_than_overwriting`, because this
+        // is the test that would notice rotation having been wired into `POST`.
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/zendesk",
+            Some(create_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+        assert!(
+            refusal.to_string().contains("@instances/<uuid>"),
+            "{refusal}"
+        );
+    }
+
+    /// **X-39's third Acceptance item.** A rotation the store refuses reports what it did, in the
+    /// vocabulary X-18 and X-20 established — and what it did is *nothing*.
+    ///
+    /// The kind survives out to the caller through the same [`store_failure`] mapping the two
+    /// partial-failure refusals read, so a `Denied` is not answered "retrying may work". That half
+    /// is asserted against the mapping itself rather than against copied strings, so a reworded
+    /// advice cannot leave this test green while the refusal drifts.
+    ///
+    /// The other half is why there is no `partly_rotated` beside `partly_written` and
+    /// `partly_destroyed`: those two loop over several addresses and can stop in the middle, and a
+    /// rotation is **one** `put` at one address against a store whose write is an atomic whole-file
+    /// replace. There is no half-old, half-new state to admit to — and the assertion that it is not
+    /// merely unreported is the last one, against the store.
+    #[tokio::test]
+    async fn a_rotation_the_store_refuses_leaves_the_old_credential_in_place() {
+        const ROTATED: &str = "ROTATED-NOT-A-REAL-SECRET-EITHER";
+
+        for failure in [Failure::Unreachable, Failure::Denied, Failure::Backend] {
+            let (app, store) = connected_app();
+            let (status, _) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED);
+
+            // Every `get` still answers; it is the write that is refused, which is the only step a
+            // rotation has.
+            store.allow_only_failing_with(0, failure);
+
+            let (status, refusal) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/zendesk/credentials/zendesk.api_token",
+                Some(json!({ "value": ROTATED })),
+            )
+            .await;
+
+            let (expected, _, advice) =
+                store_failure(&failure.at("tenants/acme/com.zendesk.api/api_token".to_string()));
+            assert_eq!(
+                status, expected,
+                "a rotation refused by the store keeps the failure's kind, exactly as a create and \
+                 a delete do: {refusal}",
+            );
+            assert!(
+                refusal["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains(advice)),
+                "and carries that kind's advice rather than a generic one: {refusal}",
+            );
+
+            assert_eq!(
+                refusal["replaced"], false,
+                "the refusal must say plainly that nothing was replaced: {refusal}",
+            );
+            assert_eq!(
+                refusal["address"], "tenants/acme/com.zendesk.api/api_token",
+                "and name the address it failed at: {refusal}",
+            );
+            assert!(
+                !refusal.to_string().contains(ROTATED) && !refusal.to_string().contains(SENTINEL),
+                "and neither the value it was given nor the one already there: {refusal}",
+            );
+
+            // The statement the refusal makes, checked against the store rather than believed.
+            assert_eq!(
+                store.at("tenants/acme/com.zendesk.api/api_token"),
+                Some(SENTINEL.to_string()),
+                "a failed rotation must leave the value it could not replace exactly as it was",
+            );
+
+            // And the connection is still whole, which is the property the whole story is about.
+            store.recovers();
+            let (status, read) =
+                call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert_eq!(read["credentials"][0]["held"], true, "{read}");
+        }
+    }
+
+    /// **X-39's fourth Acceptance item, and X-22's bound.** A rotation to a larger value that would
+    /// put the tenant past its allowance is refused, **and the old value survives**.
+    ///
+    /// This is the case where a refusal could most plausibly have destroyed something: the obvious
+    /// implementation of "replace" is a delete followed by a write, and a bound checked between the
+    /// two leaves the tenant with neither the old credential nor the new one. Here the decision is
+    /// made before the only write there is, so the old value cannot have gone anywhere.
+    ///
+    /// The arithmetic is asserted too, because a rotation is a *replacement*: what it spends is the
+    /// difference, so the occupancy it is decided against has the value being replaced taken out of
+    /// it. Counting the whole new value against an occupancy that still includes the old one would
+    /// refuse rotations that fit — and telling an operator with a leaked secret to go and
+    /// disconnect something is the wrong instruction at the worst moment. The run ends by rotating
+    /// to a value that does fit, so the bound is not passing by refusing everything.
+    #[tokio::test]
+    async fn a_rotation_past_the_tenant_allowance_is_refused_and_the_old_value_survives() {
+        /// What this tenant occupies everywhere except `zendesk`. One byte more than "the
+        /// allowance less a whole credential", so a rotation to a value at the per-value bound is
+        /// past the allowance by exactly one byte — the per-value bound admits it and only the
+        /// per-tenant one can refuse it.
+        const ELSEWHERE: usize = MAX_TENANT_STORE_BYTES - MAX_CREDENTIAL_VALUE_BYTES + 1;
+
+        let (app, store) = connected_app();
+        let acme = Tenant::new("acme").expect("a plain tenant id");
+
+        let (status, _) = connect_zendesk(&app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED);
+        occupy(&store, &acme, ELSEWHERE, &["zendesk"]);
+
+        let too_large = "L".repeat(MAX_CREDENTIAL_VALUE_BYTES);
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": too_large })),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "a rotation that would put the tenant past its allowance is refused: {refusal}",
+        );
+        assert_eq!(refusal["bound"], "tenant", "{refusal}");
+        assert_eq!(
+            refusal["held_bytes"],
+            json!(ELSEWHERE),
+            "the occupancy a replacement is decided against has the value being replaced taken \
+             out of it, or a rotation that fits would be refused: {refusal}",
+        );
+        assert_eq!(
+            refusal["adding_bytes"],
+            json!(MAX_CREDENTIAL_VALUE_BYTES),
+            "{refusal}",
+        );
+        assert_eq!(
+            refusal["limit_bytes"],
+            json!(MAX_TENANT_STORE_BYTES),
+            "{refusal}",
+        );
+
+        // **The item.** A refused rotation must not destroy what it failed to replace.
+        assert_eq!(
+            store.at("tenants/acme/com.zendesk.api/api_token"),
+            Some(SENTINEL.to_string()),
+            "the value the rotation was refused for must still be there, and be the old one",
+        );
+        let (status, read) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(read["credentials"][0]["held"], true, "{read}");
+
+        // And the bound admits the rotation that fits, so it is a bound rather than a refusal of
+        // everything. One byte less is exactly the allowance, which is inclusive.
+        let fits = "F".repeat(MAX_TENANT_STORE_BYTES - ELSEWHERE);
+        let (status, rotated) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": fits })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rotated}");
+        assert_eq!(
+            store.at("tenants/acme/com.zendesk.api/api_token"),
+            Some(fits),
+        );
+        assert!(
+            store.bytes_under("tenants/acme/") <= MAX_TENANT_STORE_BYTES,
+            "one tenant occupies {} bytes, past the {MAX_TENANT_STORE_BYTES} it may hold",
+            store.bytes_under("tenants/acme/"),
         );
     }
 
@@ -3098,7 +3830,9 @@ mod tests {
     /// module can produce, and three stories in a row (X-20, X-25, X-29) found that it did not — so
     /// the claim is now the list. Driven here: both listings, `show`, the unknown-connector and
     /// undeclared-credential refusals, the `409` for a second connection, both partial-failure
-    /// refusals with their address lists, both size refusals, and a store failure. **Not driven:**
+    /// refusals with their address lists, both size refusals, a store failure, and — since X-39 —
+    /// a rotation that lands together with all four of its refusals ([`not_connected`],
+    /// [`nothing_to_rotate`], the undeclared name, and [`rotation_failed`]). **Not driven:**
     /// [`allowance_change_in_flight`], which needs a tenant-wide claim held across a request from
     /// another task — machinery this test has none of, and the one refusal here that names no
     /// address at all, only a connector id. A test that admits its gap is worth more than one whose
@@ -3125,10 +3859,78 @@ mod tests {
                 "/api/connections/slack",
                 Some(json!({ "credentials": { "slack.nope": SENTINEL } })),
             ),
+            // X-39's answer: a rotation that lands, which is handed a value and must not give one
+            // back.
+            (
+                Method::PUT,
+                "/api/connections/zendesk/credentials/zendesk.api_token",
+                Some(json!({ "value": SENTINEL })),
+            ),
+            // And two of its refusals: an undeclared name, and a connector this tenant has not
+            // connected at all. `slack` is connected further down, not here.
+            (
+                Method::PUT,
+                "/api/connections/zendesk/credentials/zendesk.nope",
+                Some(json!({ "value": SENTINEL })),
+            ),
+            (
+                Method::PUT,
+                "/api/connections/slack/credentials/slack.bot_token",
+                Some(json!({ "value": SENTINEL })),
+            ),
         ] {
             let (_, body) = call(&app, "alice", method, path, body).await;
             answers.push(body);
         }
+
+        // X-39's other two refusals, each needing a store the requests above cannot be run through
+        // afterwards: a connection holding a subset, and a store that refuses the write.
+        let (subset_app, _) = connected_app();
+        let (status, _) = call(
+            &subset_app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({ "credentials": { "slack.bot_token": SENTINEL } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, nothing_to_rotate) = call(
+            &subset_app,
+            "alice",
+            Method::PUT,
+            "/api/connections/slack/credentials/slack.signing_secret",
+            Some(json!({ "value": SENTINEL })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "this must be the nothing-to-rotate refusal, or the answer below proves nothing about \
+             it: {nothing_to_rotate}",
+        );
+        answers.push(nothing_to_rotate);
+
+        let (refused_app, refused_store) = connected_app();
+        let (status, _) = connect_zendesk(&refused_app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED);
+        refused_store.allow_only(0);
+        let (status, rotation_failed) = call(
+            &refused_app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": SENTINEL })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this must be the failed-rotation refusal, or the answer below proves nothing about \
+             it: {rotation_failed}",
+        );
+        assert_eq!(rotation_failed["replaced"], false, "likewise");
+        answers.push(rotation_failed);
 
         // X-18's refusal, which quotes two lists of addresses and must quote no value. Armed here
         // rather than in the table above because it needs the store told to fail mid-loop.
@@ -3284,8 +4086,19 @@ mod tests {
     /// segment over the whole surface — X-03 wrote it saying X-10 would inherit it, and this is
     /// that inheritance made explicit. This one covers the rest of an address: a path parameter
     /// that could carry an authority, a credential or a rendered store path.
+    ///
+    /// **X-39 widened the allowed set by one name and paid for it.** `{credential}` names the
+    /// credential to rotate, and it is admitted on the same argument `{connector}` is: it is a key
+    /// into a declaration this host compiled in, not a component of an address. The catalogue
+    /// answers a lookup of it with the `leaf`, and the leaf is what the address carries. That is an
+    /// argument about behaviour rather than about spelling, so it is not left to this list —
+    /// [`a_hostile_credential_name_cannot_reach_the_address`] drives a name shaped like an address
+    /// straight at the route and asserts it reaches nothing.
     #[test]
     fn no_route_here_accepts_an_address() {
+        /// What a path here may name, each because the catalogue is what resolves it.
+        const KEYS: &[&str] = &["connector", "credential"];
+
         for route in MODULE.routes {
             for parameter in route
                 .path
@@ -3293,10 +4106,10 @@ mod tests {
                 .filter_map(|segment| segment.strip_prefix('{'))
                 .filter_map(|segment| segment.strip_suffix('}'))
             {
-                assert_eq!(
-                    parameter, "connector",
-                    "the only thing a path here may name is the connector, and `{parameter}` is \
-                     not it: {}",
+                assert!(
+                    KEYS.contains(&parameter),
+                    "a path here may name only a catalogue key, and `{parameter}` is not one of \
+                     {KEYS:?}: {}",
                     route.path,
                 );
             }
@@ -3307,6 +4120,102 @@ mod tests {
                 route.path,
             );
         }
+    }
+
+    /// The behaviour behind admitting `{credential}` as a path parameter: a caller cannot steer
+    /// where a value lands by what it puts there, and cannot learn anything by trying.
+    ///
+    /// Each name below is one the catalogue does not declare, so each is refused before an address
+    /// is composed — by the declaration lookup itself rather than by a filter somebody has to keep
+    /// in step with the addressing scheme.
+    ///
+    /// **Two assertions, because "no refusal names another tenant's address" needs both.** The
+    /// refusal does echo the undeclared name back, which is how `UndeclaredCredential` has always
+    /// read and is the caller's own input rather than something this host looked up — so the
+    /// property that actually matters is that the answer is *the same either way*: the whole run is
+    /// made twice, once with the other tenant holding a `zendesk` connection and once without, and
+    /// the refusals must be identical. A mirror is not an oracle. And the store is untouched in
+    /// both, so none of these wrote anywhere, least of all at the address they spell.
+    #[tokio::test]
+    async fn a_hostile_credential_name_cannot_reach_the_address() {
+        /// Names shaped like the thing a caller must not be able to reach.
+        const HOSTILE: &[&str] = &[
+            // A rendered address, for another tenant and for this one.
+            "tenants%2Fglobex%2Fcom.zendesk.api%2Fapi_token",
+            "tenants%2Facme%2Fcom.zendesk.api%2Fapi_token",
+            // A traversal out of the leaf position.
+            "..%2F..%2F..%2Fglobex%2Fcom.zendesk.api%2Fapi_token",
+            // The leaf itself, which is what the *address* carries. A caller names the
+            // flat-namespace name; the leaf alone is not one.
+            "api_token",
+        ];
+
+        /// What the hostile rotations try to plant.
+        const PLANTED: &str = "PLANTED-NOT-A-REAL-SECRET";
+
+        /// Drive every hostile name as `alice`, optionally with the other tenant connected, and
+        /// hand back what the caller saw and what the store holds afterwards.
+        async fn attempt(globex_is_connected: bool) -> (Vec<(StatusCode, Value)>, Vec<String>) {
+            let (app, store) = connected_app();
+
+            let (status, _) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED);
+            if globex_is_connected {
+                let (status, _) = connect_zendesk(&app, "bob").await;
+                assert_eq!(status, StatusCode::CREATED);
+            }
+
+            let mut answers = Vec::new();
+            for hostile in HOSTILE {
+                answers.push(
+                    call(
+                        &app,
+                        "alice",
+                        Method::PUT,
+                        &format!("/api/connections/zendesk/credentials/{hostile}"),
+                        Some(json!({ "value": PLANTED })),
+                    )
+                    .await,
+                );
+            }
+
+            (answers, store.addresses())
+        }
+
+        let (refused, occupied) = attempt(true).await;
+        let (refused_alone, occupied_alone) = attempt(false).await;
+
+        for (hostile, (status, refusal)) in HOSTILE.iter().zip(&refused) {
+            assert_eq!(
+                *status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "`{hostile}` is not a name zendesk declares, so it has no address: {refusal}",
+            );
+            assert!(
+                !refusal.to_string().contains(PLANTED),
+                "a refusal must never repeat the value it refused: {refusal}",
+            );
+        }
+
+        assert_eq!(
+            refused, refused_alone,
+            "the refusals differ depending on whether another tenant holds a connection, which \
+             makes this route an oracle for exactly the fact it must not disclose",
+        );
+
+        assert_eq!(
+            occupied_alone,
+            vec!["tenants/acme/com.zendesk.api/api_token".to_string()],
+            "an undeclared credential name must have written nowhere at all",
+        );
+        assert_eq!(
+            occupied,
+            vec![
+                "tenants/acme/com.zendesk.api/api_token".to_string(),
+                "tenants/globex/com.zendesk.api/api_token".to_string(),
+            ],
+            "and must not have reached the address it spells, in either tenant",
+        );
     }
 
     /// Both routes require a principal. Asserted here as well as in the surface-wide enumeration,
