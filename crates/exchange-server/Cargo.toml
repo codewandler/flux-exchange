@@ -1,0 +1,22 @@
+[package]
+name = "flux-exchange"
+description = "The flux-exchange server binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Not published. The library (`codewandler-flux-exchange-host`) is the reusable artifact; this
+# binary is one composition of it, and a product embedding the host writes its own.
+publish = false
+
+[[bin]]
+name = "flux-exchange"
+path = "src/main.rs"
+
+[dependencies]
+exchange-host.workspace = true
+
+tokio.workspace = true

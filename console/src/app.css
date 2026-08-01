@@ -1,0 +1,178 @@
+/*
+ * The document baseline the carried components render into.
+ *
+ * The components style their own class names and nothing else — a `<table>`, a `<code>`, an `<a>` and
+ * a heading are left to the host, because on the docs site they landed inside VitePress's `.vp-doc`
+ * container which styles those elements. Without an equivalent here the explorer would render as an
+ * unstyled outline: borderless tables, unmarked inline code, black links.
+ *
+ * So these rules are `.vp-doc`'s own, transcribed from the built flux-connectors stylesheet
+ * (`web/.vitepress/dist/assets/style.DFk-4o7g.css`) and reduced to the elements the components
+ * actually emit. Every value goes through a token from `tokens.css`, so light and dark come for free.
+ */
+
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  font-family: var(--vp-font-family-base);
+  font-size: 16px;
+  line-height: 24px;
+  font-synthesis: style;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  background-color: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  transition: background-color 0.25s, color 0.25s;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-weight: 600;
+  outline: none;
+}
+
+h1 {
+  margin: 0 0 16px;
+  letter-spacing: -0.02em;
+  line-height: 40px;
+  font-size: 32px;
+}
+
+h2 {
+  margin: 48px 0 16px;
+  border-top: 1px solid var(--vp-c-divider);
+  padding-top: 24px;
+  letter-spacing: -0.02em;
+  line-height: 32px;
+  font-size: 24px;
+}
+
+h3 {
+  margin: 32px 0 0;
+  letter-spacing: -0.01em;
+  line-height: 28px;
+  font-size: 20px;
+}
+
+h4 {
+  margin: 24px 0 0;
+  line-height: 24px;
+  font-size: 16px;
+}
+
+p {
+  margin: 16px 0;
+  line-height: 28px;
+}
+
+a {
+  font-weight: 500;
+  color: var(--vp-c-brand-1);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color 0.25s, opacity 0.25s;
+}
+
+a:hover {
+  color: var(--vp-c-brand-2);
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--vp-font-family-mono);
+}
+
+:not(pre) > code {
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: var(--vp-code-font-size);
+  background-color: var(--vp-code-bg);
+  transition: color 0.25s, background-color 0.5s;
+}
+
+a > code {
+  color: var(--vp-code-color);
+}
+
+h1 > code,
+h2 > code,
+h3 > code,
+h4 > code {
+  font-size: 0.9em;
+}
+
+pre {
+  font-family: var(--vp-font-family-mono);
+}
+
+table {
+  display: block;
+  border-collapse: collapse;
+  margin: 20px 0;
+  overflow-x: auto;
+}
+
+tr {
+  background-color: var(--vp-c-bg);
+  border-top: 1px solid var(--vp-c-divider);
+  transition: background-color 0.5s;
+}
+
+tr:nth-child(2n) {
+  background-color: var(--vp-c-bg-soft);
+}
+
+th,
+td {
+  border: 1px solid var(--vp-c-divider);
+  padding: 8px 16px;
+}
+
+th {
+  text-align: left;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--vp-c-text-2);
+  background-color: var(--vp-c-bg-soft);
+}
+
+td {
+  font-size: 14px;
+}
+
+ul,
+ol {
+  padding-left: 1.25rem;
+  margin: 16px 0;
+}
+
+li + li {
+  margin-top: 8px;
+}
+
+input,
+select,
+button {
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--vp-c-text-1);
+}

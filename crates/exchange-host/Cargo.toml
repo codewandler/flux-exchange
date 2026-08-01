@@ -1,0 +1,21 @@
+[package]
+name = "codewandler-flux-exchange-host"
+description = "The flux-exchange host, as ports: identity, runtimes, grants and leases. Composable into a product's own binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# The crate keeps its bare identity in import paths; only the crates.io package name carries the
+# vanity prefix, matching the rest of the flux family.
+[lib]
+name = "exchange_host"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

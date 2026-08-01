@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/exchange-host", "crates/exchange-server"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/codewandler/flux-exchange"
+authors = ["codewandler"]
+
+[workspace.dependencies]
+# The crates.io package carries the `codewandler-` vanity prefix (matching the flux family); the
+# alias key and the lib name stay bare, so `use exchange_host::…` is unaffected.
+exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exchange-host", version = "0.0.1" }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }

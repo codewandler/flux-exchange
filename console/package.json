@@ -1,0 +1,23 @@
+{
+  "name": "flux-exchange-console",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The flux-exchange console. Renders fixture data today — no service stands behind it yet.",
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11",
+    "vue-tsc": "^2.2.0"
+  },
+  "dependencies": {
+    "vue": "^3.5.13"
+  }
+}
