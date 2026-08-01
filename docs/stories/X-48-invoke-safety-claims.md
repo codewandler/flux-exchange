@@ -135,3 +135,40 @@ and matching on it would force the composition to name `connector-pack`, which i
 re-export's doc now records this so it is not filed a third time. **It was deliberately not
 removed**; a reviewer expecting a deletion here should read that paragraph rather than assume the
 item was skipped.
+
+## Progress 2026-08-01 — merged, then sent back by its own review
+
+Merged as `c06f56c`; gate green at 331 tests. **The independent review returned REWORK**, and the
+findings are the story's own failure shape reproduced inside the file whose Acceptance says *a guard
+that overstates its reach is worse than one that admits its edge*. Rework on `impl/X-48-r2`.
+
+Each was demonstrated with compiling code, not argued:
+
+1. **Lock 2's new doc names a method that does not exist and the door is open.** It claims
+   `ToolContext::system` is the only accessor and cites `WorkspaceContext::system`. Against the
+   pinned engine line, `ToolContext::workspace_context()` is public
+   (`flux-runtime-0.46.0/src/lib.rs:1320`), `WorkspaceContext::active() -> Arc<System>` is public
+   (`:1169`), and **there is no `WorkspaceContext::system` at all**. A source file doing
+   `ctx.workspace_context().active().run(...)` type-checks, reaches process spawn, names no
+   forbidden string, and leaves the whole workspace green.
+2. **The four-mechanism section overstates lock 1**, and that overstatement is load-bearing —
+   it is what covers lock 2's admitted blind spot. `dependencies_of` matches the literal line
+   `[dependencies]`, so a `[dependencies.reqwest]` table escapes it entirely and lock 1 says nothing.
+3. **`runtime_gate.rs` asserts a substring, not a call.** Three mutations leave the gate dead and all
+   four tests green — a discarded result, a `if false` branch, and **no call at all**, just a string
+   literal that mentions it. The file already classifies comments for exactly this reason and does
+   not classify string literals.
+
+The review independently confirmed the non-drivability claim rather than accepting it — 53
+`Provider` literals in `connector-catalog-0.9.0`, every one `Runtime::Http`, that version pinned at
+`Cargo.lock:310-311`, `Deployment::admits` returning `Ok` for `Http` under both classes. So there is
+no behavioural backstop under this test, which makes finding 3 the serious one.
+
+Confirmed sound and not to be re-done: the failing-first proof reproduces; the brace extractor fails
+loudly rather than silently at 1–4 stray braces; `Require` is the strictest mode; `network: false`
+matches upstream; `SandboxSettings` is not `#[non_exhaustive]`; nothing on the invoke path calls
+`ctx.system()` today.
+
+**Open for whoever owns the boundary:** lock 2 scans `crates/exchange-host/src` only, and
+`guarded_system` — presented as the backstop for lock 2's blind spot — lives in the unscanned
+`exchange-server`.
