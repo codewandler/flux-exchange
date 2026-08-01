@@ -1,10 +1,8 @@
 ---
 id: X-47
 title: "A connector with a templated host can actually be invoked"
-status: in-progress
+status: done
 epic: connections
-priority: 0
-design: docs/designs/connection-settings.md
 design: docs/designs/connection-settings.md
 areas: [exchange-server, exchange-host]
 note: "found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name"
@@ -365,3 +363,40 @@ catches only what somebody enumerated.
   is a manifest change. `sent` is the host's own answer and the same measurement
   `routes::invoke`'s tests already use, but it is an inference about the wire rather than a count of
   it. The wire count lives one crate down, in `connection_settings.rs`.
+
+## Closed 2026-08-01 after rework round 2 — the invariant is enforced, and what remains is named
+
+Gate green at **353 tests** (52 + 17 + 3 + 10 + 5 + 4 host, 253 server) plus 72 console.
+
+**Falsified at integration rather than taken on report.** Reverting the route to `Access::Principal`
+fails three tests, including the end-to-end one:
+
+```
+an_agent_may_not_write_a_connection_setting_and_the_refusal_is_logged ... FAILED
+an_agent_cannot_cause_a_dispatch_to_an_origin_it_named ... FAILED
+the_kind_gated_surface_is_only_what_was_declared ... FAILED
+```
+
+And the exfiltration re-driven after the fix: `403`, the settings store holds **0 bytes** for the
+tenant, the invocation answers `sent: "no"`, and the credential store still holds exactly
+`tenants/acme/com.zendesk.api/api_token`.
+
+**The gate is the whole settings write surface, not only the `PinnedTo` fields**, and the argument is
+written where the gate is. A per-field rule would rest a *stated invariant* on `suffix_of`'s admitted
+two-label approximation, and `Access` is declared as data precisely so a gate is **enumerable** rather
+than something a handler remembers to ask. The cost — an agent also cannot supply bitbucket's
+`workspace` — is named rather than discovered later.
+
+**The §4 correction went on `HostPinning::PinnedTo` as well as in the design**, because the code made
+the same "always inside the vendor's own domain" claim, and X-48's whole point is that the code must
+not claim more than it enforces.
+
+**What this does not close**, stated rather than left to be found: a *human* principal of the tenant
+who did not supply the credential can still read it out this way, because credential values are
+write-only on this surface. That needs an operator-scoped surface which does not exist —
+`connection-settings.md` §7, and now **X-54**.
+
+**Residual, carried to [[X-54]]:** `MAY_CONFIGURE` is the only enforcement point. The credential
+surface's pattern is enforce-twice — `agents::MAY_MINT` is re-checked inside `AgentStore::mint` — and
+this could not mirror it, because `ConnectionSettings::set` takes a `&Tenant` rather than a
+`Principal` and widening it is a breaking change to a published crate this story does not sanction.

@@ -30,7 +30,6 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 
 ## Now (in progress)
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
-- [X-47 — A connector with a templated host can actually be invoked](X-47-per-connection-settings.md) · found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name
 - [X-48 — The invoke composition's safety claims are as strong as its code](X-48-invoke-safety-claims.md) · found by X-12's independent review, 2026-08-01: the sandbox silently takes a permissive default in the one function that writes two other settings longhand to avoid exactly that; a comment claims processes cannot be spawned when they can; and deleting the runtime gate from invoke breaks no test
 - [X-49 — The branches X-46 opened are pinned](X-49-pin-the-branches-x46-opened.md) · found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes
 
@@ -48,6 +47,7 @@ _`docs/vision.md` says the thing this epic exists to act on:_
 - [X-53 — The explorer stops badging operations this service runs as \"not live yet\"](X-53-the-explorer-says-nothing-can-be-invoked.md) · found by X-42's review, 2026-08-01: the fourth rendering of the invoke falsehood. service.mts sets works: false for every operation with the comment \"nothing in flux-exchange can be invoked yet\"
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-54 — Who may create a connection and rotate a credential is decided, not inherited](X-54-who-may-touch-a-connection.md) · the ring-fenced half of X-47: the settings write is now gated to humans, but POST /api/connections and PUT .../credentials/{credential} are still Access::Principal, so an agent can create a connection and replace a credential
 - [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
 
 ### `invoke` — the caller names an operation, and nothing else is theirs
@@ -103,6 +103,7 @@ _None._
 - [X-44 — An operator can connect a connector without reaching for curl](X-44-connect-from-the-console.md) · X-34 shipped a read-only Connections view and said plainly that a connect form belongs in its own story. The console's first stated job is to wire things up, and it currently cannot
 - [X-45 — An operator can mint an agent and see its token once](X-45-mint-an-agent-from-the-console.md) · X-36 shipped POST /api/agents and nothing in the UI reaches it. The agent-onboarding page will tell an agent author to mint a token; this is where they do it
 - [X-46 — A connector's declared credentials are published, not discovered by provoking a refusal](X-46-catalogue-publishes-declarations.md) · found by X-44's implementor in the workaround it had to write, 2026-08-01: nothing publishes what a connector declares, so the console reads it out of the 422 that a deliberately-empty POST returns
+- [X-47 — A connector with a templated host can actually be invoked](X-47-per-connection-settings.md) · found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
