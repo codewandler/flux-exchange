@@ -4,26 +4,46 @@
 //
 // Every component under `src/components/` takes what it renders as a prop. That is not an accident of
 // how they were written — it is the property that let them be lifted out of the flux-connectors docs
-// site without a rewrite, and `test/components.test.mjs` holds it. So the catalogue is fetched *here*
+// site without a rewrite, and `test/components.test.mjs` holds it. So everything is fetched *here*
 // and passed down, and no component under `src/components/` knows a network exists.
 //
-// The catalogue has three states and each has its own view, because collapsing any two of them lies
-// to the reader:
+// Each thing this file reads has three states and each has its own view, because collapsing any two
+// of them lies to the reader:
 //
 //   loading  the request is in flight — say so, and name what is being read
-//   failed   nothing was read — `CatalogueFailure.mts`, which names the endpoint
-//   ready    a catalogue, however small, including one with no connectors in it
+//   failed   nothing was read — name the endpoint that did not answer
+//   ready    an answer, however small, including one with nothing in it
 //
 // The third and second are the pair that matters. A service that is not running and a service with
 // nothing in it must never render the same page.
+//
+// **What surrounds all of that is `ConsoleShell.mts`**, and it is the reason X-34 exists. This
+// console renders the connector catalogue, which is reference material — what this build *could*
+// run — and while that was the whole surface, the console read as a connector browser rather than
+// as the admin surface of a service that holds credentials and executes for many callers. The shell
+// states the platform's surfaces instead, including the three that are not built, and `surfaces.mts`
+// is the single statement of which is which.
 
-import { computed, onMounted, provide, shallowRef } from 'vue'
+import { computed, onMounted, provide, shallowRef, watch } from 'vue'
 import { PATH_RESOLVER } from './catalog.mts'
 import { fragmentPath, useRoute } from './routing'
-import { CONNECTORS_ENDPOINT, loadCatalogue, type CatalogueState } from './service.mts'
+import {
+  CONNECTORS_ENDPOINT,
+  SIGNIN_ENDPOINT,
+  loadCatalogue,
+  loadConnections,
+  loadSession,
+  signOut,
+  type CatalogueState,
+  type ConnectionsState,
+  type SessionState,
+} from './service.mts'
+import { surfaceOfRoute } from './surfaces.mts'
 import { isDark, toggleTheme } from './theme'
 
 import CatalogueFailure from './CatalogueFailure.mts'
+import Connections from './Connections.mts'
+import ConsoleShell from './ConsoleShell.mts'
 import OperationFacts from './OperationFacts.mts'
 import CatalogExplorer from './components/CatalogExplorer.vue'
 import CatalogSnapshot from './components/CatalogSnapshot.vue'
@@ -33,59 +53,99 @@ import OperationDetail from './components/OperationDetail.vue'
 // single static document, so `/operations/<id>` as a bare href would 404. See `src/routing.ts`.
 provide(PATH_RESOLVER, fragmentPath)
 
-// `shallowRef` rather than `ref`: the catalogue is replaced wholesale and never edited, so making
-// every operation in it deeply reactive would buy nothing and cost a walk of the entire document.
-const state = shallowRef<CatalogueState>({ status: 'loading' })
-
-onMounted(async () => {
-  state.value = await loadCatalogue()
-})
-
-// Narrowed once here rather than in the template, so the type checker can see it inside `v-if`.
-const ready = computed(() => (state.value.status === 'ready' ? state.value : null))
-const failure = computed(() => (state.value.status === 'failed' ? state.value.failure : null))
+// `shallowRef` rather than `ref`: each of these is replaced wholesale and never edited, so making
+// every operation in a catalogue deeply reactive would buy nothing and cost a walk of the document.
+const catalogue = shallowRef<CatalogueState>({ status: 'loading' })
+const session = shallowRef<SessionState>({ status: 'loading' })
+const connections = shallowRef<ConnectionsState>({ status: 'loading' })
 
 const route = useRoute()
+
+/** Whether a principal is resolved. `null` while the session is still unknown either way. */
+const principal = computed(() => (session.value.status === 'ready' ? session.value.principal : null))
+const signedIn = computed(() => principal.value !== null)
+
+onMounted(async () => {
+  // Both at once. The catalogue is anonymous and the session is not, so neither waits on the other
+  // — and a slow identity provider must not delay the one view that never needed a principal.
+  void loadCatalogue().then((state) => (catalogue.value = state))
+  session.value = await loadSession()
+})
+
+// Connections are tenant data and `/api/connections` requires a principal, so this is not asked
+// until one resolves. That is what keeps `ConnectionsState` at three states: a signed-out reader is
+// never shown a listing that failed, because none was attempted — the gate below is shown instead.
+watch(signedIn, async (resolved) => {
+  if (resolved) connections.value = await loadConnections()
+})
+
+/** Sign out, then reload — the session cookie is gone and every view on the page depends on it. */
+async function endSession() {
+  await signOut()
+  window.location.reload()
+}
+
+// Narrowed once here rather than in the template, so the type checker can see it inside `v-if`.
+const ready = computed(() => (catalogue.value.status === 'ready' ? catalogue.value : null))
+const failure = computed(() =>
+  catalogue.value.status === 'failed' ? catalogue.value.failure : null
+)
+const sessionFailure = computed(() =>
+  session.value.status === 'failed' ? session.value.failure : null
+)
 
 /** The served facts about the operation on screen, when the route names one this catalogue has. */
 const facts = computed(() =>
   ready.value && route.value.name === 'operation' ? (ready.value.served[route.value.id] ?? null) : null
 )
 
-const title = computed(() => {
-  switch (route.value.name) {
-    case 'operation':
-      return route.value.id
-    case 'core':
-      return route.value.entry
-    case 'unknown':
-      return 'Not found'
-    default:
-      return 'Catalogue'
-  }
-})
+/** Which surface of the platform the reader is on, so the rail can say so. */
+const active = computed(() => surfaceOfRoute(route.value.name))
 </script>
 
 <template>
   <div class="console">
-    <header class="console__head">
-      <div>
-        <a class="console__brand" :href="fragmentPath('/')">flux-exchange console</a>
-        <span class="console__where">{{ title }}</span>
-      </div>
-      <button
-        class="console__theme"
-        type="button"
-        :aria-pressed="isDark"
-        @click="toggleTheme()"
-      >
-        {{ isDark ? 'Light' : 'Dark' }}
-      </button>
-    </header>
+    <ConsoleShell :session="session" :active="active" @sign-out="endSession">
+      <template #theme>
+        <button type="button" :aria-pressed="isDark" @click="toggleTheme()">
+          {{ isDark ? 'Light' : 'Dark' }}
+        </button>
+      </template>
+    </ConsoleShell>
 
     <main>
+      <!--
+        Connections — the first of the console's two jobs, and where a reader lands.
+
+        Behind a principal, because a connection is tenant data. The gate is not an empty state: it
+        says why there is nothing here and offers the one thing that changes it. `/api/signin`
+        answers `303` to the identity provider, so it is an anchor the browser navigates and never
+        a fetch.
+      -->
+      <template v-if="route.name === 'connections'">
+        <p v-if="session.status === 'loading'" class="console__loading">Reading your session…</p>
+
+        <Connections v-else-if="signedIn" :state="connections" />
+
+        <section v-else class="gate">
+          <h1>Sign in to see this tenant's connections</h1>
+          <p>
+            A connection belongs to a tenant, and the tenant is read from whoever this service
+            resolves you to be — never from anything this page could ask for. So there is nothing
+            here to show until you sign in.
+          </p>
+          <p v-if="sessionFailure">
+            <code>{{ sessionFailure.endpoint }}</code> did not answer, so this console cannot tell
+            whether you are signed in. It is not saying that you are not.
+          </p>
+          <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
+        </section>
+      </template>
+
+      <!-- Everything below is the catalogue: reference material, and no longer the front door. -->
+
       <!-- Named, so a request that never comes back is visibly a request and not a blank page. -->
-      <p v-if="state.status === 'loading'" class="console__loading">
+      <p v-else-if="catalogue.status === 'loading'" class="console__loading">
         Reading the catalogue from <code>{{ CONNECTORS_ENDPOINT }}</code
         >…
       </p>
@@ -116,7 +176,7 @@ const title = computed(() => {
             The flux-exchange catalogue publishes connectors and their operations. It publishes no
             Flux core entries, so nothing here answers to
             <code>/core/{{ route.kind }}/{{ route.entry }}</code
-            >. <a :href="fragmentPath('/')">Back to the catalogue</a>.
+            >. <a :href="fragmentPath('/explorer')">Back to the catalogue</a>.
           </p>
         </template>
 
@@ -124,7 +184,7 @@ const title = computed(() => {
           <h1>Not found</h1>
           <p>
             Nothing in this console answers to <code>{{ route.path }}</code
-            >. <a :href="fragmentPath('/')">Back to the catalogue</a>.
+            >. <a :href="fragmentPath('/explorer')">Back to the catalogue</a>.
           </p>
         </template>
       </template>
@@ -132,7 +192,7 @@ const title = computed(() => {
 
     <footer class="console__foot">
       <p>
-        Read from <code>{{ CONNECTORS_ENDPOINT }}</code> ·
+        Catalogue read from <code>{{ CONNECTORS_ENDPOINT }}</code> ·
         <a href="https://github.com/codewandler/flux-exchange">codewandler/flux-exchange</a>
       </p>
     </footer>
@@ -144,36 +204,6 @@ const title = computed(() => {
   max-width: 1104px;
   margin: 0 auto;
   padding: 0 24px 64px;
-}
-
-.console__head {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 20px 0;
-  border-bottom: 1px solid var(--vp-c-divider);
-}
-
-.console__brand {
-  font-weight: 600;
-  color: var(--vp-c-text-1);
-  text-decoration: none;
-}
-
-.console__where {
-  margin-left: 10px;
-  font-size: 13px;
-  color: var(--vp-c-text-3);
-}
-
-.console__theme {
-  padding: 4px 12px;
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 6px;
-  background-color: var(--vp-c-bg-soft);
-  cursor: pointer;
 }
 
 .console__loading {
