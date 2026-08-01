@@ -143,6 +143,17 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A connection-settings store was named and could not be bound.
+    ///
+    /// A separate variant from the two above for their reason: an operator fixes it in a different
+    /// file, and what is in *this* one is not secret — so a refusal that read like the credential
+    /// store's would send somebody looking for a leak that is not there. Rendered rather than typed,
+    /// matching its siblings, because `SettingsStoreError` is `#[cfg(unix)]` too.
+    SettingsStore {
+        /// The store's own refusal.
+        reason: String,
+    },
+
     /// The composition could not build the thing that runs operations.
     ///
     /// A separate variant for the reason the two stores are separate: an operator fixes this
@@ -192,7 +203,9 @@ impl fmt::Display for StartupRefusal {
             }
             Self::Serving { source } => write!(f, "stopped serving: {source}"),
             Self::DevIdentity { source } => write!(f, "{source}"),
-            Self::CredentialStore { reason } | Self::AgentStore { reason } => {
+            Self::CredentialStore { reason }
+            | Self::AgentStore { reason }
+            | Self::SettingsStore { reason } => {
                 write!(f, "{reason}")
             }
             Self::Invoker { reason } => write!(
@@ -210,6 +223,7 @@ impl std::error::Error for StartupRefusal {
             | Self::ReachableBindWithDevelopmentIdentity { .. }
             | Self::CredentialStore { .. }
             | Self::AgentStore { .. }
+            | Self::SettingsStore { .. }
             | Self::Invoker { .. } => None,
             Self::DevIdentity { source } => Some(source),
             Self::UnreadableBind { source, .. } => Some(source),
