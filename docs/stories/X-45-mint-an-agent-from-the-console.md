@@ -1,8 +1,7 @@
 ---
 id: X-45
 title: "An operator can mint an agent and see its token once"
-status: ready
-priority: 2
+status: done
 epic: agent-access
 design: docs/designs/agent-access.md
 areas: [console]
@@ -32,17 +31,17 @@ here, unlike at `/api/session`. Cross-site is closed by `SameSite=Strict`; same-
 cannot be, because the token is on the page by construction. The remedy is revocation.
 
 ## Acceptance
-- [ ] **Failing-first test** — minting from the console yields a screen presenting the token exactly
+- [x] **Failing-first test** — minting from the console yields a screen presenting the token exactly
       once, and fails before it exists.
-- [ ] The token is **not persisted** by the console — not in `localStorage`, not in the URL, not in a
+- [x] The token is **not persisted** by the console — not in `localStorage`, not in the URL, not in a
       route. A test asserts it appears nowhere but the DOM of that one view.
-- [ ] Navigating away and returning **cannot** show it again, asserted rather than assumed.
-- [ ] The screen states plainly that this host cannot show it again, and why — the store keeps a
+- [x] Navigating away and returning **cannot** show it again, asserted rather than assumed.
+- [x] The screen states plainly that this host cannot show it again, and why — the store keeps a
       verifier, not the token.
-- [ ] It says what the token can and cannot do **today**: it authenticates nothing yet (X-37), and it
+- [x] It says what the token can and cannot do **today**: it authenticates nothing yet (X-37), and it
       authorises nothing beyond any principal (X-13, blocked). Derive that from `surfaces.mts` the way
       X-41 does, so it cannot rot.
-- [ ] Nothing under `console/src/components/` is modified.
+- [x] Nothing under `console/src/components/` is modified.
 
 ## Notes
 - **Wait for [X-40](X-40-who-may-mint-an-agent.md) if it has not landed**, or at minimum do not
@@ -51,3 +50,29 @@ cannot be, because the token is on the page by construction. The remedy is revoc
 - Do not add a "copy to clipboard" that silently fails on a non-secure origin; if you offer copy,
   handle the failure visibly. An operator who thinks they copied a token they did not is worse off
   than one who selects it by hand.
+
+## Progress
+- **Done 2026-08-01.** Console 51 -> 66 tests; Rust unchanged. Genuine merge-base failure — 51 pass,
+  **15 fail**, exactly the assertions this story adds.
+- **The screen mints for itself, against `App.vue`'s usual arrangement**, and the argument is
+  *lifetime* rather than style: `App.vue` is the root and **outlives every screen**, so a token handed
+  to it would still be in memory after the reader navigated away, one `v-if` from being rendered
+  again. Holding it in the view's own `setup` closure is what makes "navigating away" mean the state
+  **ceasing to exist** rather than a handler remembering to clear it.
+- **New test infrastructure earned rather than avoided:** a ~140-line mount harness over Vue's own
+  `createRenderer`, **no dependency**. Server-rendering can assert what a page *says*; *"shown once"*,
+  *"gone when torn down"* and *"not there when you come back"* are **lifecycle** claims, and the
+  Acceptance asked for them asserted rather than assumed.
+- **The response body's `shown: "once"` is deliberately not read.** A page that stated the one-shot
+  property only when the service remembered to say so would fall silent exactly when the service
+  changed. The screen states it from what the store holds; the fixture pins the field so upstream
+  drift surfaces here.
+- **Verified against a live service**, not only fixtures: the real `403` matches the fixture byte for
+  byte and the real `201` matches its shape.
+- **Carried forward:** `minting.mts`'s `MAY_MINT` is a courtesy copy of `routes::agents::MAY_MINT`
+  with no mechanical link. If the route ever widens, the console silently withholds the form from a
+  principal that would now be admitted — the asymmetry is deliberate (refusals render whole) but
+  worth knowing.
+- **Carried forward:** `v-show`/`<KeepAlive>` creeping into `App.vue`'s routing is the single change
+  that would silently turn the token into something living behind the next screen. There is a test on
+  it, but it is a regex over `App.vue`.

