@@ -31,3 +31,16 @@ declared `risk`, `effects` and `idempotency`.
 - `use catalog::…` — the crate's lib name is `catalog`, not `connector_catalog`.
 - `ConnectorSurface` in `crates/exchange-host/src/lib.rs` is the host-side view; it is a *view* of
   the catalogue, never a second model of one.
+- **`catalog::Operation` declares `risk` and `idempotency` but has no `effects` field** (checked
+  against 0.8.0). Acceptance asks for all three, so the third has to be *derived* and the derivation
+  documented where a reader will find it — an operation whose `hosts` are non-empty reaches the
+  network, and nothing in the catalogue speaks to `WorkspaceWrite` or `Process` today. Derive
+  honestly and say it is derived; do not present an inferred effect as a declared one, and do not
+  add an effect the catalogue cannot support.
+- The two enum pairs are near-mirrors, not the same type: `catalog::Risk` matches `host::Risk`
+  variant for variant, but `catalog::Idempotency::NonIdempotent` is `host::Idempotency::NotIdempotent`.
+  Map with an exhaustive `match`, so a variant added upstream is a compile error rather than a
+  silently wrong answer.
+- `catalog::providers()` / `operations_of()` are the whole iteration surface, which is what makes
+  "adding a connector requires no change to this route" achievable — read the catalogue, never a
+  list maintained here.

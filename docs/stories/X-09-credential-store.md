@@ -1,7 +1,7 @@
 ---
 id: X-09
 title: "A credential store, honest about what protects it"
-status: ready
+status: in-progress
 priority: 4
 epic: connections
 note: "no fallback to memory on a bad store value — a host that fell back would start, serve every route correctly, look exactly like a working one, and lose everything on restart"

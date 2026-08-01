@@ -1,0 +1,406 @@
+# Design: `invoke` — the caller names an operation, and nothing else is theirs
+
+**Status:** written ahead of implementation, 2026-08-01 · **Epic:** invoke ·
+**Story:** [X-12](../stories/X-12-invoke.md) · **Blocked on:** [X-11](../stories/X-11-align-the-engine-line.md) ·
+**Answers:** [`vision.md`](../vision.md)'s north star ·
+**Builds on:** flux's [`ecosystem.md`](https://github.com/codewandler/flux/blob/main/docs/designs/ecosystem.md)
+§"The remote binding" and flux-connectors' [`connectors-api.md`](https://github.com/codewandler/flux-connectors/blob/main/docs/designs/connectors-api.md)
+§"The confused deputy, answered again" · **Does not cover:** grants (X-13), execution records,
+`subscribe`
+
+## This cannot be built today, and the reason is not a detail
+
+`connector-pack` **cannot be linked from this repository**. `codewandler-connector-pack` 0.8.0
+requires `codewandler-flux-runtime` at `^0.41` — which Cargo reads as `>=0.41.0, <0.42.0` for a `0.x`
+crate — and the flux family is at 0.45.0. `connector_pack::pack` hands out
+`Arc<dyn flux_runtime::Tool>`, and two versions of `flux-runtime` are two distinct traits, so the
+registry cannot accept it. X-11 tracks the alignment, the work is upstream in flux-connectors, and a
+bump is in flight.
+
+**This document describes what is built when that clears.** Nothing here is implementable before it.
+
+There is a workaround, and it is the one thing this design refuses. This host could build the request
+itself — read the catalogue's `base_url`, interpolate the parameters, attach the credential, hand the
+result to an HTTP client — and it would work, and it would be the credential-injecting proxy the
+family already rejected ([`connectors-proxy.md`](https://github.com/codewandler/flux-connectors/blob/main/docs/designs/connectors-proxy.md)).
+The whole confused-deputy answer is that *the caller cannot name the authority*, and that answer is
+only true because the destination comes from the operation's own compiled Flux rather than from
+anything this process composes. A second request path deletes the argument and leaves the service.
+So: **wait for X-11.** A blocked epic is cheaper than a design that no longer holds.
+
+The rest of this document is written in the present tense, describing the finished path. Read it as
+conditional on X-11.
+
+---
+
+## 1. The route shape
+
+```text
+POST /v1/operations/{operation}/invoke
+body: the operation's declared parameters, verbatim — no envelope
+→ 200 { "operation": "...", "content": "...", "is_error": false }
+→ 4xx { "refusal": "...", "address": "...", "retryable": false, "message": "..." }
+```
+
+`{operation}` is the catalogue's own spelling of the operation id — `zendesk-ticket-show`. It is the
+only noun the caller supplies. The body is the parameter object and nothing else: it is deserialized
+as an opaque JSON value and handed to `Tool::execute`, which is the same shape flux itself calls a
+tool with.
+
+### What a caller cannot name, and what structurally prevents it
+
+Each of these is a claim about the *shape of the interface*, not about a validator. A validator is a
+thing that can be relaxed by one person in one commit; the absence of a field is not.
+
+**Not a host.** There is no request field in which a destination could arrive, because the body *is*
+the parameter object — the pack projects a `ToolSpec` with an `input_schema` from the operation's
+compiled Flux, and a member the operation does not declare has nowhere to land. Behind that, the URL
+is produced by `Operation::execute` evaluating the operation's own `CompositeOpDecl` — the parsed
+module, not a re-lowering of the IR — so the destination is the connector author's, fixed at
+compile time. And behind *that*: the crate holding this path has no HTTP client in its dependencies
+(§3, lock 1), so a URL that did arrive would have nothing to consume it. Three independent reasons,
+and the third is the one that survives a refactor of the other two.
+
+The honest residual: a **parameter value** can be interpolated into a path segment or a query, and
+for the thirteen connectors with a templated `base_url` an operator's own **configuration** value can
+reach the host segment. Neither is caller-named destination — the second is the tenant's own
+connection setting — and the reshaping cases are refused by `Error::UnsafeConfig` (a `subdomain` of
+`acme.zendesk.com@evil.example` resolves to `evil.example`, because the `@` makes everything before
+it userinfo) and `Error::UnresolvedEndpoint` (a parameter whose text spells a `{placeholder}`). X-12's
+failing-first test drives a parameter carrying `@evil.example`, `../` and `{subdomain}` and asserts
+the **origin observed on the wire is unchanged** — asserted against the recorded URL, not against the
+error message.
+
+**Not a credential.** There is no field, and no lookup a caller can steer. The address
+`tenants/<tenant>/<authority>/<service>/<credential>` is composed inside `connector-pack` from four
+components: the tenant, `provider.authority`, the elided `default` service, and `credential.leaf`.
+Three of the four are `&'static str` read out of a generated, compiled-in catalogue — they are
+program text, not runtime input. The fourth is the tenant, below. **There is no code path from an
+HTTP body to `CredentialRef::new`**, and that is the property to preserve; a route that took a
+credential name "so an operator can pick which of two tokens to use" would create one.
+
+A connector declaring no `authority` yields `Error::NoCredentialAddress` and the request is refused
+rather than sent unauthenticated — fail-closed with a diagnostic naming the missing *fact*, instead
+of a vendor's `401` that says nothing.
+
+**Not a tenant.** The invoke entry point takes a `&Principal` and has no parameter of type `&Tenant`
+or `&str` that could stand in for one. `Principal` carries its tenant and has no constructor taking a
+tenant separately from an identity; the only producer of one on a request path is `Identity::resolve`,
+whose whole input is `presented: &str` — the credential material. There is no tenant-shaped hole
+anywhere between the socket and the credential address.
+
+`Principal::new` is public, deliberately: `Identity` is a port and a composing binary must be able to
+mint principals from its own IdP. The boundary is that **no route in this repository calls it.**
+X-03's three-vector test (path segment, body field, header) is the assertion; this design's
+contribution is only that `invoke` gives it nothing new to test.
+
+**Not a runtime, and not the transport.** `Runtime` has no constructor taking caller input — stated
+and kept in `crates/exchange-host/src/runtime.rs`. The transport is a constructor argument to the
+host, supplied once at startup, and is not reachable from a request.
+
+### Rejected route shapes
+
+- **`POST /v1/invoke` with `{ "operation": …, "params": … }`.** Rejected because an envelope is a
+  place to put fields, and the field that eventually gets added is `endpoint`, or `base_url`, or
+  `credential`. The shape should have nowhere to put one. This is the same reasoning as "no
+  constructor on `Runtime` that takes caller input": remove the slot, not the value.
+- **`POST /v1/tenants/{tenant}/operations/{op}/invoke`, with the segment ignored.** Rejected, and
+  more firmly than the first. A tenant segment that is *ignored* is worse than one that is honoured,
+  because it reads as authoritative in every log line, every client SDK and every support
+  conversation — and the first person who "fixes" the inconsistency by honouring it has broken the
+  north star in a one-line diff that looks like a cleanup.
+- **`POST /v1/connectors/{connector}/operations/{op}`.** The connector is derivable from the
+  operation id — `catalog::operation(OperationKey::id(…))` is a global lookup and the entry carries
+  `provider`. A redundant name is a name that can *disagree*, which needs a reconciliation rule, and
+  a reconciliation rule is a decision procedure over caller input about which connector to use.
+- **The dotted tool name (`zendesk.ticket.show`) in the path.** That spelling exists because a dotted
+  name is not a legal Flux declaration and every flux tool is dotted; it is the *tool surface's*
+  spelling. The catalogue's `zendesk-ticket-show` is the *addressing* spelling, and it is what X-06
+  serves. One spelling on the wire; `dotted_name` derives the other internally.
+
+---
+
+## 2. The dispatch path
+
+Ordered, and the order is load-bearing at three points.
+
+1. **Resolve the principal.** `Identity::resolve`. `Ok(None)` is anonymous and is not an error;
+   `IdentityError::Rejected` and `IdentityError::Unreachable` stay distinct end to end.
+2. **Look the operation up in the catalogue**, then its provider. Unknown operation → terminal
+   refusal naming the id.
+3. **`Deployment::admits(surface.runtime)`.** §4.
+4. *(X-13's slot: consult the caller's grants; `Error::NotGranted`.)* Named here so that story is an
+   insertion rather than a re-plumb.
+5. **Construct both ports from the one tenant, at one call site** — `Credentials::new(store, tenant)`
+   and `Configuration::new(settings, tenant)`. Building them from a single value in a single
+   expression is what makes `Error::TenantMismatch` unreachable here rather than merely untriggered.
+6. **A fresh `ToolContext`**, one per invocation. §3 of the redaction rules.
+7. **`connector_pack::pack(&[provider.id], egress, credentials, configuration)`** into a fresh
+   `ToolRegistry`. Fresh per request: projection is cheap, and it is what keeps one tenant's resolved
+   configuration snapshot from outliving the request it was read for.
+8. **`tool.execute(&ctx, params)`.** Inside this call and nowhere else, the pack resolves the
+   credential, registers every travelling form with `ctx.redactor`, verifies the registration took,
+   evaluates the operation's compiled Flux into `{method, url, headers, body}`, places the
+   credential, and hands the whole thing to flux's own `http.request`.
+9. **Render the response through the same `ctx.redactor`** that the credential was registered with.
+
+Steps 1–7 are wiring. **Everything that makes a request correct and safe is inside step 8, and none
+of it is ours.** That is the design.
+
+### This host builds no request of its own — enforced, not intended
+
+The rule is easy to state and easy to erode: the erosion is always a small, reasonable-looking
+addition — a health-check pinger, a token-refresh call, an OAuth authorization-code exchange, a
+webhook registration helper. Each needs an HTTP client, and once one exists the second request path
+is a function call away.
+
+**Three locks. The first is the gate; the others make its failures legible.**
+
+**Lock 1 — the crate that dispatches has no transport, and its dependency list is an allow-list.**
+
+The whole invoke path lives in `exchange-host`, the published crate. It receives the transport as a
+constructor argument typed `connector_pack::Egress` — the same port shape `connector-pack` itself
+uses, one level up. `exchange-server` is the only crate that names `flux_web` or constructs
+`HttpRequestTool`, and it is the only crate with a server framework.
+
+A test reads `crates/exchange-host/Cargo.toml` — its own manifest, no network, no `cargo` invocation
+— and asserts its `[dependencies]` table is a **subset of an allow-list written in the test**, each
+entry with a one-line reason. Not a deny-list: a deny-list only catches the transports somebody
+thought of, and it passes for `ureq`, `isahc`, `attohttpc` and whatever ships next year. An
+allow-list fails on *any* new dependency, and the person adding one has to write down why it is not
+a transport. The complementary assertion is one line: **`exchange-server`'s sources never name
+`connector_pack`.** The crate that can build a request cannot name the pack; the crate that names the
+pack cannot build a request.
+
+The manifest is the checked artifact rather than `cargo metadata`, deliberately. The resolved graph
+unifies features across the workspace, so `connector-secrets`' optional `vault` feature (which pulls
+`reqwest`) enabled anywhere would make a closure-based check either fail spuriously or need an
+exception that swallows the real signal. A crate's own `[dependencies]` table is unaffected by
+unification, and it is exactly the thing a second request path would have to change.
+
+What lock 1 does *not* cover: `flux-system` is reachable transitively (it is where flux's real IO
+lives) and `flux-runtime`'s `ToolContext` is how the pack is called at all. The claim is therefore
+"no transport is a *direct* dependency", plus lock 2 for the reachable ones.
+
+**Lock 2 — one seam, counted.** A scanner over `crates/exchange-host/src/**/*.rs` asserts:
+
+- `connector_pack::pack` is named in exactly **one** file;
+- `Egress` appears in exactly **two** places — the field that holds it and the call that hands it to
+  `pack`. The host never calls `Egress::tool()`, and never calls `Tool::execute` on anything but the
+  operation the pack registered;
+- no source names `flux_system::net`, `std::net` or `tokio::net`.
+
+Source scanning is a blunt instrument and it is used here because the repository already runs one and
+already knows how to keep it honest: `console/test/components.test.mjs` is guarded by a test that
+runs the scanner against sources it *must reject* and sources it *must accept*. This scanner gets the
+same treatment, and without it the scanner is worth nothing — a regex that matches nothing passes
+every file.
+
+**Lock 3 — a counting transport, for what the other two cannot see.** Tests construct the host with
+an `Egress` wrapping a `Tool` that records every call and its URL. Then:
+
+- a successful invoke calls it **exactly once**, and the recorded origin is the connector's declared
+  one whatever the parameters were;
+- **every refusal in §5 leaves the count at zero.** That is what "the request was never sent" means
+  as a test rather than as a sentence in an error message, and it is the assertion `MissingCredential`
+  being terminal actually rests on.
+
+Lock 3's limit, stated because it is the one most likely to be over-read: it proves things about the
+paths a test drives, never about paths it does not know exist. Locks 1 and 2 are what speak to
+absence. Keep all three; they fail differently.
+
+**Rejected:** relying on review, and relying on a grep for `reqwest` in the sources. The first is
+what X-12 exists to replace. The second checks a name rather than a capability, passes for any crate
+nobody listed, and would have to be updated by the same person who is adding the thing it is meant to
+catch.
+
+---
+
+## 3. Credential resolution and redaction ordering
+
+The ordering rule and its verification belong to `connector-pack` and are not reimplemented here.
+`Credentials::resolve_mechanism` registers each credential with `ctx.redactor` **before the request
+exists and before the next fallible step**, then *asks the redactor whether it took* — because
+flux's `Redactor::add_secret` silently ignores a value under six trimmed characters, so registration
+can succeed and protect nothing. A value the redactor does not end up holding is
+`Error::UnredactableCredential`, and **it is not sent**.
+
+This host's job is to not defeat that. Four obligations:
+
+**One `ToolContext` per invocation.** The redactor is per context, so a credential registered for one
+call must not outlive it into another tenant's. A pooled or long-lived context would also break the
+pack's idempotence check, which asks the redactor *in hand* rather than consulting a memo — precisely
+because a remembered registration against a redactor that never received the value is a credential
+travelling unheld.
+
+**The same `ctx` into `execute` and into the response rendering.** The vendor's response is rendered
+through `ctx.redactor` before it reaches the route. Several vendors echo a token back in an error
+body, and at the pinned flux-web `http.request` returns one flat string
+(`HTTP {status}\n{headers}\n{body}`) returned whole — so the difference between "the pack kept it off
+the wire" and "it stayed off every surface" is this one call.
+
+**The host resolves no credential itself.** Its only contact with the store outside the pack is a
+presence check for the connections surface, and that check returns `bool`. No method on this host's
+API returns a `Secret`. `StoreError::NotFound` answers "no"; anything else is reported as unknown
+rather than collapsed into "no", because "unreachable" and "not connected" want opposite responses
+from an operator.
+
+**A credential too short to redact is refused, not sent.** `UnredactableCredential` names the tenant,
+the authority and the credential's name — the address, minus the value. It names neither the value
+nor its **length**: a length is a fingerprint. This is worth writing down because the refusal reads
+like an incomplete diagnostic and the obvious "improvement" is to add the length.
+
+### How "the registration took" is verified from this side
+
+The pack verifies it internally; X-12 asks this host to assert the observable. Two tests:
+
+- **A sentinel of six or more characters**, stored at a tenant's address, one invoke against a
+  loopback vendor that echoes the `Authorization` header back in its body, and the assertion that the
+  route's response carries **no substring of the sentinel**.
+- **A five-character sentinel** → refusal, and the counting transport at zero.
+
+Both sentinels must carry none of flux's known credential prefixes (`sk-ant-`, `xoxb-`, `ghp_`).
+flux's redactor runs a second, shape-based pass over tokens it was never told about, so a sentinel
+that looks like a credential would be scrubbed whether or not anybody registered it — and the test
+would pass while asserting nothing. `connector-pack`'s own `tests/credentials.rs` keeps a sentinel
+for exactly this reason; copy the reason, not just the constant.
+
+---
+
+## 4. Where `Deployment::admits` sits
+
+**After the catalogue lookup, before anything touches the credential store.**
+
+After, because the check needs the connector's declared runtime, which comes from the catalogue.
+Before the store, because a refusal that happens *after* a secret has been read has already moved
+that secret into this process's memory for a connector it was never going to run. "Refuse; never
+repair" is cheapest at the earliest point where the answer is knowable, and this is that point.
+
+Before `pack(…)` too: installation is where projection and the tenant-mismatch check happen, and
+there is no reason to project a connector this deployment will not execute.
+
+Before the grant check (X-13's slot), on the reasoning that the runtime refusal is a property of the
+*deployment* and is the same answer for every principal — cheaper, and it leaks nothing, because the
+catalogue X-06 serves is unfiltered and already publishes what a connector declares. That ordering is
+reversible and X-13 owns the final word if it finds a reason.
+
+`RuntimeRefusal` already carries the message and the tested requirement that it *names the way out* —
+"run this connector in a single-tenant deployment, or isolate it per tenant at the OS or pod level".
+Route it through unchanged. Do not add an override, a force flag, or a per-connector exception: the
+refusal exists because isolating a locally-executing runtime is an OS or pod concern that cannot be
+done from inside one Rust process, and an override is a lie about that.
+
+**A measured gap, which the test must account for.** `catalog::Provider` has **no runtime field**;
+every connector in the shipped catalogue is HTTP. So `ConnectorSurface::runtime` cannot be *read*
+from the catalogue and must be derived — `Runtime::Http` for every catalogue connector today — and
+the derivation must be documented as a derivation, on the same terms X-06 sets for `effects`. The
+consequence for X-12: **no shipped connector exercises the refusal**, so the test must construct a
+`ConnectorSurface` declaring a locally-executing runtime. That makes the path *more* worth testing,
+not less — it is a fail-closed guarantee with no accidental coverage, which is the same situation
+`connector-pack` records for its query-placement branch.
+
+---
+
+## 5. Failure taxonomy
+
+Two questions, and only the second one is usually asked: *was the request sent?* and *will retrying
+help?* An agent needs the first and infers the second, and the HTTP status space cannot express it —
+`502` says nothing about whether the effect happened.
+
+**So `retryable` is a field in the refusal body, not something a client derives from the status
+code.** It is set to `true` only when the failure **provably precedes dispatch**, or when it follows
+dispatch on an operation the catalogue declares `Idempotency::Idempotent`.
+
+`Idempotency::Conditional` is **not** marked retryable. The condition a conditional write depends on
+is stated in prose the host cannot evaluate, and a host that guesses turns "safe to repeat if you
+pass the same key" into a duplicated write.
+
+| Failure | Sent? | Retryable | Status | Why |
+|---|---|---|---|---|
+| `IdentityError::Rejected` | no | no | 401 | The credential was presented and is bad. |
+| `IdentityError::Unreachable` | no | **yes** | 503 | The IdP is down. Opposite operator response; never collapse the two. |
+| unknown operation | no | no | 404 | Nothing in the catalogue spells it. |
+| `RuntimeRefusal` | no | no | 409 | This deployment will not serve that runtime, ever, for anyone. |
+| `NotGranted` (X-13) | no | no | 403 | No grant admits it. |
+| `MissingCredential` | no | no | 422 | See below. |
+| `MissingConfig`, `MissingCredentialConfig` | no | no | 422 | The tenant's connection is incomplete. Names the field and the service. |
+| `NoCredentialAddress`, `UndeclaredCredential`, `InboundCredential`, `EmptyMechanism` | no | no | 422 | The connector cannot be addressed or authenticated as declared. |
+| `UnredactableCredential` | no | no | 422 | The value cannot be kept off a surface, so it does not go on the wire. |
+| `UnsafeConfig`, `UnresolvedEndpoint` | no | no | 422 | The composed request is not the one the gate was shown. |
+| `TenantMismatch` | no | no | 500 | Unreachable by construction (§2 step 5); if it fires, this host is wrong. |
+| credential store unreachable | no | **yes** | 503 | A transport failure at the store. Distinct from `NotFound`, which is the row above. |
+| transport failure reaching the vendor | **maybe** | only if declared idempotent | 502 / 504 | The one genuinely ambiguous row. |
+| vendor `4xx` / `5xx` / `429` | **yes** | n/a | 200 | Not a failure of this host. Returned as a result with `is_error`, unshaped. |
+
+That last row is the one most likely to be got wrong in a comfortable direction. A `404` from Zendesk
+is an *answer*, and flattening it into a host error destroys the distinction between "the vendor said
+no" and "we could not ask".
+
+**This host does not retry.** It labels. Retry policy belongs to the caller, which knows its own
+deadline and its own idempotency requirements; a host that retried a `429` on the caller's behalf
+would be spending someone else's rate limit against a budget it cannot see.
+
+### Why `MissingCredential` is terminal
+
+Three reasons, in increasing order of how much they cost when ignored.
+
+1. **The request was never sent.** There is no ambiguity about whether the effect happened, so retry
+   buys nothing but the same answer.
+2. **Nothing that a retry can change is inside this system.** The refusal names an address a human has
+   to go and put a value at. Time does not do that.
+3. **A retrying agent against a credential-less connector is a loop.** `connector-pack` requires its
+   credential port rather than accepting an `Option` for exactly this reason — a pack without one
+   would send unauthenticated requests, get a fail-closed `401`, and a host treating `401` as
+   retryable would loop on it forever. Marking `MissingCredential` retryable reintroduces that loop
+   one layer up, and it does so against a vendor's rate limit.
+
+**Every refusal names the address and never the value.** That is one rule with three edges: no
+credential value on any surface including errors; no *length*, which is a fingerprint; and, for
+connection settings, no value either unless the value is the thing the operator has to see in order
+to fix what they pasted — which is the one deliberate exception `UnsafeConfig` takes, and it takes it
+for a non-secret.
+
+---
+
+## 6. What this design does not cover
+
+- **Grants.** X-13. §2 names the slot; nothing here decides whether a principal may call anything.
+  Until X-13 lands, `invoke` is gated by identity alone, and that is a stated gap rather than a
+  position.
+- **Execution records.** Nothing here writes an audit trail. `vision.md` requires that every execution
+  be explainable — who asked, which grant admitted it, what was called, what came back — and three of
+  those four facts only exist once X-13 does. Not filed, deliberately.
+- **`subscribe`.** The inbound half of the binding. It needs the confused-deputy argument made in the
+  inbound direction ("a subscriber cannot name a binding it has not been granted"), and that argument
+  is sound only once an authenticated principal exists.
+- **Leases and streaming.** The `Lease` type is tested and nothing holds one. It needs a runtime that
+  keeps state open, which means the runtime axis beyond `http`, which a multi-tenant deployment
+  refuses.
+- **Response shaping.** Whatever `http.request` returns is returned, redacted and otherwise whole.
+- **Idempotency keys, rate limiting, concurrency limits, and retry policy.** Caller-side or later.
+
+## 7. Risks
+
+- **The response shape will have changed by the time this is built.** `connectors-api`'s `exec.rs` is
+  the prior art for this path and it handles `http.request`'s flat string, because flux-connectors
+  pins flux-web 0.41. Since flux-web **0.43.0** the canonical `ToolResult.content` is the record
+  `{status, headers, body}` and the flat block is only the model-facing view. X-11 will land the
+  *current* line, so invoke is likely built against the record. **Re-measure before copying
+  `exec.rs`**; do not port the flat-string handling on faith.
+- **The allow-list test is annoying by design, and the failure mode is deletion.** Somebody adding a
+  dependency meets a red test that is not about their change. Mitigation: the test's failure message
+  states the rule and cites this section, so the cheapest way out is to add the entry with its reason
+  rather than to delete the test. Worth watching in review; a diff that removes it is a blocker.
+- **`connector-catalog` and `connector-pack` have to move into `exchange-host`.** Today the catalogue
+  is a dependency of `exchange-server`. Invoke needs both in the host crate, which means the
+  allow-list gains two entries in the same change that introduces it. This overlaps X-02's live work
+  on the server crate; the route *handler* stays in `exchange-server` and remains a thin adapter,
+  while the invoke *function* lives in `exchange-host`. Coordinate rather than assume.
+- **A future OAuth refresh, webhook registration or health-check pinger is the real threat to lock 1,**
+  and each will arrive with a good reason. The answer is not to refuse them but to place them: a
+  token refresh is a *credential-store* concern with its own design and its own crate boundary, and
+  if it needs a transport it takes one as a port, exactly as this does. What it must never do is give
+  `exchange-host` an HTTP client.
+- **This document runs ahead of the code, which is the failure mode `connectors-api.md` records
+  about itself.** Nothing described here exists. When it does, §2's ordering and §5's table are to be
+  re-measured against the implementation rather than re-read.

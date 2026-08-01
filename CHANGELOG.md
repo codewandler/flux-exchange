@@ -8,6 +8,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **An HTTP surface that refuses an open bind** (X-02). `cargo run` binds `127.0.0.1:8080` and
+  answers `GET /health`. Startup on a reachable address with no identity provider configured is
+  **refused before the socket opens**, and the refusal names what would have worked — a daemon
+  holding credentials behind an open listener is the failure this exists to prevent, so it does not
+  start-and-warn. Routes are declared as data per feature module and the `Router` is derived from
+  them, so `routes::published()` is the whole surface by construction and a test can enumerate it;
+  an opaque per-module `Router` would have let a module publish an unauthenticated route no test
+  could see. Framework choice and its reasons: `docs/designs/http-surface.md`.
+
 - **The backlog** — vision, roadmap, and thirteen stories across four epics (X-01…X-13), plus the
   operating contract in `AGENTS.md`. The first wave is eight ready stories: the HTTP surface,
   sign-in, the catalogue and the credential store.

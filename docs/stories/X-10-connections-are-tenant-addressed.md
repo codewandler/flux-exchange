@@ -26,6 +26,11 @@ reachable only through a principal resolved for that tenant.
 
 ## Progress
 - (not started — X-03 and X-09 first)
+- **The address above is incomplete, raised by the owner 2026-08-01.** A tenant with two connections
+  to the *same* connector — two Zendesk subdomains, a sandbox and a production account — collides:
+  `tenants/<tenant>/<authority>/<credential>` has no instance dimension, so the second connection
+  overwrites the first. See [X-14](X-14-two-instances-of-one-connector.md). Do not land this story's
+  address scheme as written; either X-14 lands first, or this story carries the instance dimension.
 
 ## Notes
 - `Tenant::new` (`crates/exchange-host/src/principal.rs`) already refuses empty, over-long and

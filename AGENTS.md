@@ -35,10 +35,11 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.0.1. There is no service.** `cargo run` prints a deployment matrix and exits. What exists is the
-vocabulary and the rules as tested types. The [README](README.md) carries the itemized inventory of
-what is *not* built, and keeping it accurate is part of the job — a page that implies a working
-service costs more than an honest gap.
+**v0.0.1. The service serves one route.** `cargo run` binds loopback and answers `GET /health`, and
+refuses to start on a reachable address with no identity provider configured. What exists beyond
+that is still the vocabulary and the rules as tested types. The [README](README.md) carries the
+itemized inventory of what is *not* built, and keeping it accurate is part of the job — a page that
+implies a working service costs more than an honest gap.
 
 ## Build / test / run
 

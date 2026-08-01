@@ -1,9 +1,19 @@
 //! `exchange-host` — the flux-exchange host, stated as ports.
 //!
 //! This crate is the part a product embeds. It carries the vocabulary and the rules, and it
-//! deliberately carries **no** identity provider, **no** secret store, and **no** transport: those
-//! are traits a composing binary binds. That is what lets one implementation serve a self-serve
-//! deployment and a company's internal one without either learning about the other.
+//! deliberately carries **no** identity provider and **no** transport: those are traits a composing
+//! binary binds. That is what lets one implementation serve a self-serve deployment and a company's
+//! internal one without either learning about the other.
+//!
+//! It does carry one concrete binding — [`CredentialStore`] — and that is a narrowing of the claim
+//! above rather than an exception to it, so it is worth saying exactly where the line is. What the
+//! boundary protects is that the public crate has **no downstream dependency to leak through**. The
+//! store behind that type is `connector_secrets::FileStore`, a flux-family crate this already
+//! depends on and not a product's; the port a credential is resolved through is still
+//! `SecretStore`, which [`CredentialStore::secrets`] hands back; and a deployment that wants Vault,
+//! or a store of its own, binds that instead and never constructs this type. A default a composing
+//! binary can decline puts no product concern in the shared code. A default it *could not* decline
+//! would — so the moment this type stops being declinable, this paragraph has stopped being true.
 //!
 //! The design this implements is `docs/designs/ecosystem.md` in
 //! [codewandler/flux](https://github.com/codewandler/flux). Three rules from it are enforced here
@@ -28,11 +38,18 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+// Unix only, and for the reason `connector_secrets::file` is: the whole of what protects a value in
+// the file store is `0600` and `0700`, and a platform that cannot spell those would get a store that
+// implied a safety it did not have.
+#[cfg(unix)]
+mod credentials;
 mod grant;
 mod lease;
 mod principal;
 mod runtime;
 
+#[cfg(unix)]
+pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
 pub use grant::{Effect, Grant, Idempotency, OperationFacts, Risk, Selector};
 pub use lease::{Lease, LeaseId, LeaseState};
 pub use principal::{Principal, PrincipalKind, Tenant, TenantError};
