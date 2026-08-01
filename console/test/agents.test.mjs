@@ -745,12 +745,21 @@ test('the_derivation_is_live_and_takes_claims_off_the_page_rather_than_putting_t
   // principal do" becomes the grant question (X-13) this screen must not answer from a surface list.
   assert.ok(
     authorisation(SURFACES).length > 0,
-    'nothing is said about what a token authorises, in a build where a token holder would be admitted to every operation in the catalogue the moment it can present one'
+    'nothing is said about what a token authorises, which is the fact an operator minting one is owed'
   )
+  // X-13 rewrote the sentence this used to pin. It said "no grant model", and asserting that string
+  // was right while it was true; the claim now is the narrower one the build actually makes, and
+  // this assertion moved with it rather than being dropped — a paragraph nobody pins is a paragraph
+  // that outlives what it describes.
   assert.match(
     authorisation(SURFACES),
+    /grant this tenant holds/i,
+    'the sentence must say what now bounds a token — a grant — rather than describing a build that gated invocation by identity alone'
+  )
+  assert.doesNotMatch(
+    authorisation(SURFACES),
     /no grant model/i,
-    'the sentence no longer says that nothing is gated, which is the fact an operator minting a token is owed'
+    'the screen still tells an operator there is no grant model, which stopped being true in X-13'
   )
   assert.equal(
     authorisation(SURFACES, /* a build where a token can be presented */ true),

@@ -1,7 +1,7 @@
 ---
 id: X-13
 title: "Grants gate invocation"
-status: ready
+status: in-progress
 epic: invoke
 priority: 2
 areas: [exchange-host, exchange-server]
@@ -15,16 +15,47 @@ An operation runs only if a grant the caller holds admits it — decided from th
 metadata, not from a list of names.
 
 ## Acceptance
-- [ ] Invocation consults the caller's grants and refuses with `Error::NotGranted`, naming the
+- [x] Invocation consults the caller's grants and refuses with `Error::NotGranted`, naming the
       principal and the operation.
-- [ ] **Failing-first test** — a read-only grant (`risk <= low`) admits the reads of a connector and
+- [x] **Failing-first test** — a read-only grant (`risk <= low`) admits the reads of a connector and
       refuses its writes, with no operation named anywhere in the grant.
-- [ ] **Failing-first test** — a grant for one connector does not reach another.
-- [ ] An explicit `deny` beats an explicit `allow`, end to end and not merely in the type.
-- [ ] Grants are storable and editable per tenant.
+- [x] **Failing-first test** — a grant for one connector does not reach another.
+- [x] An explicit `deny` beats an explicit `allow`, end to end and not merely in the type.
+- [x] Grants are storable and editable per tenant.
 
 ## Progress
-- (blocked on X-12)
+
+**Landed, 2026-08-01.** `Invoker::invoke` step 3 is the gate the design reserved a slot for.
+
+- **The gate is a chain the compiler checks, not two calls to remember.** `admit_runtime` still
+  returns `Admitted`; `admit_grant` *consumes* it and returns `Granted`; `Granted::resolve` is the
+  only route from this crate to `connector_pack::resolve` — `Admitted::resolve` is gone. Skipping
+  either gate is a type error, which is X-48's pattern applied to X-13's own version of the same
+  mistake.
+- **Decided from the catalogue, not from a list.** `OperationFacts::of(&catalog::Operation)` is the
+  one projection, and `routes::catalogue::view` now publishes *it* rather than a second copy — so
+  what a client reads off `/api/catalogue` is what the gate decides on. Its three mapping tests
+  moved into `grant.rs` with the derivation.
+- **Grants are per tenant**, held in a file store (`FLUX_EXCHANGE_GRANTS`) behind a `Grants` port,
+  bound by the binary. Per-principal grants are a narrowing this build does not make, and
+  `grant.rs`'s module documentation says so rather than implying otherwise.
+- **Fail-closed, including at composition.** No grant store bound → no invoker → `503` naming both
+  settings. A tenant holding nothing runs nothing. The alternative (absent store admits everything)
+  is the exposure this story closed, and it is refused as a default.
+- **The published claim changed with the code.** The onboarding descriptor's `invoke` `warn` said
+  *"gated by identity alone… any principal may run any operation in the catalogue"*; it now states
+  the grant rule, the `403 not_granted` refusal, and that a tenant nobody has granted anything runs
+  nothing. `console/src/minting.mts` and the README moved with it.
+
+**What this does not do**, and what should be a story rather than a footnote:
+
+1. **No surface edits a grant.** The store is a file an operator writes; there is no route and no
+   console screen. Adding one means a new route module and a `routes/mod.rs` edit.
+2. **A `Granted` carries the operation, not the grant that admitted it.** An execution record wants
+   the second, and `docs/designs/invoke.md` §6 now says so where it used to defer the whole subject.
+3. **`effects` is still derived from `hosts`.** Exact for all 53 shipped connectors, and a selector
+   written on effects would under-report the day upstream ships a connector whose Flux declares
+   more. Asserted rather than assumed, in `grant.rs`.
 
 ## Notes
 - The unit tests in `crates/exchange-host/src/grant.rs` already pin the semantics, including the

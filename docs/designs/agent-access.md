@@ -117,10 +117,14 @@ grant-shaped one, so it belongs to X-13 rather than to a widened route table.
 
 ## What this epic deliberately does not do
 
-- **It does not gate anything by grant.** That is X-13, blocked upstream. Until it lands, an agent
-  token authorises nothing beyond what any principal may do **except that it may not create a
-  principal** — which X-40 closed, for the reason above. The rest is a **stated gap**, not a
-  position, and the same one `invoke` will inherit.
+- **It does not gate anything by grant.** That is X-13, and **X-13 has since landed** — so the
+  sentence that followed here has changed. It read: *until it lands, an agent token authorises
+  nothing beyond what any principal may do, except that it may not create a principal.* What is true
+  now is that an agent token authorises what any principal **of its tenant** may do, which
+  `Invoker::invoke` bounds by the grants that tenant holds; the exception X-40 closed still holds on
+  top of that. The **stated gap** this bullet recorded is closed for `invoke`; what is left is that
+  no surface edits a grant, which is a gap of a different shape and is recorded in
+  `docs/designs/invoke.md` §6.
 - **It does not add a second identity port.** `Identity` already exists and both current providers
   bind it. A third binding is the shape; a parallel mechanism is not.
 - **It does not mint tokens for humans.** Sign-in exists and works. An agent principal is a different

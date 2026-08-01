@@ -5,8 +5,9 @@
 //! An HTTP surface bound to loopback by default: a health route, the connector catalogue — what
 //! this binary *could* run, never what a caller may run, which is why every operation it serves
 //! carries `admitted: null` — and, since X-12, `POST /api/operations/{operation}/invoke`, which
-//! runs one of them for the caller's tenant. The README carries the itemized inventory of what is
-//! still not built; grants are the large one, so `invoke` is gated by identity alone.
+//! runs one of them for the caller's tenant **if a grant its tenant holds admits it** (X-13). The
+//! README carries the itemized inventory of what is still not built; the large one here is that a
+//! grant is a file an operator writes — no route and no console screen edits one.
 //!
 //! What it does carry is the rule that makes the rest safe to add: **a reachable bind with no way to
 //! resolve a principal is refused at startup**, not warned about and served anyway. See
@@ -111,6 +112,11 @@ fn compose() -> Result<AppState, StartupRefusal> {
         state = state.with_settings(store);
     }
 
+    // Bound before the invoker, because the invoker requires it. **No grant store, no invoker** —
+    // see `grant_store`: an invoker built without one could only be built by choosing what to do in
+    // its absence, and the only available choice is to admit everything.
+    let grants = grant_store()?;
+
     if let Some(store) = credential_store()? {
         // The invoker is built from the same store the connections surface writes to, and only
         // when there is one. A composition with no store could still resolve a principal and look
@@ -118,21 +124,30 @@ fn compose() -> Result<AppState, StartupRefusal> {
         // from the vendor, but one an agent treating `401` as retryable loops on forever. Binding
         // nothing means `POST /api/operations/{operation}/invoke` refuses with `503` and names the
         // setting, which is the honest answer rather than a hole.
-        // An empty configuration when nothing was bound, and deliberately not a refusal: the
-        // settings store is what the *templated* connectors need, and a host without one is still a
-        // working host for the rest of the catalogue. What it must not do is pretend — the seventeen
-        // that need a value refuse by name, quoting the field and the service.
-        let configuration = settings.map_or_else(
-            || Arc::new(exchange_host::MemoryConfig::new()) as Arc<dyn exchange_host::ConfigStore>,
-            |store| store as Arc<dyn exchange_host::ConfigStore>,
-        );
+        if let Some(grants) = grants {
+            // An empty configuration when nothing was bound, and deliberately not a refusal: the
+            // settings store is what the *templated* connectors need, and a host without one is
+            // still a working host for the rest of the catalogue. What it must not do is pretend —
+            // the seventeen that need a value refuse by name, quoting the field and the service.
+            let configuration = settings.map_or_else(
+                || {
+                    Arc::new(exchange_host::MemoryConfig::new())
+                        as Arc<dyn exchange_host::ConfigStore>
+                },
+                |store| store as Arc<dyn exchange_host::ConfigStore>,
+            );
 
-        state = state
-            .with_invoker(Arc::new(
-                invoker(store.clone(), configuration)
+            state = state.with_invoker(Arc::new(
+                invoker(store.clone(), configuration, grants)
                     .map_err(|reason| StartupRefusal::Invoker { reason })?,
-            ))
-            .with_credentials(store);
+            ));
+        }
+
+        // Bound whether or not an invoker was, and that combination is a real composition rather
+        // than an oversight: a host with credentials and no grants is one an operator can connect a
+        // vendor to and nobody can run anything on, which is the honest state to be in on the way
+        // to granting something.
+        state = state.with_credentials(store);
     }
     if let Some(store) = agent_store()? {
         state = state.with_agents(store);
@@ -218,6 +233,55 @@ fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, Sta
 /// No file store on this platform; a composition here binds its own or holds none.
 #[cfg(not(unix))]
 fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
+    Ok(None)
+}
+
+/// Bind the grant store the environment names, or bind none.
+///
+/// The same three states as the credential store — **unset binds nothing**, **set and unusable
+/// refuses to start** — and one consequence that is this store's alone: unset means this host runs
+/// **nothing**, because there is nowhere for a grant to live and therefore no grant that could admit
+/// an operation. `POST /api/operations/{operation}/invoke` refuses with `503` naming this setting.
+///
+/// That is a deliberate choice against the alternative, which is worth naming because it is the one
+/// somebody will propose. An unset grant store could have meant "no grants configured, so admit
+/// everything", and that is exactly the exposure X-13 exists to close, reintroduced as a default.
+/// **The safe state is the one you get by doing nothing**; the useful one is the one you have to
+/// configure.
+///
+/// `#[cfg(unix)]` because the file binding is, for [`credential_store`]'s reason with a different
+/// thing at stake: nothing in this file is a secret, and somebody who can *write* to it decides what
+/// this host will run with a tenant's credentials. The port is not gated, so another platform's
+/// composition binds its own.
+#[cfg(unix)]
+fn grant_store() -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusal> {
+    use exchange_host::{GrantStore, GRANT_STORE_SETTING};
+
+    let Ok(configured) = std::env::var(GRANT_STORE_SETTING) else {
+        warn!(
+            "no grant store is bound ({GRANT_STORE_SETTING} is unset), so this host runs no \
+             operation for anybody: an invocation is admitted by a grant, and there is nowhere for \
+             one to live. Set it to a path outside every working tree. It holds no secrets — it \
+             holds what each tenant may run",
+        );
+        return Ok(None);
+    };
+
+    let store = GrantStore::bind_configured(Some(&configured)).map_err(|source| {
+        StartupRefusal::GrantStore {
+            reason: source.to_string(),
+        }
+    })?;
+
+    // Read back off the bound store, so this line cannot name a file this process did not open.
+    info!("{}", store.banner());
+
+    Ok(Some(Arc::new(store)))
+}
+
+/// No file store on this platform; a composition here binds its own or holds none.
+#[cfg(not(unix))]
+fn grant_store() -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusal> {
     Ok(None)
 }
 

@@ -24,7 +24,10 @@
 //! 2. **A locally-executing runtime cannot be safely multi-tenant in one process** —
 //!    [`Deployment::admits`] refuses one, and the refusal names what would have worked.
 //! 3. **A grant selects operations by declared metadata, not by name** — [`Selector`] is a
-//!    predicate over `risk`/`effects`/`idempotency`, with explicit ids only as exceptions.
+//!    predicate over `risk`/`effects`/`idempotency`, with explicit ids only as exceptions, and
+//!    since X-13 it is what [`Invoker::invoke`] consults before it runs anything. The facts it
+//!    decides on are projected from the catalogue by [`OperationFacts::of`], so the rule is applied
+//!    to what the operation declares rather than to a list of ids somebody maintains.
 //!
 //! # Status
 //!
@@ -118,7 +121,12 @@ pub use connections::{
 };
 #[cfg(unix)]
 pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
-pub use grant::{Effect, Grant, Idempotency, OperationFacts, Risk, Selector};
+pub use grant::{
+    admit_grant, Effect, Grant, GrantRefusal, Granted, Grants, Idempotency, OperationFacts, Risk,
+    Selector,
+};
+#[cfg(unix)]
+pub use grant::{GrantStore, GrantStoreError, GRANT_STORE_SETTING};
 pub use invoke::{admit_runtime, Contexts, Invocation, InvokeRefusal, Invoker, Sent};
 pub use lease::{Lease, LeaseId, LeaseState};
 pub use principal::{Principal, PrincipalKind, Tenant, TenantError};
@@ -141,7 +149,13 @@ pub enum Error {
     #[error("{0}")]
     Runtime(#[from] RuntimeRefusal),
 
-    /// No grant held by this principal admits the operation.
+    /// No grant this principal's tenant holds admits the operation.
+    ///
+    /// Raised by [`admit_grant`] and routed to a caller through
+    /// [`InvokeRefusal::NotGranted`](invoke::InvokeRefusal::NotGranted) unchanged, so the sentence
+    /// naming the two parties has one spelling. It names **neither** the grants the tenant does
+    /// hold nor the axis that refused: an agent told which predicate turned it down can enumerate a
+    /// tenant's policy one call at a time.
     #[error("principal `{principal}` holds no grant admitting operation `{operation}`")]
     NotGranted {
         /// The principal that asked.

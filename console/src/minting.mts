@@ -133,10 +133,15 @@ export function tokenStanding(surfaces: readonly Surface[] = SURFACES): Standing
  *
  * Two claims, with two different expiries. The first is that a token minted here is **presented
  * nowhere**, which stops being true the day anything on this host resolves an agent token — and
- * that is the `authenticate` step, which is what `presentable` watches. The second is that
- * **nothing is gated by a grant**, which stops being true the day a grant model lands (X-13); no
- * surface flag can see that, so it is stated as plainly as possible and it is the sentence a
- * grant story has to come and rewrite.
+ * that is the `authenticate` step, which is what `presentable` watches.
+ *
+ * The second used to be that **nothing is gated by a grant**, stated as plainly as possible and
+ * marked as the sentence a grant story would have to come and rewrite. X-13 is that story, and this
+ * is the rewrite: invocation is gated by a grant, so what a token would authorise is bounded by
+ * what its tenant has been granted rather than by the whole catalogue. The claim is *narrower* than
+ * the old one and it expires the same way — the day a grant becomes something this console can
+ * edit, this paragraph is describing a screen the operator is looking at rather than a file they
+ * cannot see.
  *
  * It is withdrawn rather than narrowed at the first of those, because once a token can be
  * presented, *what may this principal do* is a live grant question and this screen has no business
@@ -150,8 +155,8 @@ export function tokenStanding(surfaces: readonly Surface[] = SURFACES): Standing
  * measured the descriptor against the server's route table and found `invoke` had been live since
  * v0.7.0, so that trigger was already overdue; firing it would have blanked this paragraph exactly
  * when it acquired teeth. An operator minting a token when the answer is "nothing at all" is owed a
- * sentence; an operator minting one when the answer is "every operation in the catalogue, for this
- * tenant" is owed it much more.
+ * sentence; an operator minting one when the answer is "whatever this tenant has been granted, and
+ * nothing if it has been granted nothing" is owed it much more.
  *
  * `presentable` is a parameter only so the withdrawal branch can be exercised — nothing in the app
  * passes it, and its default is the derivation. `test/agents.test.mjs` drives both sides.
@@ -170,11 +175,14 @@ export function authorisation(
     'presented nowhere and authorises nothing at all — including the ' +
     `${live.length === 1 ? 'capability' : 'capabilities'} listed here as available, which this ` +
     'service runs for the principals it can resolve and not for a token holder. When a token can ' +
-    'be presented it will authorise what any principal may do, and this build gates invocation by ' +
-    'identity alone: there is no grant model, so that is every operation in the catalogue against ' +
-    'this tenant’s own connections. One limit holds already — an agent may not create a principal, ' +
-    'so a token that leaks cannot mint successors and revoking it ends the whole of the access it ' +
-    'gave. And an agent’s token grants access to an operation, never to a credential.'
+    'be presented it will authorise what any principal of this tenant may do, and since X-13 that ' +
+    'is bounded by a grant: an operation runs only if a grant this tenant holds admits it, decided ' +
+    'from what the operation declares — its risk, its effects, its idempotency — rather than from ' +
+    'a list of names. A tenant holding no grant runs nothing at all. Grants cannot be edited from ' +
+    'this console yet: they live in the host’s grant store, and an operator writes them. Two limits ' +
+    'hold whatever is granted — an agent may not create a principal, so a token that leaks cannot ' +
+    'mint successors and revoking it ends the whole of the access it gave; and an agent’s token ' +
+    'grants access to an operation, never to a credential.'
   )
 }
 

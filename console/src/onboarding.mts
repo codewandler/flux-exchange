@@ -280,9 +280,12 @@ export const STEPS: readonly Step[] = [
         'content, unshaped — the vendor said no and we could not ask are different events. A host ' +
         'with no credential store bound runs nothing and says so.',
       warn:
-        'This route is gated by identity alone. There is no grant model in this build, so any ' +
-        'principal this host resolves may run any operation in the catalogue against its own ' +
-        'tenant’s connections.',
+        'This route is gated by identity and by grant. An operation runs only if a grant your ' +
+        'tenant holds admits it, decided from what the operation declares — its risk, its effects, ' +
+        'its idempotency — rather than from a list of names; anything else is refused with 403 ' +
+        'not_granted, before any credential is read and with nothing sent. Grants are held per ' +
+        'tenant and there is no route that edits one, so a tenant nobody has granted anything runs ' +
+        'nothing at all: ask whoever operates this deployment.',
     },
     pending: '',
   },

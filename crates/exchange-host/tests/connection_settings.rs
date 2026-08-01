@@ -29,9 +29,9 @@ use std::sync::{Arc, Mutex};
 
 use exchange_host::{
     declared_settings, host_pinning, ConnectionSettings, ConnectorDeclaration, Contexts,
-    DeclaredCredential, DeclaredSetting, Deployment, Egress, HostPinning, InvokeRefusal, Invoker,
-    Principal, PrincipalKind, Secret, SecretStore, Sent, SettingKind, SettingsStore, Tenant,
-    MAX_SETTING_VALUE_BYTES,
+    DeclaredCredential, DeclaredSetting, Deployment, Egress, Grant, GrantRefusal, Grants,
+    HostPinning, InvokeRefusal, Invoker, Principal, PrincipalKind, Secret, SecretStore, Selector,
+    Sent, SettingKind, SettingsStore, Tenant, MAX_SETTING_VALUE_BYTES,
 };
 use flux_runtime::{Tool, ToolContext};
 use serde_json::{json, Value};
@@ -243,6 +243,38 @@ async fn credential_store(
     store
 }
 
+/// Grants held for every tenant that asks, so a test about *configuration* observes the refusal it
+/// is about.
+///
+/// This file is not about the grant gate — `tests/invoke.rs` and `grant.rs` are — and a tenant
+/// holding nothing would refuse every invocation below at a gate one step earlier than the one
+/// under test. What it grants is deliberately wide and deliberately still connector-scoped: a
+/// wildcard connector is a thing [`Grant`] does not have, and a test helper is not the place to
+/// invent one.
+struct Granting(Vec<Grant>);
+
+impl Granting {
+    /// Everything the connectors in this file publish.
+    fn everything() -> Self {
+        Self(
+            connector_catalog::providers()
+                .iter()
+                .map(|provider| Grant::for_connector(provider.id, Selector::any()))
+                .collect(),
+        )
+    }
+}
+
+impl Grants for Granting {
+    fn held(&self, _: &Tenant) -> Vec<Grant> {
+        self.0.clone()
+    }
+
+    fn set(&self, _: &Tenant, _: &[Grant]) -> Result<(), GrantRefusal> {
+        unreachable!("no test in this file edits a grant")
+    }
+}
+
 /// An invoker over one credential store, one settings store and a recording egress.
 fn invoker(
     credentials: Arc<dyn SecretStore>,
@@ -254,6 +286,7 @@ fn invoker(
         egress,
         credentials,
         settings,
+        Arc::new(Granting::everything()),
         contexts(),
     )
 }

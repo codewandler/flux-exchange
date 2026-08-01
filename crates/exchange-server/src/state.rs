@@ -570,11 +570,37 @@ mod tests {
             }
         }
 
+        /// A bound grant store that admits nothing.
+        ///
+        /// A local type rather than a memory store re-exported from `exchange_host`, for the reason
+        /// `routes::invoke`'s `EmptyStore` is one: publishing a grant store that holds nothing and
+        /// forgets everything would put the "just bind this one" fallback one line away from a
+        /// composition, and an invoker whose grants vanish on restart is worse than one that
+        /// refuses to be built.
+        struct NoGrants;
+
+        impl exchange_host::Grants for NoGrants {
+            fn held(&self, _: &exchange_host::Tenant) -> Vec<exchange_host::Grant> {
+                Vec::new()
+            }
+
+            fn set(
+                &self,
+                _: &exchange_host::Tenant,
+                _: &[exchange_host::Grant],
+            ) -> Result<(), exchange_host::GrantRefusal> {
+                unreachable!("deciding an identity binding grants nothing")
+            }
+        }
+
         let invoker = Arc::new(
             crate::execution::invoker(
                 Arc::new(NoStore),
                 // Deciding an identity binding reads no connection setting either.
                 Arc::new(exchange_host::MemoryConfig::new()),
+                // Nor any grant: what is under test is what the composition *reports*, and an
+                // invoker that admits nothing reports it exactly as one that admits everything.
+                Arc::new(NoGrants),
             )
             .expect("a usable workspace root"),
         );

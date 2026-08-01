@@ -25,6 +25,10 @@
 //!   compiled-in catalogue. **There is no code path from a request body to `CredentialRef::new`.**
 //! - **Not a runtime, and not the transport.** [`Runtime`] has no constructor taking caller input,
 //!   and the transport is an [`Egress`] supplied once at construction.
+//! - **Not a grant.** Since X-13 an operation runs only if one of the caller's tenant's grants
+//!   admits it, and there is no parameter here through which a grant, a selector or a tenant's
+//!   grant list could arrive. They are read from the [`Grants`] port a composition bound, at the
+//!   tenant this host resolved.
 //!
 //! # The transport is a port, and so is the context
 //!
@@ -42,7 +46,8 @@ use flux_runtime::{Tool, ToolContext};
 use serde_json::Value;
 
 use crate::{
-    Admitted, ConnectorSurface, Deployment, Principal, Runtime, RuntimeRefusal, SecretStore,
+    admit_grant, Admitted, ConnectorSurface, Deployment, Granted, Grants, OperationFacts,
+    Principal, Runtime, RuntimeRefusal, SecretStore,
 };
 
 /// A source of fresh [`ToolContext`]s — **one per invocation**.
@@ -83,11 +88,14 @@ where
 /// from inside one Rust process, and an override would be a lie about that.
 ///
 /// **It returns [`Admitted`] rather than `()`**, and that is the load-bearing part rather than a
-/// convenience. `Admitted::resolve` is the only route from this module to `connector_pack::resolve`,
-/// and an `Admitted` cannot be constructed — so calling this and discarding the answer does not
-/// type-check any more than not calling it at all. Read [`Admitted`] for the whole argument and for
-/// what it still does not cover; the short version is that the previous guard was a source scanner
-/// and a source scanner cannot tell a live call from a string literal.
+/// convenience. An `Admitted` cannot be constructed, and since X-13 it is what
+/// [`admit_grant`](crate::admit_grant) consumes to produce the [`Granted`] that
+/// `Granted::resolve` — the only route from this module to `connector_pack::resolve` — is a method
+/// on. So calling this and discarding the answer does not type-check any more than not calling it
+/// at all, and neither does calling it and skipping the grant gate. Read [`Admitted`] and
+/// [`Granted`] for the whole argument and for what it still does not cover; the short version is
+/// that the previous guard was a source scanner and a source scanner cannot tell a live call from a
+/// string literal.
 ///
 /// # Errors
 ///
@@ -99,18 +107,21 @@ pub fn admit_runtime(
     Admitted::of(deployment, surface.runtime)
 }
 
-impl Admitted {
-    /// **The dispatch seam, hung off the gate's answer.**
+impl Granted {
+    /// **The dispatch seam, hung off the last gate's answer.**
     ///
-    /// `self` by value, and an inherent method on [`Admitted`] rather than a free call inside
+    /// `self` by value, and an inherent method on [`Granted`] rather than a free call inside
     /// [`Invoker::invoke`], because that placement *is* the enforcement: `connector_pack::resolve`
-    /// has no other caller in this crate, `Admitted` has a private field in `runtime.rs`, and so
-    /// there is no expression in `invoke` that reaches the pack without an `Ok` from the gate. The
-    /// three mutations that defeated X-48's first attempt — a discarded `Result`, a call under
-    /// `if false`, and the marker moved into a string literal — are each a compile error here.
+    /// has no other caller in this crate, `Granted` has a private field in `grant.rs`, and a
+    /// `Granted` can only be made by handing [`admit_grant`](crate::admit_grant) the [`Admitted`]
+    /// that [`admit_runtime`] produced. So there is no expression in `invoke` that reaches the pack
+    /// without an `Ok` from **both** gates, in that order. The three mutations that defeated X-48's
+    /// first attempt — a discarded `Result`, a call under `if false`, and the marker moved into a
+    /// string literal — are each a compile error here, and so is X-13's own version of them:
+    /// dispatching for a principal whose grants were never consulted.
     ///
     /// It is a method on the witness rather than a private method of [`Invoker`] taking one,
-    /// because an ignored `_admitted: Admitted` parameter is a parameter the next person deletes as
+    /// because an ignored `_granted: Granted` parameter is a parameter the next person deletes as
     /// dead weight. A receiver is not deletable without rewriting the call.
     ///
     /// What it does **not** hold: somebody writing `connector_pack::resolve(…)` directly in
@@ -150,6 +161,10 @@ pub struct Invoker {
     credentials: Arc<dyn SecretStore>,
     /// A tenant's non-secret connection settings — the `{subdomain}` in a templated base URL.
     settings: Arc<dyn ConfigStore>,
+    /// **What each tenant may run**, as the port. Consulted on every invocation; never widened by
+    /// one. There is no method on this struct that takes a [`Grant`](crate::Grant) from a caller,
+    /// and no parameter of [`invoke`](Self::invoke) through which one could arrive.
+    grants: Arc<dyn Grants>,
     /// Where a fresh per-invocation context comes from.
     contexts: Arc<dyn Contexts>,
 }
@@ -157,14 +172,22 @@ pub struct Invoker {
 impl Invoker {
     /// Bind every port an invocation runs through.
     ///
-    /// All five together, rather than a builder, because there is no useful partial composition: an
+    /// All six together, rather than a builder, because there is no useful partial composition: an
     /// invoker missing any one of them could not run an operation, and an `Option` would push that
     /// discovery from startup to the first request.
+    ///
+    /// **`grants` is required for a sharper reason than the others** (X-13). An `Option<Arc<dyn
+    /// Grants>>` would have exactly one plausible `None` behaviour — admit everything — and that is
+    /// the gap this story closed, reintroduced as a composition anybody could make by leaving an
+    /// argument out. A composition that has nowhere to keep grants binds a store that holds none
+    /// and refuses every invocation, which is a decision it has to write down rather than one it
+    /// can omit.
     pub fn new(
         deployment: Deployment,
         egress: Egress,
         credentials: Arc<dyn SecretStore>,
         settings: Arc<dyn ConfigStore>,
+        grants: Arc<dyn Grants>,
         contexts: Arc<dyn Contexts>,
     ) -> Self {
         Self {
@@ -172,6 +195,7 @@ impl Invoker {
             egress,
             credentials,
             settings,
+            grants,
             contexts,
         }
     }
@@ -182,13 +206,15 @@ impl Invoker {
     /// because an envelope is a place to put a field, and the field that eventually gets added is
     /// `endpoint`, or `base_url`, or `credential`.
     ///
-    /// The order below is load-bearing at three points and is the design's §2:
+    /// The order below is load-bearing at four points and is the design's §2:
     ///
     /// 1. the catalogue lookup, so an unknown id is refused before anything is bound;
     /// 2. the runtime gate, **before anything touches the credential store** — a refusal after a
     ///    secret has been read has already moved that secret into this process's memory for a
     ///    connector it was never going to run;
-    /// 3. both ports built from **one** tenant value in one expression, which is what makes
+    /// 3. the grant gate, after the runtime refusal — which is a property of the deployment and the
+    ///    same answer for every principal — and before the store, for step 2's reason;
+    /// 4. both ports built from **one** tenant value in one expression, which is what makes
     ///    `connector-pack`'s `TenantMismatch` unreachable here rather than merely untriggered.
     ///
     /// # Errors
@@ -221,11 +247,25 @@ impl Invoker {
         //    all* is checked by the compiler rather than by anything anybody has to remember.
         let admitted = admit_runtime(self.deployment, &ConnectorSurface::of(provider))?;
 
-        // 3. (X-13's slot.) The grant check goes **here** — after the runtime refusal, which is a
-        //    property of the deployment and the same answer for every principal, and before the
-        //    ports are bound. Until X-13 lands, `invoke` is gated by identity alone, and that is a
-        //    stated gap rather than a position. Deliberately no interim scheme: a half-grant is
-        //    worse than a stated gap, because the next story has to unpick it.
+        // 3. The grant gate (X-13), in the slot the design reserved for it: after the runtime
+        //    refusal, and before anything reads a secret for a call that is not going to be made.
+        //
+        //    The facts are projected from the catalogue entry and the connector is read off it, so
+        //    what is decided here is the operation's own declaration — a caller supplies neither.
+        //    The grants are this **tenant's**, read off the resolved principal one line before its
+        //    credentials are, and `admit_grant` consumes the runtime gate's proof to produce the
+        //    only key to step 6: skipping this is a compile error, not an omission.
+        let granted = admit_grant(
+            admitted,
+            principal,
+            provider.id,
+            &OperationFacts::of(entry),
+            &self.grants.held(principal.tenant()),
+        )
+        .map_err(|refusal| InvokeRefusal::NotGranted {
+            refusal,
+            operation: entry.id.to_owned(),
+        })?;
 
         // 4. One tenant, one expression, two ports. The tenant is read off the resolved principal
         //    and from nothing a caller controls.
@@ -240,14 +280,15 @@ impl Invoker {
         // 5. A context nothing else holds, before anything resolves a credential into it.
         let ctx = self.contexts.fresh();
 
-        // 6. The seam, reached **through the gate's answer** — `admitted` is consumed here and there
-        //    is no other way in, which is what makes step 2 unskippable rather than merely present.
+        // 6. The seam, reached **through the gates' answer** — `granted` is consumed here and there
+        //    is no other way in, which is what makes steps 2 and 3 unskippable rather than merely
+        //    present.
         //
         //    `resolve` rather than `pack` is the caller-facing half of upstream's C-413: `pack`
         //    installs what a host *advertises* and withholds `expose = false` operations, which for
         //    an execute route would withhold the *call* as a side effect of withholding the *tool*.
         //    Both run the identical admission checks.
-        let tool = admitted
+        let tool = granted
             .resolve(entry, self.egress.clone(), credentials, settings)
             .map_err(|error| InvokeRefusal::classify(entry, error, &ctx))?;
 
@@ -316,6 +357,27 @@ pub enum InvokeRefusal {
     /// This deployment will not serve the connector's declared runtime. Routed through unchanged.
     #[error("{0}")]
     Runtime(#[from] RuntimeRefusal),
+
+    /// **No grant this caller's tenant holds admits the operation.** Nothing was sent.
+    ///
+    /// A different refusal from [`Runtime`](Self::Runtime) and deliberately so: a runtime refusal is
+    /// a property of the deployment and is the same answer for every principal, while this one is
+    /// about *who is asking*. Collapsing them would tell an operator to change their deployment
+    /// shape when what they need is a grant.
+    ///
+    /// It carries [`crate::Error::NotGranted`] unchanged rather than restating it, so the sentence
+    /// naming the principal and the operation has one spelling. What it does **not** carry is which
+    /// grant, or which axis, refused: an agent told *why* can enumerate a tenant's policy one call
+    /// at a time, and the remedy is the same either way.
+    #[error("{refusal}")]
+    NotGranted {
+        /// The host's own refusal, naming the principal and the operation.
+        #[source]
+        refusal: crate::Error,
+        /// The operation the caller named, so [`operation`](Self::operation) answers without
+        /// parsing prose.
+        operation: String,
+    },
 
     /// **The pack refused before the request was built.** Nothing was sent.
     ///
@@ -405,7 +467,10 @@ impl InvokeRefusal {
     /// Whether the request reached the vendor.
     pub fn sent(&self) -> Sent {
         match self {
-            Self::UnknownOperation { .. } | Self::Runtime(_) | Self::Refused { .. } => Sent::No,
+            Self::UnknownOperation { .. }
+            | Self::Runtime(_)
+            | Self::NotGranted { .. }
+            | Self::Refused { .. } => Sent::No,
             Self::Transport { .. } => Sent::Maybe,
         }
     }
@@ -419,7 +484,13 @@ impl InvokeRefusal {
     /// somebody else's rate limit.
     pub fn retryable(&self) -> bool {
         match self {
-            Self::UnknownOperation { .. } | Self::Runtime(_) | Self::Refused { .. } => false,
+            // A grant is not something time supplies, so `NotGranted` is terminal for
+            // `MissingCredential`'s first two reasons: the request was never sent, and nothing a
+            // retry can change is inside this system.
+            Self::UnknownOperation { .. }
+            | Self::Runtime(_)
+            | Self::NotGranted { .. }
+            | Self::Refused { .. } => false,
             Self::Transport { retryable, .. } => *retryable,
         }
     }
@@ -431,6 +502,7 @@ impl InvokeRefusal {
         match self {
             Self::UnknownOperation { .. } => "unknown_operation",
             Self::Runtime(_) => "runtime_refused",
+            Self::NotGranted { .. } => "not_granted",
             Self::Refused { .. } => "refused",
             Self::Transport { .. } => "transport",
         }
@@ -441,7 +513,9 @@ impl InvokeRefusal {
         match self {
             Self::UnknownOperation { operation } => Some(operation),
             Self::Runtime(_) => None,
-            Self::Refused { operation, .. } | Self::Transport { operation, .. } => Some(operation),
+            Self::NotGranted { operation, .. }
+            | Self::Refused { operation, .. }
+            | Self::Transport { operation, .. } => Some(operation),
         }
     }
 }
@@ -456,10 +530,11 @@ impl ConnectorSurface {
     /// mapping below is exhaustive with no wildcard arm on purpose: a runtime added upstream is a
     /// new effect this host has not decided about, and it should be a compile error here.
     ///
-    /// `operations` is left empty. This constructor exists for the runtime decision, which is a
-    /// property of the connector; the operation metadata a [`Selector`](crate::Selector) reads is
-    /// X-13's business and projecting several hundred `OperationFacts` per invocation to answer a
-    /// question about one enum would be work nobody asked for.
+    /// `operations` is left empty, and it still is after X-13. This constructor exists for the
+    /// runtime decision, which is a property of the connector; the grant gate needs the facts of
+    /// the **one** operation the caller named, which [`OperationFacts::of`] projects directly from
+    /// the catalogue entry. Projecting several hundred of them per invocation to answer a question
+    /// about one would be work nobody asked for.
     pub fn of(provider: &connector_catalog::Provider) -> Self {
         Self {
             connector: provider.id.to_owned(),

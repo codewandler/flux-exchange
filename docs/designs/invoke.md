@@ -5,8 +5,9 @@
 **Answers:** [`vision.md`](../vision.md)'s north star ·
 **Builds on:** flux's [`ecosystem.md`](https://github.com/codewandler/flux/blob/main/docs/designs/ecosystem.md)
 §"The remote binding" and flux-connectors' [`connectors-api.md`](https://github.com/codewandler/flux-connectors/blob/main/docs/designs/connectors-api.md)
-§"The confused deputy, answered again" · **Does not cover:** grants (X-13), execution records,
-`subscribe`
+§"The confused deputy, answered again" · **Does not cover:** execution records, `subscribe` ·
+**Amended by:** [X-13](../stories/X-13-grants-gate-invoke.md), which landed the grant gate this
+document reserved a slot for — see §2 step 4 and §6
 
 ## This cannot be built today, and the reason is not a detail
 
@@ -129,8 +130,11 @@ Ordered, and the order is load-bearing at three points.
 2. **Look the operation up in the catalogue**, then its provider. Unknown operation → terminal
    refusal naming the id.
 3. **`Deployment::admits(surface.runtime)`.** §4.
-4. *(X-13's slot: consult the caller's grants; `Error::NotGranted`.)* Named here so that story is an
-   insertion rather than a re-plumb.
+4. **Consult the caller's grants** — `admit_grant`, refusing with `Error::NotGranted`. **Landed in
+   X-13**, and it was the insertion this slot promised rather than a re-plumb: the facts come from
+   `OperationFacts::of(entry)` and the grants from the [`Grants`] port at the resolved principal's
+   tenant. It takes the `Admitted` step 3 produced and yields a `Granted`, which is what step 7 is a
+   method on — so the two gates are one chain the compiler checks rather than two calls to remember.
 5. **Construct both ports from the one tenant, at one call site** — `Credentials::new(store, tenant)`
    and `Configuration::new(settings, tenant)`. Building them from a single value in a single
    expression is what makes `Error::TenantMismatch` unreachable here rather than merely untriggered.
@@ -279,10 +283,12 @@ repair" is cheapest at the earliest point where the answer is knowable, and this
 Before `pack(…)` too: installation is where projection and the tenant-mismatch check happen, and
 there is no reason to project a connector this deployment will not execute.
 
-Before the grant check (X-13's slot), on the reasoning that the runtime refusal is a property of the
+Before the grant check, on the reasoning that the runtime refusal is a property of the
 *deployment* and is the same answer for every principal — cheaper, and it leaks nothing, because the
-catalogue X-06 serves is unfiltered and already publishes what a connector declares. That ordering is
-reversible and X-13 owns the final word if it finds a reason.
+catalogue X-06 serves is unfiltered and already publishes what a connector declares. That ordering
+was called reversible with X-13 owning the final word; **X-13 kept it**, and made it structural: the
+runtime gate is what mints the `Admitted` the grant gate consumes, so swapping the two is now a
+change to two signatures rather than a reordering of two lines.
 
 `RuntimeRefusal` already carries the message and the tested requirement that it *names the way out* —
 "run this connector in a single-tenant deployment, or isolate it per tenant at the OS or pod level".
@@ -321,7 +327,7 @@ pass the same key" into a duplicated write.
 | `IdentityError::Unreachable` | no | **yes** | 503 | The IdP is down. Opposite operator response; never collapse the two. |
 | unknown operation | no | no | 404 | Nothing in the catalogue spells it. |
 | `RuntimeRefusal` | no | no | 409 | This deployment will not serve that runtime, ever, for anyone. |
-| `NotGranted` (X-13) | no | no | 403 | No grant admits it. |
+| `NotGranted` | no | no | 403 | No grant this caller's tenant holds admits it. `403` and not `404`: the catalogue is anonymous and publishes the operation to strangers, so hiding it here would be a fiction the surface next door disproves. |
 | `MissingCredential` | no | no | 422 | See below. |
 | `MissingConfig`, `MissingCredentialConfig` | no | no | 422 | The tenant's connection is incomplete. Names the field and the service. |
 | `NoCredentialAddress`, `UndeclaredCredential`, `InboundCredential`, `EmptyMechanism` | no | no | 422 | The connector cannot be addressed or authenticated as declared. |
@@ -364,12 +370,33 @@ for a non-secret.
 
 ## 6. What this design does not cover
 
-- **Grants.** X-13. §2 names the slot; nothing here decides whether a principal may call anything.
-  Until X-13 lands, `invoke` is gated by identity alone, and that is a stated gap rather than a
-  position.
+- **Grants.** ~~X-13.~~ **Landed**, in the slot §2 step 4 reserved. What this document said until
+  then — *"`invoke` is gated by identity alone, and that is a stated gap rather than a position"* —
+  is no longer true of the code, and the two things it left undecided were decided as follows.
+
+  **Whose grants.** A **tenant's**, not a principal's. Every principal this host resolves for a
+  tenant is decided against the same set, which is the shape `agent-access.md` already describes.
+  Per-principal grants are a narrowing this build does not make; the refusal names the principal
+  because that is who was refused, not because the grant was theirs.
+
+  **What the absence of a grant store means.** *Nothing runs.* An unset `FLUX_EXCHANGE_GRANTS`
+  builds no invoker, and the route answers `503` naming the setting. The alternative reading — no
+  grants configured, so admit everything — is exactly the exposure this story closed, reintroduced
+  as a default: the safe state is the one an operator gets by doing nothing.
+
+  **The ordering §4 said was reversible** — runtime refusal first, grant second — was kept. The
+  runtime refusal is a property of the deployment and is the same answer for every principal, it
+  leaks nothing the anonymous catalogue does not already publish, and it is what mints the
+  `Admitted` the grant gate consumes.
+
+  What is **still** not built is any surface for *editing* a grant: the store is a file an operator
+  writes. That is a gap with a reader attached rather than a hidden one — README says so, and the
+  onboarding descriptor's `invoke` step says so to every stranger who asks.
 - **Execution records.** Nothing here writes an audit trail. `vision.md` requires that every execution
-  be explainable — who asked, which grant admitted it, what was called, what came back — and three of
-  those four facts only exist once X-13 does. Not filed, deliberately.
+  be explainable — who asked, which grant admitted it, what was called, what came back — and X-13
+  made three of those four facts exist. *Which grant* admitted it is the one still missing: the gate
+  answers yes or no, and a `Granted` carries the operation rather than the grant that produced it.
+  A record wants the grant, so that is the first thing the story after this one has to add.
 - **`subscribe`.** The inbound half of the binding. It needs the confused-deputy argument made in the
   inbound direction ("a subscriber cannot name a binding it has not been granted"), and that argument
   is sound only once an authenticated principal exists.

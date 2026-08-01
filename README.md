@@ -18,8 +18,12 @@ everything below.
 > created, listed, **rotated** and deleted per tenant, and an agent principal can be **minted** — it
 > cannot yet authenticate. **`invoke` runs**: `POST /api/operations/{operation}/invoke` executes one
 > catalogue operation for the caller's tenant, with the request built by `connector_pack` from the
-> operation's own compiled Flux — gated by identity alone, because grants are X-13, and limited to
-> the forty connectors whose base URL needs no per-tenant configuration. See
+> operation's own compiled Flux — **gated by a grant** since X-13, and limited to the forty
+> connectors whose base URL needs no per-tenant configuration. An operation runs only if one of the
+> caller's tenant's grants admits it, decided from the operation's declared `risk`, `effects` and
+> `idempotency` rather than from a list of ids; a host with no grant store bound
+> (`FLUX_EXCHANGE_GRANTS`) runs nothing at all, and there is no HTTP surface for editing grants yet —
+> they are a file an operator writes. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 
@@ -86,7 +90,8 @@ against one tenant's connections, not a vendor secret.
 
 **Not built, despite being described in the design:** a second connection to one
 connector (the address has no instance dimension until upstream publishes one),
-**grant gating on `invoke`**, which is identity-gated only until X-13,
+**any surface for editing a grant** — X-13 gates `invoke` on one and gives it a file-backed store per
+tenant, and writing that file is currently an operator's job with no route and no console screen —
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
 catalogue loader. The credential store has moved off this list and is described below, and X-47 moved
 per-connection configuration off it too — but the honest replacement claim is narrower than "done":
