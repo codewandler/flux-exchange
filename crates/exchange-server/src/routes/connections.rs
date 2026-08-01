@@ -35,9 +35,17 @@
 //! a sandbox and a production account renders one address for both and the second write would
 //! silently replace the first. That is refused with `409` rather than accepted, and the refusal
 //! quotes the `@instances/<uuid>` level that has landed upstream (flux-connectors C-406) and is not
-//! published yet. **This refusal is the placeholder for that level** — see
-//! [`Refusal::AlreadyConnected`], `exchange_host::ConnectorDeclaration::address_of_declared` for the
-//! seam it is inserted at, and `docs/designs/connections.md` for the argument.
+//! published yet. **This refusal is the placeholder for that level** — see [`already_connected`],
+//! `exchange_host::ConnectorDeclaration::address_of_declared` for the seam it is inserted at, and
+//! `docs/designs/connections.md` for the argument.
+//!
+//! That refusal is a check-then-write, so it only means anything while nothing interleaves with it:
+//! every mutating route holds a
+//! [`ConnectionGuard`](crate::connection_guard::ConnectionGuard) claim on `(tenant, connector)`
+//! across the whole probe-decide-write. Without it two concurrent `POST`s both answer `201` and one
+//! value is silently lost — the exact failure the `409` exists to prevent. The claim is
+//! **single-process**; that limit is stated in `connection_guard`'s own documentation and in the
+//! design.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -108,7 +116,13 @@ fn connection_route() -> MethodRouter<AppState> {
 /// **not** denied: a body carrying `tenant` is not refused, it is ignored, and
 /// [`tests::a_tenant_in_a_body_field_does_not_influence_where_the_credential_lands`] asserts the
 /// stronger property that the value still lands under the resolved principal's tenant.
-#[derive(Debug, Deserialize)]
+///
+/// **No `Debug`, deliberately.** This is the one type on this surface holding credential values as
+/// plain `String` rather than as [`Secret`] — they arrive as JSON and there is nowhere earlier to
+/// wrap them — so a derived `Debug` would be a formatter that prints every value, one `debug!(?body)`
+/// away from putting a tenant's credentials in the log. Not deriving it makes that line fail to
+/// compile instead.
+#[derive(Deserialize)]
 struct NewConnection {
     /// Declared credential name to value. At least one, and every name declared by the connector.
     credentials: BTreeMap<String, String>,
@@ -145,7 +159,7 @@ async fn list(
         match held(store, &addresses).await {
             Ok(held) if held.is_empty() => {}
             Ok(held) => connections.push(view(provider, &addresses, &held)),
-            Err(error) => return store_unreachable(&error),
+            Err(error) => return store_failed(&error),
         }
     }
 
@@ -173,7 +187,7 @@ async fn show(
     };
 
     match held(store, &addresses).await {
-        Err(error) => store_unreachable(&error),
+        Err(error) => store_failed(&error),
         // Nothing here, and the refusal names **this tenant's** address — the one this host looked
         // at. Never another tenant's, and never the fact that another tenant holds one.
         Ok(held) if held.is_empty() => not_connected(provider, &addresses),
@@ -225,18 +239,35 @@ async fn create(
         }
     }
 
+    // Everything from here to the end of the function is one read-decide-write, and it must not
+    // interleave with another change to this same connection. Without the claim, two concurrent
+    // `POST`s both probe an empty address, both write and both answer `201` — one value silently
+    // replaced, and the caller that lost told it succeeded. That is the exact failure the `409`
+    // below exists to prevent, so leaving the window open would have made the refusal decorative.
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+
     match held(store, &addresses).await {
-        Err(error) => return store_unreachable(&error),
-        // The X-14 refusal. Checked before any write, because the whole point is that the write
-        // would have been invisible.
+        Err(error) => return store_failed(&error),
+        // The X-14 refusal, decided inside the claim so that what it read is still true when it
+        // answers.
         Ok(held) if !held.is_empty() => return already_connected(provider, &addresses),
         Ok(_) => {}
     }
 
-    for (reference, secret) in &writes {
-        if let Err(error) = store.put(reference, secret).await {
-            return store_unreachable(&error);
-        }
+    for (index, (reference, secret)) in writes.iter().enumerate() {
+        let Err(error) = store.put(reference, secret).await else {
+            continue;
+        };
+
+        // A connector declaring several credentials can fail half way, and a half-written
+        // connection is the worst of both answers: the caller sees a failure, while the `409` above
+        // now refuses every retry until somebody works out that a `DELETE` is needed first. So the
+        // values already written are taken back out, leaving the address exactly as this request
+        // found it.
+        let rolled_back = rollback(store, &writes[..index]).await;
+        return partly_written(provider, &error, rolled_back);
     }
 
     let stored: Vec<String> = body.credentials.keys().cloned().collect();
@@ -245,6 +276,30 @@ async fn create(
         Json(view(provider, &addresses, &stored)),
     )
         .into_response()
+}
+
+/// Take back the values this request had already written, and report whether that succeeded.
+///
+/// Best effort by necessity: the store has just failed, so the deletes may fail too. What matters
+/// is that the caller is told which of the two happened — a refusal claiming nothing was written
+/// when something was is the kind of answer that costs somebody an afternoon.
+async fn rollback(
+    store: &Arc<dyn SecretStore>,
+    written: &[(CredentialRef, Secret)],
+) -> Result<(), Vec<String>> {
+    let mut remaining = Vec::new();
+
+    for (reference, _) in written {
+        if store.delete(reference).await.is_err() {
+            remaining.push(address_path(reference));
+        }
+    }
+
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(remaining)
+    }
 }
 
 /// Disconnect, destroying every credential the connection holds.
@@ -267,8 +322,15 @@ async fn remove(
         Err(refusal) => return unaddressable(&refusal),
     };
 
+    // The same claim `create` takes, for the same reason and against the same neighbour: a delete
+    // that decided against a value another request is in the middle of writing would destroy half
+    // of it.
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+
     match held(store, &addresses).await {
-        Err(error) => return store_unreachable(&error),
+        Err(error) => return store_failed(&error),
         // A `404` and not a `204`: deleting something that is not there is indistinguishable from
         // deleting another tenant's, and the caller should be able to tell.
         Ok(held) if held.is_empty() => return not_connected(provider, &addresses),
@@ -280,7 +342,7 @@ async fn remove(
     // true even if a value appeared between the probe and here.
     for (_, reference) in &addresses {
         if let Err(error) = store.delete(reference).await {
-            return store_unreachable(&error);
+            return store_failed(&error);
         }
     }
 
@@ -512,26 +574,120 @@ fn no_store() -> Response {
     )
 }
 
-/// The store did not answer.
+/// The store failed, and *how* it failed survives out to the caller.
 ///
-/// `503`, never `404`. The reason names this host's own dependency, so it goes to the log rather
-/// than to the caller — the same split the identity guard makes for an unreachable provider.
-fn store_unreachable(error: &StoreError) -> Response {
-    if error.is_not_found() {
-        // Unreachable in practice: `held` filters this out. Kept because collapsing the two here
-        // is exactly the mistake `StoreError` documents, and a future edit is likelier to reach
-        // for this function than to re-read that.
-        warn!("a not-found reached the unreachable path, which is a bug in this module");
-    } else {
-        error!(%error, "the credential store did not answer");
-    }
+/// Never a `404`, whatever the variant: "we cannot say" reported as "you have not connected that
+/// integration" is an operator reconnecting an integration that was fine.
+///
+/// Beyond that the variants do **not** collapse into one message, because `AGENTS.md` § Conventions
+/// asks that failures an operator answers differently stay distinguishable, and these three are
+/// answered in three different places:
+///
+/// - [`Unreachable`](StoreError::Unreachable) — the store did not answer. A retry may work, so the
+///   status is `503` and the caller is told to retry.
+/// - [`Denied`](StoreError::Denied) — the store answered and refused **this host's own**
+///   credentials. Retrying is useless and there is nothing wrong with the caller's request; an
+///   operator has to go and fix this host's access. `502`, because the failure is upstream of us
+///   and is not a transient.
+/// - [`Backend`](StoreError::Backend) and [`Layout`](StoreError::Layout) — the store answered with
+///   something this client cannot interpret. Upstream documents `Backend` as separate from
+///   `Unreachable` for exactly this reason: retrying will not help. `502`.
+///
+/// The *reason* string never reaches the caller in any case — it names this host's own dependency,
+/// its paths and its access — so it goes to the log, the same split the identity guard makes for an
+/// unreachable provider.
+fn store_failed(error: &StoreError) -> Response {
+    let (status, reason) = match error {
+        StoreError::NotFound { .. } => {
+            // Unreachable in practice: `held` filters this out. Kept because collapsing not-found
+            // into a failure is exactly the mistake `StoreError` documents, and a future edit is
+            // likelier to reach for this function than to re-read that.
+            warn!("a not-found reached the store-failure path, which is a bug in this module");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the credential store did not answer, so this host cannot say what this tenant \
+                 has connected. Retrying may work",
+            )
+        }
+        StoreError::Unreachable { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the credential store did not answer, so this host cannot say what this tenant has \
+             connected. Retrying may work",
+        ),
+        StoreError::Denied { .. } => (
+            StatusCode::BAD_GATEWAY,
+            "the credential store refused this host's own access, so it cannot reach this \
+             tenant's credentials. Retrying will not help; an operator has to restore this host's \
+             access to the store",
+        ),
+        StoreError::Backend { .. } | StoreError::Layout { .. } => (
+            StatusCode::BAD_GATEWAY,
+            "the credential store answered with something this host cannot interpret. Retrying \
+             will not help; this is a defect in the store or in how it is configured",
+        ),
+    };
 
+    error!(%error, "the credential store failed");
+
+    refuse(status, reason, json!({}))
+}
+
+/// Another change to this same connection is already in flight.
+///
+/// One at a time per `(tenant, connector)`, because deciding whether a connection exists and then
+/// writing it is a read-decide-write that must not interleave with another of the same — see
+/// [`ConnectionGuard`](crate::connection_guard::ConnectionGuard) for the whole argument, including
+/// why this refuses rather than waits.
+fn change_in_flight(provider: &'static Provider) -> Response {
     refuse(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "the credential store is unreachable, so this host cannot say what this tenant has \
-         connected",
-        json!({}),
+        StatusCode::CONFLICT,
+        format!(
+            "another change to this tenant's `{}` connection is already in flight; only one at a \
+             time, because the credential address has no instance dimension to tell two \
+             connections to one connector apart. Retry once it has finished",
+            provider.id,
+        ),
+        json!({ "connector": provider.id }),
     )
+}
+
+/// The store failed part way through writing a connection.
+///
+/// Reports what was done about it, because "nothing was written" and "some values may still be
+/// there" send an operator to different places — and a refusal claiming the first while the second
+/// is true is worse than one that admits it does not know.
+fn partly_written(
+    provider: &'static Provider,
+    error: &StoreError,
+    rolled_back: Result<(), Vec<String>>,
+) -> Response {
+    error!(%error, connector = provider.id, "a connection could not be written");
+
+    match rolled_back {
+        Ok(()) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the credential store failed while writing the `{}` connection. Nothing was left \
+                 behind — the values written before the failure were taken back out — so retrying \
+                 is safe",
+                provider.id,
+            ),
+            json!({ "connector": provider.id, "left_behind": Value::Null }),
+        ),
+        // The store failed, and so did taking the values back out. Naming the addresses is the
+        // whole of what this host can still do for the operator: refuse, and say exactly where to
+        // look. The values are not named, only the addresses.
+        Err(remaining) => refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "the credential store failed while writing the `{}` connection, and the values \
+                 already written could not be taken back out. Some credentials may remain at the \
+                 addresses below; `DELETE /api/connections/{}` before retrying",
+                provider.id, provider.id,
+            ),
+            json!({ "connector": provider.id, "left_behind": remaining }),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -545,7 +701,7 @@ mod tests {
     use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
-    use exchange_host::{async_trait, TENANTS_ROOT};
+    use exchange_host::{async_trait, Tenant, TENANTS_ROOT};
     use tower::Service;
 
     use crate::dev_identity::DevIdentity;
@@ -557,31 +713,96 @@ mod tests {
     /// different tenant receives — and from every refusal anyone receives.
     const SENTINEL: &str = "SENTINEL-NOT-A-REAL-SECRET";
 
+    /// How a [`TestStore`] has been told to fail.
+    ///
+    /// The three the surface answers differently, so that
+    /// [`a_store_failure_keeps_its_kind_out_to_the_caller`] can drive each one rather than assert
+    /// that they are all `503`.
+    #[derive(Debug, Clone, Copy)]
+    enum Failure {
+        Unreachable,
+        Denied,
+        Backend,
+    }
+
+    impl Failure {
+        fn at(self, path: String) -> StoreError {
+            let reason = "the test store was told to fail this way".to_string();
+            match self {
+                Self::Unreachable => StoreError::Unreachable { path, reason },
+                Self::Denied => StoreError::Denied { path, reason },
+                Self::Backend => StoreError::Backend { path, reason },
+            }
+        }
+    }
+
     /// A store that lives in the test.
     ///
     /// Hand-rolled rather than reaching for `connector_secrets::MemoryStore`, so that
     /// `exchange_host` is not made to re-export an in-memory store a production composition could
-    /// then bind — the one thing X-09 refuses. This one can also be told to stop answering, which
-    /// is what pins the `503`/`404` split.
+    /// then bind — the one thing X-09 refuses. Being ours, it can also be told to fail in each of
+    /// the ways the surface answers differently, to fail *part way* through a multi-credential
+    /// write, and to widen the window between a probe and a write so that a race is reproducible
+    /// rather than lucky.
     #[derive(Default)]
     struct TestStore {
         held: Mutex<HashMap<String, String>>,
-        unreachable: Mutex<bool>,
+        /// Every operation fails this way.
+        fails: Mutex<Option<Failure>>,
+        /// This many `put`s succeed; the rest fail. `None` is "no limit".
+        puts_allowed: Mutex<Option<usize>>,
+        puts: Mutex<usize>,
+        /// `delete` fails, which is what makes a rollback fail.
+        deletes_fail: Mutex<bool>,
+        /// `get` yields to the runtime, widening the read-decide-write window.
+        widened: Mutex<bool>,
     }
 
     impl TestStore {
-        fn unreachable(&self) {
-            *self.unreachable.lock().expect("no test poisons this") = true;
+        fn fail_with(&self, failure: Failure) {
+            *self.fails.lock().expect("no test poisons this") = Some(failure);
         }
 
-        fn is_unreachable(&self, reference: &CredentialRef) -> Result<(), StoreError> {
-            if *self.unreachable.lock().expect("no test poisons this") {
-                return Err(StoreError::Unreachable {
-                    path: address_path(reference),
-                    reason: "the test store was told to stop answering".to_string(),
-                });
+        fn unreachable(&self) {
+            self.fail_with(Failure::Unreachable);
+        }
+
+        /// Let `allowed` writes land and fail every one after, so a connector declaring two
+        /// credentials can be made to fail half way.
+        fn allow_only(&self, allowed: usize) {
+            *self.puts_allowed.lock().expect("no test poisons this") = Some(allowed);
+        }
+
+        /// The store recovers: writes land again.
+        fn recovers(&self) {
+            *self.puts_allowed.lock().expect("no test poisons this") = None;
+            *self.fails.lock().expect("no test poisons this") = None;
+        }
+
+        fn deletes_fail(&self) {
+            *self.deletes_fail.lock().expect("no test poisons this") = true;
+        }
+
+        /// Make the window between a probe and a write wide enough that a concurrent request
+        /// reliably lands inside it.
+        ///
+        /// The race is real without this — the reviewer reproduced it on the first attempt — but a
+        /// test that only sometimes exercises the window is a test that only sometimes proves
+        /// anything.
+        fn widen_the_window(&self) {
+            *self.widened.lock().expect("no test poisons this") = true;
+        }
+
+        fn failure(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+            let failure = *self.fails.lock().expect("no test poisons this");
+            match failure {
+                Some(failure) => Err(failure.at(address_path(reference))),
+                None => Ok(()),
             }
-            Ok(())
+        }
+
+        fn is_widened(&self) -> bool {
+            *self.widened.lock().expect("no test poisons this")
         }
 
         /// What is stored at a rendered address, for an assertion about the store rather than
@@ -610,7 +831,15 @@ mod tests {
     #[async_trait]
     impl SecretStore for TestStore {
         async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
-            self.is_unreachable(reference)?;
+            self.failure(reference)?;
+
+            if self.is_widened() {
+                // Enough yields that another task on the runtime reliably gets to run its own
+                // probe before this one's caller writes.
+                for _ in 0..8 {
+                    tokio::task::yield_now().await;
+                }
+            }
 
             let path = address_path(reference);
             self.held
@@ -622,7 +851,16 @@ mod tests {
         }
 
         async fn put(&self, reference: &CredentialRef, secret: &Secret) -> Result<(), StoreError> {
-            self.is_unreachable(reference)?;
+            self.failure(reference)?;
+
+            {
+                let mut puts = self.puts.lock().expect("no test poisons this");
+                let allowed = *self.puts_allowed.lock().expect("no test poisons this");
+                if allowed.is_some_and(|allowed| *puts >= allowed) {
+                    return Err(Failure::Unreachable.at(address_path(reference)));
+                }
+                *puts += 1;
+            }
 
             self.held
                 .lock()
@@ -632,7 +870,11 @@ mod tests {
         }
 
         async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
-            self.is_unreachable(reference)?;
+            self.failure(reference)?;
+
+            if *self.deletes_fail.lock().expect("no test poisons this") {
+                return Err(Failure::Unreachable.at(address_path(reference)));
+            }
 
             self.held
                 .lock()
@@ -1166,6 +1408,276 @@ mod tests {
         }
     }
 
+    /// A store failure keeps its **kind** out to the caller, because the three are answered in
+    /// three different places: a retry, an operator restoring this host's access to the store, and
+    /// a defect. `AGENTS.md` § Conventions — failures an operator answers differently must stay
+    /// distinguishable, and none of them may read as `404`.
+    #[tokio::test]
+    async fn a_store_failure_keeps_its_kind_out_to_the_caller() {
+        for (failure, expected, must_say) in [
+            (
+                Failure::Unreachable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Retrying may work",
+            ),
+            (
+                Failure::Denied,
+                StatusCode::BAD_GATEWAY,
+                "Retrying will not help",
+            ),
+            (
+                Failure::Backend,
+                StatusCode::BAD_GATEWAY,
+                "Retrying will not help",
+            ),
+        ] {
+            let (app, store) = connected_app();
+            store.fail_with(failure);
+
+            let (status, refusal) =
+                call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+
+            assert_eq!(status, expected, "{failure:?}: {refusal}");
+            assert!(
+                refusal["error"]
+                    .as_str()
+                    .expect("a reason")
+                    .contains(must_say),
+                "{failure:?} must tell the operator whether a retry is worth anything: {refusal}",
+            );
+            // The store's own reason names this host's paths and access, so it goes to the log.
+            assert!(
+                !refusal
+                    .to_string()
+                    .contains("the test store was told to fail this way"),
+                "the store's own reason must not reach the caller: {refusal}",
+            );
+        }
+    }
+
+    /// A store that fails half way through a multi-credential write leaves **nothing** behind, so
+    /// a retry is not blocked by this surface's own `409`.
+    ///
+    /// Without the rollback, credential 1 is stored and credential 2 is not: the caller sees a
+    /// failure while the connection now exists as far as `create` is concerned, and every retry is
+    /// refused until somebody works out that a `DELETE` is needed first.
+    #[tokio::test]
+    async fn a_write_that_fails_half_way_leaves_nothing_behind() {
+        let (app, store) = connected_app();
+        store.allow_only(1);
+
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({
+                "credentials": {
+                    "slack.bot_token": SENTINEL,
+                    "slack.signing_secret": SENTINEL,
+                }
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refusal}");
+        assert_eq!(refusal["left_behind"], Value::Null, "{refusal}");
+        assert!(
+            store.addresses().is_empty(),
+            "the value written before the failure must have been taken back out: {:?}",
+            store.addresses(),
+        );
+
+        // And the proof that this is what matters: once the store is working again, the retry is
+        // not refused by our own `409`. Without the rollback the leftover value would have made
+        // this a `409` that only a `DELETE` could clear.
+        store.recovers();
+        let (status, _) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({ "credentials": { "slack.bot_token": SENTINEL } })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a retry after a rolled-back failure must not hit AlreadyConnected",
+        );
+    }
+
+    /// When the rollback fails too, the refusal says so and names the addresses — never the values.
+    /// A refusal claiming nothing was written while something was is the answer that costs somebody
+    /// an afternoon.
+    #[tokio::test]
+    async fn a_rollback_that_fails_is_admitted_and_the_addresses_named() {
+        let (app, store) = connected_app();
+        store.allow_only(1);
+        store.deletes_fail();
+
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({
+                "credentials": {
+                    "slack.bot_token": SENTINEL,
+                    "slack.signing_secret": SENTINEL,
+                }
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refusal}");
+        assert_eq!(
+            refusal["left_behind"],
+            json!(["tenants/acme/com.slack.api/bot_token"]),
+            "{refusal}",
+        );
+        assert!(
+            refusal["error"]
+                .as_str()
+                .expect("a reason")
+                .contains("DELETE /api/connections/slack"),
+            "the refusal must say what to do about it: {refusal}",
+        );
+        assert!(
+            !refusal.to_string().contains(SENTINEL),
+            "still addresses and never values: {refusal}",
+        );
+    }
+
+    /// **The race the `409` has to survive.** Two concurrent `POST`s for one tenant and one
+    /// connector, on a multi-threaded runtime, with the window between the probe and the write held
+    /// open.
+    ///
+    /// Before the claim in `create`, this reproduced on attempt 0: two `201`s, one value silently
+    /// replaced, and *the caller that lost was told it succeeded* — which is the exact failure the
+    /// `409` exists to prevent, so leaving the window open made the refusal decorative. The story's
+    /// Progress note bars landing this address scheme with the silent overwrite reachable.
+    ///
+    /// Looped, because a race that reproduces on attempt 0 must be shown not reproducing across
+    /// many. The invariant asserted is the one that matters and does not depend on who wins: exactly
+    /// one caller is told it created something, and the value in the store is that caller's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_creates_cannot_both_succeed() {
+        const ATTEMPTS: usize = 500;
+        const ADDRESS: &str = "tenants/acme/com.zendesk.api/api_token";
+
+        for attempt in 0..ATTEMPTS {
+            let (app, store) = connected_app();
+            store.widen_the_window();
+
+            let mut racers = Vec::new();
+            for value in ["FIRST-VALUE", "SECOND-VALUE"] {
+                let app = app.clone();
+                racers.push(tokio::spawn(async move {
+                    let (status, _) = call(
+                        &app,
+                        "alice",
+                        Method::POST,
+                        "/api/connections/zendesk",
+                        Some(json!({ "credentials": { "zendesk.api_token": value } })),
+                    )
+                    .await;
+                    (value, status)
+                }));
+            }
+
+            let mut outcomes = Vec::new();
+            for racer in racers {
+                outcomes.push(racer.await.expect("neither task panics"));
+            }
+
+            let created: Vec<&str> = outcomes
+                .iter()
+                .filter(|(_, status)| *status == StatusCode::CREATED)
+                .map(|(value, _)| *value)
+                .collect();
+            let refused = outcomes
+                .iter()
+                .filter(|(_, status)| *status == StatusCode::CONFLICT)
+                .count();
+
+            assert_eq!(
+                created.len(),
+                1,
+                "attempt {attempt}: exactly one caller may be told it created a connection, and \
+                 these were: {outcomes:?}",
+            );
+            assert_eq!(
+                refused, 1,
+                "attempt {attempt}: the other caller must be refused with a conflict: {outcomes:?}",
+            );
+            assert_eq!(
+                store.at(ADDRESS),
+                Some(created[0].to_string()),
+                "attempt {attempt}: the stored value must be the one the caller that got 201 sent \
+                 — anything else is a lost update reported as a success",
+            );
+        }
+    }
+
+    /// The other side of the same claim: a `DELETE` racing a `POST` cannot destroy half of a
+    /// connection being written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_delete_racing_a_create_leaves_the_connection_whole_or_absent() {
+        const ATTEMPTS: usize = 200;
+
+        for attempt in 0..ATTEMPTS {
+            let (app, store) = connected_app();
+            store.widen_the_window();
+
+            let creating = tokio::spawn({
+                let app = app.clone();
+                async move {
+                    call(
+                        &app,
+                        "alice",
+                        Method::POST,
+                        "/api/connections/slack",
+                        Some(json!({
+                            "credentials": {
+                                "slack.bot_token": SENTINEL,
+                                "slack.signing_secret": SENTINEL,
+                            }
+                        })),
+                    )
+                    .await
+                    .0
+                }
+            });
+            let deleting = tokio::spawn({
+                let app = app.clone();
+                async move {
+                    call(
+                        &app,
+                        "alice",
+                        Method::DELETE,
+                        "/api/connections/slack",
+                        None,
+                    )
+                    .await
+                    .0
+                }
+            });
+
+            let created = creating.await.expect("no panic");
+            let deleted = deleting.await.expect("no panic");
+
+            // Whatever order they landed in, the connection is either both credentials or neither.
+            // A single stored credential is a connection an operator cannot tell from a whole one.
+            let addresses = store.addresses();
+            assert!(
+                addresses.len() != 1,
+                "attempt {attempt}: a half-written connection survived (create={created}, \
+                 delete={deleted}): {addresses:?}",
+            );
+        }
+    }
+
     /// **Name the address, never the value.** Every answer and every refusal this module can
     /// produce, driven with a value stored, and the value appears in none of them.
     ///
@@ -1254,6 +1766,232 @@ mod tests {
                 "a connection is tenant data: {}",
                 route.path,
             );
+        }
+    }
+
+    /// What a listing actually costs, and the invariant underneath it.
+    ///
+    /// `GET /api/connections` derives an address for every addressable connector in the compiled-in
+    /// catalogue and probes it, so the cost is one `SecretStore::get` per **address** — not per
+    /// provider, since a connector may declare several credentials. `FileStore::get` is a lookup in
+    /// a map read once at open, so these are map lookups rather than file reads.
+    ///
+    /// The assertion that matters is the second one: **no two connectors share an address for one
+    /// tenant.** If two did, connecting one would show up as having connected the other, and
+    /// deleting one would destroy the other's credential. Nothing upstream promises this — it falls
+    /// out of the authority being per vendor — so it is pinned here rather than assumed.
+    #[test]
+    fn a_listing_probes_one_address_per_declared_credential_and_none_collide() {
+        let tenant = Tenant::new("acme").expect("a plain tenant id");
+        let mut rendered = Vec::new();
+        let mut addressable = 0;
+
+        for provider in connector_catalog::providers() {
+            let declared = declared_credentials(provider);
+            let declaration = declaration(provider, &declared);
+            let Ok(addresses) = declaration.addresses(&tenant) else {
+                continue;
+            };
+
+            addressable += 1;
+            rendered.extend(addresses.iter().map(|(_, r)| address_path(r)));
+        }
+
+        let mut distinct = rendered.clone();
+        distinct.sort();
+        distinct.dedup();
+
+        assert_eq!(
+            rendered.len(),
+            distinct.len(),
+            "two connectors render the same address for one tenant, so connecting one would read \
+             as connecting the other and deleting one would destroy the other's credential",
+        );
+
+        // Recorded rather than asserted to a fixed number: the catalogue is upstream's and grows.
+        // The bound is what the design's cost note is written against.
+        println!(
+            "a listing probes {} addresses across {addressable} addressable connectors ({} in the \
+             catalogue)",
+            rendered.len(),
+            connector_catalog::providers().len(),
+        );
+        assert!(
+            rendered.len() < 500,
+            "a listing probing {} addresses has outgrown probe-everything, and the design's cost \
+             note needs revisiting",
+            rendered.len(),
+        );
+    }
+
+    /// The same surface against the **real** store this binary composes, rather than against the
+    /// double above.
+    ///
+    /// Everything else in this module drives a `TestStore`, which is what lets a failure mode be
+    /// asked for on demand — but it also means none of it would notice if `TenantLayout`, the
+    /// addresses this host derives, and what `FileStore` actually does with them ever disagreed.
+    /// These tests are the ones that would: a value written through the surface has to come back
+    /// out of a store nothing here wrote by hand.
+    ///
+    /// `#[cfg(unix)]` because `CredentialStore` is.
+    #[cfg(unix)]
+    mod against_a_real_file_store {
+        use super::*;
+
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        use exchange_host::CredentialStore;
+
+        /// A scratch directory under the system temporary directory, removed on drop.
+        ///
+        /// Under `temp_dir` and not under the workspace, because `CredentialStore::bind` refuses a
+        /// path inside a working tree — which is the rule working, not an obstacle to route around.
+        struct Scratch(PathBuf);
+
+        impl Scratch {
+            fn new() -> Self {
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let path = std::env::temp_dir().join(format!(
+                    "flux-exchange-connections-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed),
+                ));
+                std::fs::create_dir_all(&path).expect("a scratch directory");
+                Self(path.canonicalize().expect("a resolvable scratch directory"))
+            }
+
+            fn store(&self) -> CredentialStore {
+                CredentialStore::bind(self.0.join("state").join("credentials"))
+                    .expect("a fresh store outside every working tree")
+            }
+        }
+
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn file_backed_app(store: &CredentialStore) -> Router {
+            super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(store.secrets()),
+            )
+        }
+
+        /// Create, list, read and delete, all the way down to a file on disk — and the credential
+        /// really is gone from the store afterwards.
+        #[tokio::test]
+        async fn a_connection_survives_the_round_trip_through_a_real_store() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let app = file_backed_app(&store);
+
+            let (status, created) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            assert_eq!(
+                created["credentials"][0]["address"],
+                "tenants/acme/com.zendesk.api/api_token",
+            );
+
+            // The address this host derived is the address the store actually used. Nothing else
+            // in this module can catch a disagreement between the two.
+            let written = std::fs::read_to_string(store.path()).expect("the store file is there");
+            assert!(
+                written.contains("tenants/acme/com.zendesk.api/api_token"),
+                "the derived address must be the one the store wrote at: {written}",
+            );
+            assert!(
+                !written.contains(SENTINEL),
+                "the store encodes its values; the plaintext must not be sitting in the file",
+            );
+
+            let (status, listed) = call(&app, "alice", Method::GET, "/api/connections", None).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(listed["connections"].as_array().expect("an array").len(), 1);
+
+            // Another tenant still gets nothing, against the real store.
+            let (status, _) =
+                call(&app, "bob", Method::GET, "/api/connections/zendesk", None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            let (status, _) = call(
+                &app,
+                "alice",
+                Method::DELETE,
+                "/api/connections/zendesk",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+
+            let emptied = std::fs::read_to_string(store.path()).expect("the store file is there");
+            assert!(
+                !emptied.contains("tenants/acme/com.zendesk.api/api_token"),
+                "deleting a connection must destroy its credential in the store: {emptied}",
+            );
+        }
+
+        /// The `409` against a store whose writes really do `fsync` and `rename`.
+        ///
+        /// Fewer attempts than the in-memory race, because each one is real IO. The claim is what
+        /// holds here too — it is taken before the probe and released after the last write, so what
+        /// the store does in between does not change the argument.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn two_concurrent_creates_cannot_both_succeed_against_a_real_store() {
+            const ATTEMPTS: usize = 50;
+
+            for attempt in 0..ATTEMPTS {
+                let scratch = Scratch::new();
+                let store = scratch.store();
+                let app = file_backed_app(&store);
+
+                let mut racers = Vec::new();
+                for value in ["FIRST-VALUE", "SECOND-VALUE"] {
+                    let app = app.clone();
+                    racers.push(tokio::spawn(async move {
+                        let (status, _) = call(
+                            &app,
+                            "alice",
+                            Method::POST,
+                            "/api/connections/zendesk",
+                            Some(json!({ "credentials": { "zendesk.api_token": value } })),
+                        )
+                        .await;
+                        status
+                    }));
+                }
+
+                let mut statuses = Vec::new();
+                for racer in racers {
+                    statuses.push(racer.await.expect("neither task panics"));
+                }
+
+                assert_eq!(
+                    statuses
+                        .iter()
+                        .filter(|status| **status == StatusCode::CREATED)
+                        .count(),
+                    1,
+                    "attempt {attempt}: exactly one caller may be told it created a connection, \
+                     and these were: {statuses:?}",
+                );
+
+                // Exactly one value on disk, whichever caller won.
+                let written =
+                    std::fs::read_to_string(store.path()).expect("the store file is there");
+                assert_eq!(
+                    written
+                        .lines()
+                        .filter(|line| line.contains("tenants/acme/com.zendesk.api/api_token"))
+                        .count(),
+                    1,
+                    "attempt {attempt}: the store must hold one value for one address: {written}",
+                );
+            }
         }
     }
 }

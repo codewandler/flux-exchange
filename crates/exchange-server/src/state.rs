@@ -5,6 +5,7 @@ use std::sync::Arc;
 use exchange_host::{Identity, SecretStore};
 
 use crate::bind::IdentityBinding;
+use crate::connection_guard::ConnectionGuard;
 use crate::dev_identity::DevIdentity;
 
 /// The state the router hands to every route.
@@ -23,6 +24,14 @@ pub struct AppState {
     /// route that would reach for one refuses rather than pretending — see
     /// [`crate::routes::connections`].
     credentials: Option<Arc<dyn SecretStore>>,
+    /// Which connection changes are in flight, so two of them cannot decide against the same
+    /// empty address and both write.
+    ///
+    /// Shared across every clone of this state, which is why it lives here rather than in the
+    /// module that uses it: `AppState` is the only thing every request holds a handle to. It is
+    /// not an `Option` — a guard with no store behind it costs nothing and guards nothing, and
+    /// making it absent would give the routes a second thing to branch on.
+    connections: Arc<ConnectionGuard>,
 }
 
 /// The identity port a composition bound, and what the bind rule may conclude from it.
@@ -55,6 +64,7 @@ impl AppState {
         Self {
             identity: BoundIdentity::None,
             credentials: None,
+            connections: Arc::default(),
         }
     }
 
@@ -69,6 +79,7 @@ impl AppState {
         Self {
             identity: BoundIdentity::Real(identity),
             credentials: None,
+            connections: Arc::default(),
         }
     }
 
@@ -77,6 +88,7 @@ impl AppState {
         Self {
             identity: BoundIdentity::Development(identity),
             credentials: None,
+            connections: Arc::default(),
         }
     }
 
@@ -103,6 +115,15 @@ impl AppState {
     /// caller supplied.
     pub fn credentials(&self) -> Option<&Arc<dyn SecretStore>> {
         self.credentials.as_ref()
+    }
+
+    /// The claims on connection changes in flight.
+    ///
+    /// Every clone of this state shares one, which is the whole point: two concurrent requests hold
+    /// two clones and must contend on the same set. See [`ConnectionGuard`] for the window it
+    /// closes and the single-process limit it closes it within.
+    pub fn connections(&self) -> &Arc<ConnectionGuard> {
+        &self.connections
     }
 
     /// Whether a request could become a principal, and whether that is safe to expose.

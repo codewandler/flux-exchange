@@ -12,6 +12,7 @@
 //! [`bind::admit_bind`] and `docs/designs/http-surface.md`.
 
 mod bind;
+mod connection_guard;
 mod dev_identity;
 mod routes;
 mod session;
