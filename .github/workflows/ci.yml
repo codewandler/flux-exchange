@@ -134,3 +134,52 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: console
+
+  action-pins:
+    name: third-party actions are pinned to a commit SHA
+    runs-on: ubuntu-latest
+    # X-30. AGENTS.md and both workflows treat SHA pinning as an invariant, and until this job existed
+    # nothing failed when someone wrote `uses: foo/bar@v3` — it was enforced by review, which is to
+    # say by whoever happened to look. That matters most for `crates-io.yml`, which holds
+    # `CARGO_REGISTRY_TOKEN`: a movable tag there hands an upstream maintainer publish rights to a
+    # crate whose versions cannot be withdrawn.
+    #
+    # Following ../flux's job of the same name, including the part that is easy to drop: the checker
+    # runs `--self-test` FIRST. A scanner that has not just demonstrated it catches an unpinned
+    # reference is not evidence that there are none — a silently mis-parsing grep reports a clean
+    # tree exactly as loudly as a working one.
+    #
+    # Costs a checkout and a few seconds; no toolchain, no cache, no build.
+    permissions:
+      contents: read # restates the workflow default, so the job is readable on its own
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Every third-party action names a full commit SHA
+        run: |
+          ./scripts/check-action-pins.sh --self-test
+          ./scripts/check-action-pins.sh
+
+  crate-versions:
+    name: the workspace version and the exchange-host pin agree
+    runs-on: ubuntu-latest
+    # X-30. `Cargo.toml` states this workspace's version twice — `[workspace.package].version` and the
+    # `version` on the `exchange-host` entry in `[workspace.dependencies]` — and the `path` half of
+    # that entry is what builds locally, so nothing here notices when they drift. They meet for the
+    # first time at `cargo publish`, which strips the path and ships the version requirement to
+    # crates.io. AGENTS.md § Publishing contract says to move them together; this is what makes that a
+    # machine's job.
+    #
+    # This does NOT replace `crates-io.yml`'s tag-vs-version check, and that one must stay: it
+    # compares the pushed tag against the manifest and can only run at release, and a tag can be
+    # pushed at a commit no pull request ever touched. This one catches the mismatch a week earlier,
+    # where the fix is free.
+    permissions:
+      contents: read # restates the workflow default, so the job is readable on its own
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: One version, stated in two places, is one number
+        run: |
+          ./scripts/check-crate-versions.sh --self-test
+          ./scripts/check-crate-versions.sh

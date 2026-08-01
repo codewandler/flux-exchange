@@ -143,4 +143,23 @@ version number is burned, and a wrong `description`, `readme` or `keywords` is f
   already up cannot be withdrawn.
 - The tag must match `[workspace.package].version`; the workflow refuses otherwise. Bump the version
   and the `exchange-host` pin in `[workspace.dependencies]` together — they are two places holding
-  one number, and a publish is where they being out of step first hurts.
+  one number, and a publish is where they being out of step first hurts. Since X-30 that pairing is
+  checked at PR time by [`scripts/check-crate-versions.sh`](scripts/check-crate-versions.sh), so the
+  mismatch surfaces where it is free to fix. The tag check stays regardless: a tag can be pushed at a
+  commit no pull request touched.
+
+## Supply chain — checked, not trusted
+
+**Every third-party action in `.github/workflows/` is pinned to a full 40-char commit SHA, with its
+human-readable version as a trailing comment.** A movable tag hands whoever controls it the code
+running in our workflows, and `crates-io.yml` carries `CARGO_REGISTRY_TOKEN` — publish rights to a
+crate whose versions cannot be withdrawn.
+
+Since X-30 this is enforced by [`scripts/check-action-pins.sh`](scripts/check-action-pins.sh) in
+CI's `action-pins` job, not by review. Both checkers run `--self-test` before they scan, following
+`../flux`: a checker that has not just proved it catches a violation is not evidence there are none.
+Keep that ordering if you touch them.
+
+Note for anyone writing a workflow comment: the scanner classifies lines before judging them, so a
+comment or a `run: |` example that mentions the step keyword is not mistaken for a real reference.
+Do not "fix" a comment to work around a grep — fix the grep.
