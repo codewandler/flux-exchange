@@ -31,7 +31,7 @@
 //! on the store file alone does not touch it. `FileStore` reaps those the next time it opens the
 //! store — but a store being deleted is one nobody is going to open again.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use connector_secrets::{FileStore, SecretStore, StoreError};
@@ -221,11 +221,27 @@ fn enclosing_working_tree(path: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Make `path` absolute, resolving every symlink that already exists.
+/// Make `path` absolute, resolving every symlink and every `..` the way the kernel will.
 ///
-/// The store's own file usually does not exist yet, so only the part that does is canonicalised and
-/// the rest is kept verbatim. That is enough for the checks above: a symlink is a way to point at a
-/// working tree without naming one, and a check that read the path as written would not see it.
+/// **Downwards, one component at a time**, because the guard above is only worth anything if the
+/// path it inspects is the path `FileStore` will create. Walking *up* from the whole path and
+/// canonicalising the deepest part that happens to exist is the obvious cheaper version and it is
+/// wrong: `state/gone/../credentials`, where `state` is a symlink into a checkout and `gone` does
+/// not exist yet, leaves the walk with a `..` it cannot take a file name from, and any answer at
+/// that point that is less than fully resolved is an answer with the symlink still in it. There is
+/// deliberately no arm here that returns one.
+///
+/// Each component is resolved against a prefix that is already resolved, so:
+///
+/// - a `Normal` component is canonicalised if it exists, and appended verbatim if it does not —
+///   the store's own file, and usually its directory, do not exist yet;
+/// - a `..` is a `pop`, which is exactly what the kernel does once the prefix it applies to has
+///   been resolved, and is safe on a prefix that does not exist because a component that does not
+///   exist is not a symlink.
+///
+/// Anything that fails for a reason other than "not there yet" is returned rather than guessed
+/// past: a path this cannot resolve is a path the guard cannot vouch for, and the caller turns that
+/// into a refusal.
 fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -233,30 +249,28 @@ fn resolve(path: &Path) -> std::io::Result<PathBuf> {
         std::env::current_dir()?.join(path)
     };
 
-    let mut existing = absolute.as_path();
-    let mut trailing = Vec::new();
-    loop {
-        match existing.canonicalize() {
-            Ok(mut resolved) => {
-                for name in trailing.iter().rev() {
-                    resolved.push(name);
-                }
-                return Ok(resolved);
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match (existing.parent(), existing.file_name()) {
-                    (Some(parent), Some(name)) => {
-                        trailing.push(name);
-                        existing = parent;
+            Component::RootDir | Component::Prefix(_) => resolved.push(component),
+            Component::Normal(name) => {
+                let candidate = resolved.join(name);
+                match candidate.canonicalize() {
+                    Ok(canonical) => resolved = canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        resolved = candidate;
                     }
-                    // Nothing above it resolves either. The absolute path is still the honest
-                    // answer, and every check below applies to it unchanged.
-                    _ => return Ok(absolute.clone()),
+                    Err(error) => return Err(error),
                 }
             }
-            Err(error) => return Err(error),
         }
     }
+
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -288,6 +302,10 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).expect("a scratch directory");
+            // Canonicalised once, here, so every expectation below is written in the spelling the
+            // store will report: the system temporary directory is itself a symlink on macOS
+            // (`/var` → `/private/var`), and this module is `#[cfg(unix)]`, which includes it.
+            let path = path.canonicalize().expect("a resolvable scratch directory");
             Self(path)
         }
 
@@ -451,6 +469,63 @@ mod tests {
         );
     }
 
+    /// A symlink alone is caught, and a `..` alone is caught — the escape is the composition of the
+    /// two, because a `..` that follows a component which does not exist yet is where a resolution
+    /// that walks *up* from the whole path stops seeing the symlink underneath it.
+    ///
+    /// The assertion that matters is the last one: the bypass was not that the refusal was missing,
+    /// it was that the store then created a `0600` credential file inside the checkout.
+    #[test]
+    fn a_symlink_followed_by_a_parent_hop_cannot_escape_the_check() {
+        let scratch = Scratch::new("working-tree-escape");
+        let checkout = scratch.join("checkout");
+        fs::create_dir_all(checkout.join(".git")).expect("a working tree");
+        tight_directory(&checkout.join("var"));
+
+        let link = scratch.join("state");
+        std::os::unix::fs::symlink(checkout.join("var"), &link).expect("a symlink");
+
+        // `state` → `checkout/var`, `gone` does not exist, and `..` puts the store back in
+        // `checkout/var` — which is where `FileStore` would create it.
+        let escaping = link.join("gone").join("..").join("credentials");
+
+        let refused = CredentialStore::bind(&escaping)
+            .expect_err("a store that lands inside a checkout must be refused however it is spelt");
+        let CredentialStoreError::InsideWorkingTree { path, root } = &refused else {
+            panic!("expected InsideWorkingTree, got: {refused}");
+        };
+        assert!(
+            root.ends_with("checkout"),
+            "the refusal must name the working tree root, got: {root}"
+        );
+        assert!(
+            path.ends_with("checkout/var/credentials"),
+            "the refusal must name the path the store would have occupied, got: {path}"
+        );
+        assert!(
+            !checkout.join("var").join("credentials").exists(),
+            "a refused store must not have been created inside the checkout"
+        );
+    }
+
+    /// The other half of the property above, on the path that is *not* refused: what the guard
+    /// inspected is what the store went on to occupy, so the two can never disagree.
+    #[test]
+    fn a_path_that_hops_through_a_parent_binds_where_it_actually_lands() {
+        let scratch = Scratch::new("parent-hop");
+        let directory = scratch.join("state");
+        tight_directory(&directory);
+
+        let store = CredentialStore::bind(directory.join("gone").join("..").join("credentials"))
+            .expect("a store");
+
+        assert_eq!(store.path(), directory.join("credentials"));
+        assert!(
+            !directory.join("gone").exists(),
+            "the store must be created where the path resolves, not through the spelling"
+        );
+    }
+
     #[test]
     fn nothing_configured_is_a_startup_error_naming_what_would_have_worked() {
         for configured in [None, Some(""), Some("   ")] {
@@ -482,7 +557,7 @@ mod tests {
             "the banner must name the bound path: {banner}"
         );
         assert!(
-            !banner.contains(&link.display().to_string()),
+            !banner.contains("/link/"),
             "the banner must not repeat the configured spelling: {banner}"
         );
         assert!(banner.contains("not encrypted"), "{banner}");

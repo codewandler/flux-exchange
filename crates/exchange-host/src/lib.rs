@@ -1,9 +1,19 @@
 //! `exchange-host` — the flux-exchange host, stated as ports.
 //!
 //! This crate is the part a product embeds. It carries the vocabulary and the rules, and it
-//! deliberately carries **no** identity provider, **no** secret store, and **no** transport: those
-//! are traits a composing binary binds. That is what lets one implementation serve a self-serve
-//! deployment and a company's internal one without either learning about the other.
+//! deliberately carries **no** identity provider and **no** transport: those are traits a composing
+//! binary binds. That is what lets one implementation serve a self-serve deployment and a company's
+//! internal one without either learning about the other.
+//!
+//! It does carry one concrete binding — [`CredentialStore`] — and that is a narrowing of the claim
+//! above rather than an exception to it, so it is worth saying exactly where the line is. What the
+//! boundary protects is that the public crate has **no downstream dependency to leak through**. The
+//! store behind that type is `connector_secrets::FileStore`, a flux-family crate this already
+//! depends on and not a product's; the port a credential is resolved through is still
+//! `SecretStore`, which [`CredentialStore::secrets`] hands back; and a deployment that wants Vault,
+//! or a store of its own, binds that instead and never constructs this type. A default a composing
+//! binary can decline puts no product concern in the shared code. A default it *could not* decline
+//! would — so the moment this type stops being declinable, this paragraph has stopped being true.
 //!
 //! The design this implements is `docs/designs/ecosystem.md` in
 //! [codewandler/flux](https://github.com/codewandler/flux). Three rules from it are enforced here
