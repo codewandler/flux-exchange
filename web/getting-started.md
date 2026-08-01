@@ -105,8 +105,10 @@ npm run dev
 The console is a separate Node build that shares nothing with the Cargo workspace, and its dev server
 prints where it is serving. It proxies `/api` to the service, which is a separate process: in a
 deployment the console is served by the same host that answers those routes, and a dev server is the
-one context where that is false — so it proxies to where the service listens **by default**, and
-moving the bind is one of the few ways to end up with a console that cannot reach it.
+one context where that is false — so it proxies to wherever `FLUX_EXCHANGE_BIND` says the service
+listens, and to the same default the service uses when that says nothing. Moving the bind therefore
+moves the console with it. The setting is read once, when the dev server starts, so export it in the
+shell you run `npm run dev` from and restart that server if you change it.
 
 You will arrive **signed out**. A browser cannot put an `Authorization` header on a navigation, and a
 sign-in form that would take a handle is a tracked change (story X-58). Until it lands, the browser

@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
+import { apiProxyTarget } from './vite.proxy.mts'
+
 // Served from the site root today. The console's links go through the injected `PathResolver`
 // (see `src/routing.ts`), so if this ever moves under a base path there is exactly one place to
 // say so — `base` here, and the resolver reads it.
@@ -17,12 +19,16 @@ export default defineConfig({
   // Deliberately a proxy rather than an absolute API base in the client: a base URL would have to be
   // configured in every deployment and would be wrong by default, whereas same-origin is correct
   // everywhere except here. `changeOrigin` is off — the service binds loopback and reads no Host.
-  // The service's own default bind, spelled once. Reading it from the environment would need
-  // `@types/node`, and this file is type-checked by `vue-tsc` in the build gate — a dependency is
-  // too much to pay for a value that changes when `FLUX_EXCHANGE_BIND` does, which is one edit here.
+  //
+  // The target follows `FLUX_EXCHANGE_BIND` and falls back to the service's default (X-71). It used
+  // to be the default, written out here, on the grounds that a reader who moves the bind can make
+  // the one edit: X-69 walked its own page, met a port already in use, moved the bind, and got a
+  // console that reached nothing — so the one edit is one nobody knows to make. `vite.proxy.mts`
+  // resolves it, both so it can be asserted without a dev server and so no `@types/node` is needed
+  // to read the setting.
   server: {
     proxy: {
-      '/api': { target: 'http://127.0.0.1:8080' },
+      '/api': { target: apiProxyTarget() },
     },
   },
 })
