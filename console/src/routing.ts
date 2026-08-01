@@ -48,6 +48,7 @@ export const fragmentPath: PathResolver = (path) => `${BASE}#${path.replace(/#/g
  * act on by itself.
  */
 export type Route =
+  | { name: 'connections'; anchor?: string }
   | { name: 'explorer'; anchor?: string }
   | { name: 'operation'; id: string; anchor?: string }
   | { name: 'core'; kind: string; entry: string; anchor?: string }
@@ -59,6 +60,11 @@ export type Route =
  * Anything unrecognised becomes `unknown` carrying the path it could not place, rather than
  * silently redirecting to the explorer: a link that no longer resolves should say so, not quietly
  * show something else and let the reader believe they arrived.
+ *
+ * **This union is the complete list of screens this console has**, which is why the honesty
+ * invariant in `test/shell.test.mjs` is stated over it: `invoke`, `subscribe` and `activity` are
+ * named in `surfaces.mts` and appear in the navigation, and no fragment may resolve to any of them
+ * while there is nothing behind them to render.
  */
 export function parseRoute(hash: string): Route {
   const decoded = decodeURIComponent(hash.replace(/^#/, '')) || '/'
@@ -73,7 +79,14 @@ export function parseRoute(hash: string): Route {
   // `anchor: undefined`, which reads as "asked for nothing" and compares unequal to a bare route.
   const at = anchor ? { anchor } : {}
 
-  if (path === '/' || path === '/explorer') return { name: 'explorer', ...at }
+  // `/` is **connections**, not the catalogue. The console's two jobs are wiring things up and
+  // seeing what happened; the catalogue is reference material about what this build could run, and
+  // landing a reader there is what made this console read as a connector browser. The explorer keeps
+  // its own path — `/explorer` is the one the carried components emit — so every link they produce
+  // still resolves exactly as it did.
+  if (path === '/' || path === '/connections') return { name: 'connections', ...at }
+
+  if (path === '/explorer') return { name: 'explorer', ...at }
 
   const operation = /^\/operations\/(.+)$/.exec(path)
   if (operation) return { name: 'operation', id: operation[1], ...at }

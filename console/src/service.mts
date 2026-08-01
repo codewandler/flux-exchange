@@ -32,6 +32,23 @@ import type { Catalog, Issue, Operation, Provider, Service, Status } from './cat
 /** Where the served catalogue lists its connectors. */
 export const CONNECTORS_ENDPOINT = '/api/catalogue/connectors'
 
+/** Where this host says who it resolved the caller to be. */
+export const SESSION_ENDPOINT = '/api/session'
+
+/** Where this tenant's connections are listed. */
+export const CONNECTIONS_ENDPOINT = '/api/connections'
+
+/**
+ * Where a human begins signing in.
+ *
+ * **Followed, never fetched.** It answers `303` to the identity provider's authorization endpoint,
+ * so a `fetch` would chase the redirect inside the page — landing the provider's login document in
+ * a response body this console cannot do anything with — while the browser's address bar never
+ * moves. The console renders an ordinary anchor and lets the browser navigate, which is what a
+ * `303` is for. `routes::signin` in `crates/exchange-server` carries the other half of this.
+ */
+export const SIGNIN_ENDPOINT = '/api/signin'
+
 /** The reserved service name, which every published address elides. Vocabulary, not data. */
 const RESERVED_SERVICE = 'default'
 
@@ -94,16 +111,25 @@ export interface ServedOperation {
 /** How a catalogue load failed. */
 export type FailureKind = 'unreachable' | 'refused' | 'unreadable'
 
-/** One failed catalogue load, in enough detail to act on. */
-export interface CatalogueFailure {
+/** One failed read of one endpoint, in enough detail to act on. */
+export interface ServiceFailure {
   kind: FailureKind
-  /** The endpoint that did not produce a catalogue. Always exactly one this console actually called. */
+  /** The endpoint that did not answer. Always exactly one this console actually called. */
   endpoint: string
   /** The HTTP status, or `null` when nothing answered at all. */
   status: number | null
   /** What the transport or the body said, verbatim — never a sentence this console made up. */
   detail: string
 }
+
+/**
+ * The catalogue's spelling of [`ServiceFailure`].
+ *
+ * The name predates the session and connection reads, which fail in exactly the same three ways
+ * against exactly the same transport. It is kept because `CatalogueFailure.mts` is the view that
+ * renders one, and renaming a view to follow a type alias would buy nothing.
+ */
+export type CatalogueFailure = ServiceFailure
 
 /** The one-line heading a page shows for this failure. */
 export function failureHeadline(failure: CatalogueFailure): string {
@@ -173,7 +199,7 @@ export interface LoadOptions {
 }
 
 /** A body that was read, or the failure that reading it was. */
-type Read = { ok: true; body: unknown } | { ok: false; failure: CatalogueFailure }
+type Read = { ok: true; body: unknown } | { ok: false; failure: ServiceFailure }
 
 /** What went wrong, in the transport's own words — never a sentence invented here. */
 function describe(error: unknown): string {
@@ -352,6 +378,229 @@ export async function loadCatalogue(options: LoadOptions = {}): Promise<Catalogu
   }
 
   return { status: 'ready', catalog: adapt(pairs), served }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The session.
+//
+// Read, never invented. The console does not decide whether anyone is signed in — it asks
+// `/api/session` and renders the answer, including the answer "I could not tell you".
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A caller this host resolved, exactly as `GET /api/session` publishes one.
+ *
+ * `tenant` is the field that matters most on this page and it is not decoration: every credential
+ * address the console can show is derived from it, and it comes from the resolved principal rather
+ * than from anything a caller controls. See `exchange_host::Principal`.
+ */
+export interface Principal {
+  /** `user`, `agent` or `service` — what kind of caller this is. */
+  kind: string
+  /** Its stable identifier within the tenant. */
+  id: string
+  /** The tenant it belongs to. */
+  tenant: string
+}
+
+/**
+ * What the console knows about who is signed in.
+ *
+ * The same three states as [`CatalogueState`] and for the same reason, with one distinction worth
+ * being explicit about: **`ready` with `principal: null` is an answer, and `failed` is not.** A
+ * `401` means this host looked and resolved nobody — a fact, and the one that should offer a
+ * sign-in link. A read that never completed means the console does not know, and rendering that as
+ * "not signed in" would tell a reader they had been signed out by an outage.
+ */
+export type SessionState =
+  | { status: 'loading' }
+  | { status: 'ready'; principal: Principal | null }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/** A principal in a `GET /api/session` body, or `null` when the body carries none this can read. */
+function readPrincipal(body: unknown): Principal | null {
+  if (!isObject(body) || !isObject(body.principal)) return null
+  const principal = body.principal
+  if (typeof principal.id !== 'string' || typeof principal.tenant !== 'string') return null
+  return {
+    kind: typeof principal.kind === 'string' ? principal.kind : '',
+    id: principal.id,
+    tenant: principal.tenant,
+  }
+}
+
+/**
+ * Who this host says the caller is.
+ *
+ * `401` is not a failure here. It is this host answering the question — nobody presented a
+ * credential it could resolve, or it has no identity provider bound to resolve one with — and
+ * either way there is no principal, which is precisely what the header needs to know in order to
+ * offer a way in. Every other refusal *is* a failure: a `503` from an unreachable identity provider
+ * and a signed-out browser are different events an operator responds to differently, and this
+ * console's whole discipline is not collapsing that pair.
+ */
+export async function loadSession(options: LoadOptions = {}): Promise<SessionState> {
+  const answered = await read(SESSION_ENDPOINT, options)
+
+  if (!answered.ok) {
+    if (answered.failure.status === 401) return { status: 'ready', principal: null }
+    return { status: 'failed', failure: answered.failure }
+  }
+
+  // A `200` whose body carries no principal this console can read is not a session. Rendering it as
+  // signed-out would be the same lie in the other direction, so it is `unreadable`.
+  const principal = readPrincipal(answered.body)
+  if (!principal) {
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable',
+        endpoint: SESSION_ENDPOINT,
+        status: 200,
+        detail: 'no `principal` with an `id` and a `tenant` in the body',
+      },
+    }
+  }
+
+  return { status: 'ready', principal }
+}
+
+/**
+ * End the caller's session and report whether the service agreed.
+ *
+ * `DELETE`, so this one is a fetch and not a link — there is no navigation that means "close my
+ * session", and the route answers `204` with a cleared cookie rather than a document. The caller
+ * reloads on success; a failure is returned rather than swallowed, because a sign-out that silently
+ * did nothing leaves a reader believing they have left.
+ */
+export async function signOut(options: LoadOptions = {}): Promise<ServiceFailure | null> {
+  const transport = options.fetch ?? globalThis.fetch
+  const url = `${options.origin ?? ''}${SESSION_ENDPOINT}`
+
+  try {
+    const response = await transport(url, { method: 'DELETE' })
+    if (response.ok) return null
+    return {
+      kind: 'refused',
+      endpoint: SESSION_ENDPOINT,
+      status: response.status,
+      detail: '',
+    }
+  } catch (error) {
+    return {
+      kind: 'unreachable',
+      endpoint: SESSION_ENDPOINT,
+      status: null,
+      detail: describe(error),
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Connections: the first of the console's two jobs, and the only one that works today.
+//
+// A connection is **addresses and never values**. `GET /api/connections` answers with the address
+// each declared credential would live at and whether anything is held there; the value never leaves
+// the store, which is the north star of this whole service. Nothing here reconstructs one, and
+// nothing here should ever start.
+// ---------------------------------------------------------------------------------------------
+
+/** One declared credential of a connection: where it lives, and whether anything is there. */
+export interface HeldCredential {
+  /** The flat-namespace name the catalogue publishes, e.g. `zendesk.api_token`. */
+  name: string
+  /** `tenants/<tenant>/<authority>/<credential>` — an address, never a value. */
+  address: string
+  /** Whether this tenant has stored something at that address. */
+  held: boolean
+}
+
+/** One connector this tenant has connected. */
+export interface Connection {
+  connector: string
+  vendor: string
+  /** The authority its credentials are addressed under, or `null` when the connector declares none. */
+  authority: string | null
+  credentials: HeldCredential[]
+}
+
+/**
+ * What this tenant has wired up.
+ *
+ * Three states, exactly as the catalogue has. **There is no fourth state for "signed out"** and that
+ * is deliberate: the session is read first and the console already knows, so a caller with no
+ * principal is never asked this question at all. A `401` arriving here therefore means the session
+ * ended between the two reads, which is a real failure and is reported as one.
+ */
+export type ConnectionsState =
+  | { status: 'loading' }
+  | { status: 'ready'; connections: Connection[] }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/** The credentials in one served connection, or the reason the entry is not one. */
+function readCredentials(entry: Record<string, unknown>): HeldCredential[] | string {
+  if (!Array.isArray(entry.credentials)) return 'a connection entry has no `credentials` array'
+  const credentials: HeldCredential[] = []
+  for (const credential of entry.credentials) {
+    if (!isObject(credential) || typeof credential.name !== 'string') {
+      return 'a credential entry has no `name`'
+    }
+    credentials.push({
+      name: credential.name,
+      address: typeof credential.address === 'string' ? credential.address : '',
+      held: credential.held === true,
+    })
+  }
+  return credentials
+}
+
+/** The connections in a `GET /api/connections` body, or the reason it is not one. */
+function readConnections(body: unknown): Connection[] | string {
+  if (!isObject(body) || !Array.isArray(body.connections)) {
+    return 'no `connections` array in the body'
+  }
+  const connections: Connection[] = []
+  for (const entry of body.connections) {
+    if (!isObject(entry) || typeof entry.connector !== 'string') {
+      return 'a connection entry has no `connector`'
+    }
+    const credentials = readCredentials(entry)
+    if (typeof credentials === 'string') return credentials
+    connections.push({
+      connector: entry.connector,
+      vendor: typeof entry.vendor === 'string' ? entry.vendor : entry.connector,
+      authority: typeof entry.authority === 'string' ? entry.authority : null,
+      credentials,
+    })
+  }
+  return connections
+}
+
+/**
+ * This tenant's connections, or the reason there are none to show.
+ *
+ * A single entry that fails the shape check fails the whole load, for the reason `readConnectors`
+ * gives: a listing silently missing one connection is a listing that lies about what is wired up,
+ * and this is the page an operator would use to check whether a leaked credential is still there.
+ */
+export async function loadConnections(options: LoadOptions = {}): Promise<ConnectionsState> {
+  const answered = await read(CONNECTIONS_ENDPOINT, options)
+  if (!answered.ok) return { status: 'failed', failure: answered.failure }
+
+  const connections = readConnections(answered.body)
+  if (typeof connections === 'string') {
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable',
+        endpoint: CONNECTIONS_ENDPOINT,
+        status: 200,
+        detail: connections,
+      },
+    }
+  }
+
+  return { status: 'ready', connections }
 }
 
 // ---------------------------------------------------------------------------------------------

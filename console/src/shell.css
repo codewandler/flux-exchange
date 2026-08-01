@@ -1,0 +1,353 @@
+/*
+ * The shell: the header, the surface rail, and the connections view.
+ *
+ * These rules belong to `src/ConsoleShell.mts` and `src/Connections.mts`, which are render functions
+ * rather than single-file components — so they carry no `<style scoped>` and their rules live in a
+ * stylesheet, the same arrangement `app.css` already describes for `CatalogueFailure.mts`.
+ *
+ * THEY ARE IN THEIR OWN FILE for one reason: **every colour here goes through a token from
+ * `tokens.css`**, and `the_shell_names_no_colour_of_its_own` in `test/shell.test.mjs` scans this
+ * file to hold that. The carried components name no colour, this console has exactly one colour
+ * vocabulary, and a second one would be a light-mode value baked into a page a reader might be
+ * looking at in the dark. A separate file is what makes that assertion precise rather than a scan
+ * of everything.
+ *
+ * So: no hex, no rgb(), no named colours. Light and dark come for free, because `.dark` redefines
+ * the tokens and nothing here restates a value.
+ */
+
+/* ---------------------------------------------------------------------------------------------
+ * The header.
+ * ------------------------------------------------------------------------------------------- */
+
+/*
+ * Deliberately not sticky. The bar, the rail and the inventory sentence together are some 250px,
+ * and a sticky region that size takes a quarter of a laptop viewport away from the thing the reader
+ * came to look at. The honest inventory is worth its space once, at the top, not on every scroll.
+ */
+.shell {
+  border-bottom: 1px solid var(--vp-c-divider);
+  background-color: var(--vp-c-bg);
+}
+
+.shell__bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 0 12px;
+}
+
+.shell__brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--vp-c-text-1);
+  text-decoration: none;
+}
+
+.shell__brand:hover {
+  color: var(--vp-c-brand-1);
+}
+
+/* Subordinate on purpose: the service is the thing, and this page is one surface onto it. */
+.shell__brand-tag {
+  font-family: var(--vp-font-family-base);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-3);
+}
+
+.shell__bar-end {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Identity.
+ * ------------------------------------------------------------------------------------------- */
+
+.shell__identity {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.shell__quiet {
+  color: var(--vp-c-text-3);
+}
+
+.shell__quiet code {
+  color: inherit;
+}
+
+.shell__who {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  overflow: hidden;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.shell__who-id {
+  padding: 2px 8px;
+  color: var(--vp-c-text-1);
+}
+
+/*
+ * The tenant, rendered as its own cell rather than as a suffix. Every credential address on this
+ * console is derived from it, so it is a fact about the page and not a decoration on a name.
+ */
+.shell__who-tenant {
+  padding: 2px 8px;
+  border-left: 1px solid var(--vp-c-divider);
+  background-color: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+}
+
+.shell__signin,
+.shell__signout,
+.shell__theme > * {
+  padding: 4px 12px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background-color: var(--vp-c-bg-soft);
+  font-size: 13px;
+  line-height: 20px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.shell__signin {
+  border-color: var(--vp-c-brand-1);
+  background-color: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+  font-weight: 500;
+}
+
+.shell__signout {
+  color: var(--vp-c-text-2);
+}
+
+.shell__signin:hover,
+.shell__signout:hover,
+.shell__theme > *:hover {
+  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-brand-1);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The surface rail.
+ *
+ * Every surface of the platform, built and unbuilt, in one row. A reader should be able to see the
+ * shape of the thing they are administering without navigating anywhere.
+ * ------------------------------------------------------------------------------------------- */
+
+.rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+}
+
+.rail__entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  border-bottom: 2px solid transparent;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  color: var(--vp-c-text-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.rail__entry:hover {
+  color: var(--vp-c-text-1);
+}
+
+.rail__entry--here {
+  border-bottom-color: var(--vp-c-brand-1);
+  color: var(--vp-c-brand-1);
+}
+
+/*
+ * NOT BUILT, and it must be unmistakable.
+ *
+ * These are `<span>`s with no href — inert by construction, not by a handler declining. The styling
+ * is the visible half of the same statement: dimmed to the tertiary text colour, the name struck
+ * through, and the tag beside it. A reader should never wonder whether they simply failed to click.
+ */
+.rail__entry--absent {
+  color: var(--vp-c-text-3);
+  cursor: not-allowed;
+}
+
+.rail__entry--absent:hover {
+  color: var(--vp-c-text-3);
+}
+
+/*
+ * The rule goes on the name and not on the entry: `text-decoration` is drawn across every
+ * descendant and a descendant cannot take it off again, so striking the whole entry would strike
+ * the "not built" tag along with it.
+ */
+.rail__entry--absent .rail__label {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.rail__tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background-color: var(--vp-c-default-soft);
+  font-family: var(--vp-font-family-base);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-3);
+}
+
+/* The honest inventory, in a sentence, under the entries it explains. */
+.shell__inventory {
+  max-width: 78ch;
+  margin: 10px 0 16px;
+  padding-left: 12px;
+  border-left: 2px solid var(--vp-c-divider);
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--vp-c-text-3);
+}
+
+.shell__inventory strong {
+  color: var(--vp-c-text-2);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Connections.
+ * ------------------------------------------------------------------------------------------- */
+
+.connections__loading {
+  margin: 32px 0;
+  color: var(--vp-c-text-2);
+}
+
+.connections {
+  display: grid;
+  gap: 16px;
+  margin: 24px 0;
+}
+
+.connection {
+  padding: 16px 20px 4px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background-color: var(--vp-c-bg-soft);
+}
+
+.connection__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.connection__name {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 18px;
+  line-height: 26px;
+}
+
+.connection__id {
+  font-size: var(--vp-code-font-size);
+  color: var(--vp-c-text-2);
+}
+
+.connection__count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--vp-c-text-3);
+}
+
+.connection__authority {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--vp-c-text-2);
+}
+
+.connection__credentials td[data-held='false'] {
+  color: var(--vp-c-text-3);
+}
+
+.connection__address {
+  color: var(--vp-c-text-2);
+}
+
+.connections__none,
+.connections__note {
+  max-width: 78ch;
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--vp-c-text-2);
+}
+
+.connections__note {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--vp-c-divider);
+  font-size: 13px;
+  color: var(--vp-c-text-3);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The signed-out gate.
+ *
+ * What stands in for a screen that needs a principal. It is not an empty state: it says why there
+ * is nothing here and offers the one thing that changes that.
+ * ------------------------------------------------------------------------------------------- */
+
+.gate {
+  max-width: 62ch;
+  margin: 64px auto;
+  padding: 28px 32px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  background-color: var(--vp-c-bg-soft);
+  text-align: center;
+}
+
+.gate h1 {
+  font-size: 22px;
+  line-height: 30px;
+}
+
+.gate p {
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--vp-c-text-2);
+}
+
+.gate .shell__signin {
+  display: inline-block;
+  padding: 8px 20px;
+}
