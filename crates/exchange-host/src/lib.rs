@@ -28,11 +28,18 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+// Unix only, and for the reason `connector_secrets::file` is: the whole of what protects a value in
+// the file store is `0600` and `0700`, and a platform that cannot spell those would get a store that
+// implied a safety it did not have.
+#[cfg(unix)]
+mod credentials;
 mod grant;
 mod lease;
 mod principal;
 mod runtime;
 
+#[cfg(unix)]
+pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
 pub use grant::{Effect, Grant, Idempotency, OperationFacts, Risk, Selector};
 pub use lease::{Lease, LeaseId, LeaseState};
 pub use principal::{Principal, PrincipalKind, Tenant, TenantError};

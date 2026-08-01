@@ -80,6 +80,32 @@ against one tenant's connections, not a vendor secret.
 records, and the catalogue loader. The design is ahead of the code on purpose; the gap is stated
 here so nobody has to discover it.
 
+### The credential store, and what does not protect it
+
+`exchange_host::CredentialStore` binds the file-backed store from `connector-secrets` rather than
+reimplementing one: a `0600` file in a `0700` directory, both modes set in the `open(2)`/`mkdir(2)`
+call and **re-checked every time the store is opened**. A widened mode is refused, never quietly
+tightened — the file already had that mode while it held values, so tightening it would hide the
+exposure instead of reporting it. A path inside a working tree is refused outright, because a
+credential under a checkout is one `git add -A` from being committed. A write is a whole-file
+rewrite through a sibling temporary, `fsync` and `rename(2)`, so a crash mid-write leaves the
+previous file whole rather than truncated, and a delete rewrites immediately, so a revoked
+credential does not come back on restart.
+
+**What protects a value there is that file mode and nothing else.** There is no encryption at rest,
+no passphrase, no OS keychain integration, and no protection from `root` or from a backup that
+copies the file. That makes it the right store for a single-operator deployment and the wrong one
+for a shared machine, where `connector-secrets`' Vault-backed store is the answer. Nothing ever
+silently selects the in-memory store instead: a configuration naming no path is a **startup error**
+naming what would have worked, because a host that fell back would start, serve every route
+correctly, look exactly like a working one, and lose every credential on restart.
+
+To decommission a store, remove the **directory**, not the file — a write interrupted between the
+`fsync` and the `rename(2)` can leave a complete copy of every credential in a sibling temporary
+that `rm` on the store file alone does not touch.
+
+No binary binds it yet; the server still starts, prints the matrix above, and exits.
+
 ## Try it
 
 ```bash
