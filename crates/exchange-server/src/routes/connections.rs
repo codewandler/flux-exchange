@@ -84,13 +84,22 @@
 //! [`list`]). Giving `GET` a status of its own therefore needs that record designed first, and is
 //! its own story rather than a line here.
 //!
-//! That refusal is a check-then-write, so it only means anything while nothing interleaves with it:
-//! every mutating route holds a
-//! [`ConnectionGuard`](crate::connection_guard::ConnectionGuard) claim on `(tenant, connector)`
-//! across the whole probe-decide-write. Without it two concurrent `POST`s both answer `201` and one
-//! value is silently lost — the exact failure the `409` exists to prevent. The claim is
-//! **single-process**; that limit is stated in `connection_guard`'s own documentation and in the
-//! design.
+//! Each refusal is a check-then-write, so it only means anything while nothing interleaves with it,
+//! and the two are decided from reads of different width — so
+//! [`ConnectionGuard`](crate::connection_guard::ConnectionGuard) is held at two widths:
+//!
+//! - Every mutating route claims `(tenant, connector)` across the whole probe-decide-write. Without
+//!   it two concurrent `POST`s both answer `201` and one value is silently lost — the exact failure
+//!   the `409` exists to prevent.
+//! - `POST` additionally claims the **tenant** across the allowance decision and the writes that
+//!   make it stale, because occupancy is a sum over every connector. Without it one tenant's
+//!   concurrent `POST`s to *different* connectors each read an occupancy the others had not written
+//!   yet and all were admitted, leaving the tenant past `MAX_TENANT_STORE_BYTES` (X-25). So one
+//!   tenant's creates serialise with each other, two tenants' never do, and `DELETE` — which only
+//!   frees allowance — stays out of the wider claim.
+//!
+//! Both claims are **single-process**; that limit is stated in `connection_guard`'s own
+//! documentation and in the design.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -306,9 +315,21 @@ async fn create(
     }
 
     // The second bound, and the one that is about the neighbours rather than about this request.
-    // Decided inside the claim for the same reason the `409` above is: it is a read of the store
-    // that has to still be true when this answers.
     //
+    // It needs a **second, wider claim**: what this tenant occupies is a sum over every connector,
+    // so the claim above — which one tenant's `zendesk` and `slack` do not share — leaves the read
+    // below true only for as long as no other connector of this tenant is being written. Before
+    // X-25 that was exactly the gap: one tenant's concurrent creates each read an occupancy the
+    // others had not written yet, all were admitted, and the tenant ended up past its allowance.
+    //
+    // Held from here to the end of the function, because it is the writes below that make the read
+    // stale. It is a claim on the tenant and not on the surface, so another tenant's create does
+    // not wait on this one; and it is never waited on, only taken or refused, so holding it and
+    // the claim above at once cannot deadlock.
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+
     // What this connector already holds is not counted twice — the probe above has just
     // established that it holds nothing, or this would have refused.
     let adding: usize = writes.iter().map(|(_, secret)| stored_bytes(secret)).sum();
@@ -514,20 +535,10 @@ async fn held(
 /// `Err` is a store that could not answer, and the caller must not turn that into "this tenant
 /// occupies nothing" — an outage read as an empty allowance is how a bound silently stops holding.
 ///
-/// # The limit this has, written down rather than discovered
-///
-/// Reading this and then writing is a read-decide-write, and the claim that covers it is per
-/// `(tenant, connector)` — see [`ConnectionGuard`](crate::connection_guard::ConnectionGuard),
-/// whose granularity X-10 chose and pinned. So **one tenant issuing concurrent `POST`s to
-/// *different* connectors can overshoot the allowance**: each reads an occupancy that the others
-/// have not written yet. The overshoot is bounded — every value still passes
-/// [`MAX_CREDENTIAL_VALUE_BYTES`](exchange_host::MAX_CREDENTIAL_VALUE_BYTES), so the worst case
-/// degrades to the per-value ceiling rather than to nothing — and it needs deliberate concurrency
-/// rather than ordinary use.
-///
-/// Closing it means serialising a tenant's connection changes across connectors, which reverses a
-/// property `connection_guard`'s own tests pin. That is a decision about that guard rather than a
-/// line here, so it is recorded as a known limit and not silently half-fixed.
+/// Reading this and then writing is a read-decide-write over **every** connector, so the caller
+/// holds `ConnectionGuard::claim_tenant` across both halves: a claim on one connector would leave
+/// this true only until another of the same tenant's creates wrote, which is the overshoot X-25
+/// closed. That claim is single-process, exactly as the per-connection one is.
 async fn occupied(store: &Arc<dyn SecretStore>, tenant: &Tenant) -> Result<usize, StoreError> {
     let mut total = 0usize;
 
@@ -866,6 +877,29 @@ fn change_in_flight(provider: &'static Provider) -> Response {
     )
 }
 
+/// Another change to one of this tenant's *other* connections is already in flight.
+///
+/// A separate refusal from [`change_in_flight`] because it is a separate fact, and one an operator
+/// would otherwise misread: nothing is wrong with the connection they asked for, and a message
+/// naming it as the thing in flight would send them looking for a request that does not exist.
+///
+/// The claim behind it is the tenant's rather than the connection's, because what a tenant may
+/// occupy is decided as a sum over every connector — see
+/// [`ConnectionGuard`](crate::connection_guard::ConnectionGuard) for why that width is the smallest
+/// one that makes the allowance true, and why `DELETE` stays outside it.
+fn allowance_change_in_flight(provider: &'static Provider) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        format!(
+            "another of this tenant's connections is already being changed; a connection to `{}` \
+             is refused while it is, because what one tenant may occupy is decided against all of \
+             its connectors at once. Retry once it has finished",
+            provider.id,
+        ),
+        json!({ "connector": provider.id }),
+    )
+}
+
 /// The store failed part way through writing a connection.
 ///
 /// Reports what was done about it, because "nothing was written" and "some values may still be
@@ -1137,6 +1171,18 @@ mod tests {
                 .filter(|(path, _)| path.starts_with(prefix))
                 .map(|(_, value)| value.len())
                 .sum()
+        }
+
+        /// Put `bytes` bytes at a rendered address, without going through the surface.
+        ///
+        /// For a test that needs a tenant already sitting near its allowance: how it got there is
+        /// not what is under test, and driving it through `create` would need connectors
+        /// declaring more credentials than any in the catalogue does.
+        fn place(&self, path: String, bytes: usize) {
+            self.held
+                .lock()
+                .expect("no test poisons this")
+                .insert(path, "v".repeat(bytes));
         }
 
         fn addresses(&self) -> Vec<String> {
@@ -2536,6 +2582,182 @@ mod tests {
                 Some(created[0].to_string()),
                 "attempt {attempt}: the stored value must be the one the caller that got 201 sent \
                  — anything else is a lost update reported as a success",
+            );
+        }
+    }
+
+    /// Occupy `bytes` of this tenant's allowance, written straight into the store, leaving every
+    /// connector in `except` empty.
+    ///
+    /// Spread over as many addresses as it takes at the per-value bound, because a tenant cannot
+    /// reach 56 KiB through the surface any other way: no catalogued connector declares seven
+    /// credentials.
+    fn occupy(store: &TestStore, tenant: &Tenant, bytes: usize, except: &[&str]) {
+        let mut remaining = bytes;
+
+        for provider in connector_catalog::providers() {
+            if except.contains(&provider.id) {
+                continue;
+            }
+
+            let declared = declared_credentials(provider);
+            let Ok(addresses) = declaration(provider, &declared).addresses(tenant) else {
+                continue;
+            };
+
+            for (_, reference) in &addresses {
+                if remaining == 0 {
+                    return;
+                }
+                let chunk = remaining.min(MAX_CREDENTIAL_VALUE_BYTES);
+                store.place(address_path(reference), chunk);
+                remaining -= chunk;
+            }
+        }
+
+        assert_eq!(
+            remaining, 0,
+            "this catalogue has too few addresses to seat {bytes} bytes for one tenant",
+        );
+    }
+
+    /// **The race the per-tenant allowance has to survive.** One tenant, two concurrent `POST`s to
+    /// *different* connectors, each individually admissible and the two together past
+    /// [`MAX_TENANT_STORE_BYTES`].
+    ///
+    /// The allowance is a read-decide-write too — read what the tenant occupies, decide, write —
+    /// and X-22 left it covered only by the `(tenant, connector)` claim, which two different
+    /// connectors do not share. So before X-25 both callers read the same 56 KiB, both were
+    /// admitted, both wrote, and the tenant ended up 8 KiB past an allowance whose entire purpose
+    /// is that no tenant can spend more of the shared file than it was given.
+    ///
+    /// The second half asserts the fix is not a lock over the surface: two *different* tenants
+    /// creating at the same moment both still get their `201`. That is the property X-10 pinned and
+    /// the reason this is a tenant-scoped claim rather than a global one — shared fate between
+    /// tenants, in the repository whose whole point is that they share nothing.
+    ///
+    /// Looped, with the window between probe and write held open by the test store, on the
+    /// precedent of [`two_concurrent_creates_cannot_both_succeed`].
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_tenants_concurrent_creates_cannot_overshoot_its_allowance() {
+        const ATTEMPTS: usize = 200;
+
+        // What each racer adds, and therefore the headroom left for it. Either fits exactly;
+        // the two together are one whole credential past the allowance.
+        const RACER_BYTES: usize = MAX_CREDENTIAL_VALUE_BYTES;
+
+        let acme = Tenant::new("acme").expect("a plain tenant id");
+
+        for attempt in 0..ATTEMPTS {
+            let (app, store) = connected_app();
+            occupy(
+                &store,
+                &acme,
+                MAX_TENANT_STORE_BYTES - RACER_BYTES,
+                &["zendesk", "slack"],
+            );
+            store.widen_the_window();
+
+            let half = "h".repeat(RACER_BYTES / 2);
+            let racers = vec![
+                tokio::spawn({
+                    let app = app.clone();
+                    let whole = "w".repeat(RACER_BYTES);
+                    async move {
+                        call(
+                            &app,
+                            "alice",
+                            Method::POST,
+                            "/api/connections/zendesk",
+                            Some(json!({ "credentials": { "zendesk.api_token": whole } })),
+                        )
+                        .await
+                        .0
+                    }
+                }),
+                tokio::spawn({
+                    let app = app.clone();
+                    async move {
+                        call(
+                            &app,
+                            "alice",
+                            Method::POST,
+                            "/api/connections/slack",
+                            Some(json!({
+                                "credentials": {
+                                    "slack.bot_token": half,
+                                    "slack.signing_secret": half,
+                                }
+                            })),
+                        )
+                        .await
+                        .0
+                    }
+                }),
+            ];
+
+            let mut outcomes = Vec::new();
+            for racer in racers {
+                outcomes.push(racer.await.expect("neither task panics"));
+            }
+
+            // The thing the bound exists to protect: this tenant's share of the one file every
+            // other tenant's write has to rewrite.
+            let occupied = store.bytes_under("tenants/acme/");
+            assert!(
+                occupied <= MAX_TENANT_STORE_BYTES,
+                "attempt {attempt}: one tenant occupies {occupied} bytes, past the \
+                 {MAX_TENANT_STORE_BYTES} it may hold, having sent two creates that were each \
+                 admissible on their own: {outcomes:?}",
+            );
+
+            // And the other half of "bounded": exactly one of them was admitted. Refusing both
+            // would hold the bound by refusing work that fits, which is not the same property.
+            let created = outcomes
+                .iter()
+                .filter(|status| **status == StatusCode::CREATED)
+                .count();
+            assert_eq!(
+                created, 1,
+                "attempt {attempt}: one of two creates that cannot both fit must still land: \
+                 {outcomes:?}",
+            );
+        }
+
+        // Two tenants, the same moment, and neither waits on the other.
+        for attempt in 0..ATTEMPTS {
+            let (app, store) = connected_app();
+            store.widen_the_window();
+
+            let mut racers = Vec::new();
+            for handle in ["alice", "bob"] {
+                let app = app.clone();
+                racers.push(tokio::spawn(async move {
+                    (handle, connect_zendesk(&app, handle).await.0)
+                }));
+            }
+
+            let mut outcomes = Vec::new();
+            for racer in racers {
+                outcomes.push(racer.await.expect("neither task panics"));
+            }
+
+            for (handle, status) in &outcomes {
+                assert_eq!(
+                    *status,
+                    StatusCode::CREATED,
+                    "attempt {attempt}: {handle} was made to wait on another tenant's create, \
+                     which is the shared fate the claim is scoped per tenant to avoid: \
+                     {outcomes:?}",
+                );
+            }
+            assert_eq!(
+                store.addresses(),
+                vec![
+                    "tenants/acme/com.zendesk.api/api_token".to_string(),
+                    "tenants/globex/com.zendesk.api/api_token".to_string(),
+                ],
+                "attempt {attempt}: both tenants' values must be in the store",
             );
         }
     }

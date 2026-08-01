@@ -333,3 +333,50 @@ answer and refusal this module can produce, and does not drive `partly_written`'
 disclosure properties are asserted directly by X-18's and X-20's own tests instead. Closing the gap
 means rearranging that test's arming order around an already-half-destroyed connection; it is
 recorded here rather than left as a false claim in the test's doc.
+
+## Addendum, 2026-08-01 — the allowance is decided at a wider claim (X-25)
+
+The claim decision above is unchanged in its own terms, and its test
+(`claims_do_not_reach_across_tenants_or_connectors`) is still green. What X-22 then added underneath
+it was a *second* read-decide-write of a different width, and the claim above is too narrow for it.
+
+`MAX_TENANT_STORE_BYTES` is read as a sum over **every** connector a tenant could hold. A claim on
+`(tenant, connector)` therefore leaves that read true only until another of the same tenant's
+connectors is written — so one tenant issuing concurrent `POST`s to *different* connectors had each
+of them read an occupancy the others had not written yet, all were admitted, and the tenant ended up
+past the allowance. The overshoot was bounded rather than unbounded, because every value still
+passed the per-value bound, but "bounded by the thing the per-tenant bound exists to improve on" is
+not the property that was claimed.
+
+**Decision: `create` additionally holds a claim on the tenant, `ConnectionGuard::claim_tenant`,
+across the allowance decision and the writes that make it stale.**
+
+- **Two claims of two widths, not one wider claim.** The per-connection claim keeps its meaning —
+  it is what makes a `POST` and a `DELETE` to one connection exclude each other — and the wider one
+  is taken only where the allowance is actually decided. Widening the existing key instead would
+  have made every connection change tenant-wide, including `DELETE`.
+- **`DELETE` stays outside it.** Destroying credentials only *frees* allowance, so it cannot cause
+  an overshoot, and the case a `DELETE` exists for is revoking a leaked secret — an operator doing
+  that must never be made to wait on an unrelated create.
+- **It stops at the tenant.** Two tenants still never contend; that was the property the original
+  granularity existed to protect, and a global lock would have been shared fate between tenants in
+  the repository whose entire point is that they share nothing. The second half of
+  `one_tenants_concurrent_creates_cannot_overshoot_its_allowance` asserts it in the same run as the
+  bound.
+- **Neither claim ever waits**, so a request holding both cannot deadlock against one holding them
+  in the other order — there is no order to get wrong.
+- **A refusal of its own, `allowance_change_in_flight`.** `change_in_flight` names the connection as
+  the thing in flight, which would be a false statement here: nothing is wrong with the connector
+  the caller asked for, and another of their own connections is being changed.
+
+**What it costs.** Only concurrent creates by one tenant contend; sequential ones never do, because
+the claim is released before the response is written. What a sequential create pays is one hash-set
+insert and one removal — measured at ~80 ns for a take-and-release, against a create that costs
+~300 µs, dominated by the per-address walk `occupied` already made. End to end, eight sequential
+creates measured 2.33 ms before and 2.39 ms after, which is inside the run-to-run spread on the
+machine that measured it. The trade is therefore paid entirely by a client that fires several
+creates for one tenant in parallel: it now gets a `409` it can retry, where before it got a `201`
+and an allowance that did not hold.
+
+**Still single-process, and no more than before.** Both claims are in-process, and two replicas over
+one store race exactly as the section above already records. Nothing here narrows that.
