@@ -16,6 +16,8 @@
 @import './shell.css';
 /* The onboarding page's, kept apart for the same reason. See `onboarding.css`. */
 @import './onboarding.css';
+/* The mint screen's, kept apart for the same reason. See `agents.css`. */
+@import './agents.css';
 
 *,
 *::before,

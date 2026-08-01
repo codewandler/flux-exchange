@@ -1,0 +1,324 @@
+/*
+ * The mint screen: the one page in this console that renders a credential value.
+ *
+ * These rules belong to `src/Agents.mts`, which is a render function rather than a single-file
+ * component — so it carries no `<style scoped>` and its rules live here, the arrangement
+ * `shell.css` describes and `onboarding.css` follows.
+ *
+ * IT IS ITS OWN FILE for the reason those two are: **every colour here goes through a token from
+ * `tokens.css`**, and `the_mint_screen_names_no_colour_of_its_own` in `test/agents.test.mjs` scans
+ * this file to hold that. No hex, no rgb(), no named colours. Light and dark come for free.
+ *
+ * THE ONE VISUAL DECISION WORTH ARGUING. The token is set large, monospaced and selectable, on a
+ * panel that is the loudest thing on the page — and the panel does not scroll away or collapse.
+ * That is not decoration. This host cannot show the token again, so the failure mode this layout
+ * exists to prevent is an operator scrolling past it, or reading the copy button as confirmation
+ * and leaving. `word-break: break-all` is part of the same argument: a 64-character token that
+ * overflowed its box would be a token an operator selected two-thirds of.
+ */
+
+.agents {
+  max-width: 76ch;
+  margin: 40px 0 0;
+}
+
+.agents h1 {
+  margin-bottom: 8px;
+}
+
+.agents__lead {
+  font-size: 15px;
+  line-height: 26px;
+  color: var(--vp-c-text-2);
+}
+
+/* ------------------------------------------------------------------------------------------- */
+/* The gate: the form, or the reason there is not one.                                          */
+/* ------------------------------------------------------------------------------------------- */
+
+.agents__gate {
+  margin: 24px 0 0;
+  padding: 20px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+}
+
+.agents__gate h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.agents__note {
+  margin: 0;
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--vp-c-text-2);
+}
+
+.agents__form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.agents__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.agents__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+}
+
+.agents__input {
+  padding: 8px 10px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+}
+
+.agents__hint {
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--vp-c-text-3);
+}
+
+.agents__expiry {
+  margin: 0;
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+}
+
+.agents__submit {
+  align-self: flex-start;
+  padding: 8px 16px;
+  border: 1px solid var(--vp-c-brand-1);
+  border-radius: 6px;
+  background: var(--vp-c-brand-1);
+  color: var(--vp-c-bg);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.agents__submit:disabled {
+  border-color: var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-3);
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------------------------------- */
+/* The disclosure. Loud, once.                                                                  */
+/* ------------------------------------------------------------------------------------------- */
+
+.agents__minted {
+  margin: 24px 0 0;
+  padding: 20px;
+  /* A heavier edge than anything else on the page: this is the only thing here that is lost by
+     being scrolled past. */
+  border: 2px solid var(--vp-c-brand-1);
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+}
+
+.agents__minted-title {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.agents__once {
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--vp-c-text-1);
+}
+
+.agents__token-line {
+  margin: 0 0 12px;
+}
+
+.agents__token {
+  display: block;
+  padding: 12px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-family: var(--vp-font-family-mono);
+  font-size: 14px;
+  line-height: 22px;
+  /* Selectable in one gesture, and never clipped: a token an operator copied two-thirds of is a
+     token they will discover is wrong after this page is gone. */
+  word-break: break-all;
+  user-select: all;
+}
+
+.agents__copy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.agents__copy-button {
+  padding: 6px 14px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.agents__copy-ok {
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+}
+
+/*
+ * A copy that did not happen. Full width and on its own line rather than a note beside the button,
+ * because the operator this is for has already looked away from it.
+ */
+.agents__copy-failed {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--vp-c-danger-1);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-1);
+}
+
+.agents__copy-why {
+  color: var(--vp-c-text-2);
+}
+
+.agents__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0 0 16px;
+  font-size: 13px;
+}
+
+.agents__facts dt {
+  color: var(--vp-c-text-3);
+}
+
+.agents__facts dd {
+  margin: 0;
+  color: var(--vp-c-text-1);
+}
+
+.agents__revocation {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-2);
+}
+
+.agents__discard {
+  padding: 6px 14px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------------------------------------- */
+/* What the token can and cannot do. Derived; see `minting.mts`.                                 */
+/* ------------------------------------------------------------------------------------------- */
+
+.agents__standing {
+  margin: 40px 0 0;
+  padding-top: 24px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.agents__standing h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.agents__derived {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-3);
+}
+
+.agents__standing-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/*
+ * A step this build cannot do is dimmed and tagged, never hidden — the same decision
+ * `onboarding.css` argues, and for the same reason: the reason it cannot be done is the most useful
+ * sentence on the page for anyone deciding whether to point an agent here. The dimming is carried
+ * by the rule down the left edge rather than by the text colour.
+ */
+.agents__standing-entry {
+  margin: 0 0 16px;
+  padding-left: 16px;
+  border-left: 2px solid var(--vp-c-brand-1);
+}
+
+.agents__standing-entry--pending {
+  border-left-color: var(--vp-c-divider);
+}
+
+.agents__standing-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.agents__tag {
+  padding: 1px 6px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--vp-c-text-3);
+}
+
+.agents__standing-summary {
+  margin: 0;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-2);
+}
+
+.agents__standing-reason {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-2);
+}
+
+.agents__authorisation {
+  margin: 24px 0 0;
+  padding: 16px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-2);
+}

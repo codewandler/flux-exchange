@@ -43,10 +43,12 @@ import {
   type SessionState,
 } from './service.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
+import { AGENTS_PATH } from './minting.mts'
 import { surfaceOfRoute } from './surfaces.mts'
 import { isDark, toggleTheme } from './theme'
 
 import AgentOnboarding from './AgentOnboarding.mts'
+import Agents from './Agents.mts'
 import CatalogueFailure from './CatalogueFailure.mts'
 import Connect from './Connect.mts'
 import Connections from './Connections.mts'
@@ -191,6 +193,22 @@ const active = computed(() => surfaceOfRoute(route.value.name))
       </template>
 
       <!--
+        Where an operator mints one, and the one screen in this console that renders a credential
+        value.
+
+        It is passed the session and nothing else, and it reads `/api/agents` for itself rather than
+        being handed a result — deliberately, and against this file's usual arrangement. This
+        component is the root, so it outlives every screen; anything it were handed would still be
+        in memory after the reader had navigated away, and what the mint answers with is the one
+        value on this host that cannot be shown a second time. Holding it here would make that a
+        claim about `App.vue` instead of a property of the view. `Agents.mts` sets out the whole of
+        it.
+      -->
+      <template v-else-if="route.name === 'agents'">
+        <Agents :session="session" />
+      </template>
+
+      <!--
         Connections — the first of the console's two jobs, and where a reader lands.
 
         Behind a principal, because a connection is tenant data. The gate is not an empty state: it
@@ -285,12 +303,15 @@ const active = computed(() => surfaceOfRoute(route.value.name))
 
     <!--
       The footer, and not the rail. Connecting an agent is a reference an agent author reaches for
-      once; the rail is where an operator works, and an entry there would imply it is a place to do
-      work. It is first in the line because it is the only one of the three that is a destination.
+      once, and minting one is something an operator does with the identity they already have; the
+      rail states what this platform *is*, and an entry there would claim a seventh surface. The two
+      destinations come first, and in that order: the reference explains what an agent is for, and
+      the screen beside it is where one is created.
     -->
     <footer class="console__foot">
       <p>
-        <a :href="fragmentPath(ONBOARDING_PATH)">Connect an agent</a> · Catalogue read from
+        <a :href="fragmentPath(ONBOARDING_PATH)">Connect an agent</a> ·
+        <a :href="fragmentPath(AGENTS_PATH)">Mint an agent</a> · Catalogue read from
         <code>{{ CONNECTORS_ENDPOINT }}</code> ·
         <a href="https://github.com/codewandler/flux-exchange">codewandler/flux-exchange</a>
       </p>
