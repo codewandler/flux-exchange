@@ -1,8 +1,7 @@
 ---
 id: X-69
 title: "The public site shows how to run this and sign in, in five minutes"
-status: in-progress
-priority: 1
+status: done
 epic: public-docs-site
 design: docs/designs/public-docs-site.md
 areas: [web]

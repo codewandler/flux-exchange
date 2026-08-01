@@ -6,6 +6,32 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **The site shows how to run this and sign in** (X-69). A visitor could read what this service
+  refuses to do and could not learn how to start it. Now there is a page, on the nav of every page and
+  in the landing hero, and **it was verified by following it** — a clean clone, `cargo run`, the
+  roster, the session cookie, and the console leg driven through headless Chrome rather than
+  simulated. Doing that changed the page twice, which is the argument for doing it.
+
+  The loopback constraint is **inside the block a reader would copy**, asserted by a test over every
+  block containing `cargo run` — a roster handle is a credential with no secret in it, and a page that
+  mentions loopback three screens below the command is a page that puts a secret-free roster on a
+  public address. It also carries the invoke prerequisite in order (`503` → `403 not_granted` →
+  the credential refusal), so nobody follows it to "you are signed in" and then falls off a cliff.
+
+### Fixed
+
+- ⚠ **The site's credential-shape scanner could not see inside a code block** (X-69). `textOf`
+  replaced each tag with a space and the syntax highlighter puts every token in its own element, so
+  `export FOO=bar` reached the rule as `export FOO = bar` and the check against a value on the
+  right-hand side of an `=` never fired. Demonstrated with a throwaway page before anything was
+  written: `export OTHER_PROBE=realvalue` passed the suite.
+
+  It had never been asked, either — **this site carried no fenced code block on any page until now**,
+  so a rule about what an example may contain had never met an example. The scanner now reconstructs
+  each block verbatim and both scanning tests read prose *and* blocks.
+
 ## [0.11.0] - 2026-08-01
 
 ### Changed

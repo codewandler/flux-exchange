@@ -33,6 +33,7 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 - [X-49 — The branches X-46 opened are pinned](X-49-pin-the-branches-x46-opened.md) · found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes
 
 ## Next (ready — take the top one unless the user named a story)
+- [X-71 — The console's dev server follows the address the service was told to bind](X-71-the-console-proxy-follows-the-bind.md) · found by X-69 while walking its own page, 2026-08-01: console/vite.config.ts hard-codes the default bind, so a reader who sets FLUX_EXCHANGE_BIND gets a console that cannot reach the service
 
 ### the primary caller can authenticate
 _Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
@@ -57,7 +58,6 @@ _**You cannot use this console without standing up an OIDC provider.** That is t
 ### a public documentation site
 _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
 - [X-64 — Every page's \"is this built\" is derived, not written](X-64-status-is-derived-not-written.md) · the mechanism that makes a large speculative site safe — status badges read the same descriptor artifact whose live flags are held to the route table by X-42/X-52's tests
-- [X-69 — The public site shows how to run this and sign in, in five minutes](X-69-run-it-yourself.md) · X-57 made signing in without an identity provider actually work on loopback; nothing public says so. This is the page that turns a charter into something a stranger can run
 - [X-65 — The whole intended surface is on the page, including what is not built](X-65-the-whole-surface-is-on-the-page.md) · channels, subscribe, leases, workflows — the brief's \"scaffold the whole future surface\", safe to write only once X-64 makes status derived
 - [X-66 — The credential-boundary argument is readable by someone who has never seen this repository](X-66-the-boundary-argument-in-public.md) · the page that justifies the platform existing: the credential never crosses the boundary, the authority does — written for an evaluator rather than for a contributor
 
@@ -121,6 +121,7 @@ _None._
 - [X-62 — An operator can grant something without editing a file by hand](X-62-an-operator-can-grant.md) · X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable
 - [X-63 — A site exists, builds, and publishes](X-63-a-site-that-publishes.md) · the scaffold and the pipeline, matched to flux-connectors/web: VitePress in web/, pages.yml with SHA-pinned actions, building on PRs as a gate and deploying only from main
 - [X-67 — Move to the 0.47 engine line and the 0.10 connector catalogue](X-67-move-to-the-047-engine-line.md) · the blocker is gone: connector-pack 0.10.0 requires flux-runtime ^0.47 and flux-connectors v0.10.0 is released. This is not a version bump — the catalogue gained a 54th provider and a new way of saying why an operation names no credential, and several tests are designed to go red on exactly that
+- [X-69 — The public site shows how to run this and sign in, in five minutes](X-69-run-it-yourself.md) · X-57 made signing in without an identity provider actually work on loopback; nothing public says so. This is the page that turns a charter into something a stranger can run
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
