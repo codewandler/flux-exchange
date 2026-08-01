@@ -36,6 +36,7 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 - [X-63 — A site exists, builds, and publishes](X-63-a-site-that-publishes.md) · the scaffold and the pipeline, matched to flux-connectors/web: VitePress in web/, pages.yml with SHA-pinned actions, building on PRs as a gate and deploying only from main
 
 ## Next (ready — take the top one unless the user named a story)
+- [X-67 — Move to the 0.47 engine line and the 0.10 connector catalogue](X-67-move-to-the-047-engine-line.md) · the blocker is gone: connector-pack 0.10.0 requires flux-runtime ^0.47 and flux-connectors v0.10.0 is released. This is not a version bump — the catalogue gained a 54th provider and a new way of saying why an operation names no credential, and several tests are designed to go red on exactly that
 
 ### the primary caller can authenticate
 _Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
