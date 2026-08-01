@@ -109,8 +109,11 @@ impl Oidc {
     /// The order matters. The `state` lookup comes first and consumes the pending request, so a
     /// callback this host did not open costs one map lookup and reaches neither the provider nor
     /// the session store.
-    pub async fn complete(&self, _state: &str, code: &str) -> Result<SessionToken, SignInRefusal> {
-        let pending = self.pending.consume().ok_or(SignInRefusal::UnknownState)?;
+    pub async fn complete(&self, state: &str, code: &str) -> Result<SessionToken, SignInRefusal> {
+        let pending = self
+            .pending
+            .take(state)
+            .ok_or(SignInRefusal::UnknownState)?;
 
         let claims = self
             .exchange
@@ -347,5 +350,260 @@ impl std::error::Error for SignInRefusal {
             Self::NoSession(source) => Some(source),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use exchange_host::async_trait;
+
+    use config::OidcConfig;
+    use exchange::Redemption;
+
+    const ISSUER: &str = "https://accounts.example.com";
+    const CLIENT_ID: &str = "flux-exchange";
+    const TENANT: &str = "acme";
+    const NONCE: &str = "the-nonce-this-host-bound";
+
+    /// An exchange that is never called: [`Oidc::admit`] is a pure function of claims, and these
+    /// tests reach it directly.
+    struct Unused;
+
+    #[async_trait]
+    impl TokenExchange for Unused {
+        async fn redeem(&self, _: Redemption<'_>) -> Result<SignedClaims, ExchangeError> {
+            unreachable!("admit() does not redeem")
+        }
+    }
+
+    fn oidc() -> Oidc {
+        Oidc::new(
+            OidcConfig::for_test(ISSUER, CLIENT_ID, TENANT),
+            Arc::new(Unused),
+        )
+    }
+
+    /// Claims a well-behaved provider returns for a sign-in bound to [`NONCE`].
+    fn good() -> SignedClaims {
+        SignedClaims {
+            issuer: ISSUER.to_string(),
+            audience: vec![CLIENT_ID.to_string()],
+            subject: "248289761001".to_string(),
+            nonce: Some(NONCE.to_string()),
+            expires_at: 2_000_000_000,
+            email: Some("alice@example.com".to_string()),
+        }
+    }
+
+    /// The baseline. Without it, every refusal below could be passing because `admit` refuses
+    /// everything.
+    #[test]
+    fn a_well_formed_id_token_yields_a_principal() {
+        let principal = oidc()
+            .admit(&good(), NONCE, 1_000_000_000)
+            .expect("well-formed claims are admitted");
+
+        assert_eq!(principal.kind(), PrincipalKind::User);
+        assert_eq!(principal.id(), "248289761001", "the `sub` claim");
+        assert_eq!(principal.tenant().as_str(), TENANT);
+    }
+
+    /// Every binding check, one at a time, each with the reason it exists.
+    ///
+    /// Stated as a table because these are the assertions that decide whether a stranger can sign
+    /// in as somebody else, and a single test that mutates one field at a time would hide which of
+    /// them had stopped working.
+    #[test]
+    fn every_binding_check_refuses_on_its_own() {
+        /// What was wrong, the claims that were wrong, and the refusal that must come back.
+        type Case = (&'static str, SignedClaims, fn(&SignInRefusal) -> bool);
+
+        let cases: Vec<Case> = vec![
+            (
+                // A token from another provider this exchange happens to trust is still not one
+                // this host asked for.
+                "another issuer",
+                SignedClaims {
+                    issuer: "https://accounts.attacker.example".to_string(),
+                    ..good()
+                },
+                |refusal| matches!(refusal, SignInRefusal::IssuerMismatch),
+            ),
+            (
+                // A token audienced to a different client is one that client can replay here.
+                "another audience",
+                SignedClaims {
+                    audience: vec!["some-other-client".to_string()],
+                    ..good()
+                },
+                |refusal| matches!(refusal, SignInRefusal::AudienceMismatch),
+            ),
+            (
+                "no audience at all",
+                SignedClaims {
+                    audience: Vec::new(),
+                    ..good()
+                },
+                |refusal| matches!(refusal, SignInRefusal::AudienceMismatch),
+            ),
+            (
+                "an expired token",
+                SignedClaims {
+                    expires_at: 999_999_999,
+                    ..good()
+                },
+                |refusal| matches!(refusal, SignInRefusal::Expired),
+            ),
+            (
+                // The replay a nonce exists to stop.
+                "another nonce",
+                SignedClaims {
+                    nonce: Some("a-nonce-from-somewhere-else".to_string()),
+                    ..good()
+                },
+                |refusal| matches!(refusal, SignInRefusal::NonceMismatch),
+            ),
+            (
+                // The one that matters most: a *missing* nonce must refuse, not be waved through.
+                // That is the difference between checking a nonce and appearing to.
+                "no nonce at all",
+                SignedClaims {
+                    nonce: None,
+                    ..good()
+                },
+                |refusal| matches!(refusal, SignInRefusal::NonceMismatch),
+            ),
+            (
+                "no subject",
+                SignedClaims {
+                    subject: String::new(),
+                    ..good()
+                },
+                |refusal| matches!(refusal, SignInRefusal::NoSubject),
+            ),
+        ];
+
+        let oidc = oidc();
+
+        for (what, claims, expected) in cases {
+            let refusal = oidc
+                .admit(&claims, NONCE, 1_000_000_000)
+                .err()
+                .unwrap_or_else(|| panic!("{what} must be refused"));
+
+            assert!(expected(&refusal), "{what} was refused as {refusal:?}");
+        }
+    }
+
+    /// A token audienced to several clients, one of which is us, is ours. This is the shape a
+    /// provider produces when a client has additional resource audiences, and refusing it would
+    /// break a legitimate deployment.
+    #[test]
+    fn an_audience_list_containing_this_client_is_accepted() {
+        let claims = SignedClaims {
+            audience: vec!["another-client".to_string(), CLIENT_ID.to_string()],
+            ..good()
+        };
+
+        assert!(oidc().admit(&claims, NONCE, 1_000_000_000).is_ok());
+    }
+
+    /// Nothing in an id token names a tenant, and nothing could: the tenant is read from the
+    /// configuration. Stated here because `SignedClaims` is the only thing crossing the seam, and a
+    /// later field added to it must not become a second source.
+    #[test]
+    fn no_claim_reaches_the_tenant() {
+        let oidc = oidc();
+
+        // Every free-text claim set to a tenant that exists and is not ours.
+        let hostile = SignedClaims {
+            subject: "globex".to_string(),
+            email: Some("someone@globex".to_string()),
+            ..good()
+        };
+
+        let principal = oidc
+            .admit(&hostile, NONCE, 1_000_000_000)
+            .expect("the claims are otherwise well formed");
+
+        assert_eq!(
+            principal.tenant().as_str(),
+            TENANT,
+            "the tenant comes from the configuration, never from a claim",
+        );
+    }
+
+    /// A caller-facing refusal never carries a value, and never carries what the provider said.
+    /// The operator's version may; that is what the log is for.
+    #[test]
+    fn a_caller_facing_refusal_carries_no_detail() {
+        let leaky = SignInRefusal::ProviderUnreachable(
+            "dial tcp 10.0.0.7:443: connection refused".to_string(),
+        );
+
+        assert!(!leaky.caller_facing().contains("10.0.0.7"));
+        assert!(!leaky.caller_facing().contains("connection refused"));
+
+        // The operator's version keeps it, or an outage would be undiagnosable.
+        assert!(leaky.to_string().contains("10.0.0.7"));
+    }
+
+    /// This port never contacts the provider, so it can never be `Unreachable` on the request path
+    /// — which is why there is no provider address for the guard's `503` to leak here.
+    #[tokio::test]
+    async fn resolving_a_session_never_reaches_the_provider() {
+        let oidc = oidc();
+
+        assert!(matches!(oidc.resolve("").await, Ok(None)), "anonymous");
+        assert!(
+            matches!(
+                oidc.resolve("not-a-session").await,
+                Err(IdentityError::Rejected)
+            ),
+            "an unrecognised credential is rejected, never reported as an outage",
+        );
+    }
+
+    /// The authorization URL is a URL: the query is appended with `?` or `&` depending on what the
+    /// configured endpoint already carries. A provider whose endpoint has a query of its own is
+    /// common enough that getting this wrong is a sign-in that fails at the provider.
+    #[test]
+    fn the_authorization_url_appends_to_an_endpoint_that_already_has_a_query() {
+        let plain = oidc().authorization_url().expect("the OS has randomness");
+        assert!(plain.contains("/authorize?response_type=code"), "{plain}");
+
+        let with_query = Oidc::new(
+            OidcConfig::for_test_with_endpoint(
+                ISSUER,
+                CLIENT_ID,
+                TENANT,
+                &format!("{ISSUER}/authorize?realm=staff"),
+            ),
+            Arc::new(Unused),
+        )
+        .authorization_url()
+        .expect("the OS has randomness");
+
+        assert!(
+            with_query.contains("?realm=staff&response_type=code"),
+            "{with_query}",
+        );
+    }
+
+    /// Values that go into the URL are percent-encoded, so a client id or redirect URI containing
+    /// a reserved character does not silently truncate the query at the provider.
+    #[test]
+    fn configured_values_are_percent_encoded_into_the_url() {
+        assert_eq!(urlencoded("flux-exchange"), "flux-exchange");
+        assert_eq!(
+            urlencoded("openid email profile"),
+            "openid%20email%20profile"
+        );
+        assert_eq!(
+            urlencoded("https://a.example/cb?x=1&y=2"),
+            "https%3A%2F%2Fa.example%2Fcb%3Fx%3D1%26y%3D2",
+        );
     }
 }

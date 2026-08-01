@@ -51,8 +51,10 @@ impl PendingAuthorizations {
 
     /// Open an authorization request: draw `state`, `nonce` and a PKCE verifier, and remember them.
     pub fn begin(&self) -> Result<Begun, FlowError> {
-        let state = entropy::hex::<OPAQUE_BYTES>().map_err(|source| FlowError::NoEntropy { source })?;
-        let nonce = entropy::hex::<OPAQUE_BYTES>().map_err(|source| FlowError::NoEntropy { source })?;
+        let state =
+            entropy::hex::<OPAQUE_BYTES>().map_err(|source| FlowError::NoEntropy { source })?;
+        let nonce =
+            entropy::hex::<OPAQUE_BYTES>().map_err(|source| FlowError::NoEntropy { source })?;
         let verifier = Verifier::generate().map_err(|source| FlowError::NoEntropy { source })?;
         let challenge = verifier.challenge();
 
@@ -79,16 +81,34 @@ impl PendingAuthorizations {
         })
     }
 
-    /// Take the authorization request this callback is finishing.
+    /// Take the authorization request `state` was bound to, if this host opened one and it has
+    /// neither been spent nor aged out.
     ///
-    /// This host finishes one sign-in at a time, so the callback consumes whichever request is
-    /// open. The `state` the provider echoed is carried through the flow but not consulted.
-    pub fn consume(&self) -> Option<Pending> {
+    /// **Single use.** The entry is removed, so a `state` works exactly once: a replay of a
+    /// callback that already succeeded finds nothing and is refused, which is the same answer a
+    /// forged one gets. That matters because the two are indistinguishable from the outside — an
+    /// attacker replaying a callback it observed is not doing anything a stuck browser cannot do by
+    /// accident, and neither should get a second session.
+    ///
+    /// The lookup is by the presented `state` and by nothing else. An implementation that consumed
+    /// *whichever* request happened to be open would let a callback this host never issued finish a
+    /// sign-in somebody else started, which is the forgery `state` exists to stop; the first commit
+    /// of this story is exactly that mistake, and
+    /// `routes::signin::tests::a_callback_whose_state_was_not_bound_at_signin_issues_no_session`
+    /// is what caught it.
+    ///
+    /// A hash lookup, not a constant-time comparison, on the same reasoning
+    /// [`SessionStore::resolve`](crate::session::SessionStore::resolve) records: a state is 256
+    /// bits from the OS, so there is no prefix to walk and no shorter guess to confirm.
+    pub fn take(&self, state: &str) -> Option<Pending> {
         let mut live = self.live();
+
+        // Sweep first, so an expired state is a miss rather than a hit. An authorization request
+        // that has been open for ten minutes is one the human abandoned, and finishing it would
+        // accept a code that has been sitting in a URL somewhere all that time.
         live.retain(|_, pending| pending.opened.elapsed() < PENDING_TTL);
 
-        let any = live.keys().next().cloned()?;
-        live.remove(&any)
+        live.remove(state)
     }
 
     /// How many requests are open. For the tests below.
@@ -174,7 +194,11 @@ mod tests {
         }
 
         assert_eq!(states.len(), 64, "a repeated state is a forgeable callback");
-        assert_eq!(nonces.len(), 64, "a repeated nonce is a replayable id token");
+        assert_eq!(
+            nonces.len(),
+            64,
+            "a repeated nonce is a replayable id token"
+        );
         assert!(
             states.is_disjoint(&nonces),
             "state and nonce must be drawn independently",
@@ -183,5 +207,105 @@ mod tests {
         for value in states.iter().chain(&nonces) {
             assert_eq!(value.len(), OPAQUE_BYTES * 2, "256 bits, hex encoded");
         }
+    }
+
+    /// A state is spendable exactly once, and only by the request it was bound to.
+    ///
+    /// The three cases together are the whole of what `take` promises: the right state works, a
+    /// state this host never issued does not, and the right state does not work twice.
+    #[test]
+    fn a_state_is_taken_once_and_only_by_itself() {
+        let pending = PendingAuthorizations::new();
+
+        let one = pending.begin().expect("the OS has randomness");
+        let two = pending.begin().expect("the OS has randomness");
+        assert_eq!(pending.open(), 2);
+
+        assert!(
+            pending.take("a-state-this-host-never-issued").is_none(),
+            "a forged state must not take anybody's authorization request",
+        );
+        assert_eq!(
+            pending.open(),
+            2,
+            "and must not consume one on its way to being refused — that would be a denial of \
+             service against whoever started the real sign-in",
+        );
+
+        let taken = pending.take(&one.state).expect("the bound state is taken");
+        assert_eq!(taken.nonce, one.nonce, "with its own nonce");
+
+        assert!(
+            pending.take(&one.state).is_none(),
+            "a state must not be spendable twice",
+        );
+        assert!(
+            pending.take(&two.state).is_some(),
+            "and taking one must not disturb another",
+        );
+    }
+
+    /// The verifier travels with the authorization request it was bound to, so the code redeemed
+    /// at the callback is proved against the challenge sent at sign-in and not against another's.
+    #[test]
+    fn each_request_keeps_its_own_verifier() {
+        let pending = PendingAuthorizations::new();
+
+        let one = pending.begin().expect("the OS has randomness");
+        let two = pending.begin().expect("the OS has randomness");
+
+        let first = pending.take(&one.state).expect("the bound state is taken");
+        let second = pending.take(&two.state).expect("the bound state is taken");
+
+        assert_ne!(first.verifier, second.verifier);
+        assert_eq!(
+            first.verifier.challenge(),
+            one.challenge,
+            "the challenge sent at sign-in must be the one this verifier answers",
+        );
+        assert_eq!(second.verifier.challenge(), two.challenge);
+    }
+
+    /// The store is bounded, because `/api/signin` is anonymous and nothing else would stop it
+    /// growing. Unlike the session store this one *expires*, so the bound is reached only by
+    /// something opening requests far faster than a human could.
+    #[test]
+    fn the_store_is_bounded_and_refuses_at_the_bound() {
+        let pending = PendingAuthorizations::new();
+
+        for _ in 0..MAX_PENDING {
+            pending.begin().expect("the store is not yet full");
+        }
+
+        assert!(
+            matches!(pending.begin(), Err(FlowError::TooManyPending { .. })),
+            "a full store must refuse",
+        );
+    }
+
+    /// An abandoned authorization request ages out, so an authorization code that has been sitting
+    /// in a URL for hours cannot still be spent.
+    #[test]
+    fn an_expired_request_is_no_longer_takeable() {
+        let pending = PendingAuthorizations::new();
+        let begun = pending.begin().expect("the OS has randomness");
+
+        // Age it, rather than sleeping for ten minutes.
+        {
+            let mut live = pending.live();
+            let entry = live.get_mut(&begun.state).expect("the request is open");
+
+            let Some(aged) = entry.opened.checked_sub(PENDING_TTL) else {
+                // A machine up for less than the TTL cannot represent an instant that old. Nothing
+                // to assert rather than something wrong to assert.
+                return;
+            };
+            entry.opened = aged;
+        }
+
+        assert!(
+            pending.take(&begun.state).is_none(),
+            "an expired state must not complete a sign-in",
+        );
     }
 }

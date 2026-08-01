@@ -88,6 +88,11 @@ pub struct ClientSecret(String);
 
 impl ClientSecret {
     /// The secret as it goes to the token endpoint.
+    ///
+    /// The single place the value leaves this type, and the only caller is a `TokenExchange` —
+    /// which this binary does not bind, hence the `allow`. Keeping the disclosure to one named
+    /// method is the point: `expose` is greppable, and a reviewer can enumerate every use of it.
+    #[allow(dead_code)]
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -164,7 +169,8 @@ impl OidcConfig {
         // `Tenant::new` is the authority on what a tenant may be spelled; do not re-validate here.
         // Refused at startup rather than at sign-in, so a tenant that could walk out of its own
         // credential prefix is impossible to hold rather than merely impossible to use.
-        let tenant = Tenant::new(tenant).map_err(|source| ConfigRefusal::UnusableTenant { source })?;
+        let tenant =
+            Tenant::new(tenant).map_err(|source| ConfigRefusal::UnusableTenant { source })?;
 
         Ok(Self {
             issuer,
@@ -182,9 +188,20 @@ impl OidcConfig {
     /// there, the environment is the only source a secret has.
     #[cfg(test)]
     pub fn for_test(issuer: &str, client_id: &str, tenant: &str) -> Self {
+        Self::for_test_with_endpoint(issuer, client_id, tenant, &format!("{issuer}/authorize"))
+    }
+
+    /// As [`OidcConfig::for_test`], with the authorization endpoint spelled out.
+    #[cfg(test)]
+    pub fn for_test_with_endpoint(
+        issuer: &str,
+        client_id: &str,
+        tenant: &str,
+        authorization_endpoint: &str,
+    ) -> Self {
         Self {
             issuer: issuer.to_string(),
-            authorization_endpoint: format!("{issuer}/authorize"),
+            authorization_endpoint: authorization_endpoint.to_string(),
             client_id: client_id.to_string(),
             client_secret: ClientSecret("a-test-secret".to_string()),
             redirect_uri: "https://exchange.example.com/api/signin/callback".to_string(),

@@ -54,6 +54,10 @@ impl Verifier {
     }
 
     /// The verifier as it goes to the token endpoint. Every call site is a deliberate disclosure.
+    ///
+    /// Reached only through [`Redemption`](super::exchange::Redemption), by a `TokenExchange` this
+    /// binary does not bind — hence the `allow`, which goes when a composition supplies one.
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -90,8 +94,7 @@ impl Challenge {
 /// workspace carries no base64 crate, and this direction of the transform is a 20-line table
 /// lookup with published vectors rather than a grammar with edge cases.
 fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
 
@@ -185,8 +188,10 @@ mod tests {
         for verifier in &drawn {
             assert_eq!(verifier.len(), 43, "32 bytes, base64url, unpadded");
             assert!(
-                verifier.chars().all(|character| character.is_ascii_alphanumeric()
-                    || matches!(character, '-' | '.' | '_' | '~')),
+                verifier
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric()
+                        || matches!(character, '-' | '.' | '_' | '~')),
                 "a code verifier is unreserved characters only: {verifier}",
             );
         }

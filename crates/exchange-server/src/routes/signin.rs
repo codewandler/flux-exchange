@@ -101,14 +101,12 @@ async fn signin(State(state): State<AppState>) -> Response {
     match oidc.authorization_url() {
         Ok(url) => (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response(),
         Err(error) => {
-            // Names this host's own machinery, so it goes to the log rather than to the caller.
-            error!(%error, "cannot open an authorization request");
-            page(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Sign-in unavailable",
-                "This host cannot start a sign-in right now. Try again shortly.",
-                None,
-            )
+            // Names this host's own machinery, so it goes to the log rather than to the caller —
+            // which is exactly the split `SignInRefusal` encodes, so the refusal goes through it
+            // rather than around it.
+            let refusal = SignInRefusal::NoFlow(error);
+            error!(reason = %refusal, "cannot open an authorization request");
+            refused(&refusal, StatusCode::SERVICE_UNAVAILABLE)
         }
     }
 }
@@ -361,10 +359,7 @@ mod tests {
 
     /// An app federating sign-in to a provider whose exchange is `exchange`.
     fn oidc_app(exchange: Arc<dyn TokenExchange>) -> Router {
-        super::super::app(AppState::with_oidc(Arc::new(Oidc::new(
-            config(),
-            exchange,
-        ))))
+        super::super::app(AppState::with_oidc(Arc::new(Oidc::new(config(), exchange))))
     }
 
     /// Drive one request through a fully assembled app and hand back everything a caller sees.
@@ -386,7 +381,11 @@ mod tests {
             .await
             .expect("a response body");
 
-        (status, headers, String::from_utf8_lossy(&bytes).into_owned())
+        (
+            status,
+            headers,
+            String::from_utf8_lossy(&bytes).into_owned(),
+        )
     }
 
     fn get(path: &str) -> HttpRequest<Body> {
@@ -480,7 +479,9 @@ mod tests {
 
         let (status, headers, body) = call(
             app.clone(),
-            get(&format!("{CALLBACK}?state={forged}&code=an-authorization-code")),
+            get(&format!(
+                "{CALLBACK}?state={forged}&code=an-authorization-code"
+            )),
         )
         .await;
 
@@ -507,7 +508,9 @@ mod tests {
         // would be a denial of service against the human who started the real sign-in.
         let (status, headers, _) = call(
             app,
-            get(&format!("{CALLBACK}?state={bound_state}&code=an-authorization-code")),
+            get(&format!(
+                "{CALLBACK}?state={bound_state}&code=an-authorization-code"
+            )),
         )
         .await;
 
@@ -521,5 +524,439 @@ mod tests {
             headers.get(SET_COOKIE).is_some(),
             "and it is the one that gets a session",
         );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The carrier rule, restated for a route that answers callers holding no credential at all.
+    // ---------------------------------------------------------------------------------------
+
+    /// X-03's escalation, closed from the other side.
+    ///
+    /// `POST /api/session` mints a readable token only for a caller that presented a readable
+    /// credential, so script holding only the `HttpOnly` cookie cannot trade it for one it can
+    /// exfiltrate. This route answers a caller that presented *nothing*, which is the same door
+    /// approached from outside — so the rule it obeys is the wider one:
+    ///
+    /// > **No route reachable without a readable credential ever puts a session token in a body.**
+    ///
+    /// Driven on the **successful** path deliberately. The refusals issue nothing at all, so they
+    /// could not fail this; the interesting case is the one where a session really is created, and
+    /// the assertion is that it leaves only as a cookie.
+    #[tokio::test]
+    async fn the_callback_issues_a_session_only_as_a_cookie() {
+        let exchange = Arc::new(StubExchange::returning(claims("not-yet-known")));
+        let app = oidc_app(exchange.clone());
+
+        let (state, nonce) = begin(&app).await;
+        exchange.echoing(&nonce);
+
+        let (status, headers, body) = call(
+            app,
+            get(&format!(
+                "{CALLBACK}?state={state}&code=an-authorization-code"
+            )),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let planted = headers
+            .get(SET_COOKIE)
+            .expect("a completed sign-in plants a session cookie")
+            .to_str()
+            .expect("a cookie is ASCII");
+
+        // The session exists, and it is `HttpOnly` — so script cannot read it off the document.
+        assert!(
+            planted.starts_with(&format!("{SESSION_COOKIE}=")),
+            "{planted}"
+        );
+        assert!(planted.contains("HttpOnly"), "{planted}");
+        assert!(planted.contains("Secure"), "{planted}");
+        assert!(planted.contains("SameSite=Strict"), "{planted}");
+
+        // And it exists nowhere else. Not as a field, not nested, not incidentally rendered into
+        // the page — matched on the 64-hex shape rather than on a key name, so a refactor that
+        // renames or re-nests cannot quietly reopen it.
+        assert!(
+            !carries_a_token(&body),
+            "the callback returned something token-shaped in its body, which is a credential a \
+             script could read off its own fetch: {body}",
+        );
+        assert!(
+            !body.contains(SESSION_COOKIE),
+            "and it must not name the session cookie in the document either: {body}",
+        );
+    }
+
+    /// A `state` works once. A replay of a callback that already succeeded is refused, and gets the
+    /// same answer a forged one gets — the two are indistinguishable from outside, and neither
+    /// should yield a second session.
+    #[tokio::test]
+    async fn a_replayed_state_is_refused() {
+        let exchange = Arc::new(StubExchange::returning(claims("not-yet-known")));
+        let app = oidc_app(exchange.clone());
+
+        let (state, nonce) = begin(&app).await;
+        exchange.echoing(&nonce);
+
+        let replay = || {
+            get(&format!(
+                "{CALLBACK}?state={state}&code=an-authorization-code"
+            ))
+        };
+
+        let (first, headers, _) = call(app.clone(), replay()).await;
+        assert_eq!(first, StatusCode::OK, "the first callback completes");
+        assert!(headers.get(SET_COOKIE).is_some());
+
+        let (second, headers, body) = call(app, replay()).await;
+
+        assert_eq!(
+            second,
+            StatusCode::BAD_REQUEST,
+            "a state must be spendable exactly once: {body}",
+        );
+        assert!(
+            headers.get(SET_COOKIE).is_none(),
+            "a replayed callback must issue no second session",
+        );
+        assert!(!carries_a_token(&body), "{body}");
+    }
+
+    /// The nonce ties the id token to the authorization request this host opened. A token that
+    /// echoes a different one — or none — is a token obtained somewhere else and replayed here.
+    #[tokio::test]
+    async fn an_id_token_that_does_not_echo_the_bound_nonce_is_refused() {
+        for wrong in [Some("a-nonce-from-somewhere-else"), None] {
+            let exchange = Arc::new(StubExchange::returning(claims("placeholder")));
+            let app = oidc_app(exchange.clone());
+
+            let (state, _) = begin(&app).await;
+            exchange.claims.lock().expect("an unpoisoned lock").nonce = wrong.map(str::to_string);
+
+            let (status, headers, body) = call(
+                app,
+                get(&format!(
+                    "{CALLBACK}?state={state}&code=an-authorization-code"
+                )),
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "a nonce of {wrong:?} must be refused: {body}",
+            );
+            assert!(
+                headers.get(SET_COOKIE).is_none(),
+                "and must issue no session",
+            );
+            assert!(!carries_a_token(&body), "{body}");
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The authorization request.
+    // ---------------------------------------------------------------------------------------
+
+    /// What `/api/signin` asks the provider for.
+    ///
+    /// Two claims in one place, because they are the two ways this request goes wrong. It must
+    /// carry PKCE with `S256` — a challenge equal to the verifier is `plain`, which protects
+    /// nothing — and it must ask for **only** the sign-in scopes. Signing in is not connecting: a
+    /// vendor scope here would turn one consent screen into a different one, and a user who agreed
+    /// to "sign in" would have granted standing access to their account.
+    #[tokio::test]
+    async fn the_authorization_request_carries_pkce_and_asks_only_to_identify_the_human() {
+        let exchange = Arc::new(StubExchange::returning(claims("not-yet-known")));
+        let app = oidc_app(exchange.clone());
+
+        let (status, headers, _) = call(app.clone(), get(SIGNIN)).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let location = headers
+            .get(header::LOCATION)
+            .expect("a redirect names where it goes")
+            .to_str()
+            .expect("a location is ASCII");
+
+        assert_eq!(parameter(location, "response_type"), Some("code"));
+        assert_eq!(parameter(location, "code_challenge_method"), Some("S256"));
+
+        let challenge = parameter(location, "code_challenge").expect("a code challenge");
+        assert_eq!(challenge.len(), 43, "SHA-256, base64url, unpadded");
+
+        // `openid email profile`, percent-encoded, and nothing else.
+        assert_eq!(
+            parameter(location, "scope"),
+            Some("openid%20email%20profile"),
+            "sign-in asks to identify the human and to do nothing on their behalf",
+        );
+
+        // The verifier reaches the token endpoint, and it is not the challenge — which is what
+        // separates S256 from `plain`.
+        let (state, nonce) = (
+            parameter(location, "state").expect("a state"),
+            parameter(location, "nonce").expect("a nonce"),
+        );
+        exchange.echoing(nonce);
+        call(
+            app,
+            get(&format!(
+                "{CALLBACK}?state={state}&code=an-authorization-code"
+            )),
+        )
+        .await;
+
+        let redemptions = exchange.redemptions();
+        assert_eq!(redemptions.len(), 1, "one code was redeemed");
+        let (code, verifier) = &redemptions[0];
+
+        assert_eq!(code, "an-authorization-code");
+        assert_eq!(verifier.len(), 43, "a code verifier crossed the seam");
+        assert_ne!(
+            verifier, challenge,
+            "the verifier must not be the challenge, which is what `plain` would have sent",
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The tenant. `AGENTS.md` § Invariants, first entry.
+    // ---------------------------------------------------------------------------------------
+
+    /// The tenant comes from the configuration, and from nothing a caller controls **and nothing
+    /// the provider says**.
+    ///
+    /// The three vector tests in `routes::identity` assert this for a path segment, a body field
+    /// and a header against the development identity. This is the same rule against the federated
+    /// one, where there is a second source to worry about: an id token's claims. The claims here
+    /// carry a hostile `email` domain and the request carries a hostile query parameter, and the
+    /// principal that comes back is in the configured tenant regardless.
+    #[tokio::test]
+    async fn neither_a_request_nor_a_claim_influences_the_tenant() {
+        const CLAIMED: &str = "attacker";
+
+        let mut hostile = claims("not-yet-known");
+        hostile.email = Some(format!("alice@{CLAIMED}.example.com"));
+        hostile.subject = SUBJECT.to_string();
+
+        let exchange = Arc::new(StubExchange::returning(hostile));
+        let app = oidc_app(exchange.clone());
+
+        let (state, nonce) = begin(&app).await;
+        exchange.echoing(&nonce);
+
+        // Every request-side vector this route has: extra query parameters on the callback.
+        let (status, headers, _) = call(
+            app.clone(),
+            get(&format!(
+                "{CALLBACK}?state={state}&code=a-code&tenant={CLAIMED}&as={CLAIMED}"
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let planted = headers
+            .get(SET_COOKIE)
+            .expect("a session cookie")
+            .to_str()
+            .expect("a cookie is ASCII");
+        let token = planted
+            .strip_prefix(&format!("{SESSION_COOKIE}="))
+            .and_then(|rest| rest.split(';').next())
+            .expect("a token in the planted cookie");
+
+        // Ask the host who it thinks the caller is, carrying the session it just issued.
+        let (status, _, body) = call(
+            app,
+            HttpRequest::builder()
+                .uri("/api/session")
+                .header(header::COOKIE, format!("{SESSION_COOKIE}={token}"))
+                .body(Body::empty())
+                .expect("a well-formed request"),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the issued session resolves: {body}"
+        );
+        assert!(
+            body.contains(&format!(r#""tenant":"{TENANT}""#)),
+            "the tenant must come from the configuration: {body}",
+        );
+        assert!(
+            !body.contains(CLAIMED),
+            "nothing a request or a claim asserted may reach the principal: {body}",
+        );
+        assert!(
+            body.contains(SUBJECT),
+            "and the principal is identified by the provider's `sub`: {body}",
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // What a caller is told when something fails.
+    // ---------------------------------------------------------------------------------------
+
+    /// `IdentityError::Unreachable` must not leak the provider's address — X-03 asserts this for
+    /// the guard's `503`, and the sign-in path is the other place a provider's address exists.
+    ///
+    /// The distinction is kept all the way out: a refused credential and an unreachable provider
+    /// differ in **status**, because an operator answers them in opposite ways.
+    #[tokio::test]
+    async fn a_refusal_tells_the_caller_nothing_about_the_provider() {
+        struct Down;
+
+        #[async_trait]
+        impl TokenExchange for Down {
+            async fn redeem(&self, _: Redemption<'_>) -> Result<SignedClaims, ExchangeError> {
+                Err(ExchangeError::Unreachable(
+                    "dial tcp 10.0.0.7:443: connection refused".into(),
+                ))
+            }
+        }
+
+        struct Refusing;
+
+        #[async_trait]
+        impl TokenExchange for Refusing {
+            async fn redeem(&self, _: Redemption<'_>) -> Result<SignedClaims, ExchangeError> {
+                Err(ExchangeError::Rejected)
+            }
+        }
+
+        let app = oidc_app(Arc::new(Down));
+        let (state, _) = begin(&app).await;
+        let (unreachable, headers, leaked) =
+            call(app, get(&format!("{CALLBACK}?state={state}&code=a-code"))).await;
+
+        assert_eq!(
+            unreachable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a provider that cannot be reached is this host's problem",
+        );
+        assert!(headers.get(SET_COOKIE).is_none(), "and issues no session");
+
+        // A 503 that names an internal address is a map of the deployment.
+        assert!(!leaked.contains("10.0.0.7"), "{leaked}");
+        assert!(!leaked.contains("connection refused"), "{leaked}");
+        assert!(!leaked.contains(ISSUER), "{leaked}");
+
+        let app = oidc_app(Arc::new(Refusing));
+        let (state, _) = begin(&app).await;
+        let (rejected, _, body) =
+            call(app, get(&format!("{CALLBACK}?state={state}&code=a-code"))).await;
+
+        assert_eq!(
+            rejected,
+            StatusCode::UNAUTHORIZED,
+            "a credential the provider refused is the caller's problem",
+        );
+        assert_ne!(
+            unreachable, rejected,
+            "an outage and a bad credential must not read the same",
+        );
+        assert!(!body.contains(ISSUER), "{body}");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The Acceptance's fourth item: missing configuration.
+    // ---------------------------------------------------------------------------------------
+
+    /// A host with no OIDC configuration serves an **explanatory page** — and serves everything
+    /// else too.
+    ///
+    /// Three claims, and the third is the one the Acceptance is really about: not a panic, and not
+    /// a login that redirects somewhere and dies on the way back. It stops at `/api/signin`, which
+    /// is the first place a human asks for it.
+    #[tokio::test]
+    async fn an_unconfigured_host_explains_itself_and_keeps_serving() {
+        for (state, expected) in [
+            (AppState::without_identity(), "not configured"),
+            (
+                AppState::oidc_without_a_token_exchange(),
+                "not available in this build",
+            ),
+        ] {
+            let app = super::super::app(state);
+
+            let (status, headers, body) = call(app.clone(), get(SIGNIN)).await;
+
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sign-in is unavailable, and says so",
+            );
+            assert!(
+                body.contains(expected),
+                "the page must explain which of the two it is: {body}",
+            );
+            assert!(body.contains("<html"), "and be a page: {body}");
+            assert!(
+                headers.get(header::LOCATION).is_none(),
+                "it must not send the browser to a provider it cannot return from",
+            );
+
+            // The page is for anonymous callers, so it names no environment variable — that is the
+            // startup log's job. See `unconfigured_page`.
+            for variable in WITHHELD_FROM_THE_PAGE {
+                assert!(
+                    !body.contains(variable),
+                    "the page must not enumerate this host's settings to an anonymous caller, \
+                     found {variable}: {body}",
+                );
+            }
+
+            // And the rest of the host is unaffected, which is the whole reason this is not a
+            // startup refusal.
+            let (health, _, _) = call(app, get("/health")).await;
+            assert_eq!(health, StatusCode::OK, "/health must keep answering");
+        }
+    }
+
+    /// A callback that arrives at an unconfigured host is refused, not answered with a stack trace
+    /// and not answered with a session.
+    #[tokio::test]
+    async fn a_callback_on_an_unconfigured_host_issues_nothing() {
+        let (status, headers, body) = call(
+            super::super::app(AppState::without_identity()),
+            get(&format!("{CALLBACK}?state=anything&code=anything")),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(headers.get(SET_COOKIE).is_none());
+        assert!(!carries_a_token(&body), "{body}");
+    }
+
+    /// A callback missing its parameters is answered exactly as one carrying an unknown state, so
+    /// the difference tells a prober nothing about what this host was expecting.
+    #[tokio::test]
+    async fn a_callback_missing_its_parameters_is_refused_like_an_unknown_state() {
+        let exchange = Arc::new(StubExchange::returning(claims("nonce")));
+        let app = oidc_app(exchange);
+
+        for query in [
+            "",
+            "?state=only-a-state",
+            "?code=only-a-code",
+            "?error=denied",
+        ] {
+            let (status, headers, body) =
+                call(app.clone(), get(&format!("{CALLBACK}{query}"))).await;
+
+            assert!(
+                status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED,
+                "`{query}` answered {status}: {body}",
+            );
+            assert!(
+                headers.get(SET_COOKIE).is_none(),
+                "`{query}` issued a session",
+            );
+            assert!(!carries_a_token(&body), "`{query}`: {body}");
+        }
     }
 }

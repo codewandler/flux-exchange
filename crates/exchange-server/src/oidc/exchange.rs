@@ -48,7 +48,15 @@ pub trait TokenExchange: Send + Sync {
 ///
 /// Borrowed rather than owned so the secret and the verifier are not copied on the way to the
 /// implementor; both are credentials and both redact when printed.
+///
+/// # Why these fields look unused
+///
+/// They are read by [`TokenExchange`] implementors, and **this binary binds none** — so to the
+/// compiler nothing reads them. The `allow` goes when a composition supplies an exchange; it is
+/// not a sign that the field is speculative, since the tests in `routes::signin` drive every one of
+/// them through a stub. See `docs/designs/oidc-signin.md`.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Redemption<'a> {
     /// The authorization code the provider returned through the browser.
     pub code: &'a str,
@@ -90,7 +98,10 @@ pub struct SignedClaims {
 /// The two variants are the same split as [`IdentityError`](exchange_host::IdentityError), for the
 /// same reason: an operator answers a rejected code and an unreachable provider in opposite ways,
 /// and a caller told "your login is broken" for an outage goes and resets a password that was fine.
+/// Constructed by [`TokenExchange`] implementors, of which this binary binds none — see
+/// [`Redemption`] for why that reads as dead code.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ExchangeError {
     /// The provider refused the code, or the token it returned did not verify.
     ///
