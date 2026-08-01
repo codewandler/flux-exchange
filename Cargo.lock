@@ -410,13 +410,17 @@ version = "0.6.0"
 dependencies = [
  "async-trait",
  "codewandler-connector-address",
+ "codewandler-connector-catalog",
  "codewandler-connector-pack",
  "codewandler-connector-secrets",
+ "codewandler-flux-core",
  "codewandler-flux-runtime",
+ "codewandler-flux-system",
  "codewandler-flux-web",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]
@@ -1055,6 +1059,8 @@ dependencies = [
  "axum",
  "codewandler-connector-catalog",
  "codewandler-flux-exchange-host",
+ "codewandler-flux-system",
+ "codewandler-flux-web",
  "jsonwebtoken",
  "reqwest",
  "serde",

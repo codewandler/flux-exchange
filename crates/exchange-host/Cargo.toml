@@ -14,23 +14,39 @@ authors.workspace = true
 name = "exchange_host"
 path = "src/lib.rs"
 
+# **This table is an allow-list, and `tests/no_second_request_path.rs` reads it** (X-12, lock 1).
+#
+# The whole invoke path lives in this crate, and the property that makes it safe is negative: there
+# is no transport here to build a second request with. A deny-list would only catch the HTTP clients
+# somebody thought of, so the test asserts this table is a **subset** of a list written in the test
+# with a reason beside every entry. Adding a dependency here means writing that reason down.
+#
+# `connector-pack` and `flux-runtime` were `[dev-dependencies]` until X-12 (see X-11's argument),
+# and promoting them is a deliberate decision about the published artifact's weight: every consumer
+# of `codewandler-flux-exchange-host` now carries the flux engine, because this crate now *runs*
+# operations rather than merely proving it could link the thing that does.
+#
+# `flux-web` deliberately did **not** come with them. It is where `HttpRequestTool` lives, and lock 1
+# says the crate that dispatches holds no transport: the transport arrives as an `Egress`, and
+# `exchange-server` is the only crate that names `flux_web`.
 [dependencies]
 async-trait.workspace = true
 connector-address.workspace = true
+connector-catalog.workspace = true
+connector-pack.workspace = true
 connector-secrets.workspace = true
+flux-core.workspace = true
+flux-runtime.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-# `connector-pack` and the flux engine are here rather than in `[dependencies]` on purpose (X-11).
-#
-# Nothing in this crate executes an operation yet — X-12 is what gives it a reason to *ship* the
-# pack. This crate is the published artifact, so a normal dependency would put the whole flux
-# engine into the graph of every consumer of `codewandler-flux-exchange-host` today, to satisfy a
-# proof rather than to run any code. A dev-dependency is absent from a published crate's
-# requirements, so it costs consumers nothing and still compiles under `cargo test --workspace`,
-# which is where the proof has to hold. X-12 promotes these three lines into `[dependencies]`.
+# Not checked by the allow-list, and that is the point of the split: a dev-dependency is absent from
+# a published crate's requirements, so nothing here reaches a consumer's graph. `flux-web` stays
+# here for `tests/engine_line.rs`, which links `HttpRequestTool` against the pack on purpose, and
+# `flux-system` is here because building a `flux_runtime::ToolContext` needs a `System` — which is
+# exactly why a composition supplies the context through a port rather than this crate minting one.
 [dev-dependencies]
-connector-pack.workspace = true
-flux-runtime.workspace = true
+flux-system.workspace = true
 flux-web.workspace = true
+tokio.workspace = true

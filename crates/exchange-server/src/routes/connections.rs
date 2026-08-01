@@ -151,12 +151,15 @@ use crate::state::AppState;
 ///
 /// Spelled through the host's own constant so this refusal and the reader that would have produced
 /// the value cannot drift into two different names.
+///
+/// `pub(super)` since X-12: [`invoke`](super::invoke) refuses in the same terms when no store is
+/// bound, and one setting quoted from two places would be two strings to keep in step.
 #[cfg(unix)]
-const STORE_SETTING: &str = exchange_host::CREDENTIAL_STORE_SETTING;
+pub(super) const STORE_SETTING: &str = exchange_host::CREDENTIAL_STORE_SETTING;
 /// The same, where the file store does not exist. Only `FileStore` is `#[cfg(unix)]`; the port is
 /// not, so a composition on another platform binds its own store rather than this one.
 #[cfg(not(unix))]
-const STORE_SETTING: &str = "FLUX_EXCHANGE_CREDENTIALS";
+pub(super) const STORE_SETTING: &str = "FLUX_EXCHANGE_CREDENTIALS";
 
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {

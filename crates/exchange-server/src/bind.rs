@@ -142,6 +142,18 @@ pub enum StartupRefusal {
         /// The store's own refusal.
         reason: String,
     },
+
+    /// The composition could not build the thing that runs operations.
+    ///
+    /// A separate variant for the reason the two stores are separate: an operator fixes this
+    /// somewhere else entirely. The only way it can happen is a working directory this process
+    /// cannot make a flux workspace out of, and it is a startup refusal rather than a per-request
+    /// one because a composition problem should announce itself before the socket opens. Rendered
+    /// rather than typed, matching the two above.
+    Invoker {
+        /// What could not be built, and why.
+        reason: String,
+    },
 }
 
 impl From<DevIdentityRefusal> for StartupRefusal {
@@ -183,6 +195,10 @@ impl fmt::Display for StartupRefusal {
             Self::CredentialStore { reason } | Self::AgentStore { reason } => {
                 write!(f, "{reason}")
             }
+            Self::Invoker { reason } => write!(
+                f,
+                "refusing to start: a credential store is bound but nothing could be composed to                  run operations with — {reason}",
+            ),
         }
     }
 }
@@ -193,7 +209,8 @@ impl std::error::Error for StartupRefusal {
             Self::ReachableBindWithoutIdentity { .. }
             | Self::ReachableBindWithDevelopmentIdentity { .. }
             | Self::CredentialStore { .. }
-            | Self::AgentStore { .. } => None,
+            | Self::AgentStore { .. }
+            | Self::Invoker { .. } => None,
             Self::DevIdentity { source } => Some(source),
             Self::UnreadableBind { source, .. } => Some(source),
             Self::BindUnavailable { source, .. } => Some(source),

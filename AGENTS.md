@@ -35,7 +35,9 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.6.0. The service serves health, the catalogue, a session and a complete OIDC sign-in.** `cargo run` binds
+**v0.6.0. The service serves health, the catalogue, a session, a complete OIDC sign-in, and — since
+X-12 — `POST /api/operations/{operation}/invoke`, which runs one catalogue operation for the
+caller's tenant.** `cargo run` binds
 loopback and refuses to start on a reachable address with no identity provider configured. What exists beyond
 that is still the vocabulary and the rules as tested types. The [README](README.md) carries the
 itemized inventory of what is *not* built, and keeping it accurate is part of the job — a page that
@@ -83,8 +85,15 @@ links here. What is left is one rule, and it is the one that bites:
   `CredentialRef` from either is one type. `DEFAULT_SERVICE` is the exception — it lives at
   `connector-address`'s root, not in its `credential` module, so `connector-secrets` does not
   re-export it.
-- **`connector-pack` is a dev-dependency**, so the published `codewandler-flux-exchange-host` does
-  not carry the flux engine in consumers' graphs for code that does not exist yet. X-12 promotes it.
+- **`connector-pack` and `flux-runtime` are ordinary dependencies since X-12**, and that was a
+  deliberate decision rather than a formality: the published `codewandler-flux-exchange-host` now
+  puts the flux engine into every consumer's graph, because it now *runs* operations rather than
+  merely proving it could link the thing that does. **`flux-web` did not come with them** — it holds
+  `HttpRequestTool`, and the crate that dispatches holds no transport.
+- **`crates/exchange-host/Cargo.toml`'s `[dependencies]` table is an allow-list**, read by
+  `tests/no_second_request_path.rs`. Adding a dependency there means adding it to `ALLOWED` in that
+  test **with a sentence saying why it is not a transport**. That test being annoying is the design;
+  deleting it is a blocker.
 - **`codewandler-connector-catalog`** still has zero dependencies.
 
 Do not "solve" an engine-line conflict with a `path` or `git` dependency on a sibling checkout. That

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use exchange_host::{Identity, SecretStore};
+use exchange_host::{Identity, Invoker, SecretStore};
 
 use crate::agent::AgentStore;
 use crate::bind::IdentityBinding;
@@ -43,6 +43,14 @@ pub struct AppState {
     /// combination of the two is a real composition, so neither implies the other. `None` is a
     /// composition that bound none, and the mint route refuses rather than pretending.
     agents: Option<Arc<AgentStore>>,
+    /// What runs an operation, if this composition bound one.
+    ///
+    /// A separate binding from [`credentials`](Self::credentials) even though one is built from the
+    /// other, and for the reason every port here is separate: an invoker also carries a transport, a
+    /// deployment class and a context source, none of which a credential store implies. `None` is a
+    /// composition that runs nothing, and `POST /api/operations/{operation}/invoke` refuses rather
+    /// than pretending — see [`crate::routes::invoke`].
+    invoker: Option<Arc<Invoker>>,
 }
 
 /// What this composition can offer a human who wants to sign in.
@@ -120,6 +128,7 @@ impl AppState {
             credentials: None,
             connections: Arc::default(),
             agents: None,
+            invoker: None,
         }
     }
 
@@ -139,6 +148,7 @@ impl AppState {
             credentials: None,
             connections: Arc::default(),
             agents: None,
+            invoker: None,
         }
     }
 
@@ -150,6 +160,7 @@ impl AppState {
             credentials: None,
             connections: Arc::default(),
             agents: None,
+            invoker: None,
         }
     }
 
@@ -169,6 +180,7 @@ impl AppState {
             credentials: None,
             connections: Arc::default(),
             agents: None,
+            invoker: None,
         }
     }
 
@@ -185,6 +197,7 @@ impl AppState {
             credentials: None,
             connections: Arc::default(),
             agents: None,
+            invoker: None,
         }
     }
 
@@ -235,6 +248,28 @@ impl AppState {
     /// The agent store this composition bound, if it bound one.
     pub fn agents(&self) -> Option<&Arc<AgentStore>> {
         self.agents.as_ref()
+    }
+
+    /// Bind what this composition runs operations with.
+    ///
+    /// An additive builder method for [`with_credentials`](Self::with_credentials)' reason.
+    ///
+    /// **Binding one does not make a caller resolvable**, so it must never influence
+    /// [`identity_binding`](Self::identity_binding): a host that can run operations and cannot
+    /// identify anybody is exactly the composition `admit_bind` exists to refuse, and it is *more*
+    /// dangerous than one that can only serve a catalogue.
+    /// `binding_an_invoker_does_not_admit_a_reachable_bind` is that claim.
+    pub fn with_invoker(mut self, invoker: Arc<Invoker>) -> Self {
+        self.invoker = Some(invoker);
+        self
+    }
+
+    /// What this composition runs operations with, if it bound anything.
+    ///
+    /// The invoker, not its parts. A route cannot reach the transport, the store or the deployment
+    /// class through it — the only thing it can do is name an operation and hand over a principal.
+    pub fn invoker(&self) -> Option<&Arc<Invoker>> {
+        self.invoker.as_ref()
     }
 
     /// The claims on connection changes in flight.
@@ -455,6 +490,67 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **X-12.** Binding an invoker does not legalise a reachable bind.
+    ///
+    /// The same shape as the three above and here for the same reason — pinning the enum is not
+    /// pinning the wiring — but this is the one where getting it wrong costs the most. An invoker
+    /// is the thing that spends a tenant's credentials against a vendor; a host on `0.0.0.0` that
+    /// can do that and cannot identify a caller is strictly worse than one that can only serve a
+    /// catalogue. The mistake this catches is somebody reasoning "operations run now, so this host
+    /// is a real service" and teaching `identity_binding` to say `Bound`.
+    #[test]
+    fn binding_an_invoker_does_not_admit_a_reachable_bind() {
+        struct NoStore;
+
+        #[exchange_host::async_trait]
+        impl exchange_host::SecretStore for NoStore {
+            async fn get(
+                &self,
+                reference: &exchange_host::CredentialRef,
+            ) -> Result<exchange_host::Secret, exchange_host::StoreError> {
+                Err(exchange_host::StoreError::NotFound {
+                    path: exchange_host::address_path(reference),
+                })
+            }
+            async fn put(
+                &self,
+                _: &exchange_host::CredentialRef,
+                _: &exchange_host::Secret,
+            ) -> Result<(), exchange_host::StoreError> {
+                unreachable!("deciding an identity binding writes no credential")
+            }
+            async fn delete(
+                &self,
+                _: &exchange_host::CredentialRef,
+            ) -> Result<(), exchange_host::StoreError> {
+                unreachable!("deciding an identity binding destroys no credential")
+            }
+        }
+
+        let invoker = Arc::new(
+            crate::execution::invoker(Arc::new(NoStore)).expect("a usable workspace root"),
+        );
+
+        for state in [
+            AppState::without_identity().with_invoker(invoker.clone()),
+            AppState::with_development_identity(dev()).with_invoker(invoker.clone()),
+            AppState::oidc_without_a_token_exchange().with_invoker(invoker.clone()),
+        ] {
+            assert!(
+                admit_bind(addr("0.0.0.0:8080"), state.identity_binding()).is_err(),
+                "binding an invoker must not make a reachable bind legal",
+            );
+        }
+
+        assert_eq!(
+            AppState::with_development_identity(dev())
+                .with_invoker(invoker)
+                .identity_binding(),
+            IdentityBinding::Development,
+            "and it must not change the binding a composition reports either",
+        );
     }
 
     /// The concrete port is reachable only when it is the development one, because that is what

@@ -38,7 +38,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # when a `connector-pack` release asks for more.
 #
 # ENGINE_LINE = "0.46"
+#
+# flux's vocabulary crate: the `Error` and `Result` every `Tool::execute` answers with. Its own
+# dependencies are `serde`, `serde_json` and `thiserror` and nothing else, which is why it is the one
+# engine crate `exchange-host` may name without weakening lock 1 — telling a refusal that precedes
+# dispatch from a transport failure means matching on that enum, and matching on it means naming it.
+flux-core = { package = "codewandler-flux-core", version = "0.46" }
 flux-runtime = { package = "codewandler-flux-runtime", version = "0.46" }
+# flux's guarded-IO facade. Named here only because `flux_runtime::ToolContext::new` takes an
+# `Arc<System>` and there is no other constructor — so a composition that wants to invoke an
+# operation has to build one. It is **not** in `exchange-host`'s `[dependencies]`: it carries
+# `flux_system::net`, which dials, and the crate that dispatches holds no transport (X-12, lock 1).
+flux-system = { package = "codewandler-flux-system", version = "0.46" }
 flux-web = { package = "codewandler-flux-web", version = "0.46" }
 
 # The connector crates, all on the 0.9 line. `connector-catalog` has no dependencies at all and

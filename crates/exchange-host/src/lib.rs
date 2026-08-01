@@ -45,6 +45,7 @@ mod connections;
 #[cfg(unix)]
 mod credentials;
 mod grant;
+mod invoke;
 mod lease;
 mod principal;
 mod runtime;
@@ -68,6 +69,27 @@ pub use async_trait::async_trait;
 /// ecosystem and this is a doorway to it, not a second copy.
 pub use connector_secrets::{CredentialRef, Secret, SecretStore, StoreError, TENANTS_ROOT};
 
+/// The pack's transport and configuration ports, re-exported for the same reason
+/// [`SecretStore`] is: a composition binds them, and it must not have to name `connector-pack` to
+/// do so.
+///
+/// The version argument applies with more force here than anywhere else in this file. **A
+/// composition that named `connector-pack` itself would be a second crate in this workspace that
+/// can reach the pack** — and the whole of `docs/designs/invoke.md` §3 lock 1 is that the crate
+/// which can build a request cannot name the pack, and the crate which names the pack cannot build
+/// a request. `exchange-server` holds `flux_web`'s `HttpRequestTool`; it reaches the pack through
+/// this doorway and through nothing else, and `tests/no_second_request_path.rs` asserts it.
+pub use connector_pack::{ConfigStore, Egress, Field, MemoryConfig};
+
+/// The context an invocation runs in, re-exported for the same reason [`Egress`] is.
+///
+/// [`Contexts`] is a port a composition implements, and its one method returns this type. A
+/// composition that had to name `flux-runtime` to implement it would be guessing an engine version
+/// — and a `ToolContext` from a different one is a different type with an identical name, which
+/// surfaces as an error about mismatched types where the real problem is a dependency line. The
+/// engine line is pinned once, in the workspace manifest; this is the doorway to the one it names.
+pub use flux_runtime::ToolContext;
+
 pub use connections::{
     address_path, admit_tenant_occupancy, stored_bytes, ConnectionRefusal, ConnectorDeclaration,
     DeclaredCredential, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES,
@@ -75,6 +97,7 @@ pub use connections::{
 #[cfg(unix)]
 pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
 pub use grant::{Effect, Grant, Idempotency, OperationFacts, Risk, Selector};
+pub use invoke::{admit_runtime, Contexts, Invocation, InvokeRefusal, Invoker, Sent};
 pub use lease::{Lease, LeaseId, LeaseState};
 pub use principal::{Principal, PrincipalKind, Tenant, TenantError};
 pub use runtime::{Deployment, Runtime, RuntimeRefusal};

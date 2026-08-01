@@ -16,7 +16,10 @@ everything below.
 > verified against the provider's published keys, so `/api/signin` redirects to a real provider —
 > configure the eight `FLUX_EXCHANGE_OIDC_*` variables and it works end to end. Connections can be
 > created, listed, **rotated** and deleted per tenant, and an agent principal can be **minted** — it
-> cannot yet authenticate. There is no `invoke`. See
+> cannot yet authenticate. **`invoke` runs**: `POST /api/operations/{operation}/invoke` executes one
+> catalogue operation for the caller's tenant, with the request built by `connector_pack` from the
+> operation's own compiled Flux — gated by identity alone, because grants are X-13, and limited to
+> the forty connectors whose base URL needs no per-tenant configuration. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 
@@ -77,13 +80,14 @@ against one tenant's connections, not a vendor secret.
 
 | | |
 |---|---|
-| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path. **Real and tested (44 tests).** |
-| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port — one that **ends when the id token behind it does** — **complete OIDC sign-in**, a per-tenant connection surface, and `POST /api/agents`, which **mints an agent principal for the caller's tenant and shows its token once**. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (213 tests).** |
+| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path, and `Invoker` — which runs one catalogue operation through `connector_pack` and holds no transport of its own. **Real and tested (66 tests).** |
+| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port — one that **ends when the id token behind it does** — **complete OIDC sign-in**, a per-tenant connection surface, and `POST /api/agents`, which **mints an agent principal for the caller's tenant and shows its token once**, and `POST /api/operations/{operation}/invoke`, a thin adapter over the host's `Invoker`. It is the **only crate here that holds an HTTP client**, and it deliberately never names `connector_pack` — a test asserts both halves. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (225 tests).** |
 | `console/` | A Vue 3 **admin surface**, not a catalogue browser: it lands on this tenant's connections, reads its session from `/api/session`, and reuses the framework-free explorer components from flux-connectors for the catalogue. `invoke`, `subscribe` and activity are **named in the navigation and inert** — no route resolves to them and no placeholder screen exists, which `console/test/shell.test.mjs` asserts rather than assumes. An unreachable service renders an error naming the endpoint — never an empty catalogue and never a false "signed out". |
 
 **Not built, despite being described in the design:** a second connection to one
 connector (the address has no instance dimension until upstream publishes one), per-connection
-configuration, `invoke`,
+configuration — which is why the thirteen connectors with a templated `base_url` refuse `invoke` by
+name — **grant gating on `invoke`**, which is identity-gated only until X-13,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
 catalogue loader. The credential store has moved off this list and is described below. The design is ahead of the code on purpose; the gap is
 stated here so nobody has to discover it.
