@@ -213,6 +213,54 @@ Lock 3's limit, stated because it is the one most likely to be over-read: it pro
 paths a test drives, never about paths it does not know exist. Locks 1 and 2 are what speak to
 absence. Keep all three; they fail differently.
 
+#### Where the locks stop
+
+Two readings of the three locks above were live at the same time, and they are different claims:
+**are the locks about the published crate, or about the deployed binary?** X-55 settled it, because
+a boundary nobody has decided is one that moves by accident — and because several documents were
+reading as the second while the code did the first.
+
+**The locks bound the published crate, not the deployed binary.** `exchange-host` is what
+`cargo publish` uploads and what a consumer composes into a process of its own. `exchange-server` is
+`publish = false`: one composition of this library, and not the one anybody downstream runs. So lock
+1 reads `crates/exchange-host/Cargo.toml`, lock 2 walks `crates/exchange-host/src`, and
+`exchange-server` gets exactly one rule — its sources may not name `connector_pack`.
+
+**The alternative, and why it was not taken.** Widening lock 2 to `crates/exchange-server/src` is
+the honest other answer, and it fails on contact with what that crate is. `exchange-server`
+legitimately holds a transport — that is what a composition is *for* — so `execution.rs` names
+`flux_system`, constructs `HttpRequestTool` and holds a `ToolContext`, and every rule in lock 2 goes
+red on correct code the day the scan reaches it. What answers that is an exception list with an
+entry per file, extended by whoever is adding the thing the rule is meant to catch: the "one more
+file on the list" drift these locks exist to prevent. Lock 1's allow-list works because a dependency
+is a rare and deliberate addition; a per-file exception list over a crate under active development
+is not the same instrument wearing the same clothes.
+
+**What the decision costs, stated rather than left to be found.** A second request path added to
+`exchange-server` — an OAuth code exchange in a route, a health-check pinger in `main.rs` — is
+caught by nothing structural. That crate holds `flux_web` and binds the credential store, so it
+could build one, and the one rule that reaches it bounds *naming the pack* rather than *building a
+request*. This is a known residual and a review matter. If it ever needs closing, close it with a
+rule shaped for a crate that is supposed to hold a transport, not by pointing lock 2 at it.
+
+**What the decision forbids.** No document may present a control from outside
+`crates/exchange-host/src` as covering a gap inside it. The concrete case is the one X-48's second
+review round left open: `crates/exchange-server/src/execution.rs` builds this composition's `System`
+with `SandboxMode::Require`, so `System::run`/`run_with_env` are confined or refuse. That is true,
+it is useful, and it is a property of **this repository's deployment**. For a consumer of
+`codewandler-flux-exchange-host` it does not exist — a downstream binary implements `Contexts` and
+supplies whatever `System` it built, quite possibly `System::new`, whose sandbox is disabled. The
+argument therefore counts **three** mechanisms rather than four, and the composition's posture is
+described where it lives instead of counted here.
+
+Both halves are checked rather than reviewed, in
+`crates/exchange-host/tests/no_second_request_path.rs`:
+`no_document_claims_more_than_the_locks_reach` requires every document that says what the locks
+reach to carry the sentence above verbatim, and refuses a paragraph that names a control from
+outside the boundary alongside the vocabulary of leaning on one;
+`the_locks_bound_the_published_crate` pins the boundary itself, so widening it fails a test with the
+argument attached rather than passing as a quiet edit to a path string.
+
 **Rejected:** relying on review, and relying on a grep for `reqwest` in the sources. The first is
 what X-12 exists to replace. The second checks a name rather than a capability, passes for any crate
 nobody listed, and would have to be updated by the same person who is adding the thing it is meant to
