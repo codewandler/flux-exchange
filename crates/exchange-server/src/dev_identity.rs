@@ -36,7 +36,7 @@ use exchange_host::{
     async_trait, Identity, IdentityError, Principal, PrincipalKind, Tenant, TenantError,
 };
 
-use crate::session::{SessionError, SessionStore, SessionToken};
+use crate::session::{Expiry, SessionError, SessionStore, SessionToken};
 
 /// The environment variable that arms the development identity.
 pub const DEV_IDENTITY_ENV: &str = "FLUX_EXCHANGE_DEV_IDENTITY";
@@ -121,8 +121,23 @@ impl DevIdentity {
     ///
     /// Takes the principal rather than a handle, so a session can only ever be opened for a caller
     /// the guard already resolved. There is no path from a request field to this argument.
+    ///
+    /// # Why these sessions do not expire
+    ///
+    /// [`Expiry::WhileTheProcessLives`], deliberately and not by omission. What was presented to
+    /// get here is a **roster handle** — a name, with no secret and no expiry in it — so there is
+    /// nothing to bind a session's end to, and any lifetime named here would be one this file
+    /// invented. That is the repair X-16 refused for the federated port, and inventing one here
+    /// would be no better for being small.
+    ///
+    /// It costs nothing that was being relied on: the roster handle itself never expires either, so
+    /// a session that did would only send the operator back to a credential that still works. And
+    /// arming this port already forces a loopback bind — see
+    /// [`IdentityBinding::Development`](crate::bind::IdentityBinding::Development) — which is where
+    /// the actual protection lives. A composition that wants sessions to end wants a real identity
+    /// provider, which is `crate::oidc`.
     pub fn open_session(&self, principal: Principal) -> Result<SessionToken, SessionError> {
-        self.sessions.open(principal)
+        self.sessions.open(principal, Expiry::WhileTheProcessLives)
     }
 
     /// Close whatever session the caller presented.

@@ -425,13 +425,18 @@ mod tests {
     }
 
     /// Claims a well-behaved provider would return for a sign-in bound to `nonce`.
+    ///
+    /// The `exp` is five minutes out, as a provider states it. It was `i64::MAX` while nothing
+    /// bound a session's life to it — harmless then, and no longer true of anything: X-16 opens the
+    /// session for exactly this long, and a token that never expires is refused rather than
+    /// honoured. See `session::MAX_SESSION_SECONDS`.
     fn claims(nonce: &str) -> SignedClaims {
         SignedClaims {
             issuer: ISSUER.to_string(),
             audience: vec![CLIENT_ID.to_string()],
             subject: SUBJECT.to_string(),
             nonce: Some(nonce.to_string()),
-            expires_at: i64::MAX,
+            expires_at: session::now() + 300,
             email: Some("alice@example.com".to_string()),
         }
     }
@@ -826,6 +831,41 @@ mod tests {
             .find(|value| value.starts_with(&format!("{}=", flow::BINDER_COOKIE)))
             .expect("the spent binder is cleared");
         assert!(cleared.contains("Max-Age=0"), "{cleared}");
+    }
+
+    /// **X-16.** The session's life is the id token's, all the way through this route.
+    ///
+    /// The wiring, which no unit test reaches: `complete` hands the store the claims' own `exp`. A
+    /// host that instead applied a lifetime of its own would answer this callback with a session,
+    /// because every other check on the token passes — it is ours, from our issuer, and echoes the
+    /// nonce this host bound. What it claims is a validity of `i64::MAX`, which
+    /// `session::MAX_SESSION_SECONDS` refuses rather than shortens, so nothing session-shaped may
+    /// come back and the caller must not be told which check it was.
+    #[tokio::test]
+    async fn an_exp_this_host_will_not_honour_completes_no_signin() {
+        let exchange = Arc::new(StubExchange::returning(SignedClaims {
+            expires_at: i64::MAX,
+            ..claims("not-yet-known")
+        }));
+        let app = oidc_app(exchange.clone());
+
+        let browser = begin(&app).await;
+        exchange.echoing(&browser.nonce);
+
+        let (status, headers, body) =
+            call(app, browser.returns_with("an-authorization-code")).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            planted_session(&headers).is_none(),
+            "a refusal that still planted a session would have signed the caller in while \
+             reporting failure",
+        );
+        assert!(!carries_a_token(&body), "{body}");
+        assert!(
+            !body.contains("exp") && !body.contains("9223372036854775807"),
+            "the caller is told nothing about the provider's token: {body}",
+        );
     }
 
     // ---------------------------------------------------------------------------------------

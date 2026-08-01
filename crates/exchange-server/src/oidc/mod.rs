@@ -34,11 +34,10 @@ pub mod pkce;
 
 use std::fmt;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use exchange_host::{async_trait, Identity, IdentityError, Principal, PrincipalKind};
 
-use crate::session::{SessionError, SessionStore, SessionToken};
+use crate::session::{now, Expiry, SessionError, SessionStore, SessionToken};
 use config::{OidcConfig, SCOPES};
 use exchange::{ExchangeError, Redemption, SignedClaims, TokenExchange};
 use flow::{Binder, Claimed, FlowError, PendingAuthorizations};
@@ -162,8 +161,16 @@ impl Oidc {
 
         let principal = self.admit(&claims, &pending.nonce, now())?;
 
+        // The session ends when the id token does. The `exp` goes across verbatim: a provider that
+        // issues a five-minute token gets a five-minute session, because a host that outlived the
+        // credential it was shown would be asserting an identity nobody is still vouching for.
         self.sessions
-            .open(principal)
+            .open(
+                principal,
+                Expiry::Credential {
+                    expires_at: claims.expires_at,
+                },
+            )
             .map_err(SignInRefusal::NoSession)
     }
 
@@ -232,6 +239,12 @@ impl Identity for Oidc {
     /// sign-in completed, so resolving one is a map lookup — which is also why this port can never
     /// produce [`IdentityError::Unreachable`], and therefore has no provider address to leak on the
     /// request path.
+    ///
+    /// That includes a session whose id token has since expired: the store stops resolving it, and
+    /// it arrives here as the same `None` an unknown token does, so it is [`IdentityError::Rejected`]
+    /// by the same line. This host does **not** ask the provider whether the identity is still
+    /// good; it holds the deadline the provider already stated. Refreshing one is a different
+    /// story, needing a refresh token this flow deliberately never asked for.
     async fn resolve(&self, presented: &str) -> Result<Option<Principal>, IdentityError> {
         // Anonymous, and deliberately not an error: a caller that reads "not signed in" as "your
         // credential was rejected" sends its user to the wrong page.
@@ -246,17 +259,6 @@ impl Identity for Oidc {
             // hand over a credential and it was bad.
             .ok_or(IdentityError::Rejected)
     }
-}
-
-/// Seconds since the Unix epoch.
-///
-/// A clock before the epoch is not a case worth a branch: `0` makes every `exp` look expired, which
-/// refuses every sign-in. That is the direction to fail in.
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Percent-encode everything that is not unreserved (RFC 3986 §2.3).
@@ -684,6 +686,47 @@ mod tests {
                 Err(IdentityError::Rejected)
             ),
             "an unrecognised credential is rejected, never reported as an outage",
+        );
+    }
+
+    /// **X-16.** A session whose id token has expired is refused exactly as one that never existed.
+    ///
+    /// Asserted at this port rather than at the store, because this is where the two answers could
+    /// diverge: a later change that reported an expired session differently — a distinct
+    /// `IdentityError`, a different status — would make the callback an oracle for which tokens
+    /// used to be sessions, and the remedy is the same for both anyway.
+    #[tokio::test]
+    async fn an_expired_session_is_refused_exactly_as_one_that_never_existed() {
+        let oidc = oidc();
+
+        // Opened the way `complete` opens one: bound to the id token's `exp`.
+        let token = oidc
+            .sessions
+            .open(
+                oidc.admit(&good(), NONCE, 1_000_000_000)
+                    .expect("well-formed claims"),
+                Expiry::Credential {
+                    expires_at: now() + 300,
+                },
+            )
+            .expect("the OS has randomness");
+
+        assert!(
+            matches!(oidc.resolve(token.as_str()).await, Ok(Some(_))),
+            "a session inside its id token's lifetime resolves",
+        );
+
+        oidc.sessions.expire_now(token.as_str());
+
+        let expired = oidc.resolve(token.as_str()).await;
+        let never_existed = oidc.resolve("a-token-this-host-never-minted").await;
+
+        assert!(matches!(expired, Err(IdentityError::Rejected)));
+        assert!(matches!(never_existed, Err(IdentityError::Rejected)));
+        assert_eq!(
+            format!("{expired:?}"),
+            format!("{never_existed:?}"),
+            "an expired session must not be distinguishable from one that never existed",
         );
     }
 
