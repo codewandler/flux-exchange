@@ -171,11 +171,16 @@ test('every root-relative URL resolves under the base GitHub serves this site fr
   }
 })
 
-test('the site links off-site only to the flux family on GitHub', () => {
-  // An absolute URL on a page about a credential-holding service is either a family repository or a
-  // fact about somebody's deployment. There is no third kind we want to publish, so the allow-list
-  // is a host list rather than a pattern.
-  const allowed = new Set(['github.com'])
+test('the site links off-site only to the flux family', () => {
+  // An absolute URL on a page about a credential-holding service is either something of the flux
+  // family's or a fact about somebody's deployment. There is no third kind we want to publish, so
+  // the allow-list is a host list rather than a pattern.
+  //
+  // Two hosts, because the family has two kinds of address and X-77 is about telling them apart:
+  // `github.com` holds the repositories, `codewandler.github.io` serves the sites they publish.
+  // Which of the two a given link should use is the subject question [`subjectIsTheProject`] asks —
+  // this test only says that no third host appears.
+  const allowed = new Set(['github.com', 'codewandler.github.io'])
 
   for (const { name, html } of pages()) {
     for (const url of html.matchAll(/https?:\/\/([A-Za-z0-9.-]+)/g)) {
@@ -430,6 +435,149 @@ test('the site build is a gate on pull requests, and only `main` deploys', () =>
     /Settings\s*→\s*Pages/,
     'pages.yml no longer records the one-time Settings → Pages → Source = GitHub Actions step, which no workflow can perform for itself'
   )
+})
+
+// ---------------------------------------------------------------------------------------------
+// The family links (X-77)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The siblings this site sends a reader to, each with the repository it lives in and the
+ * documentation site it publishes.
+ *
+ * Verified 2026-08-02: both sites answer 200, and `gh api repos/codewandler/<name> --jq .cname`
+ * reports no cname for either — so the `codewandler.github.io` address *is* the address, rather than
+ * a redirect to a nicer domain that ought to be linked instead.
+ */
+const FAMILY = [
+  {
+    name: 'flux',
+    repo: 'https://github.com/codewandler/flux',
+    site: 'https://codewandler.github.io/flux/',
+  },
+  {
+    name: 'flux-connectors',
+    repo: 'https://github.com/codewandler/flux-connectors',
+    site: 'https://codewandler.github.io/flux-connectors/',
+  },
+]
+
+/**
+ * Every `<a>` of a page as `{ href, text }`, with the text read the way a reader sees it.
+ *
+ * Anchors do not nest, so the non-greedy body is safe. [`textOf`] on the body is what turns the
+ * social icon's `<svg>` into the empty string, which is the correct reading of it: a link offering
+ * no words is not a link about a project.
+ */
+function anchorsOf(html) {
+  return [...html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)].map(([, attrs, body]) => ({
+    href: decode(attrs.match(/href="([^"]*)"/)?.[1] ?? ''),
+    text: textOf(body).replace(/\s+/g, ' ').trim(),
+  }))
+}
+
+/**
+ * Is this anchor about a sibling **project** — what it is and what it does — rather than about the
+ * repository that project happens to live in?
+ *
+ * **The discriminator is the link's subject, not its hostname**, and this is the paragraph to read
+ * before adding a github.com link to this site rather than the story that added the rule. A page may
+ * point at github.com as often as it likes provided what it points *at* is genuinely the repository:
+ * `getting-started`'s clone URL, `surface`'s pointer to the itemized inventory in the README,
+ * `index`'s `#what-exists-today` deep link, the `Releases (GitHub)` nav entry and the social icon all
+ * mean the repository and are correct. Swapping those for a landing page would send somebody looking
+ * for a clone URL somewhere that has none. Only a link whose subject is *what a sibling is or does*
+ * has a better destination, and that is the site the sibling publishes.
+ *
+ * Two questions decide it, in order:
+ *
+ *   1. Does the URL address something *inside* the repository — a path, a fragment, a releases page?
+ *      No documentation site serves those, so github.com is the only address there is.
+ *   2. Otherwise it is a bare repository URL and the words decide. Offered under the project's own
+ *      name it is a link about the project; offered as "repository", or as an icon carrying no words
+ *      at all, it is a link about the repository.
+ *
+ * The second question is deliberately narrow: it recognises the project's own name and nothing else,
+ * so `[the flux engine](https://github.com/codewandler/flux)` would slip past it. Widening it means
+ * guessing which English phrases name a project, and a guard that fires on a legitimate repository
+ * link is a guard people learn to route around. `the subject rule admits a repository link and still
+ * catches a family link` holds it to exactly this width.
+ */
+function subjectIsTheProject({ href, text }, sibling) {
+  if (href !== sibling.repo && href !== `${sibling.repo}/`) return false
+  return text.toLowerCase() === sibling.name
+}
+
+test('a link about a sibling project goes to that project’s site, not to its repository', () => {
+  // The three sites are one product, so following a family link has to keep the reader inside the
+  // family's documentation instead of dropping them into a source tree.
+  //
+  // This cannot be the build's job. `ignoreDeadLinks: false` is what makes a wrong link fail
+  // `npm run build`, and it resolves **internal** links only — an external link to the wrong host
+  // answers 200 and would publish for as long as nobody noticed.
+  for (const { name, html } of pages()) {
+    for (const anchor of anchorsOf(html)) {
+      for (const sibling of FAMILY) {
+        assert.ok(
+          !subjectIsTheProject(anchor, sibling),
+          `${name} offers "${anchor.text}" as ${anchor.href}, which is ${sibling.name}'s repository — a link about what ${sibling.name} is belongs at ${sibling.site}, the documentation site it publishes`
+        )
+      }
+    }
+  }
+})
+
+test('the family is reachable from every page, not only from the overview', () => {
+  // "Three sites read as one product" is a property of the whole site, not of its landing page: a
+  // reader who arrives at /surface from a search result should be able to reach the siblings too.
+  // The nav and the footer are the two places that appear on every page.
+  //
+  // `404.html` is excluded for the same reason as the getting-started nav test above, and it is the
+  // only exclusion: VitePress renders it without the theme shell, so it carries neither.
+  for (const { name, html } of pages().filter(({ name }) => name !== '404.html')) {
+    const links = linksOf(html)
+    for (const { name: sibling, site } of FAMILY) {
+      assert.ok(
+        links.includes(site),
+        `${name} does not link ${site} — ${sibling} is reachable from some pages and not from others, which is three repositories again`
+      )
+    }
+  }
+})
+
+test('the subject rule admits a repository link and still catches a family link', () => {
+  // The discriminator, held to its width in both directions, in the shape the environment-variable
+  // rule above uses: a scanner that has not just proved it catches a violation is not evidence there
+  // are none.
+  const [flux, connectors] = FAMILY
+
+  for (const caught of [
+    { href: flux.repo, text: 'flux' },
+    { href: `${flux.repo}/`, text: 'Flux' },
+    { href: connectors.repo, text: 'flux-connectors' },
+  ]) {
+    const sibling = caught.href.startsWith(connectors.repo) ? connectors : flux
+    assert.ok(
+      subjectIsTheProject(caught, sibling),
+      `"${caught.text}" → ${caught.href} is a link about the project and must go to ${sibling.site}`
+    )
+  }
+
+  for (const admitted of [
+    { href: `${flux.repo}/releases`, text: 'Releases (GitHub)' },
+    { href: `${flux.repo}#what-exists-today`, text: 'what exists today' },
+    { href: flux.repo, text: 'repository' },
+    { href: flux.repo, text: '' },
+    { href: flux.site, text: 'flux' },
+    // The sibling's name is a prefix of the other's repository URL; exact comparison, not
+    // `startsWith`, is what keeps `flux-connectors` from being read as `flux`.
+    { href: connectors.repo, text: 'flux-connectors' },
+  ]) {
+    assert.ok(
+      !subjectIsTheProject(admitted, flux),
+      `"${admitted.text}" → ${admitted.href} means the repository, or another sibling, and must not trip the family rule`
+    )
+  }
 })
 
 test("AGENTS.md documents the site build as part of this repository's gate", () => {

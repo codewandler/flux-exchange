@@ -36,7 +36,7 @@ built HTML in `.vitepress/dist`, so it must follow a build — see the comment a
 | `getting-started.md` | Clone, arm a local identity, sign in, reach the console — and what must be true before anything runs. |
 | `boundary.md` | The credential-boundary argument. |
 | `surface.md` | An index of the vocabulary — the things this service deals in. |
-| `test/` | Guards over the built site: the base path, and the two content rules below. |
+| `test/` | Guards over the built site: the base path, the two content rules below, and where a family link goes. |
 
 Four pages. Three were X-63's deliberate floor; `getting-started.md` is
 [X-69](../docs/stories/X-69-run-it-yourself.md), and it is **not** the volume that story deferred —
@@ -51,6 +51,20 @@ code-block reader: the highlighter puts every token in its own element, so the s
 value on the right-hand side of an `=` could not see inside a code block at all. It can now, and the
 one exemption — `FOO=<a placeholder>` is a grammar rather than a value — is held to its width by a
 test of its own.
+
+## Where a family link goes
+
+A link about **what `flux` or `flux-connectors` is** goes to the site that project publishes, not to
+its repository, so that the three sites read as one product
+([X-77](../docs/stories/X-77-the-family-links-go-to-the-family-sites.md)). The nav carries both on
+every page, and `test/site.test.mjs` holds the rule — the build cannot, because `ignoreDeadLinks`
+resolves internal links only and a link to the wrong external host is not dead.
+
+**The discriminator is the link's subject, not its hostname.** `getting-started`'s clone URL,
+`surface`'s pointer to the itemized inventory in the README, `index`'s `#what-exists-today` deep link
+and the `Releases (GitHub)` nav entry all mean the repository, and github.com is the right address
+for every one of them. The comment on `subjectIsTheProject` in `test/site.test.mjs` is the statement
+of record, including what that rule deliberately does not catch.
 
 ## What this site must not publish
 

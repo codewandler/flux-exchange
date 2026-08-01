@@ -27,9 +27,9 @@ features:
 
 ## What this is
 
-flux-exchange is the platform layer of the [flux](https://github.com/codewandler/flux) family.
+flux-exchange is the platform layer of the [flux](https://codewandler.github.io/flux/) family.
 
-[flux-connectors](https://github.com/codewandler/flux-connectors) describes what vendors can do.
+[flux-connectors](https://codewandler.github.io/flux-connectors/) describes what vendors can do.
 flux runs it. Neither holds a credential on anybody's behalf, and neither should — that is a third
 job, and this is it.
 
