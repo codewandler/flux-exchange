@@ -196,7 +196,15 @@ async fn callback(
                 SignInRefusal::UnknownState
                 | SignInRefusal::NoBinder
                 | SignInRefusal::AnotherBrowser => StatusCode::BAD_REQUEST,
+                // The back-channel refusals. X-17 split four of these apart in the log, and the
+                // status is the other half of "the caller learns nothing that separates them": a
+                // `503` for `ClientRefused` alone would report this host's registration state to
+                // an unauthenticated caller with a made-up code. `SignInRefusal::caller_facing`
+                // carries that argument in full.
                 SignInRefusal::CodeRejected
+                | SignInRefusal::ClientRefused
+                | SignInRefusal::UnpublishedKey
+                | SignInRefusal::NoIdToken
                 | SignInRefusal::IssuerMismatch
                 | SignInRefusal::AudienceMismatch
                 | SignInRefusal::Expired

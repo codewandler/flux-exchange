@@ -154,10 +154,7 @@ impl Oidc {
                 client_secret: self.config.client_secret(),
             })
             .await
-            .map_err(|error| match error {
-                ExchangeError::Rejected => SignInRefusal::CodeRejected,
-                ExchangeError::Unreachable(reason) => SignInRefusal::ProviderUnreachable(reason),
-            })?;
+            .map_err(SignInRefusal::from)?;
 
         let principal = self.admit(&claims, &pending.nonce, now())?;
 
@@ -313,6 +310,22 @@ pub enum SignInRefusal {
     /// The provider refused the authorization code, or its id token did not verify.
     CodeRejected,
 
+    /// The provider refused **this host's** client credentials, not the caller's code.
+    ///
+    /// X-17, and the same move as the three above: kept distinct **in the log only**, because the
+    /// operator's next action is entirely different and the caller's is not. See
+    /// [`SignInRefusal::caller_facing`].
+    ClientRefused,
+
+    /// The id token was signed by a key the configured key set does not publish.
+    ///
+    /// Log-only, as above. A wrong `FLUX_EXCHANGE_OIDC_JWKS_URI` and a stranger's `kid` both land
+    /// here, and an operator tells them apart by whether *every* sign-in fails this way.
+    UnpublishedKey,
+
+    /// The exchange returned no id token, so nothing said who the human is. Log-only, as above.
+    NoIdToken,
+
     /// The provider could not be reached. The reason is for the log only.
     ProviderUnreachable(String),
 
@@ -359,6 +372,23 @@ impl SignInRefusal {
     /// operator: [`fmt::Display`] keeps all three apart, because a host seeing forged states and a
     /// host seeing browsers walked into other people's sign-ins have different problems and
     /// different attackers.
+    ///
+    /// # And so do the four back-channel ones, for a sharper reason
+    ///
+    /// [`CodeRejected`](Self::CodeRejected), [`ClientRefused`](Self::ClientRefused),
+    /// [`UnpublishedKey`](Self::UnpublishedKey) and [`NoIdToken`](Self::NoIdToken) also share one
+    /// phrase and one status. X-17 split them in the log precisely *because* three of them are the
+    /// operator's fault and one is the caller's — which is exactly why the wire must not say which.
+    ///
+    /// A distinguishable answer here would make `/api/signin/callback` report **this host's own
+    /// configuration state** to anybody who can reach it, unauthenticated and with a made-up code:
+    /// whether this host's registration at the provider is currently good, whether its key set URI
+    /// resolves, whether it asks for `openid`. That is a reconnaissance oracle for a deployment, and
+    /// it would be one bought for nothing, because the caller's remedy is identical in all four
+    /// cases. [`ProviderUnreachable`](Self::ProviderUnreachable) is the deliberate exception and
+    /// stays one: an outage is transient, "try again shortly" is honest advice rather than a
+    /// diagnosis, and telling a human to reset a working password during one is the failure X-03
+    /// already refused to ship.
     pub fn caller_facing(&self) -> &'static str {
         match self {
             Self::UnknownState | Self::NoBinder | Self::AnotherBrowser => {
@@ -366,6 +396,9 @@ impl SignInRefusal {
                  sign-in page"
             }
             Self::CodeRejected
+            | Self::ClientRefused
+            | Self::UnpublishedKey
+            | Self::NoIdToken
             | Self::IssuerMismatch
             | Self::AudienceMismatch
             | Self::Expired
@@ -380,6 +413,24 @@ impl SignInRefusal {
             Self::NoFlow(_) | Self::NoSession(_) => {
                 "this host cannot open a session right now. Try again shortly"
             }
+        }
+    }
+}
+
+impl From<ExchangeError> for SignInRefusal {
+    /// One refusal per exchange failure, so the split the exchange made survives the trip out.
+    ///
+    /// A named impl rather than the closure this used to be inside [`Oidc::complete`]: it is the
+    /// single point where a new [`ExchangeError`] could be folded back into an existing refusal and
+    /// quietly undo X-17, and it is what `http_exchange`'s tests reach for to assert both channels
+    /// at once.
+    fn from(error: ExchangeError) -> Self {
+        match error {
+            ExchangeError::Rejected => Self::CodeRejected,
+            ExchangeError::ClientRefused => Self::ClientRefused,
+            ExchangeError::UnpublishedKey => Self::UnpublishedKey,
+            ExchangeError::NoIdToken => Self::NoIdToken,
+            ExchangeError::Unreachable(reason) => Self::ProviderUnreachable(reason),
         }
     }
 }
@@ -404,7 +455,13 @@ impl fmt::Display for SignInRefusal {
                  login CSRF, or a sign-in resumed in a different browser. The authorization request \
                  was left unspent",
             ),
-            Self::CodeRejected => f.write_str("the provider refused the authorization code"),
+            // The four X-17 separated. Each one is `ExchangeError`'s own words, because that is the
+            // layer that knows which of them happened and there is no second place to keep them
+            // correct. See that type's documentation.
+            Self::CodeRejected => write!(f, "{}", ExchangeError::Rejected),
+            Self::ClientRefused => write!(f, "{}", ExchangeError::ClientRefused),
+            Self::UnpublishedKey => write!(f, "{}", ExchangeError::UnpublishedKey),
+            Self::NoIdToken => write!(f, "{}", ExchangeError::NoIdToken),
             Self::ProviderUnreachable(reason) => {
                 write!(f, "the provider could not be reached: {reason}")
             }

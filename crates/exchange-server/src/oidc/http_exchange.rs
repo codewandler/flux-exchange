@@ -66,7 +66,42 @@ pub struct HttpTokenExchange {
     http: reqwest::Client,
     token_endpoint: String,
     jwks_uri: String,
-    keys: Mutex<Option<CachedKeys>>,
+    keys: Mutex<KeyCache>,
+    /// [`UNKNOWN_KID_REFETCH_FLOOR`], as a field so the tests can drive a rotation and the rate
+    /// limit without sleeping through ten seconds of each. [`HttpTokenExchange::new`] is the only
+    /// non-test constructor and it always uses the constant.
+    refetch_floor: Duration,
+}
+
+/// The key set this host is holding, and when it last went out for one.
+#[derive(Default)]
+struct KeyCache {
+    /// The last key set fetched, and when it arrived. `None` until the first fetch succeeds.
+    fresh: Option<CachedKeys>,
+
+    /// When a fetch was last **attempted**, whether or not it produced a key set.
+    ///
+    /// Separate from [`CachedKeys::fetched`], and this is the X-17 fix. The refetch floor exists so
+    /// that an unknown `kid` cannot provoke one outbound request per callback. Read off the last
+    /// *success*, it lapses entirely while the key set is unreachable — which is exactly when the
+    /// amplification is cheapest for a caller and most expensive for the provider, and exactly when
+    /// a limit is worth having. `an_unknown_kid_cannot_hammer_a_failing_key_set` holds this.
+    attempted: Option<Instant>,
+}
+
+impl KeyCache {
+    /// The key set, if one is held and is still inside [`JWKS_TTL`].
+    ///
+    /// The one place "still fresh" is spelled, because two callers ask it for opposite purposes —
+    /// [`HttpTokenExchange::cached`] to answer from it, [`HttpTokenExchange::too_soon_to_refetch`]
+    /// to decide *which failure* a rate-limited request is — and a host where those two disagreed
+    /// would report an unreachable key set as a refused credential.
+    fn current(&self) -> Option<&JwkSet> {
+        self.fresh
+            .as_ref()
+            .filter(|cached| cached.fetched.elapsed() < JWKS_TTL)
+            .map(|cached| &cached.keys)
+    }
 }
 
 /// A key set and when it was fetched.
@@ -94,38 +129,86 @@ impl HttpTokenExchange {
             http,
             token_endpoint: config.token_endpoint().to_string(),
             jwks_uri: config.jwks_uri().to_string(),
-            keys: Mutex::new(None),
+            keys: Mutex::new(KeyCache::default()),
+            refetch_floor: UNKNOWN_KID_REFETCH_FLOOR,
+        })
+    }
+
+    /// As [`HttpTokenExchange::new`], with the refetch floor named.
+    ///
+    /// `#[cfg(test)]`, so the shipped binary has exactly one floor and it is the constant. It
+    /// exists because the rotation branch is only reachable *inside* the floor's window, and a test
+    /// that proved it by sleeping through ten seconds would be a test nobody runs.
+    #[cfg(test)]
+    fn with_refetch_floor(config: &OidcConfig, refetch_floor: Duration) -> Result<Self, String> {
+        Ok(Self {
+            refetch_floor,
+            ..Self::new(config)?
+        })
+    }
+
+    /// The key cache, whatever another thread did while holding it.
+    ///
+    /// A panic in another thread while it held this lock says nothing about the key set, which is
+    /// a plain value. Failing sign-in for the life of the process because of an unrelated panic
+    /// would be the worse answer.
+    fn cache(&self) -> std::sync::MutexGuard<'_, KeyCache> {
+        self.keys.lock().unwrap_or_else(|poisoned| {
+            self.keys.clear_poison();
+            poisoned.into_inner()
         })
     }
 
     /// The cached key set, if it is still fresh.
     fn cached(&self) -> Option<JwkSet> {
-        let cache = self.keys.lock().unwrap_or_else(|poisoned| {
-            // A panic in another thread while it held this lock says nothing about the key set,
-            // which is a plain value. Failing sign-in for the life of the process because of an
-            // unrelated panic would be the worse answer.
-            self.keys.clear_poison();
-            poisoned.into_inner()
-        });
-
-        cache
-            .as_ref()
-            .filter(|cached| cached.fetched.elapsed() < JWKS_TTL)
-            .map(|cached| cached.keys.clone())
+        self.cache().current().cloned()
     }
 
-    /// How long ago the key set was last fetched, if ever.
-    fn cache_age(&self) -> Option<Duration> {
-        let cache = self.keys.lock().unwrap_or_else(|poisoned| {
-            self.keys.clear_poison();
-            poisoned.into_inner()
-        });
+    /// Why a fetch may not go out yet, or `None` when it may.
+    ///
+    /// The floor is a floor on **going out at all**, not on succeeding. That is the whole of the
+    /// X-17 fix: the previous form asked whether a *successful* fetch was recent, so a provider
+    /// whose key set was down had no floor at all and every arriving callback started its own
+    /// request. Ten seconds is far inside [`JWKS_TTL`], so a rotation is still picked up promptly
+    /// and a routine refresh is never delayed in any way an operator could measure.
+    fn too_soon_to_refetch(&self) -> Option<ExchangeError> {
+        let cache = self.cache();
 
-        cache.as_ref().map(|cached| cached.fetched.elapsed())
+        if !cache
+            .attempted
+            .is_some_and(|attempted| attempted.elapsed() < self.refetch_floor)
+        {
+            return None;
+        }
+
+        // Which refusal this is depends on what the last attempt left behind, and the two are
+        // opposite events: `a_refused_grant_and_an_unreachable_provider_do_not_collapse` is the
+        // standing argument that an outage must not read as a bad credential, and this branch is
+        // where that could quietly stop being true.
+        //
+        // A **current** key set in hand means this `kid` is one the provider does not publish — a
+        // stranger's, or a rotation that will be picked up the moment the floor lapses. Anything
+        // else means the last attempt did not leave a usable key set behind, so this request needed
+        // a fetch the floor is refusing, and blaming that on the caller's credential is the exact
+        // mistake X-17 exists to undo.
+        Some(match cache.current() {
+            Some(_) => ExchangeError::UnpublishedKey,
+            None => ExchangeError::Unreachable(format!(
+                "the key set at {} could not be refreshed, and this host refetches it at most once \
+                 every {}s",
+                self.jwks_uri,
+                self.refetch_floor.as_secs(),
+            )),
+        })
     }
 
     /// Fetch the key set and remember it.
     async fn fetch_keys(&self) -> Result<JwkSet, ExchangeError> {
+        // Stamped **before** the request goes out, not after it comes back. A stamp written on the
+        // way back leaves the whole round trip — up to [`HTTP_TIMEOUT`] of it — as a window in
+        // which every arriving callback starts a fetch of its own.
+        self.cache().attempted = Some(Instant::now());
+
         let response = self
             .http
             .get(&self.jwks_uri)
@@ -145,12 +228,7 @@ impl HttpTokenExchange {
             ExchangeError::Unreachable(format!("unreadable key set: {source}"))
         })?;
 
-        let mut cache = self.keys.lock().unwrap_or_else(|poisoned| {
-            self.keys.clear_poison();
-            poisoned.into_inner()
-        });
-
-        *cache = Some(CachedKeys {
+        self.cache().fresh = Some(CachedKeys {
             keys: keys.clone(),
             fetched: Instant::now(),
         });
@@ -180,15 +258,11 @@ impl HttpTokenExchange {
 
         // Either the cache is stale, or it is fresh and does not have this `kid`. The second is a
         // rotation the provider made early — worth one fetch, but not one per hostile request.
-        if self.cached().is_some()
-            && self
-                .cache_age()
-                .is_some_and(|age| age < UNKNOWN_KID_REFETCH_FLOOR)
-        {
-            return Err(ExchangeError::Rejected);
+        if let Some(refusal) = self.too_soon_to_refetch() {
+            return Err(refusal);
         }
 
-        find(&self.fetch_keys().await?).ok_or(ExchangeError::Rejected)
+        find(&self.fetch_keys().await?).ok_or(ExchangeError::UnpublishedKey)
     }
 }
 
@@ -229,20 +303,45 @@ impl TokenExchange for HttpTokenExchange {
 
         // Read the body before branching on status: a provider signalling `invalid_grant` in a 400
         // and one signalling it in a 200 are the same fact, and both are `Rejected`.
-        let body: TokenResponse = response.json().await.map_err(|source| {
-            if status.is_success() {
-                ExchangeError::Unreachable(format!("unreadable token response: {source}"))
-            } else {
-                // A non-success with an unparseable body is the provider saying no in a shape this
-                // host does not model. Still a refusal, and still nothing to tell the caller.
-                ExchangeError::Rejected
+        let body: Option<TokenResponse> = match response.json().await {
+            Ok(body) => Some(body),
+            Err(source) if status.is_success() => {
+                return Err(ExchangeError::Unreachable(format!(
+                    "unreadable token response: {source}"
+                )));
             }
-        })?;
+            // A non-success with an unparseable body is the provider saying no in a shape this
+            // host does not model. Which "no" it is may still be legible from the status alone,
+            // which is why this falls through rather than refusing here.
+            Err(_) => None,
+        };
 
-        let Some(id_token) = body.id_token.filter(|_| status.is_success()) else {
-            // No id token means no identity, whatever else came back. An access token without one
-            // is a successful OAuth exchange and a failed OIDC sign-in.
+        // **The operator's failure, and the reason X-17 exists.** RFC 6749 §5.2: `invalid_client`
+        // means the credential the token endpoint checked was *this host's*, and §5.2 also requires
+        // a `401` specifically when the client authenticated through the `Authorization` header —
+        // which `redeem` always does. So either spelling is the same fact, and both are read,
+        // because providers are inconsistent about the status and about the body in turn.
+        //
+        // The caller's authorization code was not even reached. Reporting this as "the provider
+        // refused the authorization code" is what sent operators to look at the one part of the
+        // flow that was working.
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || body.as_ref().and_then(|body| body.error.as_deref()) == Some("invalid_client")
+        {
+            return Err(ExchangeError::ClientRefused);
+        }
+
+        if !status.is_success() {
+            // Everything else the provider says no to, at this point, is about the code. This is
+            // the one refusal here that is genuinely the caller's credential.
             return Err(ExchangeError::Rejected);
+        }
+
+        let Some(id_token) = body.and_then(|body| body.id_token) else {
+            // No id token means no identity, whatever else came back. An access token without one
+            // is a successful OAuth exchange and a failed OIDC sign-in — and a client registered
+            // without `openid` is the usual cause, which is an operator's to fix.
+            return Err(ExchangeError::NoIdToken);
         };
 
         self.verify(&id_token).await
@@ -323,6 +422,13 @@ fn verification(permitted: Vec<Algorithm>) -> Validation {
 #[derive(Deserialize)]
 struct TokenResponse {
     id_token: Option<String>,
+
+    /// RFC 6749 §5.2's error code, read **only** to tell `invalid_client` from everything else.
+    ///
+    /// It is never carried anywhere. The provider's own words about a credential are about a
+    /// credential, so this string reaches neither the caller nor the log; what leaves this module
+    /// is a variant of [`ExchangeError`], chosen here and fixed at the type level.
+    error: Option<String>,
 }
 
 /// The id-token claims this host carries forward.
@@ -377,7 +483,9 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
+    use crate::oidc::config::{CLIENT_SECRET_ENV, JWKS_URI_ENV};
     use crate::oidc::pkce::{base64url, Verifier};
+    use crate::oidc::{Oidc, SignInRefusal};
 
     /// The provider these tests stand in for, and this host's registration at it.
     const ISSUER: &str = "https://accounts.example.com";
@@ -455,16 +563,24 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
     }
 
     /// What the stub answers at `/token`.
+    #[derive(Clone)]
     struct Answer {
         status: StatusCode,
         body: String,
     }
 
     /// The stub's shared state: what to answer, and what it has been asked.
+    ///
+    /// Both answers are behind a lock rather than fixed at construction, because X-17's rotation
+    /// and rate-limit tests need a provider that **changes under the exchange**: one that publishes
+    /// a new key between two sign-ins, and one whose key set is failing throughout.
     struct Stub {
-        token: Answer,
-        jwks: String,
+        token: Mutex<Answer>,
+        jwks: Mutex<Answer>,
         received: Mutex<Vec<TokenRequest>>,
+        /// How many requests the key-set endpoint has answered. The number
+        /// `an_unknown_kid_cannot_hammer_a_failing_key_set` is entirely about.
+        jwks_requests: Mutex<usize>,
     }
 
     /// A provider on loopback, over real HTTP.
@@ -489,9 +605,13 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
         /// Start a provider answering `token` at `/token` and publishing `jwks` at `/jwks`.
         async fn serving(token: Answer, jwks: String) -> Self {
             let stub = Arc::new(Stub {
-                token,
-                jwks,
+                token: Mutex::new(token),
+                jwks: Mutex::new(Answer {
+                    status: StatusCode::OK,
+                    body: jwks,
+                }),
                 received: Mutex::new(Vec::new()),
+                jwks_requests: Mutex::new(0),
             });
 
             let app = Router::new()
@@ -525,6 +645,48 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
                 .expect("no test panics holding this lock")
                 .clone()
         }
+
+        /// How many times the key-set endpoint has been asked.
+        fn jwks_requests(&self) -> usize {
+            *self
+                .received
+                .jwks_requests
+                .lock()
+                .expect("no test panics holding this lock")
+        }
+
+        /// Answer `/token` with this from now on.
+        fn now_answering(&self, token: Answer) {
+            *self
+                .received
+                .token
+                .lock()
+                .expect("no test panics holding this lock") = token;
+        }
+
+        /// Publish this key set from now on: a rotation, as the exchange sees one.
+        fn now_publishing(&self, jwks: String) {
+            *self
+                .received
+                .jwks
+                .lock()
+                .expect("no test panics holding this lock") = Answer {
+                status: StatusCode::OK,
+                body: jwks,
+            };
+        }
+
+        /// Break the key-set endpoint: from now on it only ever errors.
+        fn keys_unreachable(&self) {
+            *self
+                .received
+                .jwks
+                .lock()
+                .expect("no test panics holding this lock") = Answer {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                body: json!({ "error": "the key set is having a day" }).to_string(),
+            };
+        }
     }
 
     async fn token_endpoint(
@@ -543,16 +705,38 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
                 body,
             });
 
+        let answer = stub
+            .token
+            .lock()
+            .expect("no test panics holding this lock")
+            .clone();
+
         (
-            stub.token.status,
+            answer.status,
             [(CONTENT_TYPE, "application/json")],
-            stub.token.body.clone(),
+            answer.body,
         )
             .into_response()
     }
 
     async fn jwks_endpoint(State(stub): State<Arc<Stub>>) -> Response {
-        ([(CONTENT_TYPE, "application/json")], stub.jwks.clone()).into_response()
+        *stub
+            .jwks_requests
+            .lock()
+            .expect("no test panics holding this lock") += 1;
+
+        let answer = stub
+            .jwks
+            .lock()
+            .expect("no test panics holding this lock")
+            .clone();
+
+        (
+            answer.status,
+            [(CONTENT_TYPE, "application/json")],
+            answer.body,
+        )
+            .into_response()
     }
 
     /// An address on loopback with nothing behind it.
@@ -651,6 +835,97 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
     /// Redeem a code at `provider`.
     async fn redeem_at(provider: &StubProvider) -> Result<SignedClaims, ExchangeError> {
         redeem_against(&provider.base).await
+    }
+
+    /// The `state` an authorization URL carries, so a test can play the browser coming back.
+    fn state_in(url: &str) -> String {
+        url.split('&')
+            .find_map(|pair| pair.strip_prefix("state="))
+            .expect("an authorization URL carries a state")
+            .to_string()
+    }
+
+    /// Drive a whole sign-in against `provider` and take the refusal.
+    ///
+    /// Through [`Oidc::complete`] rather than through [`HttpTokenExchange::redeem`] directly,
+    /// because the thing under test is what an **operator** and a **caller** each end up being
+    /// told, and only [`SignInRefusal`] has both of those on it.
+    async fn refusal_from(provider: &StubProvider) -> SignInRefusal {
+        let config = OidcConfig::for_test_against(ISSUER, CLIENT_ID, TENANT, &provider.base);
+        let exchange = HttpTokenExchange::new(&config).expect("the HTTP client builds");
+        let oidc = Oidc::new(config, Arc::new(exchange));
+
+        let authorization = oidc.authorize().expect("the OS supplies entropy");
+        let state = state_in(&authorization.url);
+
+        oidc.complete(
+            &state,
+            "an-authorization-code",
+            authorization.binder.as_str(),
+        )
+        .await
+        .expect_err("every provider in these tests refuses")
+    }
+
+    /// A token-endpoint answer refusing something, as a provider spells it.
+    fn refusing(status: StatusCode, error: &str) -> Answer {
+        Answer {
+            status,
+            body: json!({ "error": error }).to_string(),
+        }
+    }
+
+    /// **X-17, the failing-first test.** This host's own client secret being wrong does not read,
+    /// in the log, like a caller's authorization code being refused — and reads *exactly* like it
+    /// to the caller.
+    ///
+    /// Both halves in one test because they pull in opposite directions and a pair of tests could
+    /// drift apart. RFC 6749 §5.2 `invalid_client` means the credential the **token endpoint**
+    /// checked was this host's, presented as HTTP Basic by `redeem`. No caller can do anything
+    /// about that, and an operator reading "the provider refused the authorization code" goes
+    /// looking at the wrong end of the flow entirely.
+    ///
+    /// The caller-facing half is not an economy. Answering an operator's misconfiguration
+    /// differently would make the callback report whether *this host's* registration at the
+    /// provider is currently good — to anybody who can reach `/api/signin/callback`, without
+    /// signing in. The remedy for the caller is the same either way, so nothing is withheld that
+    /// would help them.
+    #[tokio::test]
+    async fn a_refused_client_secret_is_not_reported_as_a_refused_authorization_code() {
+        // This host's registration is wrong. The operator's problem, and only theirs.
+        let misconfigured = StubProvider::serving(
+            refusing(StatusCode::UNAUTHORIZED, "invalid_client"),
+            published_keys(),
+        )
+        .await;
+
+        // The caller's code was refused. Genuinely about their credential.
+        let refusing_the_code = StubProvider::serving(
+            refusing(StatusCode::BAD_REQUEST, "invalid_grant"),
+            published_keys(),
+        )
+        .await;
+
+        let ours = refusal_from(&misconfigured).await;
+        let theirs = refusal_from(&refusing_the_code).await;
+
+        // The operator's channel separates them, and names the variable to go and look at.
+        assert_ne!(
+            ours.to_string(),
+            theirs.to_string(),
+            "an operator must be able to tell their own misconfiguration from a refused code",
+        );
+        assert!(
+            ours.to_string().contains(CLIENT_SECRET_ENV),
+            "and must be told which variable to look at: {ours}",
+        );
+
+        // The caller's channel does not. Byte-identical, or the split has become a disclosure.
+        assert_eq!(
+            ours.caller_facing(),
+            theirs.caller_facing(),
+            "the caller learns nothing that separates them",
+        );
     }
 
     /// RFC 7617 `basic-credentials`: `user:password`, standard base64 with padding.
@@ -781,8 +1056,201 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
         let refusal = redeem_at(&provider).await;
 
         assert!(
-            matches!(refusal, Err(ExchangeError::Rejected)),
+            matches!(refusal, Err(ExchangeError::UnpublishedKey)),
             "a token naming an unpublished kid must be refused, not {refusal:?}",
+        );
+    }
+
+    /// **X-17, the Acceptance's second item.** An unpublished `kid` reads differently, in the log,
+    /// from a refused authorization code — and identically to the caller.
+    ///
+    /// The same two halves as
+    /// [`a_refused_client_secret_is_not_reported_as_a_refused_authorization_code`], for a cause
+    /// that is *usually* the operator's: a `FLUX_EXCHANGE_OIDC_JWKS_URI` naming the wrong provider
+    /// fails this way on **every** sign-in, and an operator reading "the provider refused the
+    /// authorization code" has no reason to go and look at a URL.
+    ///
+    /// It is not always the operator's, which is why the caller-facing half is not negotiable: a
+    /// stranger can produce this line at will by signing anything with a `kid` of their choosing,
+    /// and a distinguishable answer would confirm to them which `kid`s this host holds keys for.
+    #[tokio::test]
+    async fn an_unpublished_kid_is_not_reported_as_a_refused_authorization_code() {
+        let signing =
+            EncodingKey::from_rsa_pem(PRIVATE_KEY.as_bytes()).expect("the test key is a valid PEM");
+
+        // Correctly signed, and differing from the happy path in nothing but its `kid`.
+        let wrong_key_set = StubProvider::serving(
+            answering_with(&signed_with(
+                Algorithm::RS256,
+                "a-kid-nobody-published",
+                &signing,
+            )),
+            published_keys(),
+        )
+        .await;
+
+        let refusing_the_code = StubProvider::serving(
+            refusing(StatusCode::BAD_REQUEST, "invalid_grant"),
+            published_keys(),
+        )
+        .await;
+
+        let ours = refusal_from(&wrong_key_set).await;
+        let theirs = refusal_from(&refusing_the_code).await;
+
+        assert_ne!(
+            ours.to_string(),
+            theirs.to_string(),
+            "an unpublished kid and a refused code are different operator problems",
+        );
+        assert!(
+            ours.to_string().contains(JWKS_URI_ENV),
+            "and the operator must be told which variable to look at: {ours}",
+        );
+
+        assert_eq!(
+            ours.caller_facing(),
+            theirs.caller_facing(),
+            "the caller learns nothing that separates them",
+        );
+    }
+
+    /// **X-17, the Acceptance's fourth item.** The refetch floor holds **while the key set is
+    /// failing**, which is precisely when it used to lapse.
+    ///
+    /// The bug: `fetch_keys` wrote its timestamp only after a successful parse, and the floor was
+    /// read off that timestamp. So a key set that was down left the cache empty, the floor had
+    /// nothing to compare against, and every arriving callback started an outbound request of its
+    /// own — one per hostile `kid`, at no cost to the sender, aimed at a provider that was already
+    /// having a bad day. A rate limit that holds only while nothing is wrong is not one.
+    ///
+    /// Counted at the stub rather than inferred from timing, because the claim is about how many
+    /// requests actually left this process.
+    #[tokio::test]
+    async fn an_unknown_kid_cannot_hammer_a_failing_key_set() {
+        let signing =
+            EncodingKey::from_rsa_pem(PRIVATE_KEY.as_bytes()).expect("the test key is a valid PEM");
+        let provider = StubProvider::serving(
+            answering_with(&signed_with(Algorithm::RS256, "a-strangers-kid", &signing)),
+            published_keys(),
+        )
+        .await;
+
+        // The key set only ever errors, from the first request onwards.
+        provider.keys_unreachable();
+
+        let config = OidcConfig::for_test_against(ISSUER, CLIENT_ID, TENANT, &provider.base);
+        let exchange = HttpTokenExchange::new(&config).expect("the HTTP client builds");
+        let verifier = Verifier::generate().expect("the OS supplies entropy");
+
+        // One exchange, many callbacks — a single host under a stream of hostile callbacks, which
+        // is the shape the amplification takes. The real floor, not a test one: ten seconds is far
+        // longer than this loop takes, so anything above one fetch is the bug.
+        for _ in 0..8 {
+            let refusal = exchange
+                .redeem(Redemption {
+                    code: "an-authorization-code",
+                    verifier: &verifier,
+                    redirect_uri: config.redirect_uri(),
+                    client_id: config.client_id(),
+                    client_secret: config.client_secret(),
+                })
+                .await;
+
+            assert!(refusal.is_err(), "no key set means nothing verifies");
+        }
+
+        assert_eq!(
+            provider.jwks_requests(),
+            1,
+            "eight hostile callbacks must cost the provider one key-set fetch, not eight",
+        );
+    }
+
+    /// **X-17, the Acceptance's fifth item.** A key published *after* the cache was filled is
+    /// picked up, without waiting out [`JWKS_TTL`].
+    ///
+    /// The rotation branch — "the cache is fresh and does not name this `kid`" — had no test at
+    /// all, because every other test in this module starts cold. A provider that rotates early
+    /// could therefore have been refusing valid sign-ins for up to five minutes with nothing here
+    /// noticing.
+    ///
+    /// The refetch floor is set to nothing for this test, because the branch is only reachable
+    /// *inside* the floor's window and a test that slept through ten real seconds is a test that
+    /// gets deleted. What is being proved is that a refetch happens and the new key is found —
+    /// `an_unknown_kid_cannot_hammer_a_failing_key_set` is what proves the floor is there.
+    ///
+    /// The rotated key is the same key material under a new `kid`, deliberately: key **selection**
+    /// is what this branch does, it selects by `kid` alone, and a second embedded keypair would
+    /// prove nothing more while doubling the private material checked into this file.
+    #[tokio::test]
+    async fn a_key_published_after_the_cache_was_filled_is_picked_up() {
+        const ROTATED: &str = "x17-rotated-key";
+
+        let signing =
+            EncodingKey::from_rsa_pem(PRIVATE_KEY.as_bytes()).expect("the test key is a valid PEM");
+        let provider =
+            StubProvider::serving(answering_with(&genuine_token()), published_keys()).await;
+
+        let config = OidcConfig::for_test_against(ISSUER, CLIENT_ID, TENANT, &provider.base);
+        let exchange = HttpTokenExchange::with_refetch_floor(&config, Duration::ZERO)
+            .expect("the HTTP client builds");
+        let verifier = Verifier::generate().expect("the OS supplies entropy");
+
+        let redeem = || async {
+            exchange
+                .redeem(Redemption {
+                    code: "an-authorization-code",
+                    verifier: &verifier,
+                    redirect_uri: config.redirect_uri(),
+                    client_id: config.client_id(),
+                    client_secret: config.client_secret(),
+                })
+                .await
+        };
+
+        // A sign-in, so the cache is warm and holds only the original key.
+        redeem().await.expect("the happy path fills the cache");
+        assert_eq!(provider.jwks_requests(), 1);
+
+        // The provider rotates: a new `kid`, published, and signing from now on.
+        provider.now_publishing(
+            json!({
+                "keys": [{
+                    "kty": "RSA",
+                    "use": "sig",
+                    "alg": "RS256",
+                    "kid": ROTATED,
+                    "n": MODULUS,
+                    "e": EXPONENT,
+                }],
+            })
+            .to_string(),
+        );
+        provider.now_answering(answering_with(&signed_with(
+            Algorithm::RS256,
+            ROTATED,
+            &signing,
+        )));
+
+        let rotated = redeem()
+            .await
+            .expect("a key published after the cache was filled must verify");
+
+        assert_eq!(rotated.subject, "the-operator");
+        assert_eq!(
+            provider.jwks_requests(),
+            2,
+            "the unknown kid provoked exactly one refetch",
+        );
+
+        // And the refetched set is now the cached one: a third sign-in with the rotated key costs
+        // nothing on the network, or "picked up" would mean "fetched again every time".
+        redeem().await.expect("the rotated key is now cached");
+        assert_eq!(
+            provider.jwks_requests(),
+            2,
+            "the rotation was cached, not refetched per sign-in",
         );
     }
 
@@ -869,7 +1337,7 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
         let refusal = redeem_at(&provider).await;
 
         assert!(
-            matches!(refusal, Err(ExchangeError::Rejected)),
+            matches!(refusal, Err(ExchangeError::NoIdToken)),
             "an exchange with no id token establishes no identity, not {refusal:?}",
         );
     }

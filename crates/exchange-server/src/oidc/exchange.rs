@@ -89,18 +89,57 @@ pub struct SignedClaims {
 
 /// Why an authorization code could not be redeemed.
 ///
-/// The two variants are the same split as [`IdentityError`](exchange_host::IdentityError), for the
-/// same reason: an operator answers a rejected code and an unreachable provider in opposite ways,
-/// and a caller told "your login is broken" for an outage goes and resets a password that was fine.
+/// # These are separated by who has to fix them, not by what the provider said
+///
+/// The original split was the same as [`IdentityError`](exchange_host::IdentityError)'s — a
+/// rejected credential against an unreachable provider — for the reason that an operator answers
+/// those in opposite ways, and a caller told "your login is broken" for an outage goes and resets
+/// a password that was fine.
+///
+/// **X-17 found the same argument one level down.** `Rejected` was carrying four different events,
+/// and two of them are not the caller's credential at all: `invalid_client` is *this host's* client
+/// secret, and an unpublished `kid` is very often *this host's* JWKS URI. Both were reported as
+/// "the provider refused the authorization code", which sends an operator to look at the one part
+/// of the flow that was working.
+///
+/// So the variants below are one per **thing an operator would do next**, and
+/// [`SignInRefusal`](super::SignInRefusal) keeps them apart in the log while answering the caller
+/// identically — the shape X-15 established for `UnknownState` / `NoBinder` / `AnotherBrowser`.
+///
 /// Constructed by [`TokenExchange`] implementors — in this binary,
 /// [`HttpTokenExchange`](super::http_exchange::HttpTokenExchange).
 #[derive(Debug)]
 pub enum ExchangeError {
     /// The provider refused the code, or the token it returned did not verify.
     ///
-    /// Carries **no detail**, deliberately. Anything the provider said about why is about a
-    /// credential, and the caller is the last party that should be told which half of it was wrong.
+    /// The one variant here that genuinely is about the **caller's** credential. Carries **no
+    /// detail**, deliberately: anything the provider said about why is about a credential, and the
+    /// caller is the last party that should be told which half of it was wrong.
     Rejected,
+
+    /// The provider refused **this host's** client credentials: RFC 6749 §5.2 `invalid_client`.
+    ///
+    /// Nothing about the caller was even reached. The client id, the client secret, or this host's
+    /// registration at the provider is wrong, and no caller can do anything about any of them.
+    ClientRefused,
+
+    /// The id token named a signing key the configured JWKS does not publish.
+    ///
+    /// Two very different things wear this shape, and an operator can tell them apart by volume: a
+    /// stranger sending a `kid` nobody ever published is one line among many, and a wrong
+    /// `FLUX_EXCHANGE_OIDC_JWKS_URI` is *every* sign-in failing this way from the first one.
+    ///
+    /// Carries no `kid`. It is attacker-chosen request input, and this host does not put request
+    /// input into log lines — `routes::signin` makes the same choice for the provider's `error`
+    /// parameter.
+    UnpublishedKey,
+
+    /// The exchange succeeded and returned no id token.
+    ///
+    /// A successful OAuth exchange and a failed OIDC sign-in: there is an access token and nothing
+    /// that says who the human is. Usually a client registered without the `openid` scope, which is
+    /// again a thing only an operator can fix.
+    NoIdToken,
 
     /// The provider could not be reached.
     ///
@@ -114,6 +153,29 @@ impl std::fmt::Display for ExchangeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Rejected => f.write_str("the provider refused the authorization code"),
+            // Each of these names the variable to go and look at, because the whole point of the
+            // variant is that the operator would otherwise be looking at the caller.
+            Self::ClientRefused => write!(
+                f,
+                "the provider refused this host's own client credentials (invalid_client), not the \
+                 authorization code: check {} and {}, and that this host is still registered at \
+                 the provider",
+                super::config::CLIENT_ID_ENV,
+                super::config::CLIENT_SECRET_ENV,
+            ),
+            Self::UnpublishedKey => write!(
+                f,
+                "the id token was signed by a key the configured key set does not publish: check \
+                 {} names this issuer's key set. If only some sign-ins fail this way it is instead \
+                 a stranger's kid, which is refused and costs nothing",
+                super::config::JWKS_URI_ENV,
+            ),
+            Self::NoIdToken => write!(
+                f,
+                "the provider redeemed the code and returned no id token, so nothing says who the \
+                 human is: check this host's registration requests the `openid` scope ({})",
+                super::config::SCOPES,
+            ),
             Self::Unreachable(reason) => write!(f, "the provider could not be reached: {reason}"),
         }
     }
