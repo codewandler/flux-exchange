@@ -5,8 +5,11 @@ the [board](stories/README.md); this document is the narrative around it.
 
 ## Status
 
-_As of 2026-08-01:_ **v0.0.1 — a charter, a type system, and an HTTP surface with one route.**
-`cargo run` binds loopback and answers `GET /health`; everything past that is unbuilt.
+_As of 2026-08-01:_ **v0.4.0 — a platform that holds credentials and can sign a human in.**
+`cargo run` binds loopback and refuses a reachable address with no identity provider. Complete OIDC
+sign-in, sessions that end when the identity behind them does, a per-tenant connection surface with
+credential bounds, and the connector catalogue. **It still executes nothing** — `invoke`,
+`subscribe` and execution records are unbuilt, so the platform can be wired up but not yet used.
 
 `crates/exchange-host` carries the vocabulary and the rules as tested types (32 tests):
 `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, and the `Identity` port.
@@ -17,7 +20,7 @@ and a lease requiring the same principal rather than merely the same tenant.
 `crates/exchange-server` prints which runtimes each deployment shape would serve, and exits.
 `console/` reads the live catalogue from the service; the fixture banner is gone with the fixtures.
 
-**Nothing holds a credential, binds a port, or answers a request.**
+**It holds credentials, binds a port and answers requests. It does not yet run an operation.**
 
 ## The blocker, and what it does not block
 

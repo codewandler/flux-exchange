@@ -33,6 +33,9 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
+### Catalogue
+- [X-34 — The console presents an execution platform, not a catalogue browser](X-34-console-shell.md) · owner-raised 2026-08-01: 'flux-exchange is the execution platform - not just a catalog explorer'. The console renders one reference view and no chrome, while the service behind it holds credentials for many tenants and runs operations for them
+
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
 - [X-33 — CI proves the MSRV the crate promises](X-33-msrv-job.md) · split from X-30, 2026-08-01: the job could not land while rust-version was false. The number is now 1.88 (observed, not chosen), so the job can be written against a promise that holds
