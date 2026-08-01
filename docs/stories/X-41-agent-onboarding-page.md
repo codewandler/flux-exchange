@@ -34,8 +34,9 @@ X-36 just made it possible to mint an agent principal and hand it a token. Nothi
       It describes the shape of the service, never its contents. Assert this, do not intend it.
 - [x] **Honest by construction:** what the page says an agent can do is derived from the same
       `surfaces.mts` declaration the navigation uses. A test asserts the page cannot present a
-      capability whose surface is marked `built: false` — so today it must say an agent can be
-      **minted** and cannot yet **authenticate** or **invoke**.
+      capability whose surface is marked `built: false`. ⚠ **The parenthetical this item used to
+      carry — "so today it must say an agent can be minted and cannot yet authenticate or invoke" —
+      was false about `invoke` and is corrected below.**
 - [x] It states the concrete next step that actually works today: how a signed-in human mints an
       agent (`POST /api/agents`) and that the token is shown **once**.
 - [x] Light and dark through `tokens.css`; no second colour vocabulary; no file under
@@ -76,3 +77,32 @@ X-36 just made it possible to mint an agent principal and hand it a token. Nothi
 - **Carried forward:** the `identity` surface backs the mint step. Repurposing `identity` in
   `surfaces.mts` would move the mint claim with it silently — the test asserts the derivation, not
   the mapping's judgement.
+
+## Correction 2026-08-01 (by X-42) — the page said `invoke` was not built, and it was
+
+X-42 built a machine-readable descriptor from this page's source and, being fetched rather than
+read, the claim got checked against the route table. `POST /api/operations/{operation}/invoke` is
+registered in `routes::MODULES` and shipped in **v0.7.0**. This page had been saying otherwise since.
+
+**The reasoning error is in this story's own Progress note**, and it is worth keeping on the page
+rather than deleting:
+
+> **The rule is one-directional, and the code says so.** `identity` being built is not proof that
+> `POST /api/agents` exists. What the derivation guarantees is that it can take a claim **off** the
+> page…
+
+That is correct as far as it goes and it is the wrong half of the risk. A derivation that can only
+*remove* claims was treated as safe because it cannot invent a capability. But removing a **true**
+claim is also a false page — and it is the worse direction here, because the caller this epic exists
+for is told the platform cannot do the thing it does. "One-directional" is not a synonym for "fails
+safe"; it names which direction it fails in, and nobody asked whether that direction was the safe one.
+
+The falsification at integration was real and did not catch it either: flipping `invoke` to
+`built: true` turned four tests red, which proves the wiring is live. It cannot prove the **value**
+was right. A test that the page follows its source says nothing about the source.
+
+**What changed** (in X-42): `surfaces.mts` now answers two questions separately — `built` (has this
+console a screen) and `served` (does this service do this). `invoke` is `built: false, served: true`.
+No surface's `built` moved, so this page's navigation assertions are untouched; the capability
+claims now derive from `served`, and `served` is held to `routes::MODULES` by a Rust test in both
+directions. That test would have gone red on the version of this page that shipped.
