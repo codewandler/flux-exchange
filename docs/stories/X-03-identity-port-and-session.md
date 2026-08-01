@@ -1,7 +1,7 @@
 ---
 id: X-03
 title: "Bind the Identity port, with a dev identity and a session"
-status: ready
+status: in-progress
 priority: 2
 epic: serve
 note: "the tenant must come from the resolved principal and from NOTHING a caller controls — not a path segment, not a body field, not a header"

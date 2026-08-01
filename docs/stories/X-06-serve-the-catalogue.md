@@ -1,7 +1,7 @@
 ---
 id: X-06
 title: "Serve the connector catalogue"
-status: ready
+status: in-progress
 priority: 3
 epic: catalogue
 note: "the operation metadata a grant is written over — risk, effects, idempotency — must be in the response, or Selector cannot be evaluated by anything but the server"
