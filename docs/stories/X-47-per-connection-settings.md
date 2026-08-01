@@ -1,8 +1,9 @@
 ---
 id: X-47
 title: "A connector with a templated host can actually be invoked"
-status: done
+status: in-progress
 epic: connections
+priority: 0
 design: docs/designs/connection-settings.md
 design: docs/designs/connection-settings.md
 areas: [exchange-server, exchange-host]
@@ -185,3 +186,82 @@ Merged as the rework of the reverted `90ee254`.
   approximates a public-suffix list. A vendor template shaped `{x}.co.uk` would pass it while pinning
   a public suffix. Nothing shipped is in that shape, and the catalogue-wide test asserts the property
   of every accepted suffix — but it is the assumption to re-examine first.
+
+## REOPENED 2026-08-01 — the independent re-review found a second exfiltration path
+
+I closed this story earlier today. **That was wrong and this reopens it.** The re-review measured a
+credential on the wire at an origin the caller chose, on the connectors this fix treats as *safe*.
+
+### The finding
+
+`PUT /api/connections/{connector}/settings/{service}/{field}` is `Access::Principal`
+(`routes/connections.rs:257`), and `require_principal` admits **every** kind
+(`routes/mod.rs:183-199`). Driven end to end through a recording egress as an agent principal:
+
+```
+stored endpoint.subdomain = "attacker-controlled"
+url:     "https://attacker-controlled.zendesk.com/api/v2/tickets/1.json"
+headers: {"Authorization":"Basic b3BzQGFjbWUudGVzdC90b2tlbjpxdWlnZ2xlLW1hcnJvdy1wbGltdGgtNDI="}
+         → ops@acme.test/token:quiggle-marrow-plimth-42
+```
+
+**This is new reachability from X-47.** Before it, `execution::invoker` bound `MemoryConfig::new()`
+and zendesk refused before dispatch.
+
+### Why the §4 defence does not hold
+
+§4 argues the composed authority is always inside the vendor's own domain. That is **true and is not
+a safety argument**: `*.zendesk.com`, `*.atlassian.net`, `*.myshopify.com`, `*.supabase.co` and
+`*.my.salesforce.com` are **self-service registrable namespaces**. "Inside the vendor" and "not the
+caller's" are two different claims.
+
+It is the same shape as the §4 flaw this rework was already correcting, one level up:
+
+> a character allow-list constrains what a value **looks like**, not where the request goes
+> — and **a suffix pin constrains which vendor the request reaches, not whose account at that vendor.**
+
+### Why this matters even though agent tokens do not resolve yet
+
+`AgentStore::resolve` is `#[allow(dead_code, reason = "bound to the Identity port by X-37")]`, so a
+minted agent cannot authenticate on a production build today. It is still live, for two reasons:
+
+- `dev_identity.rs:47` mints `PrincipalKind::Agent` where the development identity is armed.
+- **Credential values are write-only by design** — this surface never reads one back. Any principal
+  of the tenant who did *not* supply the credential can now read it out. Within-tenant, but a real
+  boundary: the model says a stored credential is not readable, and this makes it readable.
+
+It breaks `AGENTS.md` § Invariants verbatim: *"An agent's token grants access to an operation, never
+to a credential."*
+
+### The second blocker: the `get`-side guard is held by no test
+
+The design calls the second enforcement point *"the one that matters"*. Deleting it from
+`settings.rs:1130-1137` and running the whole gate: **331 passed, 0 failed.** The guard works — a
+value planted straight into the store file is refused at `get`, nothing dispatches, and the file is
+byte-identical afterwards — but nothing keeps it there. The three scenarios §4 names (an edited
+store, a restored backup, a value written by an older build) are defended by a branch a refactor can
+delete with a green CI. This repository's own standard is *verified by falsification, not on report*;
+it was applied to `host_pinning` and not to this.
+
+### What the re-review confirmed, so it is not re-spent
+
+- **Four is the right count and there is no fifth.** The whole shipped catalogue rehearsed through
+  the real `host_pinning`: 53 providers → 4 `WholeAuthority`, 7 `PinnedTo`, 13 `OutsideTheAuthority`.
+  Independently: across all 681 shipped `.flux` files, **0 operations mention a `://` authority that
+  is not in their `hosts`**, so reading the rule off the catalogue misses no second request target.
+- **No bypass of the `get` guard reachable from dispatch**, measured against a planted store file.
+- **The refusal is a refusal** — no trim, lowercase or truncation; refuses on the template before the
+  size bound; names the connector and its template and carries no field a value could occupy.
+- **A setting cannot reshape the path** — bitbucket's `endpoint.workspace` with `..`, `../evil`,
+  `a/b`, `a%2fb`, `a?x=1`, `a#frag` each refused with nothing dispatched.
+- **A catalogue bump goes red** rather than quietly dispatching.
+
+### Carried, smaller
+
+- `suffix_of` accepts a public suffix at exactly two labels — `{x}.co.uk`, `{x}.com.au`,
+  `{x}.github.io` all return a suffix. Everything else errs closed as claimed. The story's wording
+  that "the catalogue-wide test asserts the property of every accepted suffix" **overstates the
+  cover**: `connection_settings.rs:726-732` asserts `suffix.matches('.').count() >= 2`, which
+  restates `suffix_of`'s own threshold rather than checking anything independent.
+- `host_pinning` keeps the **last** pinned suffix rather than requiring every template to agree
+  (`settings.rs:428`). Unexercised — every shipped provider has one distinct host template.

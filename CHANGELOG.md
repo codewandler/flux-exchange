@@ -28,7 +28,15 @@ All notable changes to this project are documented in this file. The format is b
   **Configuration is not a credential and is not stored as one**: its own file, its own port, and
   bounds never summed with the credential allowance. Values are not read back out.
 
-  **Four connectors are deliberately refused**, and this is the security property of the release: for
+  ⚠ **This entry claimed a security property the code does not have, and the claim is withdrawn.**
+  An independent re-review measured a tenant's credential on the wire at an origin the *caller*
+  chose, on the connectors this change treats as safe — a suffix pin constrains which **vendor** a
+  request reaches, not **whose account** at that vendor, and `*.zendesk.com`, `*.atlassian.net`,
+  `*.myshopify.com`, `*.supabase.co` and `*.my.salesforce.com` are all self-service registrable.
+  X-47 is reopened and **this is not released**. What follows is what the change does; read it with
+  that correction.
+
+  **Four connectors are deliberately refused**, and this was described as the security property: for
   `newrelic`, `docusign`, `okta` and `freshdesk` the templated value *is the entire destination
   authority*, so supplying it would have been a way for a caller to name a host — and the tenant's
   credential would have travelled there. The rule is about the **template**, not the value, and it is
