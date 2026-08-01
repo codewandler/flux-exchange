@@ -87,6 +87,17 @@ base path plus the two content rules the site publishes under — no deployment-
 credential-shaped. It is a third Node tree: `web/`, `console/` and the Cargo workspace share nothing,
 including lockfiles.
 
+**Since X-64 no page on that site states whether a capability is built.** Pages under
+`web/capabilities/` name a capability in their frontmatter and the status is derived from the
+committed agent descriptor — the same artifact whose `live` flags `routes::onboarding`'s tests hold
+to `routes::MODULES`. A page naming a capability the descriptor does not publish **fails the site
+build**, because a capability page rendering with no badge tells a reader nothing is wrong. The site
+build also re-derives that artifact from `console/src/descriptor.mts` and fails when the committed
+copy is stale, rather than assuming the console suite ran — so editing `console/src/surfaces.mts`
+without running `node scripts/agent-descriptor.mjs` from `console/` now turns the *site* red too.
+That reads across three trees without sharing a dependency with any of them; `web/README.md` has the
+rules and, more usefully, the one thing the badge does **not** hold.
+
 Rust 1.88 or newer — that is the floor `jsonwebtoken` and `time` impose, not a number we chose. It
 lives in `Cargo.toml` as `rust-version`, and since X-33 CI's `msrv` job builds the workspace on
 whatever that says, reading the number out of the manifest rather than restating it. **Do not raise

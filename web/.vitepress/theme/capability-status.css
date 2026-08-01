@@ -1,0 +1,66 @@
+/*
+ * The derived capability status badge (X-64).
+ *
+ * Built entirely out of the default theme's own custom properties, so it follows the site's light
+ * and dark themes without restating either. `--vp-c-brand-*` for a capability this build serves and
+ * `--vp-c-warning-*` for one it does not: the two states must be distinguishable at a glance and
+ * before reading, which is the design's "a reader must never have to guess which they are looking
+ * at".
+ *
+ * The colour is never the whole signal. The badge always spells the verdict out in words — a reader
+ * who cannot distinguish the two hues reads "Built" or "Not built", which is the same information.
+ */
+
+.capability-status {
+  margin: 0 0 2rem;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid var(--vp-c-divider);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background-color: var(--vp-c-bg-soft);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.capability-status.is-live {
+  border-left-color: var(--vp-c-brand-1);
+}
+
+.capability-status.is-planned {
+  border-left-color: var(--vp-c-warning-1, var(--vp-c-yellow-1));
+}
+
+.capability-status p {
+  margin: 0;
+}
+
+.capability-status p + p {
+  margin-top: 0.5rem;
+}
+
+.capability-status__verdict {
+  font-size: 1rem;
+}
+
+.capability-status.is-live .capability-status__verdict strong {
+  color: var(--vp-c-brand-1);
+}
+
+.capability-status.is-planned .capability-status__verdict strong {
+  color: var(--vp-c-warning-1, var(--vp-c-yellow-1));
+}
+
+.capability-status__call {
+  margin-left: 0.5rem;
+}
+
+.capability-status__withheld {
+  color: var(--vp-c-text-1);
+}
+
+/* The provenance line. Quieter than the verdict on purpose — it is there for the reader who wants
+ * to know where the answer came from, not for the one who wants the answer. */
+.capability-status__source {
+  color: var(--vp-c-text-2);
+  font-size: 0.82rem;
+}
