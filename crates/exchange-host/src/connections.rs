@@ -291,21 +291,45 @@ impl<'a> ConnectorDeclaration<'a> {
         let mut writes = Vec::with_capacity(supplied.len());
 
         for (name, value) in supplied {
-            let reference = self.address_of(tenant, name)?;
-
-            if value.len() > MAX_CREDENTIAL_VALUE_BYTES {
-                return Err(ConnectionRefusal::CredentialTooLarge {
-                    connector: self.connector.to_string(),
-                    credential: name.clone(),
-                    bytes: value.len(),
-                    limit: MAX_CREDENTIAL_VALUE_BYTES,
-                });
-            }
-
-            writes.push((reference, Secret::new(value)));
+            writes.push(self.write_of(tenant, name, value)?);
         }
 
         Ok(writes)
+    }
+
+    /// **One** supplied value, resolved to its address and admitted against the per-value bound.
+    ///
+    /// The single-value form of [`writes`](Self::writes), and the same seam rather than a second
+    /// one: [`writes`] is written in terms of this, so the bound is stated in one place and the
+    /// two cannot drift.
+    ///
+    /// It exists because replacing a credential is an operation on exactly one of them (X-39), and
+    /// asking the many-valued form for it would hand the caller a `Vec` whose length it has to
+    /// assume — an assumption that is either an `unwrap` or a branch that can never be taken. A
+    /// caller with one value says so in the type instead.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`address_of`](Self::address_of), and
+    /// [`ConnectionRefusal::CredentialTooLarge`] for a value past [`MAX_CREDENTIAL_VALUE_BYTES`].
+    pub fn write_of(
+        &self,
+        tenant: &Tenant,
+        name: &str,
+        value: &str,
+    ) -> Result<(CredentialRef, Secret), ConnectionRefusal> {
+        let reference = self.address_of(tenant, name)?;
+
+        if value.len() > MAX_CREDENTIAL_VALUE_BYTES {
+            return Err(ConnectionRefusal::CredentialTooLarge {
+                connector: self.connector.to_string(),
+                credential: name.to_string(),
+                bytes: value.len(),
+                limit: MAX_CREDENTIAL_VALUE_BYTES,
+            });
+        }
+
+        Ok((reference, Secret::new(value)))
     }
 
     /// The address of a credential this declaration is already known to carry.
@@ -758,6 +782,53 @@ mod tests {
         // The argument for the number, restated where it is enforced: the reason one tenant's size
         // is anybody else's business is that every write rewrites the whole store.
         assert!(message.contains("rewrites the whole store"), "{message}");
+    }
+
+    /// The single-value seam a rotation writes through resolves the same address and applies the
+    /// same bound as the many-valued one — because it *is* the many-valued one's step.
+    ///
+    /// Both directions are pinned: what `write_of` produces for a name is what `writes` produces
+    /// for a map holding only that name, and a value past the bound is refused identically. A
+    /// second copy of the bound is exactly what this test exists to catch.
+    #[test]
+    fn one_value_is_admitted_by_the_same_step_as_a_whole_body() {
+        let supplied = BTreeMap::from([("zendesk.api_token".to_string(), "a-token".to_string())]);
+
+        let (reference, secret) = zendesk()
+            .write_of(&acme(), "zendesk.api_token", "a-token")
+            .expect("a declared credential of a declared authority");
+        let writes = zendesk()
+            .writes(&acme(), &supplied)
+            .expect("the same, through the many-valued form");
+
+        assert_eq!(writes.len(), 1);
+        assert_eq!(reference, writes[0].0);
+        assert_eq!(
+            address_path(&reference),
+            "tenants/acme/com.zendesk.api/api_token",
+        );
+        assert_eq!(stored_bytes(&secret), stored_bytes(&writes[0].1));
+
+        // The bound is the same one, not a second copy of the number.
+        let oversized = "x".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1);
+        assert_eq!(
+            zendesk()
+                .write_of(&acme(), "zendesk.api_token", &oversized)
+                .expect_err("a value past the bound is not a credential"),
+            ConnectionRefusal::CredentialTooLarge {
+                connector: "zendesk".to_string(),
+                credential: "zendesk.api_token".to_string(),
+                bytes: MAX_CREDENTIAL_VALUE_BYTES + 1,
+                limit: MAX_CREDENTIAL_VALUE_BYTES,
+            },
+        );
+
+        // And an undeclared name has no address here either, so a caller naming one in a path
+        // cannot reach one.
+        assert!(matches!(
+            zendesk().write_of(&acme(), "zendesk.api_key", "a-token"),
+            Err(ConnectionRefusal::UndeclaredCredential { .. }),
+        ));
     }
 
     /// `Tenant` is the only way a tenant reaches an address, and it refuses a traversing spelling
