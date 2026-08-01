@@ -19,6 +19,10 @@
 //      unpublished by this source rather than absent from the connector.
 
 import type { Catalog, Issue, Operation, Provider, Service, Status } from './catalog.mts'
+// The one thing this file reads that is not the served document: whether this build's service
+// serves the invocation route. It is a statement about the API surface — no tenant, no principal,
+// no session — and `adapt` below is where the whole argument for reading it here lives.
+import { SURFACES } from './surfaces.mts'
 
 // ---------------------------------------------------------------------------------------------
 // The endpoints.
@@ -1072,10 +1076,9 @@ const NO_PRINCIPAL: Issue = {
 /**
  * One operation, in the carried contract's shape.
  *
- * `works` is `false` and that is not pessimism: nothing in flux-exchange can be invoked yet, and the
- * catalogue-wide condition above is on every operation, so an operation claiming to work while
- * carrying a listed reason it does not would be self-contradictory. `ownIssues` sees none of these —
- * they are catalogue-scoped — so no operation is badged with a defect it does not own.
+ * `works` arrives on the shared `Status` that [`adapt`] computes once over the whole document, and
+ * what it means is written down there. `ownIssues` sees none of the catalogue-wide conditions above
+ * — they are catalogue-scoped — so no operation is badged with a defect it does not own.
  */
 function adaptOperation(connector: string, served: ServedOperation, status: Status): Operation {
   return {
@@ -1143,6 +1146,60 @@ function adaptProvider(pair: ServedPair, status: Status): Provider {
 }
 
 /**
+ * **What `works` means in this console** — set out here because the name does not say it, and
+ * because there were four defensible readings and three of them are wrong on this page.
+ *
+ * It means: **this service runs this operation.** `POST /api/operations/{operation}/invoke` is in
+ * the published surface, it is compiled against the same catalogue this document was read from, and
+ * dispatch ends in the operation's own compiled Flux. That is the whole claim. It is not a claim
+ * that the reader may call it, that anyone holds the credential it needs, or that a call would
+ * succeed.
+ *
+ * The three readings not taken (`docs/stories/X-53-…`), each for one reason:
+ *
+ *   - **the tenant has a connection**, and **the tenant has supplied every setting the connector
+ *     needs** (X-47) — both are per-tenant state, and this explorer is reachable *anonymously*. A
+ *     badge derived from either would turn a public page into a report on somebody's connections,
+ *     and it would need `GET /api/connections`, which the catalogue path deliberately never calls.
+ *     `test/service.test.mjs::the_explorer_is_the_same_document_for_two_tenants` holds that shut
+ *     adversarially rather than by reading, the way `routes::onboarding::tests` does for the
+ *     descriptor.
+ *   - **the caller's principal could invoke it** — that is `admitted`, it is three-valued, and
+ *     `null` is not `false`. Collapsing it into a boolean destroys the distinction `OperationFacts`
+ *     exists to render, and makes a badge on a public page move with who is looking at it.
+ *
+ * What is left is a fact about **this build and its route table**, identical for every caller, and
+ * it is *derived* rather than asserted: `surfaces.mts` says whether the service serves `invoke`, and
+ * the server's own gate
+ * (`routes::onboarding::tests::a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it`)
+ * measures that field against `routes::MODULES`. A route leaving the surface turns the Rust gate red
+ * until `surfaces.mts` agrees, and this badge follows with no edit here. That is X-42's correction
+ * in `docs/designs/agent-onboarding.md` applied a fourth time: derive, and derive from the construct
+ * that answers the question being asked. If that surface is ever renamed away this reads `false`,
+ * which under-claims — the direction this repository prefers to fail in.
+ *
+ * **Every operation gets the same answer, and that is honest rather than lazy.** The catalogue route
+ * filters nothing — it serves what this binary was compiled with — and every connector in the
+ * shipped catalogue declares `Runtime::Http`, which
+ * `exchange_host::invoke::tests::the_whole_catalogue_declares_http` keeps true, so the deployment
+ * gate refuses none of them. The day one declares a locally-executing runtime, this console will not
+ * be able to see it: the served document publishes no runtime. That is a gap in what the service
+ * publishes, recorded in the story, and not something to guess at here.
+ *
+ * **Why this does not contradict the two conditions on `status.issues`.** The carried contract
+ * describes `works` as `issues.length === 0` (`catalog.mts`), from an emitter where every issue is a
+ * defect of the operation carrying it. Neither condition here is one: `CONSOLE-SOURCE-SCOPE` is a
+ * statement about what this *source* publishes, and `CONSOLE-NO-PRINCIPAL` says in its own words
+ * that it "is not a statement that anything here is closed to you". Both are catalogue-scoped,
+ * `ownIssues` filters them out, and no operation owns a defect. The banner and the badge answer
+ * different questions — *may you call it* and *does this service run it* — and the first is exactly
+ * what keeps the second from reading as a promise to the visitor.
+ */
+const SERVICE_RUNS_OPERATIONS: boolean = SURFACES.some(
+  (surface) => surface.id === 'invoke' && surface.served
+)
+
+/**
  * The catalogue the components render, with the catalogue-wide conditions applied.
  *
  * The conditions are decided over the whole document and then shared by every operation, which is
@@ -1156,7 +1213,7 @@ function adapt(pairs: ServedPair[]): Catalog {
   if (operations.length > 0 && operations.every((operation) => operation.admitted === null)) {
     issues.push(NO_PRINCIPAL)
   }
-  const status: Status = { works: false, issues, notes: [] }
+  const status: Status = { works: SERVICE_RUNS_OPERATIONS, issues, notes: [] }
 
   return {
     // Neither is published by the served document, and nothing renders either — the console's footer

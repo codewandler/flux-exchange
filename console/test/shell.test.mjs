@@ -7,8 +7,11 @@
 // so the shell states the platform's surfaces instead, and the reader can see the shape of the thing
 // they are administering.
 //
-// Half of that shape is **not built**. `invoke`, `subscribe` and execution records do not exist, and
-// this repository's rule (`docs/vision.md` principle 7, and `AGENTS.md`) is that a page implying a
+// Half of that shape is **not built**. `subscribe` and execution records do not exist, and `invoke`
+// is a route with no screen to drive it from — two different gaps, which is why `surfaces.mts`
+// answers `built` and `served` separately (X-42). `every_surface_is_marked_with_its_true_state`
+// below asserts the first; the second is held against the server's own route table by the Rust gate.
+// This repository's rule (`docs/vision.md` principle 7, and `AGENTS.md`) is that a page implying a
 // working service costs more than an honest gap. A named, disabled entry is honest. A screen with a
 // plausible empty state is a lie — and the difference between the two is exactly the kind of thing
 // that decays silently, because a placeholder screen looks *better* than a disabled entry to anyone

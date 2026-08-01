@@ -18,17 +18,24 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createSSRApp } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
 import {
+  CONNECTIONS_ENDPOINT,
   CONNECTORS_ENDPOINT,
+  SESSION_ENDPOINT,
   failureMessage,
   loadCatalogue,
   operationsEndpoint,
 } from '../src/service.mts'
 import CatalogueFailure from '../src/CatalogueFailure.mts'
 import OperationFacts from '../src/OperationFacts.mts'
+
+const consoleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 /** One served operation, in the shape the catalogue routes publish. */
 const operation = (over = {}) => ({
@@ -272,4 +279,169 @@ test('admitted_null_is_a_third_state_and_never_reads_as_denied', async () => {
     createSSRApp(OperationFacts, { operation: operation({ admitted: true }) })
   )
   assert.match(admitted, /admitted/i)
+})
+
+// ---------------------------------------------------------------------------------------------
+// What the explorer says about invocation (X-53).
+//
+// `POST /api/operations/{operation}/invoke` has been in the published surface since v0.7.0, and this
+// adapter went on setting `works: false` for every operation, so the cards badged operations this
+// service runs as "Not live yet". These two tests are the pair the story asks for: the badge is
+// true, and it is true **without** the page learning anything about a tenant.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The count the cards badge from.
+ *
+ * `ProviderCard.vue` and `CatalogSnapshot.vue` both count a provider's operations whose
+ * `status.works` is true and read "Not live yet" at zero. They are carried single-file components
+ * and there is no bundler in this test run — nothing here can import a `.vue` — so the rule is
+ * evaluated over the same props they are handed, and `the_cards_still_badge_from_works` below reads
+ * their sources so this cannot go on guarding a rule they have stopped using.
+ */
+const liveOperations = (provider) => provider.operations.filter((each) => each.status.works).length
+
+/** The two operations of one connector, as the catalogue routes publish them. */
+const zendesk = () => [
+  operation(),
+  operation({
+    id: 'zendesk-ticket-delete',
+    service: 'tickets',
+    risk: 'destructive',
+    idempotency: 'conditional',
+  }),
+]
+
+test('an_operation_this_service_runs_is_not_badged_as_unrunnable', async () => {
+  const { fetchImpl } = servedBy({ zendesk: zendesk() })
+  const state = await loadCatalogue({ fetch: fetchImpl })
+  assert.equal(state.status, 'ready')
+
+  const [provider] = state.catalog.providers
+  assert.ok(provider.operations.length > 0, 'an empty connector would make every assertion vacuous')
+
+  for (const each of provider.operations) {
+    assert.equal(
+      each.status.works,
+      true,
+      `\`${each.id}\` is served by a host that publishes POST /api/operations/{operation}/invoke and ` +
+        'is marked as something this service cannot run'
+    )
+  }
+
+  // The badge itself: zero live operations is the "Not live yet" branch, and everything live is
+  // "Live". This is the sentence the story exists to stop the page saying.
+  assert.notEqual(liveOperations(provider), 0, 'the card reads "Not live yet" on operations this service runs')
+  assert.equal(
+    liveOperations(provider),
+    provider.operation_count,
+    'a provider whose operations this service all runs must not be badged as partly live'
+  )
+
+  // And nothing was moved into the operations to buy it: the two catalogue-wide conditions are the
+  // reader's context, not defects, so no operation owns one.
+  const owned = provider.operations.flatMap((each) =>
+    each.status.issues.filter((issue) => issue.scope === 'operation')
+  )
+  assert.deepEqual(owned, [], 'no operation owns a defect, so none may be badged with one')
+})
+
+test('the_cards_still_badge_from_works', () => {
+  // The guard on the guard, in the shape `components.test.mjs` uses. The rule above is a copy of one
+  // that lives in components this repository may not edit (`AGENTS.md` § The console); if they stop
+  // reading `works`, or stop rendering that label, the copy is guarding nothing and this says so.
+  for (const file of ['ProviderCard.vue', 'CatalogSnapshot.vue']) {
+    const source = readFileSync(path.join(consoleRoot, 'src', 'components', file), 'utf-8')
+    assert.ok(
+      source.includes('status.works'),
+      `${file} no longer reads \`status.works\`, so the rule this file evaluates is not the one it renders`
+    )
+    assert.ok(
+      source.includes('Not live yet'),
+      `${file} no longer renders "Not live yet"; re-read what it badges before trusting the test above`
+    )
+  }
+})
+
+/**
+ * The same host, serving the same catalogue, holding one tenant's state.
+ *
+ * The tenant-scoped routes answer differently per tenant and are recorded on `asked`, so a console
+ * that started deriving the explorer from what a tenant holds would be caught twice: by the document
+ * moving, and by the request it had to make to move it.
+ */
+function servedToTenant(document, tenant) {
+  const { fetchImpl: catalogue, asked } = servedBy(document)
+  const json = (body) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+
+  const fetchImpl = async (url, init) => {
+    if (url === SESSION_ENDPOINT) {
+      asked.push(url)
+      return json({ principal: { kind: 'user', id: tenant.who, tenant: tenant.id } })
+    }
+    if (url === CONNECTIONS_ENDPOINT) {
+      asked.push(url)
+      return json({ connections: tenant.connections })
+    }
+    return catalogue(url, init)
+  }
+
+  return { fetchImpl, asked }
+}
+
+test('the_explorer_is_the_same_document_for_two_tenants', async () => {
+  // The explorer is reachable anonymously, so whatever decides a badge on it must not be per-tenant.
+  // Driven the way `routes::onboarding::tests::the_document_is_identical_with_two_tenants_connected`
+  // drives the descriptor: two tenants that really do differ, and a comparison on the whole document
+  // rather than on a field somebody thought to check — a leak worth catching would arrive as a count
+  // or a flag, not as a `tenant` key.
+  const document = { zendesk: zendesk(), slack: [operation({ id: 'slack-message-post', service: 'chat' })] }
+
+  const hosts = [
+    servedToTenant(document, {
+      id: 'acme',
+      who: 'alice',
+      connections: [{ connector: 'zendesk', credentials: [{ name: 'zendesk.api_token', stored: true }] }],
+    }),
+    servedToTenant(document, { id: 'globex', who: 'bob', connections: [] }),
+  ]
+
+  // The two hosts really are holding different state, or this test asserts nothing.
+  const held = []
+  for (const host of hosts) held.push(await (await host.fetchImpl(CONNECTIONS_ENDPOINT)).text())
+  assert.notEqual(held[0], held[1], 'both tenants hold the same connections; the comparison below is empty')
+
+  // Those two probes are requests *this test* made. Clear them, so what remains on `asked` is only
+  // what the console asked for.
+  for (const host of hosts) host.asked.length = 0
+
+  const documents = []
+  for (const host of hosts) {
+    const state = await loadCatalogue({ fetch: host.fetchImpl })
+    assert.equal(state.status, 'ready')
+    documents.push(JSON.stringify(state))
+  }
+
+  assert.equal(
+    documents[0],
+    documents[1],
+    'the catalogue moved with the tenant, so something the explorer renders is read from what a ' +
+      'host holds rather than from what it serves anonymously'
+  )
+
+  // And it never asked. The components take everything they render as props (`components.test.mjs`),
+  // so a page that asked nothing tenant-scoped can render nothing tenant-specific.
+  for (const host of hosts) {
+    assert.ok(host.asked.length > 0, 'the console asked for nothing at all; this assertion would be vacuous')
+    for (const url of host.asked) {
+      assert.ok(
+        url.startsWith(CONNECTORS_ENDPOINT),
+        `rendering the catalogue asked for \`${url}\`, which is not one of the anonymous catalogue routes`
+      )
+    }
+  }
 })

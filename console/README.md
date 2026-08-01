@@ -56,8 +56,14 @@ What that does and does not mean:
   no hosts, no Flux source, and no Flux core catalogue. Those fields are shown empty rather than
   filled in with something plausible, and a catalogue-wide notice on every page says that an empty
   field there means *unpublished by this source*, not absent from the connector.
-- **Nothing can be called.** There is no invoke route yet, so every operation reads "not live yet",
-  which is true.
+- **The service runs these operations, and the cards say so.** `POST
+  /api/operations/{operation}/invoke` has been in the published surface since v0.7.0, so an operation
+  of a connector this build carries is badged live rather than "not live yet" — the badge is a
+  statement about *this deployment*, not about the reader. What it does not claim is that you may
+  call it: that needs a principal, a connection and the credential the connector declares, and the
+  catalogue-wide notice on the page is what draws that line. `src/service.mts` sets the flag and
+  carries the argument for this reading and against the three tenant-specific ones (X-53). **There
+  is still no screen for it** — the surface rail says so — so the API is what you call.
 - **`admitted` is three-valued and the catalogue route answers `null` for every operation.** That
   route is anonymous — it says what *exists*, not what you may call — so the console renders the
   third state and never a refusal, whether or not somebody is signed in.
