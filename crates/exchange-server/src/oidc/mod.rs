@@ -495,6 +495,12 @@ impl From<ExchangeError> for SignInRefusal {
     /// single point where a new [`ExchangeError`] could be folded back into an existing refusal and
     /// quietly undo X-17, and it is what `http_exchange`'s tests reach for to assert both channels
     /// at once.
+    ///
+    /// **The arms below must stay one-to-one**, and `tests::every_exchange_error_names_the_refusal_it_becomes`
+    /// is what holds that. Exhaustiveness alone does not: it forces a new variant to be given *an*
+    /// arm, not a *distinct* one, and an arm reusing an existing refusal inherits its status and its
+    /// log line without `status()` changing — which is why X-26's guard cannot see it. Folding two
+    /// causes together here is a decision to argue for in that test, not a line to add here.
     fn from(error: ExchangeError) -> Self {
         match error {
             ExchangeError::Rejected => Self::CodeRejected,
@@ -1063,6 +1069,172 @@ mod tests {
 
         assert_ne!(unreachable.status(), back_channel[0].status());
         assert_ne!(unreachable.caller_facing(), back_channel[0].caller_facing());
+    }
+
+    /// **X-31, the failing-first test.** Every [`ExchangeError`], and the refusal it becomes — one
+    /// arm per variant, and no two arms arriving at the same refusal.
+    ///
+    /// The other half of [`every_refusal_states_the_status_it_answers_with`], which guards the
+    /// refusal→status edge and, as the story that wrote it said, nothing else. A new
+    /// [`ExchangeError`] folded into an existing refusal inherits that refusal's status *and* its log
+    /// line without `status()` changing at all — and undoes X-17, the split that exists because four
+    /// causes were once one refusal and an operator could not tell their own misconfiguration from a
+    /// caller's refused credential.
+    ///
+    /// Two claims, because either one alone leaves the fold reachable:
+    ///
+    /// 1. **`names` states the pairing.** Its `match` is exhaustive, so a variant added to
+    ///    [`ExchangeError`] tomorrow does not compile here until somebody writes down which refusal
+    ///    it produces. [`SignInRefusal::from`] is exhaustive too and forces an *arm* — it does not
+    ///    force a *distinct* one, and that is precisely the hole.
+    /// 2. **The refusals are distinct.** A fold is invisible to a per-variant assertion: mapping
+    ///    `NoIdToken` onto `CodeRejected` satisfies "this error produces that refusal" perfectly
+    ///    well. What it cannot satisfy is *two* errors producing *two* refusals, so injectivity is
+    ///    asserted across the whole mapping rather than case by case.
+    ///
+    /// A future variant that genuinely belongs on an existing refusal is not forbidden. It is turned
+    /// into an edit of this test, made with a reason, instead of a line nobody reads.
+    #[test]
+    fn every_exchange_error_names_the_refusal_it_becomes() {
+        // The one variant carrying a value, so the pairing below can also say the value survives.
+        const REASON: &str = "dial tcp 10.0.0.7:443: connection refused";
+
+        fn names(error: &ExchangeError) -> fn(&SignInRefusal) -> bool {
+            match error {
+                // The caller's credential, and the only one of the four that is.
+                ExchangeError::Rejected => |refusal| matches!(refusal, SignInRefusal::CodeRejected),
+                // X-17's three: this host's registration, this host's key set URI, this host's
+                // scopes. An operator answers each of them somewhere the caller cannot see.
+                ExchangeError::ClientRefused => {
+                    |refusal| matches!(refusal, SignInRefusal::ClientRefused)
+                }
+                ExchangeError::UnpublishedKey => {
+                    |refusal| matches!(refusal, SignInRefusal::UnpublishedKey)
+                }
+                ExchangeError::NoIdToken => |refusal| matches!(refusal, SignInRefusal::NoIdToken),
+                // The reason is checked, not just the variant: it names this host's own
+                // dependencies, and an outage reported without the address it failed at is a `503`
+                // an operator can do nothing with.
+                ExchangeError::Unreachable(_) => {
+                    |refusal| matches!(refusal, SignInRefusal::ProviderUnreachable(reason) if reason == REASON)
+                }
+            }
+        }
+
+        // One of every variant. The list is not compiler-checked — `names` above is what stops a
+        // variant being added without anyone stating what it becomes — so the count below rules out
+        // the one way this list rots quietly: an entry repeated where a new variant was meant to go.
+        let every = [
+            ExchangeError::Rejected,
+            ExchangeError::ClientRefused,
+            ExchangeError::UnpublishedKey,
+            ExchangeError::NoIdToken,
+            ExchangeError::Unreachable(REASON.to_string()),
+        ];
+
+        let distinct: std::collections::HashSet<_> =
+            every.iter().map(std::mem::discriminant).collect();
+        assert_eq!(
+            distinct.len(),
+            every.len(),
+            "one of every exchange failure, and no repeats",
+        );
+
+        let mut produced = std::collections::HashSet::new();
+
+        for error in every {
+            let stated = names(&error);
+            let described = format!("{error:?}");
+            let refusal = SignInRefusal::from(error);
+
+            assert!(
+                stated(&refusal),
+                "{described} produces {refusal:?}, which is not the refusal this test states it \
+                 becomes",
+            );
+            assert!(
+                produced.insert(std::mem::discriminant(&refusal)),
+                "{described} produces {refusal:?}, which another exchange failure already produces. \
+                 That is the fold X-17 undid: two causes become one line in the log and one status, \
+                 and `every_refusal_states_the_status_it_answers_with` cannot see it because \
+                 `status()` never changed",
+            );
+        }
+    }
+
+    /// **X-31, the same edge one type over.** [`SessionError`] collapses into a *single* refusal, and
+    /// the log is the only thing separating its causes — so the log is what is pinned.
+    ///
+    /// This edge cannot fold the way [`From<ExchangeError>`] can: [`SignInRefusal::NoSession`]
+    /// *carries* its source rather than replacing it, so one arm is enough and a new
+    /// [`SessionError`] arrives at the log intact. Asserted here rather than assumed, because that
+    /// is the whole reason one arm is acceptable.
+    ///
+    /// What can still rot is the property underneath it — that the four causes read differently once
+    /// they get there. X-17's implementor checked that by hand; this holds it. They are answers to
+    /// four different operator questions: a dead entropy source, a store at its ceiling, a credential
+    /// that expired before it arrived, and a provider issuing tokens longer-lived than this host will
+    /// honour. A `503` that does not say which is a page reload and a shrug.
+    #[test]
+    fn every_session_failure_reads_differently_through_the_refusal_carrying_it() {
+        fn why(error: &SessionError) -> &'static str {
+            match error {
+                SessionError::NoEntropy { .. } => "the OS randomness source is unreadable",
+                SessionError::TooManyLive { .. } => "the store is at its ceiling",
+                SessionError::AlreadyExpired { .. } => "the credential expired before it arrived",
+                SessionError::ImplausibleLifetime { .. } => {
+                    "the credential outlives what is honoured"
+                }
+            }
+        }
+
+        // As above: `why` forces a new variant to be named, and the count forbids a repeat here.
+        let every = [
+            SessionError::NoEntropy {
+                source: std::io::Error::other("the test's, not the OS's"),
+            },
+            SessionError::TooManyLive { max: 64 },
+            SessionError::AlreadyExpired {
+                expires_at: 1_000_000_000,
+            },
+            SessionError::ImplausibleLifetime {
+                seconds: 999_999,
+                max: 43_200,
+            },
+        ];
+
+        let distinct: std::collections::HashSet<_> =
+            every.iter().map(std::mem::discriminant).collect();
+        assert_eq!(
+            distinct.len(),
+            every.len(),
+            "one of every session failure, and no repeats",
+        );
+
+        let mut lines: Vec<(&'static str, String)> = Vec::new();
+
+        for error in every {
+            let cause = why(&error);
+            let source = error.to_string();
+            let refusal = SignInRefusal::NoSession(error);
+
+            assert_eq!(
+                refusal.to_string(),
+                source,
+                "the refusal must carry {cause} through to the log, not restate it",
+            );
+
+            for (seen, line) in &lines {
+                assert_ne!(
+                    &refusal.to_string(),
+                    line,
+                    "{cause} reads in the log exactly like {seen}, and they are the same `503`: an \
+                     operator has nothing left to tell them apart by",
+                );
+            }
+
+            lines.push((cause, refusal.to_string()));
+        }
     }
 
     /// The authorization URL is a URL: the query is appended with `?` or `&` depending on what the
