@@ -6,6 +6,34 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- **Moved to the flux 0.47 engine line and the 0.10 connector catalogue** (X-67). Both pin sets in one
+  commit — raising either alone puts two engine lines in one lock, and `connector_pack::pack` hands
+  out `Arc<dyn flux_runtime::Tool>`, so two runtime versions are two unrelated traits. A third test
+  now reads `Cargo.lock` itself, because the manifest-reading one cannot see a crate dragged in
+  transitively.
+
+  ⚠ **`intercom` is now refused for configuration, and an EU or AU tenant will read that as an
+  outage.** Upstream changed its `base_url` to `https://{host}` — a bare placeholder is the whole
+  destination authority — so X-47's guard refused it, exactly as designed: *a catalogue bump that
+  moves a host template turns a test red rather than quietly dispatching.* A value stored before the
+  bump is refused on the way **out** of the store as well.
+
+  The refusal is right under the rule and wrong about intercom, because that `{host}` is a **closed
+  set of three vendor hostnames the catalogue publishes**. X-70 is the story that admits a declared
+  choice without reopening the door to a free value.
+
+  **Census, measured rather than assumed:** 54 providers (algolia is new), 679 operations, 5
+  `WholeAuthority`, 8 `PinnedTo`, 13 `OutsideTheAuthority`, and all 54 still declare HTTP — so X-48's
+  runtime gate and X-13's `effects` derivation are unmoved. Four operations left the invocable surface
+  (postmark and zoom operations that returned a credential) plus three from babelforce.
+
+  Two claims in this repository turned out to be prose nothing asserted, and both were **already
+  wrong** before this change: *"299 operations across 53 connectors"* appeared in two doc comments
+  while the real count on the previous catalogue was 681. Corrected, and each now says where the
+  number came from and that nothing checks it.
+
 ## [0.10.0] - 2026-08-01
 
 ### Added

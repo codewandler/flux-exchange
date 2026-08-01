@@ -33,13 +33,13 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 - [X-49 — The branches X-46 opened are pinned](X-49-pin-the-branches-x46-opened.md) · found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes
 
 ## Next (ready — take the top one unless the user named a story)
-- [X-67 — Move to the 0.47 engine line and the 0.10 connector catalogue](X-67-move-to-the-047-engine-line.md) · the blocker is gone: connector-pack 0.10.0 requires flux-runtime ^0.47 and flux-connectors v0.10.0 is released. This is not a version bump — the catalogue gained a 54th provider and a new way of saying why an operation names no credential, and several tests are designed to go red on exactly that
 
 ### the primary caller can authenticate
 _Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
 - [X-35 — Agent access (epic)](X-35-agent-access-epic.md) · EPIC — the vision's primary caller cannot authenticate. PrincipalKind::Agent exists as a type and appears in the loopback dev roster; nothing mints or verifies an agent's token. Not blocked by X-11, unlike everything else downstream
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-70 — A setting whose values are a closed vendor set is not the caller naming a host](X-70-a-closed-set-is-not-a-free-choice.md) · found by X-67, 2026-08-01: intercom is now refused because its base_url is `https://{host}`, but that {host} is a closed set of three vendor hostnames the catalogue publishes — host_pinning reads the template and never the choices, so it errs closed on a value that could not name anything
 - [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
 - [X-60 — An operator can find out who supplied a credential](X-60-who-supplied-this-credential.md) · found by X-54, 2026-08-01: nothing records who supplied a credential, which is half the reason X-54's kind gate was needed — and it means an operator cannot audit a substitution after the fact, including one another human made
 
@@ -120,6 +120,7 @@ _None._
 - [X-57 — \"Sign-in is available\" stops meaning \"OIDC is configured\"](X-57-signin-availability-means-what-it-says.md) · the shared prerequisite for every local-identity story: SignIn::available() returns true only for SignIn::Oidc, so a host with a working development identity tells the console it cannot sign anyone in
 - [X-62 — An operator can grant something without editing a file by hand](X-62-an-operator-can-grant.md) · X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable
 - [X-63 — A site exists, builds, and publishes](X-63-a-site-that-publishes.md) · the scaffold and the pipeline, matched to flux-connectors/web: VitePress in web/, pages.yml with SHA-pinned actions, building on PRs as a gate and deploying only from main
+- [X-67 — Move to the 0.47 engine line and the 0.10 connector catalogue](X-67-move-to-the-047-engine-line.md) · the blocker is gone: connector-pack 0.10.0 requires flux-runtime ^0.47 and flux-connectors v0.10.0 is released. This is not a version bump — the catalogue gained a 54th provider and a new way of saying why an operation names no credential, and several tests are designed to go red on exactly that
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

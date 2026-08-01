@@ -1,8 +1,7 @@
 ---
 id: X-67
 title: "Move to the 0.47 engine line and the 0.10 connector catalogue"
-status: in-progress
-priority: 1
+status: done
 areas: [exchange-host, exchange-server, console]
 note: "the blocker is gone: connector-pack 0.10.0 requires flux-runtime ^0.47 and flux-connectors v0.10.0 is released. This is not a version bump — the catalogue gained a 54th provider and a new way of saying why an operation names no credential, and several tests are designed to go red on exactly that"
 ---
