@@ -41,7 +41,6 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 
 ### agent onboarding
 _`docs/vision.md` says the thing this epic exists to act on:_
-- [X-41 — An agent arriving at this service is told how to connect](X-41-agent-onboarding-page.md) · owner-raised 2026-08-01, high priority: the charter's primary caller is an agent and nothing anywhere tells one how to reach this service. Public, linked from the footer, and honest about what it cannot yet do
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
@@ -93,6 +92,7 @@ _`docs/vision.md` says the thing this epic exists to act on:_
 - [X-34 — The console presents an execution platform, not a catalogue browser](X-34-console-shell.md) · owner-raised 2026-08-01: 'flux-exchange is the execution platform - not just a catalog explorer'. The console renders one reference view and no chrome, while the service behind it holds credentials for many tenants and runs operations for them
 - [X-36 — An agent token is minted once, and this host keeps only a verifier](X-36-mint-agent-token.md) · the first half of closing the vision's largest unblocked gap — nothing today can create a principal an agent could present
 - [X-39 — A credential can be rotated without a window where the connection is gone](X-39-credential-rotation.md) · the surface can create and destroy a connection but not replace a credential: a second create is refused 409, so rotating a leaked secret today means DELETE then POST, and everything using it is broken in between
+- [X-41 — An agent arriving at this service is told how to connect](X-41-agent-onboarding-page.md) · owner-raised 2026-08-01, high priority: the charter's primary caller is an agent and nothing anywhere tells one how to reach this service. Public, linked from the footer, and honest about what it cannot yet do
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

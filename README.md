@@ -8,7 +8,7 @@ happened; agents are what call operations all day. That inverts the usual assump
 everything below.
 
 > [!WARNING]
-> **Status: v0.4.0 — a charter, a type system, and an HTTP surface a human can sign in to.**
+> **Status: v0.5.0 — a charter, a type system, and an HTTP surface a human can sign in to.**
 >
 > `cargo run` binds `127.0.0.1:8080` and serves health, the connector catalogue, a session, and a
 > **complete** OIDC sign-in. It refuses to start on a reachable address while no identity provider

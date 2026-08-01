@@ -6,6 +6,20 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-01
+
+### Added
+
+- **An arriving agent is told what this is** (X-41). The charter calls the agent the primary caller,
+  and nothing anywhere told one how to reach this service. A public page — no account needed, linked
+  from the console's footer — says what the platform is, how to get an identity for an agent, and
+  what that identity can and cannot do **today**.
+
+  It is **honest by construction**: what it claims derives from the same surface declaration the
+  navigation reads, so it cannot advertise a capability the console marks unbuilt. The rule is
+  one-directional by design — the derivation can take a claim *off* the page, never put one *on*.
+  Flipping a surface to built turns four tests red, so the wiring is checked rather than trusted.
+
 ### Added
 
 - **An agent principal can be minted, and this host keeps only a verifier** (X-36). `docs/vision.md`
