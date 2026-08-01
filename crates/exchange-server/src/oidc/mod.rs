@@ -35,6 +35,7 @@ pub mod pkce;
 use std::fmt;
 use std::sync::Arc;
 
+use axum::http::StatusCode;
 use exchange_host::{async_trait, Identity, IdentityError, Principal, PrincipalKind};
 
 use crate::session::{now, Expiry, SessionError, SessionStore, SessionToken};
@@ -380,6 +381,48 @@ pub enum SignInRefusal {
 }
 
 impl SignInRefusal {
+    /// The status the caller is answered with.
+    ///
+    /// The other half of [`caller_facing`](Self::caller_facing), and here for the same reason: a
+    /// refusal decides *what a caller learns*, and `routes::signin` decides only how to render it —
+    /// the page, the headers, and which line goes to the log. Several of the arms below are
+    /// load-bearing security decisions, and every one of them is an argument about a refusal rather
+    /// than about a page.
+    ///
+    /// This lived inline in `routes::signin::callback` until X-26. Keeping it there cost a test:
+    /// proving that an expired id token answers `401` rather than `503` needed a *second*,
+    /// router-level case, because the test that knew which refusal had been produced had no way to
+    /// ask what status it carried. The argument was already half here anyway —
+    /// [`caller_facing`](Self::caller_facing) says three times that a group of refusals shares "one
+    /// phrase and one status", and the route's comments pointed back at it for the reasoning.
+    pub fn status(&self) -> StatusCode {
+        match self {
+            // The caller's problem, and what X-04's and X-15's failing-first tests drive. All three
+            // answer `400` with the same phrase; only the log tells them apart, and
+            // `caller_facing` carries the argument for that.
+            Self::UnknownState | Self::NoBinder | Self::AnotherBrowser => StatusCode::BAD_REQUEST,
+            // The back-channel refusals. X-17 split four of these apart in the log, and the status
+            // is the other half of "the caller learns nothing that separates them": a `503` for
+            // `ClientRefused` alone would report this host's registration state to an
+            // unauthenticated caller with a made-up code. `caller_facing` carries that argument in
+            // full.
+            Self::CodeRejected
+            | Self::ClientRefused
+            | Self::UnpublishedKey
+            | Self::NoIdToken
+            | Self::IssuerMismatch
+            | Self::AudienceMismatch
+            | Self::Expired
+            | Self::NonceMismatch
+            | Self::NoSubject => StatusCode::UNAUTHORIZED,
+            // This host's problem, kept distinct all the way out: an operator answers an outage and
+            // a bad credential in opposite ways.
+            Self::ProviderUnreachable(_) | Self::NoFlow(_) | Self::NoSession(_) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        }
+    }
+
     /// What the caller is told. A short, fixed phrase per variant, and never a value.
     ///
     /// # The three binding refusals answer identically, on purpose
@@ -873,6 +916,153 @@ mod tests {
             oidc.sessions.resolve(token.as_str()).is_some(),
             "and the session it opened must resolve",
         );
+    }
+
+    /// **X-26's failing-first test.** The refusal and the status it answers with, in one assertion,
+    /// from beside the refusal.
+    ///
+    /// The same fact that
+    /// `routes::signin::tests::an_expired_id_token_is_refused_as_a_credential_and_not_as_an_outage`
+    /// drives through the router. X-24 had to write that second, route-level test because this one
+    /// could not be written: the test that knows *which* refusal was produced had no way to ask what
+    /// status it carries. Both are kept — that one proves the route renders it, this one proves the
+    /// refusal carries it — but the mapping's own proof belongs next to the mapping.
+    #[test]
+    fn an_expired_id_token_carries_the_status_of_a_rejected_credential() {
+        const NOW: i64 = 1_000_000_000;
+
+        let refusal = oidc()
+            .admit_and_open(
+                &SignedClaims {
+                    expires_at: NOW,
+                    ..good()
+                },
+                NONCE,
+                NOW,
+            )
+            .expect_err("a token whose `exp` is the moment it is read against has expired");
+
+        assert_eq!(
+            refusal.status(),
+            StatusCode::UNAUTHORIZED,
+            "an expired credential is the caller's problem: a `503` sends a human away to try again \
+             shortly when what they need is to sign in again ({refusal:?})",
+        );
+    }
+
+    /// **X-26.** Every refusal, and the status a caller is answered with — one arm per variant.
+    ///
+    /// [`SignInRefusal::status`] groups its variants, because the groups *are* the argument: three
+    /// refusals that must read alike, four that must not be told apart, and a set that is this
+    /// host's fault rather than the caller's. This test deliberately does not group them, so a
+    /// change to the mapping has to be written down here as "*this* variant now answers *this*" —
+    /// which is the thing a router-level test cannot say, because it names a request rather than a
+    /// refusal.
+    ///
+    /// The `match` is also the compiler's half of the job: a variant added to [`SignInRefusal`] does
+    /// not compile here until somebody states what a caller learns about it.
+    #[test]
+    fn every_refusal_states_the_status_it_answers_with() {
+        fn stated(refusal: &SignInRefusal) -> StatusCode {
+            match refusal {
+                // Nothing presented named a sign-in this host opened.
+                SignInRefusal::UnknownState => StatusCode::BAD_REQUEST,
+                SignInRefusal::NoBinder => StatusCode::BAD_REQUEST,
+                SignInRefusal::AnotherBrowser => StatusCode::BAD_REQUEST,
+                // The four back-channel refusals, which a caller may not tell apart.
+                SignInRefusal::CodeRejected => StatusCode::UNAUTHORIZED,
+                SignInRefusal::ClientRefused => StatusCode::UNAUTHORIZED,
+                SignInRefusal::UnpublishedKey => StatusCode::UNAUTHORIZED,
+                SignInRefusal::NoIdToken => StatusCode::UNAUTHORIZED,
+                // The id token was shown and not accepted.
+                SignInRefusal::IssuerMismatch => StatusCode::UNAUTHORIZED,
+                SignInRefusal::AudienceMismatch => StatusCode::UNAUTHORIZED,
+                SignInRefusal::Expired => StatusCode::UNAUTHORIZED,
+                SignInRefusal::NonceMismatch => StatusCode::UNAUTHORIZED,
+                SignInRefusal::NoSubject => StatusCode::UNAUTHORIZED,
+                // This host could not do its job, and says so rather than blaming the caller.
+                SignInRefusal::ProviderUnreachable(_) => StatusCode::SERVICE_UNAVAILABLE,
+                SignInRefusal::NoFlow(_) => StatusCode::SERVICE_UNAVAILABLE,
+                SignInRefusal::NoSession(_) => StatusCode::SERVICE_UNAVAILABLE,
+            }
+        }
+
+        // One of every variant, so the loop walks the whole type rather than the handful a test
+        // happened to think of. The list itself is not compiler-checked — `stated` above is what
+        // stops a variant being added without anyone stating what a caller learns about it — so the
+        // count below rules out the one way this can rot quietly: an entry repeated where a new
+        // variant was meant to go.
+        let every = [
+            SignInRefusal::UnknownState,
+            SignInRefusal::NoBinder,
+            SignInRefusal::AnotherBrowser,
+            SignInRefusal::CodeRejected,
+            SignInRefusal::ClientRefused,
+            SignInRefusal::UnpublishedKey,
+            SignInRefusal::NoIdToken,
+            SignInRefusal::ProviderUnreachable("dial tcp 10.0.0.7:443".to_string()),
+            SignInRefusal::IssuerMismatch,
+            SignInRefusal::AudienceMismatch,
+            SignInRefusal::Expired,
+            SignInRefusal::NonceMismatch,
+            SignInRefusal::NoSubject,
+            SignInRefusal::NoFlow(FlowError::NoEntropy {
+                source: std::io::Error::other("the test's, not the OS's"),
+            }),
+            SignInRefusal::NoSession(SessionError::TooManyLive { max: 0 }),
+        ];
+
+        let distinct: std::collections::HashSet<_> =
+            every.iter().map(std::mem::discriminant).collect();
+        assert_eq!(
+            distinct.len(),
+            every.len(),
+            "one of every refusal, and no repeats",
+        );
+
+        for refusal in &every {
+            assert_eq!(refusal.status(), stated(refusal), "{refusal:?}");
+        }
+    }
+
+    /// **X-17, restated at the type.** The four back-channel refusals are a *single* answer: one
+    /// status and one phrase.
+    ///
+    /// Both halves together, because either one alone is the leak. A status that told them apart
+    /// would report **this host's own configuration state** — whether its registration at the
+    /// provider is currently good, whether its key set URI resolves — to anybody who can reach
+    /// `/api/signin/callback` unauthenticated with a made-up code.
+    /// [`SignInRefusal::caller_facing`] carries that argument in full; this holds it.
+    ///
+    /// `routes::signin::tests::a_refusal_tells_the_caller_nothing_about_the_provider` holds the same
+    /// line through the router, and both are kept: that one proves what the wire carries, this one
+    /// proves the refusals already agreed before anything rendered them.
+    #[test]
+    fn the_four_back_channel_refusals_are_a_single_answer() {
+        let back_channel = [
+            SignInRefusal::CodeRejected,
+            SignInRefusal::ClientRefused,
+            SignInRefusal::UnpublishedKey,
+            SignInRefusal::NoIdToken,
+        ];
+
+        for refusal in &back_channel {
+            assert_eq!(refusal.status(), back_channel[0].status(), "{refusal:?}");
+            assert_eq!(
+                refusal.caller_facing(),
+                back_channel[0].caller_facing(),
+                "{refusal:?}",
+            );
+        }
+
+        // The deliberate exception stays one. An outage is transient, "try again shortly" is honest
+        // advice rather than a diagnosis, and telling a human to reset a working password during one
+        // is the failure X-03 already refused to ship.
+        let unreachable =
+            SignInRefusal::ProviderUnreachable("dial tcp 10.0.0.7:443: connection refused".into());
+
+        assert_ne!(unreachable.status(), back_channel[0].status());
+        assert_ne!(unreachable.caller_facing(), back_channel[0].caller_facing());
     }
 
     /// The authorization URL is a URL: the query is appended with `?` or `&` depending on what the

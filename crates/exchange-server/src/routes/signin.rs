@@ -120,7 +120,7 @@ async fn signin(State(state): State<AppState>) -> Response {
             // rather than around it.
             let refusal = SignInRefusal::NoFlow(error);
             error!(reason = %refusal, "cannot open an authorization request");
-            refused(&refusal, StatusCode::SERVICE_UNAVAILABLE)
+            refused(&refusal)
         }
     }
 }
@@ -155,7 +155,7 @@ async fn callback(
     // is the provider's words about a credential, so it may not reach the caller.
     if callback.error.is_some() {
         warn!("the identity provider returned an error to the sign-in callback");
-        return refused(&SignInRefusal::CodeRejected, StatusCode::UNAUTHORIZED);
+        return refused(&SignInRefusal::CodeRejected);
     }
 
     let (Some(presented_state), Some(code)) = (callback.state, callback.code) else {
@@ -165,7 +165,7 @@ async fn callback(
         // happens here rather than after a lookup.
         // `tests::a_callback_without_a_code_is_not_an_oracle_for_a_live_state` pins both halves:
         // the answers match byte for byte, and the probe does not spend what it asked about.
-        return refused(&SignInRefusal::UnknownState, StatusCode::BAD_REQUEST);
+        return refused(&SignInRefusal::UnknownState);
     };
 
     // The binder the browser is holding, if it is holding one. This is the **one** credential-shaped
@@ -183,44 +183,20 @@ async fn callback(
         // whether the `state` named is one this host is holding.
         let refusal = SignInRefusal::NoBinder;
         warn!(reason = %refusal, "a sign-in did not complete");
-        return refused(&refusal, StatusCode::BAD_REQUEST);
+        return refused(&refusal);
     };
 
     let token = match oidc.complete(&presented_state, &code, binder).await {
         Ok(token) => token,
         Err(refusal) => {
-            let status = match refusal {
-                // The caller's problem, and what X-04's and X-15's failing-first tests drive.
-                // All three answer `400` with the same phrase; only the log tells them apart, and
-                // `SignInRefusal::caller_facing` carries the argument for that.
-                SignInRefusal::UnknownState
-                | SignInRefusal::NoBinder
-                | SignInRefusal::AnotherBrowser => StatusCode::BAD_REQUEST,
-                // The back-channel refusals. X-17 split four of these apart in the log, and the
-                // status is the other half of "the caller learns nothing that separates them": a
-                // `503` for `ClientRefused` alone would report this host's registration state to
-                // an unauthenticated caller with a made-up code. `SignInRefusal::caller_facing`
-                // carries that argument in full.
-                SignInRefusal::CodeRejected
-                | SignInRefusal::ClientRefused
-                | SignInRefusal::UnpublishedKey
-                | SignInRefusal::NoIdToken
-                | SignInRefusal::IssuerMismatch
-                | SignInRefusal::AudienceMismatch
-                | SignInRefusal::Expired
-                | SignInRefusal::NonceMismatch
-                | SignInRefusal::NoSubject => StatusCode::UNAUTHORIZED,
-                // This host's problem, kept distinct all the way out: an operator answers an
-                // outage and a bad credential in opposite ways.
-                SignInRefusal::ProviderUnreachable(_)
-                | SignInRefusal::NoFlow(_)
-                | SignInRefusal::NoSession(_) => StatusCode::SERVICE_UNAVAILABLE,
-            };
-
             // The operator's version goes to the log; `caller_facing` is what the caller sees, and
-            // it carries no value from the provider and no address of one.
+            // it carries no value from the provider and no address of one. Which status each refusal
+            // answers with — and why `Expired` is a `401` while `NoSession` is a `503`, and why the
+            // four back-channel refusals are indistinguishable — is `SignInRefusal::status`, next to
+            // the phrase it decides alongside. X-26 moved it there; this route decides only how a
+            // refusal is rendered.
             warn!(reason = %refusal, "a sign-in did not complete");
-            return refused(&refusal, status);
+            return refused(&refusal);
         }
     };
 
@@ -276,8 +252,19 @@ fn planting(mut response: Response, cookies: &[String]) -> Response {
 }
 
 /// A refusal the caller sees: a status and a fixed phrase, never a value.
-fn refused(refusal: &SignInRefusal, status: StatusCode) -> Response {
-    page(status, "Sign-in refused", refusal.caller_facing(), None)
+///
+/// Both come from the refusal, and neither is passed in. Until X-26 the status was the caller's
+/// argument here while the phrase came from the refusal, which meant every call site restated a
+/// decision the refusal had already made and any two of them could drift. What stays a decision of
+/// this module is everything around them: that a refusal is rendered as a page rather than a body a
+/// script can read, that it plants no cookie, and what goes to the log instead.
+fn refused(refusal: &SignInRefusal) -> Response {
+    page(
+        refusal.status(),
+        "Sign-in refused",
+        refusal.caller_facing(),
+        None,
+    )
 }
 
 /// The page an operator meets when no OIDC configuration was supplied.
