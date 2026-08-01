@@ -42,14 +42,12 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 _`docs/vision.md` says the thing this epic exists to act on:_
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
 
-### Catalogue
-- [X-46 — A connector's declared credentials are published, not discovered by provoking a refusal](X-46-catalogue-publishes-declarations.md) · found by X-44's implementor in the workaround it had to write, 2026-08-01: nothing publishes what a connector declares, so the console reads it out of the 422 that a deliberately-empty POST returns
-
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-47 — A connector with a templated host can actually be invoked](X-47-per-connection-settings.md) · found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name
 - [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
 
 ### `invoke` — the caller names an operation, and nothing else is theirs
+- [X-48 — The invoke composition's safety claims are as strong as its code](X-48-invoke-safety-claims.md) · found by X-12's independent review, 2026-08-01: the sandbox silently takes a permissive default in the one function that writes two other settings longhand to avoid exactly that; a comment claims processes cannot be spawned when they can; and deleting the runtime gate from invoke breaks no test
 - [X-13 — Grants gate invocation](X-13-grants-gate-invoke.md) · Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect
 
 ## Blocked
@@ -98,6 +96,7 @@ _None._
 - [X-41 — An agent arriving at this service is told how to connect](X-41-agent-onboarding-page.md) · owner-raised 2026-08-01, high priority: the charter's primary caller is an agent and nothing anywhere tells one how to reach this service. Public, linked from the footer, and honest about what it cannot yet do
 - [X-43 — Whether a human can sign in here is a fact the console reads, not prose it parses](X-43-signin-availability.md) · found by X-34's implementor, 2026-08-01: the console links to /api/signin unconditionally, so on a host with no identity provider the Sign in button leads to a 503 page. The 401 body distinguishes the cases in prose, and matching on prose is fragile
 - [X-44 — An operator can connect a connector without reaching for curl](X-44-connect-from-the-console.md) · X-34 shipped a read-only Connections view and said plainly that a connect form belongs in its own story. The console's first stated job is to wire things up, and it currently cannot
+- [X-46 — A connector's declared credentials are published, not discovered by provoking a refusal](X-46-catalogue-publishes-declarations.md) · found by X-44's implementor in the workaround it had to write, 2026-08-01: nothing publishes what a connector declares, so the console reads it out of the 422 that a deliberately-empty POST returns
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

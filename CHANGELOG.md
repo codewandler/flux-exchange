@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **A connector's declared credentials are published** (X-46). `GET
+  /api/catalogue/connectors/{id}/credentials` names what a connector requires. Before this, nothing
+  published the fact, so the console discovered it by issuing a create it knew would be refused and
+  reading the refusal — which coupled it to an error body. The declaration only: names, authority
+  and leaf, **never whether anyone holds them**.
+
 ## [0.7.0] - 2026-08-01
 
 ### Added

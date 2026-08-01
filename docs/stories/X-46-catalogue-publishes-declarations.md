@@ -1,8 +1,7 @@
 ---
 id: X-46
 title: "A connector's declared credentials are published, not discovered by provoking a refusal"
-status: ready
-priority: 1
+status: done
 epic: catalogue
 areas: [exchange-server]
 note: "found by X-44's implementor in the workaround it had to write, 2026-08-01: nothing publishes what a connector declares, so the console reads it out of the 422 that a deliberately-empty POST returns"
@@ -39,17 +38,17 @@ the argument out rather than hiding it. It is correct today. It is still the wro
   reasonably ask why the console POSTs before every render.
 
 ## Acceptance
-- [ ] **Failing-first test** — a caller can read a connector's declared credentials from the
+- [x] **Failing-first test** — a caller can read a connector's declared credentials from the
       catalogue surface, and it fails before the field exists.
-- [ ] The console's `loadDeclaration` reads **that**, and the empty-`POST` workaround is deleted. A
+- [x] The console's `loadDeclaration` reads **that**, and the empty-`POST` workaround is deleted. A
       test asserts the console issues **no `POST`** in order to render a connect form.
-- [ ] **What is published is the declaration, not a tenant's state** — the names and whatever the
+- [x] **What is published is the declaration, not a tenant's state** — the names and whatever the
       catalogue already knows, never whether anyone holds them. That distinction is what keeps this
       on the anonymous-safe catalogue rather than the per-tenant surface.
-- [ ] The `422` on an empty credential map is **unchanged** — it is a real refusal with its own
+- [x] The `422` on an empty credential map is **unchanged** — it is a real refusal with its own
       argument in `docs/designs/connections.md`, and this story removes the *need* to provoke it, not
       the refusal itself.
-- [ ] Existing catalogue answers are unchanged for every caller that does not ask for the new field.
+- [x] Existing catalogue answers are unchanged for every caller that does not ask for the new field.
 
 ## Notes
 - Decide whether this belongs on the connector entry, alongside `operations`, or on its own path, and
@@ -57,3 +56,28 @@ the argument out rather than hiding it. It is correct today. It is still the wro
   adding anything here; the declaration may already exist and simply not be served.
 - If the fact genuinely lives upstream and this host cannot publish it without a crates change, that
   is a finding to report, not a reason to widen the workaround.
+
+## Progress
+- **Done 2026-08-01.** Gate green: 48 + 3 + 10 + 5 host, 231 server, 51 console. Genuine merge-base
+  failure on both halves — Rust `404` vs `200`, console `POST` vs `GET`.
+- **The fact already existed.** `connector-catalog` 0.9 has carried `Provider::auth` all along, and
+  `routes/connections.rs` was already reading it to build the very `422` the console was provoking.
+  So this was purely *serve a fact that exists* — no dependency change, no upstream request.
+  **That is the second story in a row where checking upstream first turned a supposed limitation
+  into a lookup**; X-12 found the same with C-405 and `Provider::runtime`.
+- **Its own path rather than a field**, argued on shape: a credential is declared at *provider* level
+  upstream, so nesting it in an operations answer would make a client fetch 299 operations to learn
+  two names, and putting it on the 53-entry listing would turn a directory into a payload. It also
+  makes "existing answers unchanged" true by construction. X-43 chose the same shape.
+- **`place` and `acquire` are deliberately not published** — they describe how this host composes a
+  request at invoke time, not what an operator must store. `authority` and `leaf` **are**, because
+  together they are why a declaration may be unaddressable, which today is only learnable by being
+  refused.
+- **This widens the anonymous surface** with per-connector credential *names*. Byte-identical vendor
+  data anyone can `cargo add`, naming no tenant — but it is a real widening and the line a reviewer
+  should check.
+- **Behaviour change:** a connector declaring nothing now yields `{status:'ready', credentials:[]}`
+  rather than a refusal. `Connect.mts` already had the branch for it.
+- **Carried forward:** the wire shape is pinned in two places that cannot see each other — a Rust
+  contract test and a console fixture. Both go green independently if the shape changes while the
+  real console breaks.
