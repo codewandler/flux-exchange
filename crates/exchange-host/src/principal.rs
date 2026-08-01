@@ -89,6 +89,21 @@ pub enum PrincipalKind {
     Service,
 }
 
+impl std::fmt::Display for PrincipalKind {
+    /// The **wire spelling**, which is the one a refusal quotes back.
+    ///
+    /// Deliberately the same string [`Serialize`] emits and the same one the development identity's
+    /// roster is written in, so a caller told which kinds a route admits is told them in a spelling
+    /// it has already seen. `a_kind_renders_as_it_serialises` is what keeps the two from drifting.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Service => "service",
+        })
+    }
+}
+
 /// A resolved caller.
 ///
 /// The tenant is part of the principal, and that is the whole point: it is read from whatever
@@ -165,6 +180,25 @@ mod tests {
             TenantError::TooLong { .. },
         ));
         assert!(Tenant::new("x".repeat(MAX_TENANT_LEN)).is_ok());
+    }
+
+    /// A kind renders the same way it serialises.
+    ///
+    /// Two spellings of one thing is how a refusal comes to quote `Agent` at a caller that sent
+    /// `agent`, and the wire spelling is the one already published — by this type's `Serialize`,
+    /// and by the development identity's roster.
+    #[test]
+    fn a_kind_renders_as_it_serialises() {
+        for kind in [
+            PrincipalKind::User,
+            PrincipalKind::Agent,
+            PrincipalKind::Service,
+        ] {
+            assert_eq!(
+                serde_json::to_value(kind).expect("a kind serialises"),
+                serde_json::Value::String(kind.to_string()),
+            );
+        }
     }
 
     /// A principal renders its tenant, because an audit line that omits it cannot be read twice.

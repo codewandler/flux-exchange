@@ -80,11 +80,47 @@ Three stories, in order, because each needs the one before it:
 3. **Revoke and list** — an operator can see which agents exist and kill one. Without this, minting is
    a one-way door, and a leaked token has no remedy.
 
+## Who may mint, which is not a grant question (X-40)
+
+X-36 built minting and reported the hole in it: nothing gated minting by `PrincipalKind`, so once
+**Authenticate** lands and an agent's own token resolves, a leaked agent token mints successor
+agents. The damage is not one extra agent — it is that **revocation stops being a remedy,
+invisibly**. **Revoke** exists so a leaked token has an answer, and a token that mints successors
+makes that answer incomplete in a way an operator cannot see: the descendants are ordinary agents
+with no recorded relationship to the one that was revoked, so an operator who revokes the leaked
+token, watches it stop resolving and closes the incident is wrong and has no way to find out.
+
+**So `POST /api/agents` admits a `User` and nothing else**, declared on the route as
+`Access::PrincipalOfKind` and enforced again at `AgentStore::mint`, because the store is the thing
+that creates a principal.
+
+**`Service` is refused too, and that is a decision rather than an omission.** A `Service` is another
+backend acting on behalf of one of its own accounts and actors — the caller a programmatic
+provisioning story would reach for — so refusing it costs something real. It is worth it: the
+property this gate defends is that revoking a token ends the access it gave, and that holds only if
+every minter is itself revocable by this host's operator. A `User` is, because sign-in is federated
+and the account behind it is disabled at the provider. A `Service` is not: nothing in this repository
+mints, verifies, lists or revokes a service credential. Admitting it would put the same defect one
+level up and one level further out of sight, where there is not even a revoke route to be incomplete.
+The story that wants a service to mint is the story that gives a service a revocation path.
+
+**Why this does not wait for X-13.** Grants answer *what may this principal do* and need the grant
+model, which is blocked upstream. This asks *what kind of principal is calling*, which this host
+knows today from the credential it issued — no grant, no connector metadata, no policy. It is
+authentication-shaped, and deferring it would ship a revocation mechanism that does not revoke.
+
+**How far it reaches.** Only here, for now. `DELETE /api/connections/{connector}` stays open to every
+kind: it destroys tenant data inside the tenant the caller already belongs to, an operator can see it
+and undo it by reconnecting, and nothing about it survives revocation of the token that did it.
+Whether an agent should reach a destructive route at all is a real question — and it is the
+grant-shaped one, so it belongs to X-13 rather than to a widened route table.
+
 ## What this epic deliberately does not do
 
 - **It does not gate anything by grant.** That is X-13, blocked upstream. Until it lands, an agent
-  token authenticates and authorises nothing beyond what any principal may do — which is a **stated
-  gap**, not a position, and the same one `invoke` will inherit.
+  token authorises nothing beyond what any principal may do **except that it may not create a
+  principal** — which X-40 closed, for the reason above. The rest is a **stated gap**, not a
+  position, and the same one `invoke` will inherit.
 - **It does not add a second identity port.** `Identity` already exists and both current providers
   bind it. A third binding is the shape; a parallel mechanism is not.
 - **It does not mint tokens for humans.** Sign-in exists and works. An agent principal is a different

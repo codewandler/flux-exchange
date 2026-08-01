@@ -18,12 +18,66 @@
 //!
 //! # Minting requires a principal, and the refusal names nothing
 //!
-//! The route is [`Access::Principal`], so an anonymous caller is refused by the guard before this
+//! The route requires a principal, so an anonymous caller is refused by the guard before this
 //! module runs, with the one fixed phrase every guarded route answers with. That is deliberate:
 //! a refusal that said "no such tenant" or "you may not mint for that tenant" would answer a caller
 //! this host has not identified with a fact about what exists.
 //! `super::tests::the_surface_mints_an_agent_principal_and_refuses_an_anonymous_caller` is that
 //! claim over the published surface.
+//!
+//! # Who may mint: a `User`, and nothing else (X-40)
+//!
+//! The route is [`Access::PrincipalOfKind`]`(`[`MAY_MINT`]`)`, and [`MAY_MINT`] holds one kind.
+//!
+//! **Why an `Agent` may not.** X-36 built this route and reported the hole in it: nothing gated
+//! minting by kind, so once X-37 resolves an agent's own token, a leaked agent token mints
+//! successor agents. The damage is not one extra agent — it is that **revocation stops being a
+//! remedy, invisibly.** X-38 exists so a leaked token has an answer, and a token that mints
+//! successors makes that answer incomplete in a way an operator cannot see: the descendants are
+//! ordinary agents with no recorded relationship to the one that was revoked, so an operator who
+//! revokes the leaked token, sees it stop resolving, and closes the incident is wrong and has no
+//! way to find out. Nothing here relates a minted agent to whatever minted it, which is exactly why
+//! the gate is on *creating* one rather than on *cleaning up after* one.
+//!
+//! **Why a `Service` may not, which is a decision and not an omission.** A `Service` is another
+//! backend acting on behalf of one of its own accounts and actors, and it is the caller a
+//! programmatic provisioning story would reach for — so refusing it costs something real, and the
+//! argument has to be worth that.
+//!
+//! It is. The property this gate defends is that *revoking a token ends the access it gave*, and
+//! that holds only if every minter is itself revocable **by this host's operator** and every mint
+//! is attributable to something that can be ended. A `User` is: sign-in is federated, so the
+//! account behind it is disabled at the identity provider and X-16 is what makes this host notice.
+//! A `Service` is not: nothing in this repository mints a service credential, verifies one, lists
+//! one or revokes one — `PrincipalKind::Service` is a kind the identity port may return and nothing
+//! else. Letting it mint would put the *same* defect one level up, and one level further out of
+//! sight, since there would be no revoke route to be incomplete in the first place.
+//!
+//! There is a second reason, weaker but pointing the same way: a `Service` acts **on behalf of** an
+//! account and an actor. Its authority is delegated, and an agent principal is not a thing done on
+//! someone's behalf — it is a durable, independently-authenticating identity in the tenant that
+//! outlives the delegation and that this host holds no expiry for.
+//!
+//! **The other answer, stated and rejected.** It runs: a service is a backend, backends are
+//! trusted, an operator who wired one up meant it to act — so let it mint. That mistakes *being a
+//! backend* for *being accountable*, which is the property actually at stake. And the two mistakes
+//! are not symmetric: refusing a `Service` that should mint is a `403` an operator meets on their
+//! first attempt and files a story about, while admitting one that should not is a hole nobody
+//! meets until a credential leaks. One of those is reversible in a patch release and the other is
+//! reversible in nobody's incident review. **Refuse; never repair** — this repository's own rule —
+//! points the same way, so `Service` is refused now and the story that wants it is the story that
+//! gives it a revocation path.
+//!
+//! **How far the argument reaches, and where it stops.** Only here. In particular
+//! `DELETE /api/connections/{connector}` stays [`Access::Principal`] for every kind, and that too
+//! is decided rather than left: destroying a connection destroys *tenant data the tenant owns*,
+//! and an agent doing it is an agent acting inside the tenant it already belongs to, doing
+//! something an operator can see (`GET /api/connections`) and undo by reconnecting. Nothing about
+//! it survives revocation of the token that did it. Whether an agent *should* be able to reach a
+//! destructive route at all is a real question, but it is the grant-shaped one — *what may this
+//! principal do* — which is X-13 and needs the grant model. This story is the
+//! authentication-shaped one — *what kind of principal is this* — and answering the other with it
+//! would be inventing a policy model in a route table.
 //!
 //! # A cookie-carried caller **does** get a token here, unlike at `/api/session`
 //!
@@ -48,15 +102,31 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{post, MethodRouter};
 use axum::{Extension, Json};
-use exchange_host::Principal;
+use exchange_host::{Principal, PrincipalKind};
 use serde::Deserialize;
 use serde_json::json;
 use tracing::error;
 
-use super::{Access, Module, Route};
+use super::{refuse_kind, Access, Module, Route};
 use crate::agent::{AgentError, Expiry, AGENT_STORE_SETTING};
 use crate::session;
 use crate::state::AppState;
+
+/// The kinds of principal that may create a principal: a **signed-in human, and nothing else**.
+///
+/// This is X-40, and it is the narrowest list this host publishes. The argument is in the module
+/// documentation above; what follows is why it is a `const` beside the route rather than a check
+/// inside [`mint`].
+///
+/// It is read in two places, and they are not redundant:
+///
+/// - [`MODULE`] declares it, so the guard enforces it before this module runs and
+///   `super::tests::the_kind_gated_surface_is_only_what_was_declared` can see it by walking the
+///   published surface. That is what a caller meets.
+/// - `crate::agent::AgentStore::mint` enforces it again against the principal it is handed, so the
+///   rule survives a future handler that reaches the store without declaring an access. That is
+///   what makes it true.
+pub(super) const MAY_MINT: &[PrincipalKind] = &[PrincipalKind::User];
 
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
@@ -71,7 +141,10 @@ pub(super) const MODULE: Module = Module {
         // `super::tests::no_published_route_takes_a_tenant_in_its_path` walks the whole surface,
         // and this route gives it nothing to find.
         path: "/api/agents",
-        access: Access::Principal,
+        // **Only a `User`.** Minting is not an operation against a connection, it is the creation
+        // of a principal in this tenant — so the question this route asks is which *kind* of caller
+        // may do that, and [`MAY_MINT`] is the answer.
+        access: Access::PrincipalOfKind(MAY_MINT),
         method_router: route,
     }],
 };
@@ -168,6 +241,13 @@ fn refuse_mint(error: AgentError) -> Response {
             // the caller's own tenant holds.
             refuse(StatusCode::CONFLICT, error.to_string())
         }
+        AgentError::MayNotMint { .. } => {
+            // Unreachable through the published route — `Access::PrincipalOfKind(MAY_MINT)` refuses
+            // before this module runs — and answered anyway, in the guard's own terms rather than
+            // in a second phrase that could drift from it. `error.to_string()` is deliberately not
+            // used: it names the caller's kind, which belongs in a log line and not in an answer.
+            refuse_kind(MAY_MINT)
+        }
         AgentError::TooManyLive { .. }
         | AgentError::NoEntropy { .. }
         | AgentError::Unwritable { .. } => {
@@ -225,11 +305,28 @@ mod tests {
     /// The roster every test below is armed with: one development user, in tenant `acme`.
     const ROSTER: &str = "user:alice@acme";
 
+    /// One handle of each kind, all in tenant `acme`, for the tests about **who** may mint.
+    ///
+    /// The development identity is the only port that resolves an agent or a service today — X-37
+    /// is what binds an agent's own token — so this is what lets X-40's refusal be asserted from
+    /// the wire now rather than after the hole it closes is reachable.
+    const EVERY_KIND_ROSTER: &str = "user:alice@acme,agent:incumbent@acme,service:ingest@acme";
+
     /// What a hostile caller claims, down every vector. It is never a tenant that exists.
     const CLAIMED: &str = "attacker";
 
     /// The tenant `alice` is armed with, and therefore the only answer any of these may produce.
     const RESOLVED: &str = "acme";
+
+    /// The agent a `User` mints in the who-may-mint test — the leg that must succeed.
+    const MINTED_BY_A_USER: &str = "minted-by-a-human";
+
+    /// The successor an `Agent` must not be able to mint. Distinct spellings for the two refused
+    /// kinds, so the store assertion says *which* gate leaked rather than that one of them did.
+    const SUCCESSOR_OF_AN_AGENT: &str = "successor-of-an-agent";
+
+    /// The successor a `Service` must not be able to mint.
+    const SUCCESSOR_OF_A_SERVICE: &str = "successor-of-a-service";
 
     /// A scratch directory holding one store, removed on drop.
     struct Scratch(PathBuf);
@@ -295,10 +392,15 @@ mod tests {
 
     /// A `POST /api/agents` carrying `alice`'s development credential and `body`.
     fn as_alice(body: Value) -> HttpRequest<Body> {
+        as_handle("alice", body)
+    }
+
+    /// A `POST /api/agents` carrying one roster handle's development credential and `body`.
+    fn as_handle(handle: &str, body: Value) -> HttpRequest<Body> {
         HttpRequest::builder()
             .method(Method::POST)
             .uri(AGENTS)
-            .header(AUTHORIZATION, "Bearer alice")
+            .header(AUTHORIZATION, format!("Bearer {handle}"))
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(body.to_string()))
             .expect("a well-formed request")
@@ -307,6 +409,108 @@ mod tests {
     /// Thirty days out, as an operator wiring an agent into a config would state it.
     fn in_thirty_days() -> i64 {
         session::now() + 30 * 24 * 60 * 60
+    }
+
+    /// **X-40's headline.** Only a `User` mints — asserted for all three kinds in one run.
+    ///
+    /// The three legs are one test on purpose. A refusal for an agent proves nothing on its own:
+    /// a route that had simply stopped minting would satisfy it, and the way this gate fails in
+    /// practice is by being too wide or by taking the feature down with it. So the same app, the
+    /// same store and the same wall clock answer all three, and the user's `201` is what stops the
+    /// other two from passing vacuously.
+    ///
+    /// **Asserted against the store, not only the status.** A `403` that had already written the
+    /// agent would be the whole defect wearing the right status code, and the store is the thing
+    /// `resolve` reads — so what is on disk is what decides whether a successor exists.
+    #[tokio::test]
+    async fn only_a_user_mints_and_no_other_kind_creates_a_successor() {
+        let scratch = Scratch::new("who-may-mint");
+        let store = scratch.store();
+        let app = app(AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster(EVERY_KIND_ROSTER).expect("a well-formed roster"),
+        ))
+        .with_agents(store.clone()));
+
+        // Leg one: a human still mints. First, so the two refusals below are refusals of the kind
+        // and not of a route that has stopped working.
+        let (status, _, minted) = call(
+            app.clone(),
+            as_alice(json!({ "id": MINTED_BY_A_USER, "expires_at": in_thirty_days() })),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a user must still mint, or the refusals below pass by having broken minting for \
+             everyone: {minted}",
+        );
+        assert_eq!(minted["principal"]["id"], MINTED_BY_A_USER);
+
+        // Legs two and three: neither of the non-human kinds creates a principal.
+        //
+        // The agent is the story's case — a leaked token minting successors is what makes
+        // revocation (X-38) an incomplete remedy, invisibly, because a successor is an ordinary
+        // agent with no recorded relationship to the one that was revoked.
+        //
+        // The service is the same question one level up, and it is decided rather than omitted:
+        // see this module's documentation for why refusing is the answer.
+        for (handle, successor) in [
+            ("incumbent", SUCCESSOR_OF_AN_AGENT),
+            ("ingest", SUCCESSOR_OF_A_SERVICE),
+        ] {
+            let (status, _, refusal) = call(
+                app.clone(),
+                as_handle(
+                    handle,
+                    json!({ "id": successor, "expires_at": in_thirty_days() }),
+                ),
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "`{handle}` minted a successor, so revoking its own token would not end the \
+                 access it gave: {refusal}",
+            );
+
+            // The refusal names nothing about what exists, following
+            // `an_anonymous_caller_is_refused_and_told_nothing`. This caller is identified, so the
+            // rule it broke may be quoted — but no id, no tenant, and no count of what this host
+            // holds.
+            let rendered = refusal.to_string();
+            for leak in [
+                successor,
+                MINTED_BY_A_USER,
+                RESOLVED,
+                handle,
+                "agent",
+                "tenant",
+            ] {
+                assert!(
+                    !rendered.contains(leak),
+                    "the refusal names `{leak}`, which tells the caller something about what \
+                     exists: {rendered}",
+                );
+            }
+            assert!(!carries_a_token(&rendered), "{rendered}");
+        }
+
+        // The claim that actually matters: no successor was created. Read from the store rather
+        // than inferred from the statuses, because the store is what `resolve` reads.
+        let on_disk = std::fs::read_to_string(store.path()).expect("minting writes the store");
+        assert!(
+            on_disk.contains(MINTED_BY_A_USER),
+            "the user's mint must be on disk, or the assertions below hold over an empty file: \
+             {on_disk}",
+        );
+        for successor in [SUCCESSOR_OF_AN_AGENT, SUCCESSOR_OF_A_SERVICE] {
+            assert!(
+                !on_disk.contains(successor),
+                "`{successor}` exists, so the refusal was a status and not a refusal: {on_disk}",
+            );
+        }
     }
 
     /// **X-36's headline, end to end.** Minting answers with a token, and the token is not

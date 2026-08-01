@@ -379,6 +379,18 @@ impl AgentStore {
     /// as a check somebody has to remember. `routes::agents`' vector tests are what keep it true
     /// from the wire inwards.
     ///
+    /// # Who may mint (X-40)
+    ///
+    /// Only a [`PrincipalKind::User`]. The argument — that a principal which can create principals
+    /// makes revocation an incomplete remedy, and why `Service` is refused too — lives on
+    /// `routes::agents::MAY_MINT`, where a reader meets the rule.
+    ///
+    /// It is enforced **here as well as at the route**, and the two are not the same claim: the
+    /// route's declaration is what a caller meets and what the surface enumeration can see, while
+    /// this is what holds for any caller of this store — including a handler a later story adds
+    /// that reaches `mint` without declaring an access. The store is the thing that creates a
+    /// principal, so it is the thing that has to refuse.
+    ///
     /// # Errors
     ///
     /// Every variant of [`AgentError`], and none of them carries the token — which is structural
@@ -389,6 +401,15 @@ impl AgentStore {
         id: &str,
         expiry: Expiry,
     ) -> Result<Minted, AgentError> {
+        // First, and before the identifier is even looked at: a principal that may not create one
+        // learns nothing from this call — not whether the name it chose was admissible, not whether
+        // it was taken, not how full this store is.
+        if minted_by.kind() != PrincipalKind::User {
+            return Err(AgentError::MayNotMint {
+                kind: minted_by.kind(),
+            });
+        }
+
         let id = admit_id(id)?;
         // Decided before the lock, so an expiry this host will not honour refuses on its own terms
         // rather than depending on how full the store happens to be.
@@ -857,6 +878,14 @@ impl std::error::Error for AgentStoreError {
 /// what failed. Hand-written `Display` for [`AgentStoreError`]'s reason.
 #[derive(Debug)]
 pub enum AgentError {
+    /// The minting principal is not of a kind that may create a principal. See
+    /// [`AgentStore::mint`], and `routes::agents::MAY_MINT` for why.
+    MayNotMint {
+        /// The kind that asked. For the **log line**, which is where an agent reaching for this is
+        /// worth seeing — never for the answer, which quotes the rule instead.
+        kind: PrincipalKind,
+    },
+
     /// The identifier the caller supplied cannot name an agent.
     UnusableId {
         /// Which rule it broke. The rule and not the value: a refusal that echoed the identifier
@@ -908,6 +937,12 @@ pub enum AgentError {
 impl fmt::Display for AgentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MayNotMint { kind } => write!(
+                f,
+                "a principal of kind `{kind}` may not mint an agent: minting creates a principal, \
+                 and a principal that can create principals is one whose revocation does not end \
+                 the access it gave",
+            ),
             Self::UnusableId { reason } => f.write_str(reason),
             Self::AlreadyMinted { id } => write!(
                 f,
@@ -951,7 +986,8 @@ impl std::error::Error for AgentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::NoEntropy { source } | Self::Unwritable { source, .. } => Some(source),
-            Self::UnusableId { .. }
+            Self::MayNotMint { .. }
+            | Self::UnusableId { .. }
             | Self::AlreadyMinted { .. }
             | Self::AlreadyExpired { .. }
             | Self::ImplausibleLifetime { .. }
@@ -1014,6 +1050,68 @@ mod tests {
             expires_at: NOW + 30 * 24 * 60 * 60,
             as_of: NOW,
         }
+    }
+
+    /// **X-40 at the store.** Only a `User` mints, and the refusal happens before anything else
+    /// this function decides.
+    ///
+    /// The route's declaration is what a caller meets — `routes::agents::MAY_MINT`, enforced by the
+    /// guard and enumerated over the published surface. This is the same rule where it cannot be
+    /// bypassed by a handler that reaches the store without declaring an access, which is the shape
+    /// a later story would most plausibly reintroduce the hole in.
+    ///
+    /// Two things asserted beyond the refusal itself:
+    ///
+    /// 1. **Nothing was written.** A `403` that had already recorded the agent is the whole defect
+    ///    wearing the right status code.
+    /// 2. **It refuses before `admit_id`.** An agent handed an identifier this host would reject
+    ///    anyway must be told it may not mint, not that its name was unusable — the second answer
+    ///    is a probe into what this store would have accepted.
+    #[test]
+    fn only_a_user_mints_at_the_store() {
+        let scratch = Scratch::new("who-may-mint");
+        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+
+        for kind in [PrincipalKind::Agent, PrincipalKind::Service] {
+            let minter = Principal::new(
+                kind,
+                "incumbent",
+                Tenant::new("acme").expect("a literal tenant"),
+            );
+
+            assert!(
+                matches!(
+                    store.mint(&minter, "successor", in_thirty_days()),
+                    Err(AgentError::MayNotMint { kind: refused }) if refused == kind,
+                ),
+                "a `{kind}` minted a successor, so revoking its own credential would not end the \
+                 access it gave",
+            );
+
+            // Leg 2: an identifier this host would refuse on its own terms still refuses for the
+            // kind, so the answer is never a probe into what the store would have taken.
+            assert!(
+                matches!(
+                    store.mint(&minter, "../../etc/passwd", in_thirty_days()),
+                    Err(AgentError::MayNotMint { .. }),
+                ),
+                "a `{kind}` was told about its identifier rather than about its kind",
+            );
+        }
+
+        // Leg 1: the refusals wrote nothing. A user's mint follows, so this is not a store that
+        // simply never writes.
+        assert!(!scratch.store().exists(), "a refused mint wrote the store",);
+
+        store
+            .mint(&alice(), "triage-bot", in_thirty_days())
+            .expect("a user still mints, or every refusal above is vacuous");
+
+        let on_disk = fs::read_to_string(scratch.store()).expect("a user's mint writes the store");
+        assert!(
+            on_disk.contains("triage-bot") && !on_disk.contains("successor"),
+            "only the user's agent may exist: {on_disk}",
+        );
     }
 
     /// **X-36, the Acceptance's first and fourth items.** Minting yields a token, and the value

@@ -95,6 +95,12 @@ token **once**; this host keeps `SHA-256(token)` and never the token, in a store
 `FLUX_EXCHANGE_AGENTS`. Reading that store end to end yields the roster — which agents exist, in
 which tenants, until when — and no value anybody can present.
 
+**Only a signed-in human mints.** An agent or a service presenting a credential of its own is
+refused with `403`, because a principal that can create principals is one whose revocation does not
+end the access it gave — the descendants would be ordinary agents with no recorded relationship to
+the token that was revoked. `docs/designs/agent-access.md` carries the argument, including why a
+`Service` is refused as well.
+
 **Presenting such a token authenticates nothing yet.** Nothing binds the agent store to the
 `Identity` port, so a minted token is refused by every guarded route exactly as an unknown value is;
 and there is no way to list or revoke one, so minting is currently a one-way door until the token's

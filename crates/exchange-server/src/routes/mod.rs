@@ -27,7 +27,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::MethodRouter;
 use axum::{Json, Router};
-use exchange_host::IdentityError;
+use exchange_host::{IdentityError, PrincipalKind};
 use serde_json::json;
 use tower_http::trace::TraceLayer;
 use tracing::warn;
@@ -66,8 +66,8 @@ impl Module {
 pub struct Route {
     /// The path axum matches.
     pub path: &'static str,
-    /// Whether a principal is required. This field is what wires the guard — a route is not
-    /// guarded by its handler remembering to ask.
+    /// Whether a principal is required, and of which kinds. This field is what wires the guard — a
+    /// route is not guarded by its handler remembering to ask.
     pub access: Access,
     /// How it answers. A function rather than a value so a module's table can be a `const`.
     pub method_router: fn() -> MethodRouter<AppState>,
@@ -77,29 +77,62 @@ impl Route {
     fn router(&self, state: &AppState) -> Router<AppState> {
         let route = Router::new().route(self.path, (self.method_router)());
 
-        match self.access {
-            Access::Anonymous => route,
-            // `route_layer` and not `layer`: the guard must run for this route and leave an
-            // unmatched path a plain 404, rather than answering 401 for paths that do not exist.
-            Access::Principal => route.route_layer(middleware::from_fn_with_state(
-                state.clone(),
-                require_principal,
-            )),
-        }
+        let admitted = match self.access {
+            Access::Anonymous => return route,
+            Access::Principal => None,
+            Access::PrincipalOfKind(kinds) => Some(kinds),
+        };
+
+        // `route_layer` and not `layer`: the guard must run for this route and leave an
+        // unmatched path a plain 404, rather than answering 401 for paths that do not exist.
+        route.route_layer(middleware::from_fn_with_state(
+            (state.clone(), admitted),
+            require_principal,
+        ))
     }
 }
 
-/// Whether a route answers a caller the host could not resolve to a principal.
+/// Which kinds of principal a guarded route admits. `None` is every kind.
+///
+/// `None` rather than a written-out list of all three, so [`Access::Principal`] cannot silently
+/// stop admitting a kind that gets added to [`PrincipalKind`] later — a route that admits everyone
+/// says so by holding nothing, not by holding a list somebody has to remember to extend.
+type Admitted = Option<&'static [PrincipalKind]>;
+
+/// Whether a route answers a caller the host could not resolve to a principal, and which kinds of
+/// principal it answers at all.
+///
+/// # Why the kind is declared here and not decided by the handler
+///
+/// The same reason [`Access`] exists at all: a route is not guarded by its handler remembering to
+/// ask. Declaring it as data makes the whole surface enumerable, so
+/// `tests::the_kind_gated_surface_is_only_what_was_declared` can walk [`published`] and compare
+/// against a list with an argument written beside every entry — the shape
+/// `the_anonymous_surface_is_only_what_was_declared_anonymous` already uses for the other axis.
+///
+/// # This is not the grant model, and does not wait for it
+///
+/// `docs/designs/agent-access.md` defers **authorization** to X-13, and that deferral holds for
+/// *what an agent may call*. [`Access::PrincipalOfKind`] asks a different question — *what kind of
+/// principal is calling* — which this host answers today from the credential it issued, with no
+/// grant, no connector metadata and no policy. When X-13 lands it decides what a principal may do
+/// with a connection; this decides whether a principal may exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     /// Answers without a principal. Health is the only one, and a test enforces that.
     Anonymous,
-    /// Refused unless the identity port resolves a principal.
+    /// Refused unless the identity port resolves a principal — of **any** kind.
     ///
-    /// Everything but health. `identity::MODULE` is the first route declared this way, and
+    /// Almost everything. `identity::MODULE` is the first route declared this way, and
     /// `tests::the_surface_publishes_a_route_that_requires_a_principal` keeps at least one so the
     /// enumeration above never becomes a comparison against an empty set.
     Principal,
+    /// Refused unless the identity port resolves a principal **and** its kind is one of these.
+    ///
+    /// The narrower form, for a route where the *kind* of caller is the question. `/api/agents` is
+    /// the one that exists: minting creates a principal, and a principal that can create principals
+    /// is one whose revocation is not a complete remedy. See [`agents`] for the argument.
+    PrincipalOfKind(&'static [PrincipalKind]),
 }
 
 /// Every route the assembled app publishes, paired with the module that publishes it.
@@ -123,9 +156,10 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
-/// Refuse anything this host cannot attribute to a principal.
+/// Refuse anything this host cannot attribute to a principal — or attributes to the wrong kind of
+/// one.
 async fn require_principal(
-    State(state): State<AppState>,
+    State((state, admitted)): State<(AppState, Admitted)>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -144,13 +178,24 @@ async fn require_principal(
     let resolved = identity.resolve(presented).await;
 
     match resolved {
-        Ok(Some(principal)) => {
-            request.extensions_mut().insert(principal);
-            // How the caller authenticated, for the one route that mints credentials. The guard is
-            // the only thing that inserts this, so a handler cannot be lied to about it.
-            request.extensions_mut().insert(carrier);
-            next.run(request).await
-        }
+        Ok(Some(principal)) => match admitted {
+            Some(kinds) if !kinds.contains(&principal.kind()) => {
+                // Identified, and refused anyway. To the log, because an agent reaching for a
+                // route only a human may call is the shape of a leaked token being used — and an
+                // operator who cannot see it happening has nothing to revoke. The caller's own id
+                // and tenant belong here and not in the answer.
+                warn!(%principal, "a principal of a kind this route does not admit was refused");
+                refuse_kind(kinds)
+            }
+            _ => {
+                request.extensions_mut().insert(principal);
+                // How the caller authenticated, for the one route that mints credentials. The
+                // guard is the only thing that inserts this, so a handler cannot be lied to
+                // about it.
+                request.extensions_mut().insert(carrier);
+                next.run(request).await
+            }
+        },
         Ok(None) => refuse(
             StatusCode::UNAUTHORIZED,
             "this route requires a principal and none was presented",
@@ -220,6 +265,37 @@ fn refuse(status: StatusCode, reason: &str) -> Response {
     (status, Json(json!({ "error": reason }))).into_response()
 }
 
+/// Refuse a caller this host **did** identify, because its kind is not one this route admits.
+///
+/// `403` and not `401`: the credential was good, and telling a caller to authenticate again when
+/// authenticating again cannot help is how an operator spends an afternoon rotating a working
+/// token.
+///
+/// # What it says, and what it must not
+///
+/// It quotes the **rule** — which kinds this route admits, in the wire spelling `PrincipalKind`
+/// serialises — and nothing else. Not the caller's own id, not its tenant, not what this host
+/// holds, not whether the thing it asked to create already exists. That is
+/// `an_anonymous_caller_is_refused_and_told_nothing`'s discipline applied one step later: an
+/// identified caller may be told what would have worked, in the same way an unusable identifier is
+/// refused by quoting the rule rather than the value, but a refusal is never a place to learn what
+/// exists. Derived from the declaration rather than written out, so the rule and the sentence
+/// describing it cannot drift.
+///
+/// `pub(super)` so `agents` answers its own unreachable store-level refusal in these exact terms —
+/// see [`agents::MAY_MINT`].
+pub(super) fn refuse_kind(admitted: &'static [PrincipalKind]) -> Response {
+    let admitted: Vec<String> = admitted.iter().map(PrincipalKind::to_string).collect();
+
+    refuse(
+        StatusCode::FORBIDDEN,
+        &format!(
+            "this route admits only a principal of kind: {}",
+            admitted.join(", "),
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +322,34 @@ mod tests {
             .await
             .expect("a router is infallible")
             .status()
+    }
+
+    /// Drive one `GET` carrying a development roster handle, and report the status and the body —
+    /// a refusal aimed at an identified caller is only worth anything if what it says can be read.
+    async fn authenticated_get(app: Router, path: &str, handle: &str) -> (StatusCode, String) {
+        let mut service = app.into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("a router is always ready");
+
+        let request = HttpRequest::builder()
+            .uri(path)
+            .header(header::AUTHORIZATION, format!("Bearer {handle}"))
+            .body(Body::empty())
+            .expect("a well-formed request");
+
+        let response = service
+            .call(request)
+            .await
+            .expect("a router is infallible")
+            .into_response();
+
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a response body");
+
+        (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Drive one anonymous `POST` through a fully assembled app and report what it answered, body
@@ -381,7 +485,7 @@ mod tests {
     #[test]
     fn the_surface_publishes_a_route_that_requires_a_principal() {
         let guarded: Vec<_> = published()
-            .filter(|(_, route)| route.access == Access::Principal)
+            .filter(|(_, route)| route.access != Access::Anonymous)
             .map(|(module, route)| (module.name, route.path))
             .collect();
 
@@ -438,7 +542,7 @@ mod tests {
 
         assert_eq!(
             minting,
-            vec![("/api/agents", Access::Principal)],
+            vec![("/api/agents", Access::PrincipalOfKind(agents::MAY_MINT))],
             "nothing on this surface mints an agent principal, so the primary caller the vision \
              names can become one only through the development identity",
         );
@@ -454,6 +558,110 @@ mod tests {
             !body.contains("agent"),
             "the refusal must name nothing about what exists: {body}",
         );
+    }
+
+    /// **X-40.** Every route that admits only some kinds of principal, and the argument for each.
+    ///
+    /// The companion to `the_anonymous_surface_is_only_what_was_declared_anonymous` on the other
+    /// axis, and it has the same two teeth. A route that *stops* being kind-gated fails it, which
+    /// is the regression that matters — that is how a leaked agent token gets its mint back. And a
+    /// route that *starts* being kind-gated fails it too, so nobody narrows the surface without
+    /// writing down why, which is how a `403` for a caller that should have worked gets shipped.
+    ///
+    /// **The whole list is one entry, and the rest of the surface is deliberately not on it.** In
+    /// particular `DELETE /api/connections/{connector}` is not: it destroys tenant data inside the
+    /// tenant the caller already belongs to, an operator can see it (`GET /api/connections`) and
+    /// undo it by reconnecting, and nothing about it outlives revocation of the token that did it.
+    /// Whether an agent may reach a destructive route is a real question, but it is the
+    /// **grant-shaped** one — *what may this principal do* — which is X-13. Minting is the
+    /// authentication-shaped one — *what kind of principal is this, and may it create another* —
+    /// and that is the whole of what this decides. `crate::routes::agents` carries the long form.
+    #[test]
+    fn the_kind_gated_surface_is_only_what_was_declared() {
+        /// Every route that admits fewer than all kinds. Adding a line here is the decision; the
+        /// assertion below is only the enforcement.
+        const KIND_GATED: &[(&str, &str, &[PrincipalKind])] = &[
+            // Minting an agent principal. Only a signed-in human, because a principal that can
+            // create principals makes revocation (X-38) an incomplete remedy that an operator
+            // cannot see — and `Service` is refused for the same reason one level up, since this
+            // host mints, verifies and revokes nothing for a service.
+            ("agents", "/api/agents", agents::MAY_MINT),
+        ];
+
+        let gated: Vec<_> = published()
+            .filter_map(|(module, route)| match route.access {
+                Access::PrincipalOfKind(kinds) => Some((module.name, route.path, kinds)),
+                Access::Anonymous | Access::Principal => None,
+            })
+            .collect();
+
+        assert_eq!(
+            gated, KIND_GATED,
+            "the set of routes that admit only some kinds of principal changed; every entry needs \
+             an argument written beside it in KIND_GATED, and these are what are gated: {gated:?}",
+        );
+    }
+
+    /// The kind gate's own guard, in the shape `the_declared_access_is_what_decides_the_answer`
+    /// uses: run the mechanism against a caller it must refuse and one it must admit, through the
+    /// **same handler**, so only the declared access can explain the difference.
+    ///
+    /// Without this, `the_kind_gated_surface_is_only_what_was_declared` is a test about a field's
+    /// value: a `PrincipalOfKind` the guard never consulted would satisfy it exactly as happily.
+    #[tokio::test]
+    async fn a_declared_kind_is_what_decides_the_answer() {
+        fn open() -> MethodRouter<AppState> {
+            get(|| async { "reached" })
+        }
+
+        const ONLY_A_USER: &[PrincipalKind] = &[PrincipalKind::User];
+
+        const SPY: Module = Module {
+            name: "spy",
+            routes: &[
+                Route {
+                    path: "/spy-any-kind",
+                    access: Access::Principal,
+                    method_router: open,
+                },
+                Route {
+                    path: "/spy-only-a-user",
+                    access: Access::PrincipalOfKind(ONLY_A_USER),
+                    method_router: open,
+                },
+            ],
+        };
+
+        let state = AppState::with_development_identity(std::sync::Arc::new(
+            crate::dev_identity::DevIdentity::from_roster("user:alice@acme,agent:bot@acme")
+                .expect("a well-formed roster"),
+        ));
+        let app = SPY.router(&state).with_state(state);
+
+        for (handle, path, expected) in [
+            ("alice", "/spy-any-kind", StatusCode::OK),
+            ("bot", "/spy-any-kind", StatusCode::OK),
+            ("alice", "/spy-only-a-user", StatusCode::OK),
+            ("bot", "/spy-only-a-user", StatusCode::FORBIDDEN),
+        ] {
+            let (status, body) = authenticated_get(app.clone(), path, handle).await;
+
+            assert_eq!(
+                status, expected,
+                "`{handle}` at `{path}`: only the declared access differs between these routes, \
+                 and `/spy-any-kind` answering both is what stops this passing for a guard that \
+                 refuses everyone: {body}",
+            );
+
+            if status == StatusCode::FORBIDDEN {
+                // `403` and not `401`: the credential was good. And the refusal quotes the rule —
+                // which kinds are admitted — and never the caller, its tenant, or what exists.
+                assert!(
+                    body.contains("user") && !body.contains("bot") && !body.contains("acme"),
+                    "the refusal must quote the rule and name nothing else: {body}",
+                );
+            }
+        }
     }
 
     /// The other half of the Acceptance's first item: the route an operator checks must answer.
