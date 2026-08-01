@@ -8,6 +8,32 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A tenant on intercom's or newrelic's non-US region can configure their connection** (X-70).
+  Upstream C-225 changed both connectors' `base_url` to a bare `{host}` placeholder, and X-47's rule
+  reads the template rather than the value — a bare placeholder **is** the whole destination
+  authority, so both were refused. But the same upstream change shipped `config_choices`, and that
+  `{host}` is a closed set of hostnames **the vendor published**. Choosing among three regions the
+  catalogue declares is not a caller naming a destination.
+
+  **The rule still reads declared data, never the value's shape.** `HostPinning` gains a fourth
+  answer, `ChosenFrom`, and admission is **byte equality** against the published strings — nothing
+  trimmed, folded, prefixed or parsed. That is deliberate and it is the whole safety argument: there
+  is no second parser to disagree with the first, which is [[X-19]]'s defect class. Asked at **both**
+  enforcement points, so a value planted directly in the store is refused on the way out as well as
+  on the way in. An independent review drove 21 hostile spellings — trailing dot, `:443`,
+  `@evil.example`, a Cyrillic homoglyph, a zero-width space, `xn--`, percent-encoded dots — through
+  all three paths; all 21 refused.
+
+  **`newrelic` moved with `intercom`, and that was not optional.** A rule derived from the catalogue
+  admits it for exactly the reason it admits intercom; refusing it would have meant writing the word
+  `"intercom"` into this repository, which is the enumerated list the story exists to avoid. The
+  configurable surface is **51 of 54**, up from 49; `docusign`, `freshdesk` and `okta` remain refused.
+
+  ⚠ **This is a breaking change to the published crate.** `HostPinning` and `SettingsRefusal` are
+  public re-exports and neither is `#[non_exhaustive]`, so a downstream matching either exhaustively
+  will not compile. Deliberate rather than overlooked — marking them `#[non_exhaustive]` now would be
+  a second breaking change on top of this one, and the variant is the point.
+
 - **The site shows how to run this and sign in** (X-69). A visitor could read what this service
   refuses to do and could not learn how to start it. Now there is a page, on the nav of every page and
   in the landing hero, and **it was verified by following it** — a clean clone, `cargo run`, the

@@ -1,7 +1,7 @@
 ---
 id: X-70
 title: "A setting whose values are a closed vendor set is not the caller naming a host"
-status: in-progress
+status: done
 priority: 1
 epic: connections
 design: docs/designs/connection-settings.md
