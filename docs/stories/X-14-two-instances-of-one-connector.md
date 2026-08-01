@@ -1,7 +1,7 @@
 ---
 id: X-14
 title: "Two instances of one connector, told apart by a name the operator chose"
-status: ready
+status: blocked
 priority: 5
 epic: connections
 note: "owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first"
@@ -59,7 +59,17 @@ refusal, not a fallback to a default.
       — it becomes an address segment, so a traversing spelling is refused at construction.
 
 ## Progress
-- (not started — design first)
+- **Blocked on upstream, 2026-08-01.** The instance dimension belongs in `connector_spec`'s
+  `CredentialRef`, filed as flux-connectors **C-406** (an optional uuid, required when a tenant holds
+  more than one integration of the same kind — owner-directed). It cannot be added here: this story's
+  own Notes forbid forking the address scheme locally, because two spellings of an address is how two
+  components stop agreeing where a credential lives.
+- C-406 is itself sequenced behind flux-connectors **C-407**, which extracts the credential address
+  vocabulary into its own crate — i.e. it moves the very types C-406 adds a component to. That work
+  is in flight in another session.
+- **What unblocks this:** C-407 lands, C-406 adds the optional uuid, flux-connectors publishes, and
+  this repository picks up the new `connector-spec`. Then the host side is the tenant-scoped
+  label → uuid resolution described above.
 
 ## Notes
 - **Design first.** This changes an address scheme that `docs/designs/invoke.md` and X-10 both build

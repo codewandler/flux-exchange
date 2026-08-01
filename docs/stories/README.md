@@ -36,7 +36,6 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 ### Connections
 - [X-08 — Connections and credentials (epic)](X-08-connections-epic.md) · connector-secrets and connector-spec carry NO flux dependency, so this epic is unblocked too — only invoke waits on the engine line
 - [X-10 — Connections addressed by a tenant the caller cannot name](X-10-connections-are-tenant-addressed.md) · Tenant::new already refuses a traversing spelling at construction; this story is where that validated value becomes the ONLY way an address is built
-- [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
@@ -46,6 +45,7 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
 - [X-12 — Invoke an operation](X-12-invoke.md) · the caller names an operation id and nothing else about the request is theirs — not the host, not the credential, not the tenant. That is the whole confused-deputy answer
 - [X-13 — Grants gate invocation](X-13-grants-gate-invoke.md) · Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect
+- [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
 
 ## Backlog
 _None._
