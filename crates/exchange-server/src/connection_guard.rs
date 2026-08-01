@@ -1,4 +1,4 @@
-//! One change to one connection at a time.
+//! One change to one connection at a time, and one change to one tenant's allowance at a time.
 //!
 //! # The window this closes
 //!
@@ -12,6 +12,32 @@
 //! The port cannot close this: `SecretStore` is `get`/`put`/`delete` with no compare-and-swap, and
 //! adding one is not this repository's to do. What is available is that the whole decision happens
 //! in one process, so the guard is an in-process claim on the thing being changed.
+//!
+//! # Two scopes, because there are two decisions
+//!
+//! A claim is taken on the **thing the decision is about**, and this surface makes two decisions of
+//! different width:
+//!
+//! - *Is this connector already connected?* is about one address, so [`ConnectionGuard::claim`]
+//!   claims `(tenant, connector)`. Two tenants never contend, and one tenant's `zendesk` and
+//!   `slack` never contend — that is the granularity X-10 chose, and
+//!   [`tests::claims_do_not_reach_across_tenants_or_connectors`] still pins it.
+//! - *Has this tenant room left in its allowance?* is about **every** connector at once: what a
+//!   tenant occupies is the sum over all of them, so a read of it is only true while no other
+//!   connector of that tenant is being written. [`ConnectionGuard::claim_tenant`] claims the
+//!   tenant, and one tenant's concurrent creates to *different* connectors therefore do serialise.
+//!
+//! **That second scope is contention the first deliberately avoids**, and it is here because
+//! avoiding it made `MAX_TENANT_STORE_BYTES` untrue: before X-25 each of one tenant's concurrent
+//! creates read an occupancy the others had not written yet, all were admitted, and the tenant
+//! ended up past the allowance that exists to bound its share of the one file every other tenant's
+//! write has to rewrite. The contention is bounded to what the allowance is decided from — **one
+//! tenant**, and only on `POST`. Two tenants still never contend, which is the property that
+//! mattered; `DELETE` takes no tenant claim, because destroying credentials only frees allowance
+//! and an operator revoking a leaked secret must never be made to wait on an unrelated create.
+//!
+//! A caller may hold both at once, and there is no lock ordering to get wrong: a claim is never
+//! waited on, only taken or refused, so two claims cannot deadlock.
 //!
 //! # What it covers, and what it does not
 //!
@@ -36,12 +62,26 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use exchange_host::Tenant;
 
-/// What a claim is taken on: one tenant's connection to one connector.
+/// What a claim is taken on — one of the two widths the module documentation argues for.
 ///
-/// Per `(tenant, connector)` rather than one lock over the whole surface, because a global one
-/// would make one tenant's connection writes wait on another's — shared fate between tenants, in
-/// the one repository whose entire point is that they do not share anything.
-type Key = (String, String);
+/// One set holds both, rather than two sets holding one each, because they are the same kind of
+/// thing: a name for what is in flight, taken and released the same way. The variants cannot
+/// collide, so a tenant called `zendesk` claims nothing a connector called `zendesk` does.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Key {
+    /// One tenant's connection to one connector.
+    ///
+    /// Per `(tenant, connector)` rather than one lock over the whole surface, because a global one
+    /// would make one tenant's connection writes wait on another's — shared fate between tenants,
+    /// in the one repository whose entire point is that they do not share anything.
+    Connection(String, String),
+    /// One tenant's connection changes as a whole, across every connector.
+    ///
+    /// Wider on purpose, and only as wide as the decision that needs it: what a tenant may occupy
+    /// is a sum over all of its connectors, so nothing narrower than the tenant makes a read of it
+    /// still true when it is written. It stops at the tenant, so two tenants never contend.
+    Tenant(String),
+}
 
 /// The connection changes currently in flight.
 #[derive(Debug, Default)]
@@ -56,8 +96,27 @@ impl ConnectionGuard {
     /// `None` is not an error condition to retry internally; it is an answer the caller turns into
     /// a refusal. See the module documentation for why refusing beats waiting.
     pub fn claim(self: &Arc<Self>, tenant: &Tenant, connector: &str) -> Option<Claim> {
-        let key = (tenant.as_str().to_string(), connector.to_string());
+        self.take(Key::Connection(
+            tenant.as_str().to_string(),
+            connector.to_string(),
+        ))
+    }
 
+    /// Claim **all** of one tenant's connection changes, for a decision that is about the tenant
+    /// rather than about one connector.
+    ///
+    /// That is the allowance: `exchange_host::MAX_TENANT_STORE_BYTES` is read as a sum over every
+    /// connector, so a create deciding against it has to exclude the tenant's other creates and not
+    /// only its own connector's. A caller holding this and [`claim`](Self::claim) holds two claims;
+    /// neither waits, so neither can deadlock against the other.
+    ///
+    /// `None` is answered exactly as [`claim`](Self::claim)'s is: a refusal, not a retry loop.
+    pub fn claim_tenant(self: &Arc<Self>, tenant: &Tenant) -> Option<Claim> {
+        self.take(Key::Tenant(tenant.as_str().to_string()))
+    }
+
+    /// Take a claim on `key`, or report that something else already holds it.
+    fn take(self: &Arc<Self>, key: Key) -> Option<Claim> {
         // `insert` answers whether the key was new, so taking the claim and finding out whether it
         // was free are the same operation. A `contains` followed by an `insert` would be the very
         // check-then-act this type exists to remove.
@@ -88,7 +147,8 @@ impl ConnectionGuard {
     }
 }
 
-/// A held claim on one tenant's connection to one connector.
+/// A held claim on one tenant's connection to one connector, or on that tenant's connections as a
+/// whole.
 ///
 /// Released on drop, including while a panic unwinds, so there is no path that leaves a connection
 /// permanently unchangeable. Deliberately carries no method to release early: an explicit `release`
@@ -134,8 +194,15 @@ mod tests {
         );
     }
 
-    /// Claims are per connection, not per surface. A global lock would make one tenant's writes
-    /// wait on another's, which is shared fate between tenants.
+    /// A **connection** claim is per connection, not per surface. A global lock would make one
+    /// tenant's writes wait on another's, which is shared fate between tenants.
+    ///
+    /// Still true after X-25, and deliberately so: what that story serialises across one tenant's
+    /// connectors is the *allowance* decision, which takes the wider claim below. This one keeps
+    /// its meaning — it is what makes a `POST` and a `DELETE` to one connection exclude each other
+    /// — and it keeps `DELETE` out of the wider scope entirely. Read this next to
+    /// [`a_tenant_claim_covers_that_tenants_connectors_and_stops_there`], which states the width
+    /// that did change and why.
     #[test]
     fn claims_do_not_reach_across_tenants_or_connectors() {
         let guard = Arc::new(ConnectionGuard::default());
@@ -148,6 +215,40 @@ mod tests {
         assert!(
             guard.claim(&tenant("acme"), "slack").is_some(),
             "the same tenant's connection to another connector is a different claim",
+        );
+    }
+
+    /// **The width X-25 added, and the width it stopped at.** A tenant claim excludes that same
+    /// tenant's other connection changes — which is the whole point, since the allowance is decided
+    /// as a sum over every connector — and excludes nothing of any other tenant's.
+    ///
+    /// It is a different claim from the per-connection one, so holding one says nothing about the
+    /// other: `create` holds both, and if taking the tenant claim also took the connection's, a
+    /// `POST` would be refusing itself.
+    #[test]
+    fn a_tenant_claim_covers_that_tenants_connectors_and_stops_there() {
+        let guard = Arc::new(ConnectionGuard::default());
+        let acme = guard.claim_tenant(&tenant("acme")).expect("free");
+
+        assert!(
+            guard.claim_tenant(&tenant("acme")).is_none(),
+            "one tenant's allowance is decided one change at a time, or two concurrent creates \
+             read an occupancy neither has written yet",
+        );
+        assert!(
+            guard.claim_tenant(&tenant("globex")).is_some(),
+            "another tenant's changes must not wait on this one: the serialisation is per tenant \
+             and is not a lock over the surface",
+        );
+        assert!(
+            guard.claim(&tenant("acme"), "zendesk").is_some(),
+            "the two claims are different claims, and one request holds both",
+        );
+
+        drop(acme);
+        assert!(
+            guard.claim_tenant(&tenant("acme")).is_some(),
+            "the claim must be available again once the change finished",
         );
     }
 
@@ -180,6 +281,9 @@ mod tests {
 
         for connector in ["zendesk", "slack", "github"] {
             let _claim = guard.claim(&tenant("acme"), connector).expect("free");
+        }
+        for name in ["acme", "globex"] {
+            let _claim = guard.claim_tenant(&tenant(name)).expect("free");
         }
 
         assert!(guard.claimed().is_empty());
