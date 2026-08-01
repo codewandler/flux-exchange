@@ -103,6 +103,14 @@ async fn serve() -> Result<(), StartupRefusal> {
 fn compose() -> Result<AppState, StartupRefusal> {
     let mut state = compose_identity()?;
 
+    // Bound before the invoker, because the invoker reads it. A composition with no settings store
+    // still builds one — it gets an empty configuration, which is X-12's behaviour: the connectors
+    // that need nothing per connection run, and the ones that do refuse by name.
+    let settings = settings_store()?;
+    if let Some(store) = settings.clone() {
+        state = state.with_settings(store);
+    }
+
     if let Some(store) = credential_store()? {
         // The invoker is built from the same store the connections surface writes to, and only
         // when there is one. A composition with no store could still resolve a principal and look
@@ -110,9 +118,19 @@ fn compose() -> Result<AppState, StartupRefusal> {
         // from the vendor, but one an agent treating `401` as retryable loops on forever. Binding
         // nothing means `POST /api/operations/{operation}/invoke` refuses with `503` and names the
         // setting, which is the honest answer rather than a hole.
+        // An empty configuration when nothing was bound, and deliberately not a refusal: the
+        // settings store is what the *templated* connectors need, and a host without one is still a
+        // working host for the rest of the catalogue. What it must not do is pretend — the sixteen
+        // that need a value refuse by name, quoting the field and the service.
+        let configuration = settings.map_or_else(
+            || Arc::new(exchange_host::MemoryConfig::new()) as Arc<dyn exchange_host::ConfigStore>,
+            |store| store as Arc<dyn exchange_host::ConfigStore>,
+        );
+
         state = state
             .with_invoker(Arc::new(
-                invoker(store.clone()).map_err(|reason| StartupRefusal::Invoker { reason })?,
+                invoker(store.clone(), configuration)
+                    .map_err(|reason| StartupRefusal::Invoker { reason })?,
             ))
             .with_credentials(store);
     }
@@ -200,6 +218,56 @@ fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, Sta
 /// No file store on this platform; a composition here binds its own or holds none.
 #[cfg(not(unix))]
 fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
+    Ok(None)
+}
+
+/// Bind the connection-settings store the environment names, or bind none.
+///
+/// The same three states as the credential store, and the same argument for each — **unset binds
+/// nothing**, **set and unusable refuses to start** — with one difference stated plainly, because
+/// it is the whole of why this is a second function and not a second path passed to the first.
+///
+/// **What this file holds is not secret.** A subdomain, a workspace slug, an account name: each is
+/// in the URL of every request the connector makes and in the vendor's own dashboard. It is kept
+/// apart from the credential store because mixing them would make `held` and the tenant occupancy
+/// bound each mean two things at once, not because it needs the same protection —
+/// `exchange_host::settings` carries that argument at length.
+///
+/// Unset is therefore a *warning* rather than a silent absence, and it names the consequence
+/// precisely: sixteen connectors refuse by name until this is set, and the rest are unaffected.
+///
+/// `#[cfg(unix)]` because the file binding is, for [`credential_store`]'s reason with less at stake:
+/// the modes there are what protects a credential, and here they are hygiene for a customer's data.
+/// The port is not gated, so another platform's composition binds its own.
+#[cfg(unix)]
+fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>, StartupRefusal> {
+    use exchange_host::{SettingsStore, CONNECTION_SETTINGS_SETTING};
+
+    let Ok(configured) = std::env::var(CONNECTION_SETTINGS_SETTING) else {
+        warn!(
+            "no connection-settings store is bound ({CONNECTION_SETTINGS_SETTING} is unset), so \
+             every connector whose base URL is templated on a per-connection value — zendesk, \
+             shopify, jira and thirteen others — will refuse by name. Set it to a path outside \
+             every working tree. It holds no secrets; credentials stay in the credential store",
+        );
+        return Ok(None);
+    };
+
+    let store = SettingsStore::bind_configured(Some(&configured)).map_err(|source| {
+        StartupRefusal::SettingsStore {
+            reason: source.to_string(),
+        }
+    })?;
+
+    // Read back off the bound store, so this line cannot name a file this process did not open.
+    info!("{}", store.banner());
+
+    Ok(Some(Arc::new(store)))
+}
+
+/// No file store on this platform; a composition here binds its own or holds none.
+#[cfg(not(unix))]
+fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>, StartupRefusal> {
     Ok(None)
 }
 

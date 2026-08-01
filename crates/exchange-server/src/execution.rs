@@ -14,9 +14,7 @@
 
 use std::sync::Arc;
 
-use exchange_host::{
-    Contexts, Deployment, Egress, Invoker, MemoryConfig, SecretStore, ToolContext,
-};
+use exchange_host::{ConfigStore, Contexts, Deployment, Egress, Invoker, SecretStore, ToolContext};
 use flux_system::{System, Workspace};
 use flux_web::http::HttpRequestTool;
 use flux_web::WebOptions;
@@ -40,12 +38,26 @@ impl Contexts for GuardedSystem {
 
 /// Build the invoker this composition serves operations with, or say why it could not.
 ///
+/// `settings` is where a tenant's **non-secret** connection values are read from — the
+/// `{subdomain}` in a templated base URL. It arrives as the port rather than as the store for the
+/// same reason `credentials` does, and it is a *separate* argument from `credentials` because they
+/// are separate stores: a subdomain is not a secret, and `exchange_host::settings` carries the
+/// argument for why keeping the two apart is a decision rather than a filing convention.
+///
+/// A composition that binds no settings store passes an empty one and gets X-12's behaviour
+/// unchanged: the sixteen connectors whose operations carry a `{placeholder}` refuse by name,
+/// quoting the field and the service, and the other thirty-seven run. That is the honest gap rather
+/// than a fallback — nothing is served from somewhere else.
+///
 /// # Errors
 ///
 /// When the process's working directory cannot be made into a flux workspace. That is the only
 /// fallible step, and it is fallible at *startup* rather than on the first request, which is where
 /// a composition problem should announce itself.
-pub fn invoker(credentials: Arc<dyn SecretStore>) -> Result<Invoker, String> {
+pub fn invoker(
+    credentials: Arc<dyn SecretStore>,
+    settings: Arc<dyn ConfigStore>,
+) -> Result<Invoker, String> {
     let options = WebOptions {
         // **Deny-all**, explicitly. `None` here does not mean "no secrets": it means "fall back to
         // the `FLUX_WEB_SECRET_ALLOW` environment variable", which would let a `{"$secret": "NAME"}`
@@ -85,12 +97,12 @@ pub fn invoker(credentials: Arc<dyn SecretStore>) -> Result<Invoker, String> {
         Deployment::MultiTenant,
         Egress::new(Arc::new(HttpRequestTool::new(&options))),
         credentials,
-        // **No connection settings are bound**, and that is an honest gap rather than an oversight:
-        // nothing in this host stores a tenant's non-secret connection values yet. The consequence
-        // is precise and fail-closed — the thirteen connectors whose `base_url` carries a
-        // `{placeholder}` refuse by name, quoting the field and the service, rather than sending a
-        // request to a host with a brace in it. The other forty run.
-        Arc::new(MemoryConfig::new()),
+        // **A tenant's non-secret connection settings**, as the port. X-47 gave them a store of
+        // their own — deliberately not the credential store, see `exchange_host::settings` — and
+        // this is where it reaches the thing that reads it. Nothing a caller supplies can influence
+        // which tenant is read: `Invoker::invoke` binds this port and the credential port to one
+        // tenant, in one expression, off the resolved principal.
+        settings,
         Arc::new(GuardedSystem {
             system: Arc::new(System::new(workspace)),
         }),
