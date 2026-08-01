@@ -33,11 +33,16 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
+### Catalogue
+- [X-32 — A console test in a subdirectory is not silently skipped](X-32-console-test-discovery.md) · found by X-28's implementor while wiring the console into CI, 2026-08-01: `node --test test/*.test.mjs` matches one directory level, so a test added under test/<subdir>/ never runs and CI stays green
+
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-29 — A partial delete does not overstate what survived, or understate why](X-29-partial-delete-precision.md) · found by X-18's belated review, 2026-08-01: `left_behind` names addresses that never held a value and calls them still usable, and a mixed-kind delete loop reports the FIRST failure kind — so a Denied address can be reported with 'retrying may work'
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
+- [X-30 — CI proves the pins and the MSRV, not just the tests](X-30-ci-supply-chain-and-msrv.md) · found by X-28's implementor, 2026-08-01: ../flux fails CI when an unpinned action reappears and checks crate versions at PR time; this repo enforces both by review only, and `rust-version = 1.87` is a promise to consumers that nothing verifies
+- [X-31 — A new exchange error cannot silently inherit a refusal's status](X-31-error-to-refusal-edge.md) · found by X-26's implementor in the guard it had just written, 2026-08-01: every_refusal_states_the_status_it_answers_with pins the refusal→status edge, and nothing pins the error→refusal edge, so a new ExchangeError folded into an existing refusal would undo X-17's split without touching status()
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
