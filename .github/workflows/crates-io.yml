@@ -1,0 +1,95 @@
+# Publishes this workspace's crates.io artifact when a version tag `vX.Y.Z` is pushed.
+#
+# Modelled on ../flux-connectors' workflow of the same name, with one deliberate simplification:
+# this workspace publishes **one** crate, `codewandler-flux-exchange-host`. There is no closure to
+# order, so there is no topological sort — `flux-exchange` itself is `publish = false` (it is one
+# composition of the host, and a product embedding the host writes its own binary).
+#
+# REQUIRED SECRET: `CARGO_REGISTRY_TOKEN` — the org-level secret on `codewandler`. It has SELECTED
+# visibility, so this repository must be on its allow-list:
+#   Settings → Secrets and variables → Actions → CARGO_REGISTRY_TOKEN → Repository access.
+# Without it this job fails fast, before a toolchain is installed or anything is packaged.
+#
+# THE GATE RUNS HERE. Unlike ../flux and ../flux-connectors, this repository has no `ci.yml` yet, so
+# there is no other run proving the workspace is green at this commit. Publishing an artifact nobody
+# tested would be the worst possible thing to make permanent, so the gate is part of this job rather
+# than assumed from a neighbouring one. When a `ci.yml` lands, this can defer to it — but it should
+# not simply be deleted.
+#
+# Idempotent: a crate@version already on crates.io is skipped, so a failed run can be re-run, or the
+# tag re-pushed, to resume. That matters because a published version cannot be withdrawn.
+#
+# Publishing is CI-only by contract — see AGENTS.md § Publishing contract. Do not run
+# `cargo publish` by hand.
+name: crates.io
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  # Resume a publish that died partway (a crates.io rate limit, a network failure) from the current
+  # branch. Idempotent, so it skips what is already live.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-io-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      # First, before a toolchain is installed or anything is packaged: a missing secret must stop
+      # the run here, not surface as an upload failure after the artifact is already live.
+      - name: Check the publish token is configured
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set. It is an org-level secret on codewandler with SELECTED visibility — add this repository under Settings → Secrets and variables → Actions → CARGO_REGISTRY_TOKEN → Repository access."
+            exit 1
+          fi
+
+      - name: Install Rust toolchain
+        # The same pin as ../flux and ../flux-connectors, so a release built here is built by the
+        # cargo the rest of the family releases with. Note this is NOT the workspace's
+        # `rust-version` (1.87) — that is the MSRV a consumer must have, not the toolchain we ship
+        # from.
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.97.0"
+          components: clippy, rustfmt
+
+      - name: Verify the tag matches the workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          wsver=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "tag=$tag workspace=$wsver"
+          if [ "$tag" != "$wsver" ]; then
+            echo "::error::tag v$tag does not match [workspace.package].version $wsver"
+            exit 1
+          fi
+
+      # The project's gate, exactly as AGENTS.md § Build / test / run states it. A red gate must
+      # stop the publish, because the upload cannot be taken back afterwards.
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Publish to crates.io
+        run: bash scripts/publish-crates-io.sh

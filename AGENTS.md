@@ -116,3 +116,29 @@ provider. The server binary is `publish = false`.
 That trait boundary is what keeps downstream concerns out of this repository, and it is structural
 rather than disciplinary: the public crate has no downstream dependency to leak through. **No
 flux-family repository names a downstream company.**
+
+### Publishing contract
+
+**Publishing to crates.io is CI-only. Never run `cargo publish` by hand** — not locally, not with
+`--allow-dirty`, not "just to test". A published version cannot be withdrawn or corrected: a burned
+version number is burned, and a wrong `description`, `readme` or `keywords` is fixable only in the
+*next* version. `--dry-run` is the only form of `cargo publish` anyone runs outside CI.
+
+- A release is a consequence of pushing a `vX.Y.Z` tag.
+  [`.github/workflows/crates-io.yml`](.github/workflows/crates-io.yml) does the rest, via
+  [`scripts/publish-crates-io.sh`](scripts/publish-crates-io.sh). It holds a `concurrency` group so
+  two runs cannot race, and `workflow_dispatch` resumes a run that died partway.
+- It needs one secret, **`CARGO_REGISTRY_TOKEN`**, checked before anything is packaged so a missing
+  token fails the run rather than surfacing as an upload failure. It is an **org-level secret on
+  `codewandler` with SELECTED visibility**, shared with `flux` and `flux-connectors` — this
+  repository is on its allow-list, and a fork or a renamed repository will not be.
+- **The gate runs inside that workflow.** This repository has no `ci.yml` yet, so nothing else
+  proves the workspace is green at the tagged commit, and publishing an artifact nobody tested is
+  the worst thing to make permanent. When a `ci.yml` lands the workflow can defer to it — it should
+  not simply lose the gate.
+- The publish is **idempotent**: a version already on crates.io is skipped, so a failed run can be
+  re-run or the tag re-pushed. That is what makes a partial release recoverable, given that what is
+  already up cannot be withdrawn.
+- The tag must match `[workspace.package].version`; the workflow refuses otherwise. Bump the version
+  and the `exchange-host` pin in `[workspace.dependencies]` together — they are two places holding
+  one number, and a publish is where they being out of step first hurts.
