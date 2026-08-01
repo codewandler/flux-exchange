@@ -10,11 +10,14 @@
 #   Settings → Secrets and variables → Actions → CARGO_REGISTRY_TOKEN → Repository access.
 # Without it this job fails fast, before a toolchain is installed or anything is packaged.
 #
-# THE GATE RUNS HERE. Unlike ../flux and ../flux-connectors, this repository has no `ci.yml` yet, so
-# there is no other run proving the workspace is green at this commit. Publishing an artifact nobody
-# tested would be the worst possible thing to make permanent, so the gate is part of this job rather
-# than assumed from a neighbouring one. When a `ci.yml` lands, this can defer to it — but it should
-# not simply be deleted.
+# THE GATE RUNS HERE, AND STILL DOES NOW THAT `ci.yml` EXISTS. `ci.yml` gates every push to `main`
+# and every pull request, which is what catches a red tree when it lands — but it is not evidence
+# about *this* commit. A tag can be pushed at a commit no CI run ever covered: a branch that was
+# never merged, a run cancelled by the next push, a fork, a window where Actions were disabled.
+# Deferring would mean trusting a run that may not exist, and publishing an artifact nobody tested is
+# the worst possible thing to make permanent, because the upload cannot be withdrawn. So the gate is
+# part of this job rather than assumed from a neighbouring one, and duplicating four cheap commands
+# on the one irreversible path is the correct trade. Keep it. See X-28.
 #
 # Idempotent: a crate@version already on crates.io is skipped, so a failed run can be re-run, or the
 # tag re-pushed, to resume. That matters because a published version cannot be withdrawn.
