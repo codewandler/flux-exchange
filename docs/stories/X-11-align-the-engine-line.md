@@ -1,9 +1,11 @@
 ---
 id: X-11
 title: "Align the flux engine line so connector-pack can link"
-status: blocked
+status: ready
 epic: invoke
-note: "BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo"
+priority: 1
+areas: [exchange-host, exchange-server]
+note: "UNBLOCKED 2026-08-01: upstream published 0.9.0. connector-pack now requires flux-runtime ^0.46 and 0.46.0 exists, so the ^0.41-vs-0.45 conflict is gone. connector-spec is replaced by connector-address and stopped at 0.8"
 ---
 
 # Align the flux engine line so connector-pack can link
@@ -42,3 +44,54 @@ the same time. Until that holds, nothing can execute an operation.
   the same "one engine version" constraint every consumer of the pack hits.
 - **Only `invoke` is affected.** `connector-catalog` has no dependencies; `connector-spec` and
   `connector-secrets` have no flux dependency. Do not let this block X-01…X-10.
+
+## Unblocked, 2026-08-01 — what actually changed upstream
+
+flux-connectors published **0.9.0** today, and the conflict this story was waiting on is gone:
+
+| | was | now |
+|---|---|---|
+| `connector-pack` requires | `flux-runtime ^0.41` | **`flux-runtime ^0.46`** |
+| latest `flux-runtime` | 0.45.0 | 0.47.0, and **0.46.0 exists** |
+
+So `connector-pack` 0.9.0 resolves against a published engine line, and this repository can depend on
+it. **Verify that rather than assuming it** — a resolvable manifest is not a linking binary.
+
+**The upgrade is not just a version bump.** `connector-spec` — the *compiler* — has been split, and
+the vocabulary extracted to a new crate:
+
+- `codewandler-connector-spec` stopped at **0.8.0**. There is no 0.9.
+- `codewandler-connector-address` **0.9.0** is the replacement for the vocabulary, and depends on
+  nothing but `thiserror`.
+- `connector-catalog` and `connector-secrets` are both at **0.9.0**.
+
+This repository's only use of the old crate is `connector_spec::DEFAULT_SERVICE` in
+`exchange-host/src/connections.rs`, plus doc references to
+`connector_spec::Connector::credential_ref_for`. Small, but it is on the **address derivation path**,
+which is the repository's central invariant — so the migration must not be done by search and replace
+without reading what moved.
+
+## Acceptance
+- [x] *(superseded — recorded above)* `connector-pack` is published against a usable flux line.
+- [ ] The workspace builds against `connector-catalog`, `connector-secrets` and
+      `connector-address` at **0.9**, with `connector-spec` gone from the manifests entirely.
+- [ ] **A test proves `connector-pack` can actually link here**, not merely resolve — the Acceptance's
+      original wording asked for a trivial binary that compiles against it. Adapt it to whatever the
+      0.9 surface is, and say what you did.
+- [ ] **The address derivation is unchanged**, asserted by the existing tests staying green
+      *unmodified* — the 18-hostile-name sweep, `no_route_here_accepts_an_address`, and the
+      tenant-derivation vectors are what guard the central invariant and they must not be edited to
+      accommodate an upgrade.
+- [ ] The engine line this repository targets is recorded **in one place**, so the next bump is a
+      value change rather than archaeology.
+- [ ] Whether `connector-pack` is *added as a dependency now* is a decision to make and argue: X-12
+      needs it, and an unused dependency carried early is weight without benefit.
+
+## Notes
+- **Read the upstream changelog before migrating.** `connector-spec` was the compiler and
+  `connector-address` is the vocabulary — that is a real reorganisation (upstream's own note calls it
+  "C-407 extracted the vocabulary"), not a rename, and assuming the latter is how an address
+  derivation quietly changes shape.
+- `connector-secrets` re-exports `CredentialRef` from `connector-address` now, where it used to come
+  from `connector-spec`. Check which path this repository is actually using.
+- This runs **solo**: it changes manifests and the lockfile, so nothing else may be in flight.

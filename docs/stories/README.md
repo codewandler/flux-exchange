@@ -45,11 +45,13 @@ _`docs/vision.md` says the thing this epic exists to act on:_
 ### Catalogue
 - [X-46 — A connector's declared credentials are published, not discovered by provoking a refusal](X-46-catalogue-publishes-declarations.md) · found by X-44's implementor in the workaround it had to write, 2026-08-01: nothing publishes what a connector declares, so the console reads it out of the 422 that a deliberately-empty POST returns
 
+### `invoke` — the caller names an operation, and nothing else is theirs
+- [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · UNBLOCKED 2026-08-01: upstream published 0.9.0. connector-pack now requires flux-runtime ^0.46 and 0.46.0 exists, so the ^0.41-vs-0.45 conflict is gone. connector-spec is replaced by connector-address and stopped at 0.8
+
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
 
 ## Blocked
-- [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
 - [X-12 — Invoke an operation](X-12-invoke.md) · the caller names an operation id and nothing else about the request is theirs — not the host, not the credential, not the tenant. That is the whole confused-deputy answer
 - [X-13 — Grants gate invocation](X-13-grants-gate-invoke.md) · Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect
 - [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
