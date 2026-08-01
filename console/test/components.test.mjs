@@ -8,7 +8,7 @@
 // That was an asserted property there (`web/test/explorer.test.mjs`,
 // `no_component_imports_the_site_framework`) and it has to stay an asserted property here, or it
 // rots in exactly the way that is invisible: a component that imports Vite, or `node:fs`, or this
-// console's fixture data, renders identically on this page and simply stops being mountable
+// console's service client, renders identically on this page and simply stops being mountable
 // anywhere. Nothing about the rendered output would ever tell you.
 //
 // So this file is the port of that test, plus the two guards the move itself introduced:
@@ -121,8 +121,8 @@ function importedModules(source) {
  *   `./Something.vue`   a sibling in this same directory
  *   `../catalog.mts`    the catalogue's typed contract, which is data shape and no data
  *
- * Note what the third one is *not*: it is not a loader, not a fetch, not this console's fixtures.
- * Everything a component renders arrives as a prop or as injected context, and a component that
+ * Note what the third one is *not*: it is not a loader, not a fetch, not this console's service
+ * client. Everything a component renders arrives as a prop or as injected context, and a component that
  * reached for its own data could not be attached to a second host — which is the entire reason this
  * set could be lifted out of the flux-connectors site and dropped in here unchanged.
  *
@@ -151,7 +151,7 @@ test('no_component_imports_the_site_framework', () => {
   )
 
   // And nothing else either. A component that reaches for the filesystem, for the network, or for
-  // this console's fixture data cannot be attached anywhere, whatever it imports it from.
+  // this console's service client cannot be attached anywhere, whatever it imports it from.
   for (const file of sources) {
     for (const module of imports.get(file)) {
       assert.match(
@@ -170,8 +170,8 @@ test('no_component_imports_the_site_framework', () => {
 // run against sources that must be rejected, and the assertion is that it sees them.
 //
 // Each case below is a real way the boundary has been crossed or could be: the host framework, the
-// filesystem, a build-time data loader, this console's own fixtures, a transport, and every import
-// syntax that reaches them.
+// filesystem, a build-time data loader, this console's own service client, a transport, and every
+// import syntax that reaches them.
 test('the import scanner sees the imports it exists to catch', () => {
   const component = (script) => `<script setup lang="ts">\n${script}\n</script>\n<template><p /></template>\n`
 
@@ -180,7 +180,10 @@ test('the import scanner sees the imports it exists to catch', () => {
     ['import { useRouter } from "vue-router"', 'vue-router'],
     ["import { readFileSync } from 'node:fs'", 'node:fs'],
     ["import { data } from '../catalog.data.mts'", '../catalog.data.mts'],
-    ["import { fixtureCatalog } from '../fixtures/catalog'", '../fixtures/catalog'],
+    // The near miss, and the live temptation since the console started fetching: `../catalog.mts` is
+    // permitted and `../service.mts` sits beside it, one word apart, and would put a network in a
+    // component. The allowlist has to tell them apart.
+    ["import { loadCatalogue } from '../service.mts'", '../service.mts'],
     ["import { routes } from '../routing'", '../routing'],
     ["import axios from 'axios'", 'axios'],
     // Side-effect, re-export, dynamic and CommonJS forms: the coupling is the point, not the syntax.

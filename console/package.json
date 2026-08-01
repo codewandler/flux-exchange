@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "The flux-exchange console. Renders fixture data today — no service stands behind it yet.",
+  "description": "The flux-exchange console. Browses the connector catalogue served at /api/catalogue.",
   "license": "MIT OR Apache-2.0",
   "scripts": {
     "dev": "vite",
