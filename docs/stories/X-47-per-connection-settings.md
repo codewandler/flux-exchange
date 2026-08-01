@@ -1,8 +1,7 @@
 ---
 id: X-47
 title: "A connector with a templated host can actually be invoked"
-status: ready
-priority: 1
+status: in-progress
 epic: connections
 areas: [exchange-server, exchange-host]
 note: "found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name"

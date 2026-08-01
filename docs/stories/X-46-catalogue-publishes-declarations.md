@@ -81,3 +81,15 @@ the argument out rather than hiding it. It is correct today. It is still the wro
 - **Carried forward:** the wire shape is pinned in two places that cannot see each other — a Rust
   contract test and a console fixture. Both go green independently if the shape changes while the
   real console breaks.
+- **Reviewed PASS.** The anonymous-surface question was settled **structurally rather than by
+  probing**: the handler is `async fn credentials(Path(connector)) -> Response` — no `State`, no
+  identity extractor — so it **cannot observe a caller**, and `Access::Anonymous` attaches no layer.
+  A two-tenant probe could only confirm what the signature already forces.
+- **The disclosure guard was proved non-decorative**, not assumed: the reviewer added `held: bool` to
+  `CredentialView` and three tests failed, including the wire-contract one.
+- Upstream `Credential` is `{name, leaf, acquire, place}` — **there is no value field to leak**, so
+  the withholding of `place`/`acquire` is about wire-contract minimalism rather than secrecy.
+- **Two coverage gaps found, filed as [X-49](X-49-pin-the-branches-x46-opened.md):** the
+  `declares-nothing` render path this story newly made reachable has no test, and
+  `the_existing_catalogue_answers_gained_no_field` lacks the non-vacuity assertion its sibling
+  twenty lines earlier has.
