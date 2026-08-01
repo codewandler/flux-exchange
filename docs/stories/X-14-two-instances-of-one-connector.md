@@ -4,6 +4,7 @@ title: "Two instances of one connector, told apart by a name the operator chose"
 status: ready
 priority: 2
 epic: connections
+design: docs/designs/connection-instances.md
 note: "owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first"
 ---
 
@@ -32,7 +33,19 @@ cannot be shared by two connectors); this is one connector that cannot hold two 
 authority**, cannot name the host, and cannot name the credential. An instance selector is a value
 the caller *does* supply, so it has to be introduced without reopening that door.
 
-The shape that appears to hold — to be confirmed by the design, not assumed here: an instance name is
+**The design is now written**: `docs/designs/connection-instances.md`. Read it before starting — it
+settles the shape below and adds three things this story could not know when it was filed:
+
+1. **The address dimension already exists upstream.** `connector-address` 0.9 publishes
+   `CredentialRef::for_instance` and `TenantInstances::resolve`, and `connections.rs` already names
+   `address_of_declared` as the seam it goes in. The ambiguous case is *already* refused upstream —
+   do not add a default back.
+2. **A label cannot be the address segment.** `validate_instance` requires a canonical lowercase
+   hyphenated uuid and nothing else, so the label→uuid indirection is forced rather than chosen.
+3. **The migration is the sharp edge**, and is the only code here that moves a credential it did not
+   create: the day a second connection appears, the first's address gains a segment.
+
+The shape the design confirms: an instance name is
 an **operator-chosen label scoped to the tenant**, and the caller names only the label. The host,
 the authority and the credential address are all resolved *from the connection the label maps to*,
 inside the tenant the principal was resolved for. The caller names *which of my connections*, never
