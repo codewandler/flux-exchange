@@ -1,0 +1,104 @@
+name: pages
+
+# Builds the VitePress site in `web/` and publishes it to GitHub Pages.
+#
+# ONE-TIME REPOSITORY SETTING, which this workflow cannot do for itself:
+# Settings → Pages → "Build and deployment" → Source must be set to **GitHub Actions**.
+# Until it is, `build` still runs and still fails on a broken site, but `deploy` errors out with
+# "Get Pages site failed" / "Not Found". Nothing in the repository can detect that from the outside,
+# which is why it is written here rather than assumed.
+#
+# The site's `base` is '/flux-exchange/' (see web/.vitepress/config.mts) because a *project* Pages
+# site is served under the repository name — https://codewandler.github.io/flux-exchange/. Renaming
+# the repository or moving to a custom domain means changing that value too, or the published site
+# loads its assets from the wrong path. The config carries the longer version of that warning,
+# including why a committed CNAME file is not evidence a custom domain is serving.
+#
+# Modelled on ../flux-connectors/.github/workflows/pages.yml — same job shape, same action pins, and
+# the same division between a gate and a deployment. Where this one differs, the difference is
+# commented where it occurs.
+
+on:
+  push:
+    branches: [main]
+  # Also on PRs: the build job is a gate, so a change that breaks the site is caught before it can
+  # reach `main` and publish. Only pushes to `main` deploy.
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege. The build job only reads the checkout and uploads an artifact; the write
+# permissions Pages needs are declared on the `deploy` job alone, so a pull request build never
+# holds them.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install Node toolchain
+        # Pinned rather than floating for the same reason the Rust toolchain is pinned in ci.yml:
+        # a moving version turns someone else's release into our red build. Same action, same SHA
+        # and same Node version as ci.yml's `console` job — two Node trees, one toolchain.
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          # `web/` has its own lockfile; `console/`'s is a different tree and caching against it
+          # would key this job on a file it never installs.
+          cache-dependency-path: web/package-lock.json
+
+      # `npm ci`, not `npm install`: it installs exactly the committed lockfile and fails when
+      # package.json and the lockfile disagree, instead of quietly resolving something else.
+      - name: Install dependencies
+        run: npm ci
+        working-directory: web
+
+      # The gate itself. `ignoreDeadLinks: false` means a dead internal link fails here rather than
+      # publishing a broken page — so this step is the reason a broken site cannot reach the URL.
+      - name: Build site
+        run: npm run build
+        working-directory: web
+
+      # After the build, deliberately: the suite reads `web/.vitepress/dist`, so running it first
+      # would assert against a site that was never rendered. It guards the deployed base path and
+      # the two content rules this site publishes under.
+      - name: Test the built site
+        run: npm test
+        working-directory: web
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: web/.vitepress/dist
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    # Deploy only from `main`. The sibling repository gates on `github.event_name != 'pull_request'`
+    # alone; the `github.ref` half is added here because `workflow_dispatch` can be run against any
+    # branch, and a manual run from a feature branch would otherwise publish it.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    # Serialise deployments without cancelling one mid-flight — a cancelled Pages deployment can
+    # leave the site half-published. Scoped to this job so PR builds never queue behind it.
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

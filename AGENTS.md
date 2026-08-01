@@ -62,7 +62,19 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 
 cd console && npm install && npm test && npm run build
+
+cd web && npm ci && npm run build && npm test
 ```
+
+**`web/` is the public documentation site (X-63), and its build is a gate rather than a formality.**
+`.vitepress/config.mts` sets `ignoreDeadLinks: false`, so a dead internal link fails `npm run build`
+instead of publishing a broken page — that failure is the whole reason a broken site cannot reach the
+public URL. [`.github/workflows/pages.yml`](.github/workflows/pages.yml) runs it on every pull
+request and deploys only from `main`; run it locally before you touch a page or a link. `npm test`
+comes **after** the build because it asserts over `web/.vitepress/dist`, and it guards the deployed
+base path plus the two content rules the site publishes under — no deployment-specific fact, nothing
+credential-shaped. It is a third Node tree: `web/`, `console/` and the Cargo workspace share nothing,
+including lockfiles.
 
 Rust 1.88 or newer — that is the floor `jsonwebtoken` and `time` impose, not a number we chose. It
 lives in `Cargo.toml` as `rust-version`, and since X-33 CI's `msrv` job builds the workspace on
