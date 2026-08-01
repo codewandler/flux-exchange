@@ -37,14 +37,19 @@ _None._
 _Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
 - [X-35 — Agent access (epic)](X-35-agent-access-epic.md) · EPIC — the vision's primary caller cannot authenticate. PrincipalKind::Agent exists as a type and appears in the loopback dev roster; nothing mints or verifies an agent's token. Not blocked by X-11, unlike everything else downstream
 - [X-40 — A leaked agent token cannot mint its own successors](X-40-who-may-mint-an-agent.md) · found by X-36's implementor in the surface it had just built, 2026-08-01: nothing gates minting by principal kind, so once X-37 binds the Identity port a leaked agent token mints successor agents — and revoking the first will not kill the descendants
+- [X-45 — An operator can mint an agent and see its token once](X-45-mint-an-agent-from-the-console.md) · X-36 shipped POST /api/agents and nothing in the UI reaches it. The agent-onboarding page will tell an agent author to mint a token; this is where they do it
 
 ### agent onboarding
 _`docs/vision.md` says the thing this epic exists to act on:_
 - [X-41 — An agent arriving at this service is told how to connect](X-41-agent-onboarding-page.md) · owner-raised 2026-08-01, high priority: the charter's primary caller is an agent and nothing anywhere tells one how to reach this service. Public, linked from the footer, and honest about what it cannot yet do
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
 
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-44 — An operator can connect a connector without reaching for curl](X-44-connect-from-the-console.md) · X-34 shipped a read-only Connections view and said plainly that a connect form belongs in its own story. The console's first stated job is to wire things up, and it currently cannot
+
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
+- [X-43 — Whether a human can sign in here is a fact the console reads, not prose it parses](X-43-signin-availability.md) · found by X-34's implementor, 2026-08-01: the console links to /api/signin unconditionally, so on a host with no identity provider the Sign in button leads to a 503 page. The 401 body distinguishes the cases in prose, and matching on prose is fragile
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
