@@ -20,7 +20,18 @@ the same time. Until that holds, nothing can execute an operation.
       change rather than an archaeology exercise.
 
 ## Progress
-- (blocked — the work is upstream, in flux-connectors)
+- **The upstream half is DONE, 2026-08-01.** flux-connectors' C-403 moved all seven pins to the 0.45
+  line (`flux-spec` to `1.3` on its own line) and is merged to its `main`. The emitted Flux is
+  unchanged — a full build rewrote 2 of 557 artifacts, both README snippet SVGs, and the delta is
+  four `fill=` attributes from a highlighter reclassification.
+- **Still blocked, on publication only.** Published `codewandler-connector-pack` 0.8.0 still requires
+  `flux-runtime ^0.41`; a tag and a CI publish are what close this. Nothing further can be done from
+  this repository.
+- Worth knowing while you wait: the same release also carries C-406's instance dimension, so it turns
+  **X-11, X-12, X-13 and X-14** from blocked into ready in one move.
+- Found during that work and worth filing against flux: `flux-runtime` 0.45.0 declares
+  `flux-secret = "1"` but calls `Redactor::try_add_secret`, which first exists in 1.1.0 — so a legal
+  resolve of 1.0.x fails to compile. The requirement should be `"1.1"`.
 
 ## Notes
 - Measured 2026-08-01 from crates.io: `codewandler-connector-pack` 0.8.0 requires

@@ -67,9 +67,31 @@ refusal, not a fallback to a default.
 - C-406 is itself sequenced behind flux-connectors **C-407**, which extracts the credential address
   vocabulary into its own crate — i.e. it moves the very types C-406 adds a component to. That work
   is in flight in another session.
-- **What unblocks this:** C-407 lands, C-406 adds the optional uuid, flux-connectors publishes, and
-  this repository picks up the new `connector-spec`. Then the host side is the tenant-scoped
-  label → uuid resolution described above.
+- **UPDATE — C-406 has landed upstream and is merged to flux-connectors `main`** (`14b5dc7`,
+  merge `9c740a1`). The blocker narrows from *unimplemented* to **unpublished**: crates.io still
+  serves `codewandler-connector-spec` 0.8.0 and this repository pins `"0.8"` from the registry.
+- **The address grammar, as landed** — build against this, do not re-derive it:
+  `tenants/<tenant>/<authority>[/@instances/<uuid>][/<service>]/<credential>`
+  - `InstanceId` is a validated newtype: canonical lowercase hyphenated uuid only, and the nil uuid
+    is refused because "no instance" is already spelled by omitting the level.
+  - The marker is `@instances` and the `@` is load-bearing — it is unspellable in every component
+    grammar, so the level cannot be forged and no service or credential name is reserved away. A bare
+    uuid segment would have been ambiguous with a service, since a uuid is a well-formed service name.
+  - `TenantInstances` carries the fact the crate cannot derive — how many connections a tenant holds
+    and which is named — and states the whole rule: elide at one, the named one at several, **refuse
+    when several and none is named**, refuse a uuid the tenant does not hold. That refusal is
+    Acceptance item 6 of this story, already enforced upstream.
+  - `credential_ref_for` now takes `TenantInstances`; every existing call site passes
+    `TenantInstances::sole()`, so no shipped address moved (`connector-cli diff`: 557 up to date).
+- **The label → uuid mapping is explicitly ours.** Upstream recorded the split in
+  `docs/designs/credential-addressing.md`: the label is tenant-scoped, mutable and renameable, and a
+  compiled artifact must hold none of those. So this story is exactly that resolution plus threading
+  a connection through — the caller names *which of my connections*, the host resolves it to the uuid.
+- **What unblocks this now:** flux-connectors publishes (likely 0.9.0 — `credential_ref_for`'s
+  signature changed, so it is breaking), and this repository moves its `connector-spec` pin. Note the
+  **same release also closes X-11**, since C-403 already moved the engine line and `connector-pack`
+  must be republished against it — one upstream release turns four blocked stories here into ready
+  ones.
 
 ## Notes
 - **Design first.** This changes an address scheme that `docs/designs/invoke.md` and X-10 both build
