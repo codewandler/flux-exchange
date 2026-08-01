@@ -1,8 +1,7 @@
 ---
 id: X-25
 title: "A tenant's allowance holds against its own concurrent creates"
-status: ready
-priority: 2
+status: done
 epic: connections
 areas: [exchange-server]
 note: "found by X-22's implementor in the bound it had just added, 2026-08-01: occupancy is read and written under a claim keyed per (tenant, connector), so one tenant issuing concurrent creates to different connectors can overshoot the allowance — closing it means reversing a property connection_guard deliberately pins"
@@ -48,18 +47,18 @@ impose. Reversing it is a decision *about the guard*, which is why X-22 document
 `occupied` rather than half-fixing it.
 
 ## Acceptance
-- [ ] **Failing-first test** — two concurrent creates by one tenant to *different* connectors, each
+- [x] **Failing-first test** — two concurrent creates by one tenant to *different* connectors, each
       individually admissible, cannot leave the tenant over `MAX_TENANT_STORE_BYTES`. It must fail
       before the fix, which means it has to actually interleave rather than run sequentially; the
       existing `two_concurrent_creates_cannot_both_succeed` is the precedent for driving that.
-- [ ] Two concurrent creates by **different tenants** still proceed without contending — the
+- [x] Two concurrent creates by **different tenants** still proceed without contending — the
       serialisation must not become a global lock. Asserted in the same run.
-- [ ] `claims_do_not_reach_across_tenants_or_connectors` is either still green, or **replaced by a
+- [x] `claims_do_not_reach_across_tenants_or_connectors` is either still green, or **replaced by a
       test stating the new property and saying why it changed**. Do not delete it quietly; it
       records a decision, and reversing that decision is the substance of this story.
-- [ ] The tenant-scoped contention is documented where the guard's own doc argues its scope, so the
+- [x] The tenant-scoped contention is documented where the guard's own doc argues its scope, so the
       next reader sees why one tenant serialises and two do not.
-- [ ] `occupied`'s doc note about this known limit is removed, since the limit is gone.
+- [x] `occupied`'s doc note about this known limit is removed, since the limit is gone.
 
 ## Notes
 - Two shapes worth weighing, and the story does not mandate either: a second claim keyed on the
@@ -72,3 +71,30 @@ impose. Reversing it is a decision *about the guard*, which is why X-22 document
 - Measure what the added contention costs a tenant creating several connections in sequence. If it
   is meaningful, say so — a correct bound that makes ordinary use slow is a trade worth stating,
   not hiding.
+
+## Progress
+- **Done 2026-08-01.** Gate green: 43 + 176 tests, clippy clean, fmt clean.
+- **Shape: a second claim keyed on the tenant alone**, held from before the occupancy read to the
+  end of `create` — not merely around the decision, because it is the `put` loop that makes the read
+  stale, so releasing after the decision would have closed nothing.
+- **`DELETE` deliberately does not take the tenant claim.** A delete only frees allowance and cannot
+  cause an overshoot, and the case a `DELETE` exists for is revoking a leaked secret, which must not
+  wait behind another connector's create.
+- **`claims_do_not_reach_across_tenants_or_connectors` was kept green, not deleted.** The
+  per-connection claim is unchanged and still what makes `POST` and `DELETE` to one connection
+  exclude each other; a new test states the width that *did* change and why.
+- **The different-tenants half was mutation-checked**, not assumed: keying the tenant claim on a
+  constant makes it fail on the first attempt, so it is not passing by construction.
+- **The proof is a looped race, stated as such** — 200 attempts with a widened window, failing 10/10
+  runs at the base within the first ten attempts, clean 8/8 after. A single attempt is not certain
+  to interleave, and the report said so rather than implying a deterministic schedule.
+- **Measured, as the story asked, rather than reassured:** the claim costs **80 ns**; a create is
+  already ~300 µs dominated by the occupancy walk, so it is ~0.03% and not meaningful for sequential
+  use. The cost lands on a client firing several creates for one tenant in parallel, which now gets
+  a retryable `409` where it previously got a `201` and an allowance that did not hold.
+- **Knowingly accepted:** a `DELETE` racing a same-tenant `POST` to another connector can free space
+  the create already read past, so the create can refuse when there was room. Retryable, errs toward
+  the bound rather than past it, and closing it would mean putting `DELETE` inside the tenant claim —
+  the thing that must not wait. First place to look at an unexplained `409` on create.
+- Also carried: `change_in_flight` and `allowance_change_in_flight` are not machine-distinguishable
+  — same status, same JSON shape, only the prose differs.

@@ -8,6 +8,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A tenant's allowance holds against its own concurrent creates** (X-25). X-22's occupancy bound
+  was read and written under a claim keyed per `(tenant, connector)`, so one tenant's concurrent
+  creates to *different* connectors each read an occupancy the others had not written yet. A second
+  claim keyed on the tenant closes it. `DELETE` deliberately stays outside that claim — it only frees
+  allowance, and the case a delete exists for is revoking a leaked secret, which must not wait.
+
+  A client firing several creates for one tenant in parallel now sees a retryable `409` where it
+  previously got a `201` and an allowance that did not hold. Different tenants still do not contend.
+
+### Changed
+
+- **A sign-in refusal carries its own status** (X-26). The refusal-to-status mapping moved from
+  inline in the callback route onto `SignInRefusal`, beside `caller_facing()` — where the argument
+  for it already lived. Every status on the wire is unchanged and now pinned variant by variant.
+
 - **CI gates every push and pull request** (X-28). This repository had one workflow and it fired on
   a version tag, so a red `main` was invisible until someone tried to release, and the console had
   never been built by CI at all. `ci.yml` now runs the whole Rust gate and builds and tests the

@@ -63,3 +63,9 @@ a `Denied` can be answered "retrying may work".
   `contains("Retrying may work")` substring check — the full-sentence pin arrived with X-20,
   *after* the refactor it is now credited with protecting. Nothing wrong shipped, but do not treat
   that pin as having covered X-18.
+- **A third finding, recurring:** `no_answer_or_refusal_carries_a_credential_value` claims in its own
+  doc to drive *every* answer and refusal this module can produce. It does not drive
+  `partly_written`'s two branches (noted by X-20), and now not `allowance_change_in_flight` either
+  (noted by X-25). No disclosure has actually been found — each new refusal names only a connector
+  id and addresses — but a test whose doc overstates its coverage is worse than one that admits the
+  gap, and this is the third story to record the same drift. Fix the claim or fix the coverage.

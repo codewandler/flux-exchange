@@ -34,13 +34,11 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-25 — A tenant's allowance holds against its own concurrent creates](X-25-tenant-allowance-race.md) · found by X-22's implementor in the bound it had just added, 2026-08-01: occupancy is read and written under a claim keyed per (tenant, connector), so one tenant issuing concurrent creates to different connectors can overshoot the allowance — closing it means reversing a property connection_guard deliberately pins
 - [X-29 — A partial delete does not overstate what survived, or understate why](X-29-partial-delete-precision.md) · found by X-18's belated review, 2026-08-01: `left_behind` names addresses that never held a value and calls them still usable, and a mixed-kind delete loop reports the FIRST failure kind — so a Denied address can be reported with 'retrying may work'
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
 - [X-27 — Configuration is read by name, not by position](X-27-config-read-by-name.md) · raised by X-04's review and again by X-23's implementor, 2026-08-01: REQUIRED, the positional reads in OidcConfig::read, and TRANSPORT_CHECKED are three lists describing one set of variables, and the drift they permit has already shipped once
-- [X-26 — A sign-in refusal carries its own status](X-26-refusal-status.md) · found by X-24's implementor, 2026-08-01: the refusal-to-status table lives inline in routes::signin::callback and is unreachable from any other module, so a test that wants to state 'this refusal, and this status' has to be written at the route instead of beside the refusal
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
@@ -72,6 +70,8 @@ _None._
 - [X-22 — One tenant cannot make every other tenant's writes slow](X-22-credential-size-bounds.md) · found by the standing credential audit, 2026-08-01: nothing bounds a credential's size or a connection's count, and every put/delete rewrites and fsyncs the whole store under one mutex — so one authenticated tenant sets the cost of every other tenant's write
 - [X-23 — A browser-facing endpoint is refused in cleartext too](X-23-browser-facing-endpoint-scheme.md) · raised by X-17's implementor and again by X-19's, 2026-08-01: BACK_CHANNEL covers only the token endpoint and the key set, so FLUX_EXCHANGE_OIDC_AUTHORIZATION_ENDPOINT and _REDIRECT_URI take any scheme without a word
 - [X-24 — A sign-in reads the clock once](X-24-one-clock-reading.md) · found by X-16's reviewer, 2026-08-01: `complete` reads now() for `admit` and `open` reads it again, so a token whose exp falls between the two readings is admitted and then refused — the caller gets NoSession's 503 rather than the 401 Expired would give
+- [X-25 — A tenant's allowance holds against its own concurrent creates](X-25-tenant-allowance-race.md) · found by X-22's implementor in the bound it had just added, 2026-08-01: occupancy is read and written under a claim keyed per (tenant, connector), so one tenant issuing concurrent creates to different connectors can overshoot the allowance — closing it means reversing a property connection_guard deliberately pins
+- [X-26 — A sign-in refusal carries its own status](X-26-refusal-status.md) · found by X-24's implementor, 2026-08-01: the refusal-to-status table lives inline in routes::signin::callback and is unreachable from any other module, so a test that wants to state 'this refusal, and this status' has to be written at the route instead of beside the refusal
 - [X-28 — The gate runs on every push, not only at a release](X-28-ci-gate.md) · the crates.io workflow runs the gate inline because there is no ci.yml at all — so a red main is only discovered when someone tries to release, and the console's Node build is never run by CI
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
