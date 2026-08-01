@@ -17,9 +17,9 @@ That is not an aspiration; `test/components.test.mjs` asserts it, in
 `no_component_imports_the_site_framework` (the port of the assertion of the same name in
 flux-connectors' `web/test/explorer.test.mjs`). A component may import **Vue**, a **sibling
 component**, and **`../catalog.mts`**. Nothing else. In particular it may not import `node:*`, a
-build-time data loader, or this console's `src/fixtures/`: a component that reaches for its own data
-cannot be attached anywhere, so everything a component renders arrives as a prop or as injected
-context.
+build-time data loader, or this console's service client (`../service.mts`): a component that
+reaches for its own data cannot be attached anywhere, so everything a component renders arrives as a
+prop or as injected context.
 
 ## The one thing a host has to supply
 
@@ -121,8 +121,8 @@ failure the original repository exists to correct.
 
 In flux-connectors this is enforced mechanically, by tests that check every component source against
 the values in the generated `public/catalog.json`. **That check has not been ported, and it cannot be
-yet: this repository generates no catalogue, so there is no set of real values to check against.**
-What holds the line here in the meantime is the import rule above — a component cannot reach
-`src/fixtures/catalog.ts`, so it cannot launder fixture data into itself by importing it. Hardcoding
-a string is still possible and still forbidden. When flux-exchange generates a catalogue, port that
-test too.
+yet: this console fetches its catalogue at runtime, so there is no committed artifact holding a set
+of real values to check the sources against.** What holds the line here in the meantime is the
+import rule above — a component cannot reach `../service.mts`, so it cannot launder the served
+document into itself by importing it. Hardcoding a string is still possible and still forbidden.
+When flux-exchange emits a catalogue artifact, port that test too.

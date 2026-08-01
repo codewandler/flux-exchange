@@ -176,3 +176,52 @@ button {
   font-size: 14px;
   color: var(--vp-c-text-1);
 }
+
+/*
+ * The two app-layer views (`src/CatalogueFailure.mts`, `src/OperationFacts.mts`).
+ *
+ * They are render functions rather than single-file components so a plain-Node test can render them
+ * — see their own headers — and a render function carries no `<style scoped>`, so their rules live
+ * here. They read the same tokens as everything else, so light and dark come for free.
+ */
+
+.failure {
+  margin: 32px 0;
+  padding: 20px 24px;
+  border: 1px solid var(--vp-c-danger-1);
+  border-radius: 8px;
+  background-color: var(--vp-c-danger-soft);
+}
+
+.failure__title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 28px;
+  letter-spacing: -0.01em;
+  color: var(--vp-c-danger-1);
+}
+
+.failure__endpoint {
+  margin: 12px 0 0;
+  font-size: 14px;
+}
+
+.failure__message {
+  margin: 8px 0 0;
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--vp-c-text-2);
+}
+
+.facts__effects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0 0;
+}
+
+.facts__note {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--vp-c-text-2);
+}
