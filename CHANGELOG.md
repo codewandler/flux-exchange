@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-01
+
 ### Added
 
 - **An operator can tell their own misconfiguration from a refused credential** (X-17).
