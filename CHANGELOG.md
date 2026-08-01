@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-01
+
 ### Added
 
 - **A tenant's allowance holds against its own concurrent creates** (X-25). X-22's occupancy bound
@@ -18,6 +20,13 @@ All notable changes to this project are documented in this file. The format is b
   previously got a `201` and an allowance that did not hold. Different tenants still do not contend.
 
 ### Changed
+
+- **OIDC configuration is read by name, not by position** (X-27). The read pulled values out of a
+  vector positionally, and three lists described one set of variables — so adding a variable to one
+  and not another silently shifted every value after it. That drift had already shipped once. The
+  parallel lists are gone: both are now derived from the read itself, so the same mistake is a
+  compile error rather than a host that starts up with a blank client secret. No refusal, order or
+  message changed.
 
 - **A sign-in refusal carries its own status** (X-26). The refusal-to-status mapping moved from
   inline in the callback route onto `SignInRefusal`, beside `caller_facing()` — where the argument

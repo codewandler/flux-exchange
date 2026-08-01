@@ -38,7 +38,6 @@ _None._
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
-- [X-27 — Configuration is read by name, not by position](X-27-config-read-by-name.md) · raised by X-04's review and again by X-23's implementor, 2026-08-01: REQUIRED, the positional reads in OidcConfig::read, and TRANSPORT_CHECKED are three lists describing one set of variables, and the drift they permit has already shipped once
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
@@ -72,6 +71,7 @@ _None._
 - [X-24 — A sign-in reads the clock once](X-24-one-clock-reading.md) · found by X-16's reviewer, 2026-08-01: `complete` reads now() for `admit` and `open` reads it again, so a token whose exp falls between the two readings is admitted and then refused — the caller gets NoSession's 503 rather than the 401 Expired would give
 - [X-25 — A tenant's allowance holds against its own concurrent creates](X-25-tenant-allowance-race.md) · found by X-22's implementor in the bound it had just added, 2026-08-01: occupancy is read and written under a claim keyed per (tenant, connector), so one tenant issuing concurrent creates to different connectors can overshoot the allowance — closing it means reversing a property connection_guard deliberately pins
 - [X-26 — A sign-in refusal carries its own status](X-26-refusal-status.md) · found by X-24's implementor, 2026-08-01: the refusal-to-status table lives inline in routes::signin::callback and is unreachable from any other module, so a test that wants to state 'this refusal, and this status' has to be written at the route instead of beside the refusal
+- [X-27 — Configuration is read by name, not by position](X-27-config-read-by-name.md) · raised by X-04's review and again by X-23's implementor, 2026-08-01: REQUIRED, the positional reads in OidcConfig::read, and TRANSPORT_CHECKED are three lists describing one set of variables, and the drift they permit has already shipped once
 - [X-28 — The gate runs on every push, not only at a release](X-28-ci-gate.md) · the crates.io workflow runs the gate inline because there is no ci.yml at all — so a red main is only discovered when someone tries to release, and the console's Node build is never run by CI
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
