@@ -68,7 +68,10 @@ pub use async_trait::async_trait;
 /// ecosystem and this is a doorway to it, not a second copy.
 pub use connector_secrets::{CredentialRef, Secret, SecretStore, StoreError, TENANTS_ROOT};
 
-pub use connections::{address_path, ConnectionRefusal, ConnectorDeclaration, DeclaredCredential};
+pub use connections::{
+    address_path, admit_tenant_occupancy, stored_bytes, ConnectionRefusal, ConnectorDeclaration,
+    DeclaredCredential, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES,
+};
 #[cfg(unix)]
 pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
 pub use grant::{Effect, Grant, Idempotency, OperationFacts, Risk, Selector};

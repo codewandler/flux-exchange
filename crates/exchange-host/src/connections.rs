@@ -50,11 +50,117 @@
 //! repository's, i.e. X-14 — so that function is the seam X-14 extends rather than replaces. The
 //! refusal that stands in for it meanwhile belongs to the surface that writes; see
 //! `docs/designs/connections.md`.
+//!
+//! # What a tenant may occupy, and why the bound is here and not on the port
+//!
+//! Two bounds, [`MAX_CREDENTIAL_VALUE_BYTES`] and [`MAX_TENANT_STORE_BYTES`], each with its
+//! argument written beside it. They answer different questions — *is this a credential* and *how
+//! much of the store may one tenant hold* — and the second is the one that matters between tenants,
+//! because `FileStore` rewrites and `fsync`s one file under one mutex on every write, so one
+//! tenant's size is every other tenant's write latency. That is shared fate in the repository whose
+//! claim is that tenants share nothing, which is why it is an invariant here rather than a capacity
+//! note.
+//!
+//! **The bound is not on the [`SecretStore`](crate::SecretStore) port, and it cannot be.** That
+//! port is `connector_secrets`', re-exported by this crate and deliberately not redefined — the
+//! crate root says so, and says why: there is one credential addressing scheme in this ecosystem
+//! and this crate is a doorway to it, not a second copy. Putting a bound on it would mean either
+//! changing an upstream crate from here, or declaring a second `SecretStore` locally, and the
+//! second is exactly what has already been refused.
+//!
+//! So the bound sits at the next seam in, [`ConnectorDeclaration::writes`], which is the **only**
+//! way supplied values become writes. A composition cannot write a credential it has not addressed,
+//! and it cannot get an addressed value out of this crate without the value being admitted first —
+//! so the per-value bound is not a check a surface remembers to make, it is the step that produces
+//! the thing there is to write. What that does *not* reach is a second `SecretStore` implementation
+//! fed by something other than this host's create path: a Vault-backed store bound by another
+//! composition inherits nothing from here, and saying otherwise would be a claim this repository
+//! cannot keep.
+//!
+//! The per-tenant bound cannot have that shape, because deciding it needs a *reading of the store*
+//! and this crate holds none. [`admit_tenant_occupancy`] is therefore the decision, and the caller
+//! supplies the two numbers it is decided from; the surface that can read the store is the one that
+//! must call it, and `routes::connections` does — inside the same claim that decides everything
+//! else about a create, so what it read is still true when it answers.
 
-use connector_secrets::{CredentialRef, Layout, TenantLayout};
+use std::collections::BTreeMap;
+
+use connector_secrets::{CredentialRef, Layout, Secret, TenantLayout};
 use connector_spec::DEFAULT_SERVICE;
 
 use crate::Tenant;
+
+/// The most bytes one credential value may occupy. **Stated once, here.**
+///
+/// A credential on this surface is what a connector declares: an API token, a bearer or refresh
+/// token, a signing or webhook secret, or — at the largest end anyone actually ships — a
+/// PEM-encoded private key, which is about 3.2 KiB for RSA 4096. 8 KiB is a little over twice
+/// that, so no credential a connector really declares is refused by it.
+///
+/// The bound is therefore about *kind* rather than about thrift: a value that does not fit is not
+/// a credential that grew, it is something that is not a credential. It sits three orders of
+/// magnitude below axum's 2 MB default body limit, which is what a caller would otherwise be
+/// spending — and spending against every other tenant, because the store is one file.
+///
+/// It does **not** on its own bound what one tenant occupies; see [`MAX_TENANT_STORE_BYTES`].
+pub const MAX_CREDENTIAL_VALUE_BYTES: usize = 8 * 1024;
+
+/// The most bytes one tenant may occupy across the whole credential store. **Stated once, here.**
+///
+/// This is the bound that protects the neighbours, and it is a different question from the one
+/// above. `connector_secrets::FileStore` holds one file and every `put`/`delete` rewrites and
+/// `fsync`s the whole of it under one mutex, so the file's size is every tenant's write latency.
+/// What this number buys is that a tenant's contribution to that shared cost is capped at 64 KiB
+/// *whatever it does* — so the store's size is a function of how many tenants an operator has
+/// admitted, a number they chose, rather than of what any one of them decided to upload.
+///
+/// 64 KiB is eight values at the per-value bound, or several hundred real tokens. A tenant with
+/// every addressable connector in the compiled-in catalogue connected, at the ~100-byte tokens
+/// those connectors actually declare, occupies single-digit kilobytes — two orders of magnitude
+/// under this.
+///
+/// **The per-value bound alone would not give this.** A tenant may hold one value per declared
+/// address, and the catalogue declares tens of them, so per-value alone leaves a ceiling of
+/// `addresses × 8 KiB` — hundreds of kilobytes, and a ceiling that grows every time upstream adds a
+/// connector. This one does not move when the catalogue does, which is the property worth having.
+pub const MAX_TENANT_STORE_BYTES: usize = 64 * 1024;
+
+// The two bounds answer different questions, and the second is only worth having while it is the
+// tighter one. Asserted at compile time rather than in a test, because the failure it guards
+// against is somebody editing one number: a tenant allowance below one whole credential refuses
+// every real connection, and one so far above it that no tenant reaches it bounds nothing.
+const _: () = assert!(MAX_TENANT_STORE_BYTES > MAX_CREDENTIAL_VALUE_BYTES);
+const _: () = assert!(MAX_TENANT_STORE_BYTES < 16 * MAX_CREDENTIAL_VALUE_BYTES);
+
+/// How many bytes a value occupies in the store, without exposing it.
+///
+/// The length and nothing else, so that a caller measuring a tenant's occupancy never has a line
+/// holding the plaintext — there is nothing there for a `debug!` to turn into a disclosure.
+pub fn stored_bytes(secret: &Secret) -> usize {
+    secret.expose_secret().len()
+}
+
+/// Refuse a write that would take this tenant past [`MAX_TENANT_STORE_BYTES`].
+///
+/// `held` is what the tenant already occupies across the whole store and `adding` is what the
+/// request would put there. Separated because only the caller can read the store, and inclusive at
+/// the bound: a tenant sitting exactly on its allowance has not exceeded it.
+///
+/// # Errors
+///
+/// [`ConnectionRefusal::TenantAllowanceExhausted`], naming both numbers and the bound and never a
+/// value.
+pub fn admit_tenant_occupancy(held: usize, adding: usize) -> Result<(), ConnectionRefusal> {
+    if held.saturating_add(adding) > MAX_TENANT_STORE_BYTES {
+        return Err(ConnectionRefusal::TenantAllowanceExhausted {
+            held,
+            adding,
+            limit: MAX_TENANT_STORE_BYTES,
+        });
+    }
+
+    Ok(())
+}
 
 /// One credential a connector declares, as much of it as an address needs.
 ///
@@ -157,6 +263,51 @@ impl<'a> ConnectorDeclaration<'a> {
             .collect()
     }
 
+    /// Every supplied value, resolved to an address and admitted against the per-value bound.
+    ///
+    /// **The only way to turn supplied values into writes**, which is the point of it: the bound
+    /// is not a check a surface remembers to make before writing, it is the step that produces the
+    /// thing there is to write. A composition that resolves addresses one at a time through
+    /// [`address_of`](Self::address_of) has no values in its hands and so cannot skip it.
+    ///
+    /// Nothing is written here and nothing may be: every name is resolved and every value admitted
+    /// *before* the first pair is handed back, so a body with one good value and one that is not a
+    /// credential stores neither. That is the same rule the address resolution already followed,
+    /// extended to cover the values.
+    ///
+    /// The supplied *names* need no bound of their own — a name this connector does not declare is
+    /// refused below, so the keys are bounded by the catalogue rather than by the caller.
+    ///
+    /// # Errors
+    ///
+    /// The refusals of [`address_of`](Self::address_of), and
+    /// [`ConnectionRefusal::CredentialTooLarge`] for a value past
+    /// [`MAX_CREDENTIAL_VALUE_BYTES`].
+    pub fn writes(
+        &self,
+        tenant: &Tenant,
+        supplied: &BTreeMap<String, String>,
+    ) -> Result<Vec<(CredentialRef, Secret)>, ConnectionRefusal> {
+        let mut writes = Vec::with_capacity(supplied.len());
+
+        for (name, value) in supplied {
+            let reference = self.address_of(tenant, name)?;
+
+            if value.len() > MAX_CREDENTIAL_VALUE_BYTES {
+                return Err(ConnectionRefusal::CredentialTooLarge {
+                    connector: self.connector.to_string(),
+                    credential: name.clone(),
+                    bytes: value.len(),
+                    limit: MAX_CREDENTIAL_VALUE_BYTES,
+                });
+            }
+
+            writes.push((reference, Secret::new(value)));
+        }
+
+        Ok(writes)
+    }
+
     /// The address of a credential this declaration is already known to carry.
     ///
     /// **The one place an address is composed**, and therefore the seam X-14 extends. When
@@ -207,7 +358,16 @@ pub fn address_path(reference: &CredentialRef) -> String {
     TenantLayout.render(reference)
 }
 
-/// Why a connection has no address. Every variant refuses; none guesses one.
+/// Why a connection is refused before anything is written.
+///
+/// Most of these are "there is no address": something the connector must declare is missing, or a
+/// name was supplied that it does not declare. The last two are the other kind — the address is
+/// fine and what would go in it is not, because it is past a bound. Both kinds share this type
+/// because both are decided in one place on the create path and answered by one mapping, and a
+/// second refusal type beside it is how one of them comes to be answered differently by accident.
+///
+/// Every variant refuses; none guesses, and none repeats a credential value. The sizes they quote
+/// are the caller's own numbers — what it sent, and what it already holds.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConnectionRefusal {
     /// The connector declares no authority, so no address renders at all.
@@ -262,6 +422,47 @@ pub enum ConnectionRefusal {
         credential: String,
         /// What the addressing scheme said.
         reason: String,
+    },
+
+    /// A supplied value is larger than a credential is.
+    ///
+    /// Names the credential and the bound. The size is quoted because it is what makes the
+    /// refusal actionable and it is the caller's own number; the value itself is not, and there is
+    /// deliberately no field here one could occupy.
+    #[error(
+        "connector `{connector}` credential `{credential}` was sent as {bytes} bytes, and one \
+         credential value may be at most {limit}. A credential is a token, not a file — nothing \
+         was stored, and this refusal does not repeat what was sent"
+    )]
+    CredentialTooLarge {
+        /// The connector that was named.
+        connector: String,
+        /// The credential whose value is past the bound.
+        credential: String,
+        /// How many bytes were sent.
+        bytes: usize,
+        /// [`MAX_CREDENTIAL_VALUE_BYTES`], so a refusal carries the bound rather than implying it.
+        limit: usize,
+    },
+
+    /// This tenant already occupies as much of the store as one tenant may.
+    ///
+    /// Distinct from the variant above because the remedy is: that one is a value that is not a
+    /// credential, this one is a tenant that has connected enough. Both numbers are this tenant's
+    /// own — no other tenant's occupancy is disclosed, or even consulted.
+    #[error(
+        "this tenant occupies {held} bytes of the credential store and this request would add \
+         {adding}, past the {limit} bytes one tenant may hold. Every write rewrites the whole \
+         store, so one tenant's size is every other tenant's write latency — disconnect a \
+         connector you no longer use before connecting another"
+    )]
+    TenantAllowanceExhausted {
+        /// What this tenant already occupies, across every connector.
+        held: usize,
+        /// What this request would add.
+        adding: usize,
+        /// [`MAX_TENANT_STORE_BYTES`].
+        limit: usize,
     },
 }
 
@@ -437,6 +638,126 @@ mod tests {
             address_path(&globex_reference),
             "tenants/globex/com.zendesk.api/api_token",
         );
+    }
+
+    /// A value larger than a credential is refused, and the refusal names the credential and the
+    /// bound — never what was sent.
+    #[test]
+    fn a_value_past_the_bound_is_refused_and_names_the_credential_and_the_bound() {
+        let oversized = "x".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1);
+        let supplied = BTreeMap::from([("zendesk.api_token".to_string(), oversized.clone())]);
+
+        let refusal = zendesk()
+            .writes(&acme(), &supplied)
+            .expect_err("a value past the bound is not a credential");
+
+        assert_eq!(
+            refusal,
+            ConnectionRefusal::CredentialTooLarge {
+                connector: "zendesk".to_string(),
+                credential: "zendesk.api_token".to_string(),
+                bytes: MAX_CREDENTIAL_VALUE_BYTES + 1,
+                limit: MAX_CREDENTIAL_VALUE_BYTES,
+            },
+        );
+
+        let message = refusal.to_string();
+        assert!(message.contains("zendesk.api_token"), "{message}");
+        assert!(
+            message.contains(&MAX_CREDENTIAL_VALUE_BYTES.to_string()),
+            "the refusal must name the bound so an operator learns the limit: {message}",
+        );
+        assert!(
+            !message.contains(&oversized),
+            "the refusal must never repeat the value: {message}",
+        );
+    }
+
+    /// The bound is inclusive: a value of exactly [`MAX_CREDENTIAL_VALUE_BYTES`] is a credential.
+    #[test]
+    fn a_value_at_the_bound_is_still_a_credential() {
+        let supplied = BTreeMap::from([(
+            "zendesk.api_token".to_string(),
+            "x".repeat(MAX_CREDENTIAL_VALUE_BYTES),
+        )]);
+
+        let writes = zendesk()
+            .writes(&acme(), &supplied)
+            .expect("a value at the bound is admitted");
+
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            address_path(&writes[0].0),
+            "tenants/acme/com.zendesk.api/api_token",
+        );
+        assert_eq!(stored_bytes(&writes[0].1), MAX_CREDENTIAL_VALUE_BYTES);
+    }
+
+    /// One value past the bound refuses the *whole* body, including the values that were fine —
+    /// the same rule the address resolution already followed, extended to cover the values. A
+    /// caller that got the good half written would have a connection nobody can tell from a
+    /// working one until an operation fails.
+    #[test]
+    fn one_value_past_the_bound_refuses_every_value_in_the_body() {
+        let slack = ConnectorDeclaration {
+            connector: "slack",
+            authority: Some("com.slack.api"),
+            credentials: &[
+                DeclaredCredential {
+                    name: "slack.bot_token",
+                    leaf: "bot_token",
+                },
+                DeclaredCredential {
+                    name: "slack.signing_secret",
+                    leaf: "signing_secret",
+                },
+            ],
+        };
+
+        let supplied = BTreeMap::from([
+            ("slack.bot_token".to_string(), "a-token".to_string()),
+            (
+                "slack.signing_secret".to_string(),
+                "x".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1),
+            ),
+        ]);
+
+        assert!(
+            matches!(
+                slack.writes(&acme(), &supplied),
+                Err(ConnectionRefusal::CredentialTooLarge { .. }),
+            ),
+            "one value past the bound must refuse the whole body",
+        );
+    }
+
+    /// The second bound, which the first does not give: inclusive at the allowance, and refusing
+    /// with both of the tenant's own numbers and the limit.
+    #[test]
+    fn the_tenant_allowance_is_inclusive_and_bounds_the_whole() {
+        assert!(admit_tenant_occupancy(0, MAX_TENANT_STORE_BYTES).is_ok());
+        assert!(admit_tenant_occupancy(MAX_TENANT_STORE_BYTES, 0).is_ok());
+
+        let refusal = admit_tenant_occupancy(MAX_TENANT_STORE_BYTES, 1)
+            .expect_err("one byte past the allowance is past it");
+
+        assert_eq!(
+            refusal,
+            ConnectionRefusal::TenantAllowanceExhausted {
+                held: MAX_TENANT_STORE_BYTES,
+                adding: 1,
+                limit: MAX_TENANT_STORE_BYTES,
+            },
+        );
+
+        let message = refusal.to_string();
+        assert!(
+            message.contains(&MAX_TENANT_STORE_BYTES.to_string()),
+            "{message}",
+        );
+        // The argument for the number, restated where it is enforced: the reason one tenant's size
+        // is anybody else's business is that every write rewrites the whole store.
+        assert!(message.contains("rewrites the whole store"), "{message}");
     }
 
     /// `Tenant` is the only way a tenant reaches an address, and it refuses a traversing spelling
