@@ -35,8 +35,8 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.0.1. The service serves health, the catalogue, a session and a partial sign-in.** `cargo run` binds loopback and
-refuses to start on a reachable address with no identity provider configured. What exists beyond
+**v0.2.0. The service serves health, the catalogue, a session and a complete OIDC sign-in.** `cargo run` binds
+loopback and refuses to start on a reachable address with no identity provider configured. What exists beyond
 that is still the vocabulary and the rules as tested types. The [README](README.md) carries the
 itemized inventory of what is *not* built, and keeping it accurate is part of the job — a page that
 implies a working service costs more than an honest gap.

@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **CI gates every push and pull request** (X-28). This repository had one workflow and it fired on
+  a version tag, so a red `main` was invisible until someone tried to release, and the console had
+  never been built by CI at all. `ci.yml` now runs the whole Rust gate and builds and tests the
+  console in its own job. The release workflow **keeps** its own inline gate: a tag can be pushed at
+  a commit no CI run ever covered, and publishing is the irreversible path.
+
 ## [0.2.0] - 2026-08-01
 
 ## [0.1.0] - 2026-08-01
