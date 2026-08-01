@@ -8,6 +8,20 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A credential can be rotated in place** (X-39). The surface could create, read and delete but not
+  *replace*, so rotating a credential — the remedy for a leak — meant `DELETE` then `POST`, with a
+  window where the tenant had no connection at all and anything relying on it failed.
+
+  Rotation replaces **one** credential rather than the declared set, and the reason is the north star:
+  this host never hands a credential value back out, so a wholesale replace would make a caller
+  re-send every value it wanted to *keep* — and an operator rotating one of two credentials has no way
+  to obtain the other. It is separated from create by path, method **and** body type, so `POST`'s
+  `409` on an existing connection is untouched: an upsert is still the silent overwrite the
+  connections story exists to prevent.
+
+  A refused rotation leaves the old value in place, including when it would exceed the tenant's
+  allowance.
+
 - **The console presents an execution platform** (X-34). It rendered the connector catalogue and
   nothing else, with no header and no navigation, while the service behind it grew sign-in, expiring
   sessions and a per-tenant connection surface. `docs/vision.md` gives the console two jobs — *wire
