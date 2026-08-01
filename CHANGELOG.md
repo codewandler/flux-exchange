@@ -8,6 +8,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Only a human mints an agent** (X-40). Nothing gated minting by principal kind, so once agent
+  tokens authenticate, a leaked one could mint successors — and revoking the first would not kill the
+  descendants. Revocation would have stopped being a remedy **invisibly**, because those descendants
+  are ordinary agents with no recorded relationship to the token that was revoked.
+
+  `Agent` and `Service` are both refused. `Service` is the interesting one: the property this
+  defends holds only if every minter is itself revocable by this host's operator, and a `User` is —
+  sign-in is federated — while nothing here mints, verifies, lists or revokes a *service* credential.
+  Admitting it would reproduce the same defect one level further out of sight.
+
 - **Whether this deployment can sign anyone in is a field** (X-43). The console linked to
   `/api/signin` unconditionally, so on a host with no identity provider the **Sign in** button led to
   a `503` — the operator learned the platform could not sign them in by being refused. The

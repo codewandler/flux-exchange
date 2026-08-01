@@ -1,8 +1,7 @@
 ---
 id: X-40
 title: "A leaked agent token cannot mint its own successors"
-status: ready
-priority: 1
+status: done
 epic: agent-access
 design: docs/designs/agent-access.md
 areas: [exchange-server]
@@ -42,16 +41,16 @@ creation of a new principal in this tenant. Leaving it ungated until an upstream
 resolves would ship a revocation mechanism that does not revoke.
 
 ## Acceptance
-- [ ] **Failing-first test** — a caller whose principal is `PrincipalKind::Agent` is refused at the
+- [x] **Failing-first test** — a caller whose principal is `PrincipalKind::Agent` is refused at the
       minting route, and no agent is created. Assert against the store, not only the status.
-- [ ] A `User` principal still mints, asserted in the same run, so the refusal cannot pass by
+- [x] A `User` principal still mints, asserted in the same run, so the refusal cannot pass by
       breaking minting for everyone.
-- [ ] `Service` is decided explicitly rather than by omission — a `Service` principal acts on behalf
+- [x] `Service` is decided explicitly rather than by omission — a `Service` principal acts on behalf
       of an account and actor, so whether it may mint is a real question. Decide, implement, and say
       why the other answer is wrong.
-- [ ] The refusal names nothing about what exists — no agent id, no tenant, no count. Follow
+- [x] The refusal names nothing about what exists — no agent id, no tenant, no count. Follow
       `an_anonymous_caller_is_refused_and_told_nothing`.
-- [ ] The rule is stated where a reader meets it: on the route, and in
+- [x] The rule is stated where a reader meets it: on the route, and in
       `docs/designs/agent-access.md`, which currently says an agent "authenticates and authorises
       nothing beyond what any principal may do" — a sentence this story makes false.
 
@@ -64,3 +63,35 @@ resolves would ship a revocation mechanism that does not revoke.
   the same class of question and this story should at least record an answer.
 - X-38 (revoke) should be read alongside this: together they are what make a leaked token
   recoverable. Neither is sufficient alone.
+
+## Progress
+- **Done 2026-08-01.** Gate green: 45 + 220, clippy clean, fmt clean. Genuine merge-base failure —
+  at the base an agent minted a successor and the test quoted the successor's own token back.
+  **Independent review dispatched**: this is authorization on a principal-creating route and it adds
+  to the published crate's API.
+- **`Service` is refused, and the argument is the substance.** The property defended is that
+  *revoking a token ends the access it gave*, and that holds only if **every minter is itself
+  revocable by this host's operator**. A `User` is — sign-in is federated, the account is disabled at
+  the provider, and X-16 makes this host notice. A `Service` is **not**: nothing in this repository
+  mints, verifies, lists or revokes a service credential; `PrincipalKind::Service` is a kind the
+  identity port may return and nothing more. Admitting it would reproduce the exact defect one level
+  up and further out of sight, where there is not even a revoke route to be incomplete.
+- **The two errors are not symmetric**, which is what makes refusing the safe direction: refusing a
+  `Service` that should mint is a `403` an operator meets on their first attempt; admitting one that
+  should not is invisible until a credential leaks.
+- **Enforced twice, deliberately.** Declaratively on the route, where `published()` can see it, and
+  again inside `AgentStore::mint` — the store creates the principal, so the store must refuse. The
+  route gate alone would be bypassed by any later handler reaching `mint` without declaring an
+  access, and the module's own spy test already calls `mint` directly, so that path is not
+  hypothetical. Each is pinned by its own test.
+- **`Access` gained a variant rather than the handler gaining a check**, because `routes/mod.rs`
+  states a route is not guarded by its handler remembering to ask — a handler-level check would have
+  been invisible to the surface enumeration.
+- **Carried forward — the lockout constraint, and it binds X-37.** The gate reads `Principal::kind()`
+  from whatever the identity port returned. `oidc/mod.rs` constructs `PrincipalKind::User`
+  unconditionally today, so this is safe now — but **any third `Identity` binding that resolves a
+  human as something other than `User` locks that operator out of minting.**
+- **Filed as adjacent, worth a story:** nothing records **which principal minted a given agent**. The
+  gate makes descendants impossible so revocation is complete again, but if X-38 or a later story
+  wants an audit trail of minting, `Agent` has no field for it and this was the cheapest moment to
+  add one.
