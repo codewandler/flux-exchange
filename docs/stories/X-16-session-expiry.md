@@ -1,8 +1,7 @@
 ---
 id: X-16
 title: "A session ends when the identity behind it does"
-status: ready
-priority: 1
+status: done
 epic: serve
 areas: [exchange-server]
 note: "deferred twice — X-03 left it to X-04 on the grounds that an id token has an `exp` to bind to, and X-04 deferred it again because no composition could produce an id token. X-04 now can, so the reason is gone"
@@ -29,15 +28,15 @@ stated blocker is gone. Left alone, the position is worse than it was before: th
 a five-minute token is as durable as the process.
 
 ## Acceptance
-- [ ] **Failing-first test** — a session opened from claims whose `exp` has passed no longer
+- [x] **Failing-first test** — a session opened from claims whose `exp` has passed no longer
       resolves, asserted through `SessionStore::resolve` rather than through a clock the test owns.
-- [ ] A session opened from claims that are still valid **does** resolve, in the same test run, so
+- [x] A session opened from claims that are still valid **does** resolve, in the same test run, so
       the expiry cannot pass by breaking sessions for everyone.
-- [ ] Expiry is taken from the **id token's `exp`**, not from a fixed lifetime this host invents. A
+- [x] Expiry is taken from the **id token's `exp`**, not from a fixed lifetime this host invents. A
       provider that issues a five-minute token must not yield an eight-hour session here.
-- [ ] A session that has expired is indistinguishable, to the caller, from one that was never
+- [x] A session that has expired is indistinguishable, to the caller, from one that was never
       opened — the same refusal, naming nothing about why.
-- [ ] The expired entry is not merely unresolvable but **removed**, so `SessionStore`'s bound is not
+- [x] The expired entry is not merely unresolvable but **removed**, so `SessionStore`'s bound is not
       consumed by sessions nobody can use. `a_full_store_refuses_rather_than_evicting` states the
       store's policy; expiry must not become a back door through it.
 
@@ -49,3 +48,22 @@ a five-minute token is as durable as the process.
   saying so is more likely right.
 - `Oidc::admit` already refuses an expired token at sign-in. This story is about the session that
   outlives it afterwards, which is a different moment and a different check.
+
+## Progress
+- **Done 2026-08-01.** Gate green: 149 tests, clippy clean under `-D warnings`, fmt clean.
+- The `exp` crosses verbatim — a five-minute token yields a five-minute session. This host invents
+  no lifetime, because one it invented would outlive the credential it was shown.
+- **An `exp` already past, or beyond thirty days, refuses the sign-in rather than being clamped.**
+  Clamping would issue a session neither the provider nor this host described, and would leave the
+  misconfigured provider in place for the operator never to find.
+- **One wall clock, not two.** `now()` moved to `session.rs`: `admit` decides whether a token has
+  expired and the store decides how long a session may live, and two clocks could admit a token and
+  then refuse it a session.
+- The dev identity keeps `WhileTheProcessLives` — a roster handle carries no secret and no expiry,
+  so any lifetime there would be invented, and that port already forces a loopback bind.
+- Proof was six weakened-implementation runs rather than a merge-base run, which could only have
+  produced a compile error; the implementor said so plainly rather than dressing it up.
+- A fixture that used `expires_at: i64::MAX` had to state a realistic five minutes — a token that
+  never expires is not a thing a provider issues, so that is the fixture being corrected.
+- **Carried forward:** `resolve` now sweeps the whole map under the mutex on every authenticated
+  request. Correct at the 4096 bound, but it is the first place to look if request latency moves.

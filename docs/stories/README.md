@@ -33,9 +33,11 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-18 — A delete that fails half way says what it destroyed](X-18-delete-partial-failure.md) · found by a standing audit of the credential surface, 2026-08-01: DELETE has no rollback and no partial-failure report, so a failed delete can leave a live vendor credential on disk while the operator is told only 'retrying may work'
+
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
-- [X-16 — A session ends when the identity behind it does](X-16-session-expiry.md) · deferred twice — X-03 left it to X-04 on the grounds that an id token has an `exp` to bind to, and X-04 deferred it again because no composition could produce an id token. X-04 now can, so the reason is gone
 - [X-17 — An operator can tell their own misconfiguration from a refused credential](X-17-exchange-failure-modes.md) · found by X-04's two reviewers, 2026-08-01: `ExchangeError::Rejected` collapses four causes, one of which is this host's own client secret being wrong — and it is logged as 'the provider refused the authorization code'
 
 ## Blocked
@@ -58,6 +60,7 @@ _None._
 - [X-09 — A credential store, honest about what protects it](X-09-credential-store.md) · no fallback to memory on a bad store value — a host that fell back would start, serve every route correctly, look exactly like a working one, and lose everything on restart
 - [X-10 — Connections addressed by a tenant the caller cannot name](X-10-connections-are-tenant-addressed.md) · Tenant::new already refuses a traversing spelling at construction; this story is where that validated value becomes the ONLY way an address is built
 - [X-15 — A sign-in a victim did not start cannot become a session in their browser](X-15-login-csrf.md) · found by X-04's implementor, 2026-08-01: server-side `state` does NOT close login-CSRF. An attacker who legitimately starts a sign-in here, authenticates as themselves, then walks a victim into the callback with that genuinely-bound state has the victim's browser holding the attacker's session
+- [X-16 — A session ends when the identity behind it does](X-16-session-expiry.md) · deferred twice — X-03 left it to X-04 on the grounds that an id token has an `exp` to bind to, and X-04 deferred it again because no composition could produce an id token. X-04 now can, so the reason is gone
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

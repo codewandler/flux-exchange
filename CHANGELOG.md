@@ -8,6 +8,27 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A session ends when the identity behind it does** (X-16). Deferred twice — X-03 left it to X-04
+  on the grounds that an id token carries an `exp` worth binding to, and X-04 deferred it again
+  because no composition could produce an id token. X-04 removed that reason, and the position was
+  then worse than before: the host knew when an identity expired and discarded it.
+
+  `Oidc::complete` passes the id token's `exp` to the session store **verbatim**. A five-minute token
+  yields a five-minute session; this host invents no lifetime, because one it invented would outlive
+  the credential it was shown.
+
+  **An `exp` already past, or further out than thirty days, refuses the sign-in rather than being
+  clamped.** Clamping would issue a session neither the provider nor this host described, and would
+  leave the misconfigured provider in place for nobody to find. An expired session is **removed**
+  rather than left unresolvable, so expiry cannot become a back door through the store's bound, and
+  it answers exactly as a session that never existed.
+
+  One wall clock, not two: `now()` moved to `session.rs`, because `admit` decides whether a token has
+  expired and the store decides how long a session may live, and two clocks could admit a token and
+  then refuse it a session. The development identity keeps its process-lifetime session — a roster
+  handle carries no secret and no expiry, so any lifetime there would be invented, and that port
+  already forces a loopback bind.
+
 - **OIDC sign-in completes** (X-04, closing the `PARTIAL` this story shipped as). The owner took the
   dependency decision on 2026-08-01 — `reqwest`, `jsonwebtoken`, `sha2` — and `TokenExchange` is no
   longer an unbound port. The authorization code is redeemed back-channel with `client_secret_basic`
