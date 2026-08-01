@@ -64,7 +64,6 @@ _**You cannot use this console without standing up an OIDC provider.** That is t
 ### a public documentation site
 _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
 - [X-64 — Every page's \"is this built\" is derived, not written](X-64-status-is-derived-not-written.md) · the mechanism that makes a large speculative site safe — status badges read the same descriptor artifact whose live flags are held to the route table by X-42/X-52's tests
-- [X-77 — A reader following a family link lands on a documentation site, not on a repository](X-77-the-family-links-go-to-the-family-sites.md) · owner-raised 2026-08-02, the day the site went live: index.md sends a reader to github.com for flux and flux-connectors, so following the family link drops them out of the docs and into a source tree. Both sibling sites are published and neither is linked
 - [X-65 — The whole intended surface is on the page, including what is not built](X-65-the-whole-surface-is-on-the-page.md) · channels, subscribe, leases, workflows — the brief's \"scaffold the whole future surface\", safe to write only once X-64 makes status derived
 - [X-66 — The credential-boundary argument is readable by someone who has never seen this repository](X-66-the-boundary-argument-in-public.md) · the page that justifies the platform existing: the credential never crosses the boundary, the authority does — written for an evaluator rather than for a contributor
 
@@ -77,6 +76,10 @@ _None._
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-21 — A half connection is distinguishable from a deliberately partial one](X-21-half-connection-visibility.md) · raised by X-18's implementor, 2026-08-01: GET answers 200 for a connection whose delete failed half way, which reads as 'connected' — but a connector may legitimately hold a subset of what it declares, so the two render identically and telling them apart needs a record this module deliberately does not keep
 - [X-50 — A connector that needs no credential can actually be connected](X-50-a-connector-that-needs-nothing-can-be-connected.md) · found adjacent to X-49, 2026-08-01: the console disables Connect for a connector that declares no credentials — a state X-46 made reachable and X-49 pinned the *render* of, but nobody can act on it
+
+### a public documentation site
+_`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
+- [X-78 — The family-link rule catches one spelling of a repository URL, and its comment says it catches the kind](X-78-the-subject-rule-reads-one-spelling-of-a-url.md) · found by X-77's independent review, 2026-08-02: subjectIsTheProject matches the exact canonical href, so [flux](http://github.com/codewandler/flux) — plain http — passes silently with the project's own name as the anchor text. The narrowness is real and the comment that web/README.md calls the statement of record does not mention it
 
 ## Done
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
@@ -132,6 +135,7 @@ _None._
 - [X-67 — Move to the 0.47 engine line and the 0.10 connector catalogue](X-67-move-to-the-047-engine-line.md) · the blocker is gone: connector-pack 0.10.0 requires flux-runtime ^0.47 and flux-connectors v0.10.0 is released. This is not a version bump — the catalogue gained a 54th provider and a new way of saying why an operation names no credential, and several tests are designed to go red on exactly that
 - [X-69 — The public site shows how to run this and sign in, in five minutes](X-69-run-it-yourself.md) · X-57 made signing in without an identity provider actually work on loopback; nothing public says so. This is the page that turns a charter into something a stranger can run
 - [X-71 — The console's dev server follows the address the service was told to bind](X-71-the-console-proxy-follows-the-bind.md) · found by X-69 while walking its own page, 2026-08-01: console/vite.config.ts hard-codes the default bind, so a reader who sets FLUX_EXCHANGE_BIND gets a console that cannot reach the service
+- [X-77 — A reader following a family link lands on a documentation site, not on a repository](X-77-the-family-links-go-to-the-family-sites.md) · owner-raised 2026-08-02, the day the site went live: index.md sends a reader to github.com for flux and flux-connectors, so following the family link drops them out of the docs and into a source tree. Both sibling sites are published and neither is linked
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

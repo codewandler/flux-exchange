@@ -1,7 +1,7 @@
 ---
 id: X-77
 title: "A reader following a family link lands on a documentation site, not on a repository"
-status: in-progress
+status: done
 priority: 1
 epic: public-docs-site
 design: docs/designs/public-docs-site.md

@@ -20,6 +20,25 @@ All notable changes to this project are documented in this file. The format is b
   public address. It also carries the invoke prerequisite in order (`503` → `403 not_granted` →
   the credential refusal), so nobody follows it to "you are signed in" and then falls off a cliff.
 
+- **A family link lands on the family's documentation, not in a source tree** (X-77). The site called
+  itself the platform layer of the flux family and then sent the reader to github.com for both
+  siblings. Each publishes a site; neither was linked. `index.md` now points at them and a nav
+  dropdown puts both on **every** page — VitePress server-renders a flyout's items, so they are in the
+  static HTML rather than only in the client bundle.
+
+  **The rule is about the link's subject, not its hostname**, which is what lets it coexist with the
+  github.com links that are correct: a URL addressing anything inside the repository — a path, a
+  fragment, the releases page — is a repository link, and a bare repository URL is judged by the
+  anchor's own words. The clone command, `surface.md`'s inventory pointer and `index.md`'s
+  `#what-exists-today` all stay. It ships with a self-test pinning the discriminator in both
+  directions, because a scanner without one is the pattern `console/test/components.test.mjs` already
+  rejects.
+
+  `ignoreDeadLinks: false` could never have caught this — it checks internal links, and a link to the
+  wrong host is not dead. The guard was seen firing twice: at the merge base against the real links,
+  and again with the nav entry pointed back at github.com, where it named a page the overview does not
+  cover.
+
 ### Fixed
 
 - **The console's dev server follows the bind the service was told to use** (X-71). `vite.config.ts`
