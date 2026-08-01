@@ -21,7 +21,10 @@ exchange-host.workspace = true
 
 axum.workspace = true
 connector-catalog.workspace = true
+jsonwebtoken.workspace = true
+reqwest.workspace = true
 serde.workspace = true
+sha2.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tower.workspace = true

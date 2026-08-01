@@ -29,6 +29,29 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 connector-catalog = { package = "codewandler-connector-catalog", version = "0.8" }
 connector-secrets = { package = "codewandler-connector-secrets", version = "0.8" }
 connector-spec = { package = "codewandler-connector-spec", version = "0.8" }
+# The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family
+# precedent is sibling flux-connectors, which already uses reqwest and jsonwebtoken for exactly this
+# exchange; the alternative was hand-rolling signature verification, which nobody should do.
+#
+# `rustls-tls` and `default-features = false` keep OpenSSL out of the build, so the binary does not
+# acquire a C toolchain dependency for one HTTPS call. `jsonwebtoken` picks the pure-Rust backend for
+# the same reason.
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+# `rustls-native-certs` rather than bundled roots: an operator pointing this at a corporate IdP
+# behind a private CA expects the OS trust store to be what decides, not a copy of Mozilla's list
+# compiled into the binary months ago.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "form",
+    "rustls",
+    "rustls-native-certs",
+    "http2",
+    "charset",
+] }
+# Replaces the hand-written `oidc/sha256.rs`, which existed only because no digest crate was allowed
+# in. It was checked exhaustively against hashlib before it was trusted; it is deleted now rather
+# than kept as a second implementation nobody exercises.
+sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

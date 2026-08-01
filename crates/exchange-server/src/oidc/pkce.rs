@@ -22,7 +22,8 @@
 
 use std::fmt;
 
-use super::sha256;
+use sha2::{Digest, Sha256};
+
 use crate::entropy;
 
 /// The code challenge method this host uses, in the spelling the authorization request carries.
@@ -55,9 +56,8 @@ impl Verifier {
 
     /// The verifier as it goes to the token endpoint. Every call site is a deliberate disclosure.
     ///
-    /// Reached only through [`Redemption`](super::exchange::Redemption), by a `TokenExchange` this
-    /// binary does not bind — hence the `allow`, which goes when a composition supplies one.
-    #[allow(dead_code)]
+    /// Reached only through [`Redemption`](super::exchange::Redemption), which `HttpTokenExchange`
+    /// spends at the token endpoint.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -65,8 +65,12 @@ impl Verifier {
     /// The challenge that goes in the authorization request — `BASE64URL(SHA256(verifier))`.
     ///
     /// Derived rather than stored, so a verifier and its challenge cannot drift apart.
+    ///
+    /// `sha2` since the X-04 dependency decision opened it up. This was a hand-written SHA-256 for
+    /// as long as no digest crate was allowed in; RFC 7636 Appendix A's vector below is unchanged
+    /// and still passes, which is what makes the swap checkable rather than merely plausible.
     pub fn challenge(&self) -> Challenge {
-        Challenge(base64url(&sha256::digest(self.0.as_bytes())))
+        Challenge(base64url(&Sha256::digest(self.0.as_bytes())))
     }
 }
 
@@ -93,7 +97,12 @@ impl Challenge {
 /// Written out for the same reason the cookie parser in [`session`](crate::session) is: the
 /// workspace carries no base64 crate, and this direction of the transform is a 20-line table
 /// lookup with published vectors rather than a grammar with edge cases.
-fn base64url(bytes: &[u8]) -> String {
+///
+/// `pub(super)` so [`http_exchange`](super::http_exchange)'s tests hand-assemble a JWT with the one
+/// encoder this module already proves against RFC 4648's vectors. A second copy in a test module
+/// would be a second thing to keep correct, and a forgery test built on a broken encoder passes for
+/// the wrong reason.
+pub(super) fn base64url(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -128,7 +137,7 @@ mod tests {
     ///
     /// This is the assertion that matters most in this module, because it pins the whole chain a
     /// provider re-computes on its side — SHA-256, then base64url, then the exact characters — in
-    /// one comparison. If `sha256` or `base64url` were wrong in any way that mattered, this fails.
+    /// one comparison. If `sha2` or `base64url` were wrong in any way that mattered, this fails.
     #[test]
     fn the_rfc_7636_worked_example() {
         let verifier = Verifier("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk".to_string());
