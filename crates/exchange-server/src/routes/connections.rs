@@ -8,7 +8,40 @@
 //! DELETE /api/connections/{connector}   disconnect, destroying every credential it holds
 //! PUT    /api/connections/{connector}/credentials/{credential}
 //!                                       replace one credential's value, in place
+//! GET    /api/connections/{connector}/settings
+//!                                       what this connector needs configured, and which are set
+//! PUT    /api/connections/{connector}/settings/{service}/{field}
+//!                                       supply one non-secret per-connection value
+//! DELETE /api/connections/{connector}/settings/{service}/{field}
+//!                                       unset one
 //! ```
+//!
+//! # The settings half, and why it is a second store rather than more credentials (X-47)
+//!
+//! Sixteen of the shipped connectors declare a `base_url` templated on a per-connection value — a
+//! vendor subdomain, a workspace slug, a space id — and until X-47 there was nowhere for a tenant to
+//! put one, so `invoke` bound an empty configuration and every one of them refused by name. The
+//! three routes above are that home.
+//!
+//! **They do not write to the credential store, and that is the decision rather than the plumbing.**
+//! A subdomain is not a secret; it is in the URL of every request the connector makes. Storing one
+//! beside an API token would make [`view`]'s `held` mean two things at once — a connection with a
+//! subdomain and no token would report as held — and would spend a tenant's *credential* allowance,
+//! whose whole argument is about the latency of the one file every credential write rewrites. So
+//! they are two stores with two allowances, and `exchange_host::settings` carries the argument.
+//! [`tests::a_setting_is_not_a_credential_and_does_not_land_in_the_credential_store`] is what holds
+//! it to being true rather than intended.
+//!
+//! `{service}` and `{field}` are catalogue keys exactly as `{connector}` and `{credential}` are:
+//! looked up in what the connector's own operations declare and refused when nothing declares them,
+//! never a segment of anything. The service is a **required** path segment rather than defaulting to
+//! `default`, because `contentful` declares `endpoint.space_id` under two services and a value
+//! silently filed under the wrong one is a management write into a space nobody named.
+//!
+//! **Values go in and do not come back out**, as everywhere else on this surface: `GET` answers with
+//! `binds` targets and a `set` boolean. That is stricter than the "not a secret" argument requires,
+//! and it is the direction that cannot be wrong — a `username` field holds an account name or an
+//! email address, which is a customer's personal data whatever the field is called.
 //!
 //! # Where the tenant comes from, and what a caller may say
 //!
@@ -137,8 +170,9 @@ use axum::routing::{get, put, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
-    address_path, admit_tenant_occupancy, stored_bytes, ConnectionRefusal, ConnectorDeclaration,
-    CredentialRef, DeclaredCredential, Principal, Secret, SecretStore, StoreError, Tenant,
+    address_path, admit_tenant_occupancy, admit_tenant_settings, declared_settings, stored_bytes,
+    ConnectionRefusal, ConnectorDeclaration, CredentialRef, DeclaredCredential, DeclaredSetting,
+    Principal, Secret, SecretStore, SettingsRefusal, StoreError, Tenant,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -160,6 +194,18 @@ pub(super) const STORE_SETTING: &str = exchange_host::CREDENTIAL_STORE_SETTING;
 /// not, so a composition on another platform binds its own store rather than this one.
 #[cfg(not(unix))]
 pub(super) const STORE_SETTING: &str = "FLUX_EXCHANGE_CREDENTIALS";
+
+/// The setting that names the connection-settings store, quoted when none is bound.
+///
+/// Spelled through the host's own constant for [`STORE_SETTING`]'s reason. `pub(super)` for its
+/// reason too: [`invoke`](super::invoke) points a refused invocation at this surface, and one
+/// setting quoted from two places would be two strings to keep in step.
+#[cfg(unix)]
+pub(super) const SETTINGS_SETTING: &str = exchange_host::CONNECTION_SETTINGS_SETTING;
+/// The same, where the file store does not exist. Only the file binding is `#[cfg(unix)]`; the port
+/// is not, so a composition on another platform binds its own store rather than this one.
+#[cfg(not(unix))]
+pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
 
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
@@ -194,6 +240,23 @@ pub(super) const MODULE: Module = Module {
             access: Access::Principal,
             method_router: credential_route,
         },
+        Route {
+            // What this connector needs configured, and which of them this tenant has supplied.
+            // The answer is derived from the connector's own operations and from the resolved
+            // principal, and carries no value.
+            path: "/api/connections/{connector}/settings",
+            access: Access::Principal,
+            method_router: settings_route,
+        },
+        Route {
+            // `{service}` and `{field}` are keys into what the connector declares, exactly as
+            // `{connector}` is a key into the catalogue: refused when nothing declares them, and
+            // never a segment of an address. The tenant — the only part a caller could want to move
+            // — comes from the guard.
+            path: "/api/connections/{connector}/settings/{service}/{field}",
+            access: Access::Principal,
+            method_router: setting_route,
+        },
     ],
 };
 
@@ -207,6 +270,14 @@ fn connection_route() -> MethodRouter<AppState> {
 
 fn credential_route() -> MethodRouter<AppState> {
     put(rotate)
+}
+
+fn settings_route() -> MethodRouter<AppState> {
+    get(list_settings)
+}
+
+fn setting_route() -> MethodRouter<AppState> {
+    put(set_setting).delete(clear_setting)
 }
 
 /// The values a caller supplies when it connects a connector.
@@ -657,6 +728,327 @@ async fn remove(
     }
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+// ---------------------------------------------------------------------------------------------
+// The settings half (X-47)
+// ---------------------------------------------------------------------------------------------
+
+/// The one value a caller supplies when it sets a connection setting.
+///
+/// Deliberately the same shape as [`RotatedCredential`] and deliberately a different type: they are
+/// two bodies for two surfaces, and one type shared between them is how a change made for the
+/// non-secret one lands on the secret one. A `Debug` is derived here — unlike its two neighbours —
+/// because this really does hold a non-secret value, and that difference is exactly what this whole
+/// half of the module exists to keep visible.
+#[derive(Debug, Deserialize)]
+struct SuppliedSetting {
+    /// The value to put at the setting's derived address.
+    value: String,
+}
+
+/// What this connector needs configured, and which of them this tenant has supplied.
+///
+/// Derived from the connector's own compiled operations, not from a list kept here: `zendesk` needs
+/// `endpoint.subdomain` because its operations' Flux says so. See
+/// `exchange_host::declared_settings` for why a `base_url` scan is not the same answer.
+///
+/// **No values.** A `set` boolean per field, so an operator can see what is left to supply without
+/// this host handing back a customer's account identifiers.
+async fn list_settings(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(connector): Path<String>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+
+    let declared = match declared_settings(provider) {
+        Ok(declared) => declared,
+        Err(refusal) => return settings_refused(&refusal),
+    };
+
+    let settings: Vec<Value> = declared
+        .iter()
+        .map(|setting| {
+            json!({
+                "service": setting.service,
+                "field": setting.binds(),
+                "set": store.is_set(principal.tenant(), provider.id, setting),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "connector": provider.id,
+        "vendor": provider.vendor,
+        "settings": settings,
+    }))
+    .into_response()
+}
+
+/// Supply one non-secret per-connection value.
+///
+/// The address is `(resolved tenant, connector, service, field)` and not one segment of it comes
+/// from the request in the sense that matters: `{connector}`, `{service}` and `{field}` are keys
+/// looked up in what the connector declares, and the tenant is the guard's. A caller that names a
+/// service or a field the connector does not declare is refused with `422` and told what it does
+/// declare.
+///
+/// # What this route deliberately does not do
+///
+/// It does not decide whether the value is *safe to put in a URL*. `connector-pack` decides that at
+/// the one substitution point it makes, holding the composed authority to an allow-list of host
+/// characters — so `acme.zendesk.com@evil.example` is refused there, with the position of the value
+/// in the request known, which is knowledge this route does not have. A second opinion here would be
+/// a second spelling of one rule, and `AGENTS.md`'s "this host constructs no request of its own"
+/// says which of the two spellings gets to exist.
+async fn set_setting(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, service, field)): Path<(String, String, String)>,
+    Json(body): Json<SuppliedSetting>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+    let Some(setting) = DeclaredSetting::parse(&service, &field) else {
+        return unreadable_field(provider, &service, &field);
+    };
+
+    // The allowance, decided before the write and against what the write *replaces*. It is the
+    // settings allowance and never the credential one: a tenant that has filled its credential
+    // store can still supply a subdomain, and one that has filled this store is told to remove a
+    // setting rather than to disconnect a connector.
+    //
+    // The claim is the same one every mutating route on this surface takes, for the same reason:
+    // reading an occupancy and then writing is a read-decide-write, and two of this tenant's
+    // concurrent settings writes would each read an occupancy the other had not written yet.
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+
+    let held = store.held_bytes(principal.tenant());
+    if let Err(refusal) = admit_tenant_settings(held, body.value.len()) {
+        return settings_refused(&refusal);
+    }
+
+    // The store applies the rest — that this connector declares the service and the field, and the
+    // per-value bound — because that is where the declared surface is derived and a check made here
+    // would be a second copy of it.
+    if let Err(refusal) = store.set(principal.tenant(), provider.id, &setting, &body.value) {
+        return settings_refused(&refusal);
+    }
+
+    Json(setting_view(provider, &setting, true)).into_response()
+}
+
+/// Unset one per-connection value.
+///
+/// `204` when something was there and `404` when nothing was, for [`remove`]'s reason: "unset
+/// something that was not set" and "unset it" are different facts and a caller should be able to
+/// tell. Nothing here touches a credential — a connector whose subdomain is cleared still holds its
+/// token, and clearing the token is `DELETE /api/connections/{connector}`.
+async fn clear_setting(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, service, field)): Path<(String, String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+    let Some(setting) = DeclaredSetting::parse(&service, &field) else {
+        return unreadable_field(provider, &service, &field);
+    };
+
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+
+    match store.clear(principal.tenant(), provider.id, &setting) {
+        Err(refusal) => settings_refused(&refusal),
+        Ok(false) => nothing_to_clear(provider, &setting),
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+/// One setting as a caller sees it: where it belongs and whether it is supplied. Never its value.
+fn setting_view(provider: &'static Provider, setting: &DeclaredSetting, set: bool) -> Value {
+    json!({
+        "connector": provider.id,
+        "service": setting.service,
+        "field": setting.binds(),
+        "set": set,
+    })
+}
+
+/// This composition bound no connection-settings store.
+///
+/// Not a fallback and not an empty answer, exactly as [`no_store`] is not: a host that cannot hold a
+/// connection setting says so and names the setting that would have given it one. The message says
+/// what the file is *for*, because an operator who has just read the credential-store refusal will
+/// otherwise assume this one is about secrets too.
+fn no_settings_store() -> Response {
+    refuse(
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!(
+            "this host has no connection-settings store bound, so it cannot hold the per-connection \
+             values a templated connector needs: set `{SETTINGS_SETTING}` to a path outside every \
+             working tree. It holds no secrets — credentials stay in the credential store",
+        ),
+        json!({ "setting": SETTINGS_SETTING }),
+    )
+}
+
+/// The `{field}` segment is not a `binds` target at all.
+///
+/// Distinct from "this connector does not declare it": that one is a name in the right vocabulary
+/// naming the wrong thing, and this is a name in no vocabulary. The distinction earns its keep on
+/// one case — `credential.zendesk.api_token` is a real row of the design's `binds` table and it is a
+/// **secret**, so an operator reaching for it here has to be told it lives somewhere else rather
+/// than that zendesk does not declare it.
+fn unreadable_field(provider: &'static Provider, service: &str, field: &str) -> Response {
+    refuse(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        format!(
+            "`{field}` is not a connection setting. A setting is spelled `endpoint.<variable>` or \
+             `username.<credential>` — the same `binds` targets a refused invocation names. A \
+             `credential.<name>` is a secret and belongs at `POST /api/connections/{}`, not here",
+            provider.id,
+        ),
+        json!({ "connector": provider.id, "service": service, "field": field }),
+    )
+}
+
+/// Nothing was set at that address, so there was nothing to unset.
+///
+/// Names the connector, the service and the field this host looked at — this tenant's own address
+/// and never another's, the same rule [`not_connected`] follows.
+fn nothing_to_clear(provider: &'static Provider, setting: &DeclaredSetting) -> Response {
+    refuse(
+        StatusCode::NOT_FOUND,
+        format!(
+            "this tenant has supplied no `{}` for connector `{}` service `{}`, so there is nothing \
+             to unset",
+            setting.binds(),
+            provider.id,
+            setting.service,
+        ),
+        json!({
+            "connector": provider.id,
+            "service": setting.service,
+            "field": setting.binds(),
+        }),
+    )
+}
+
+/// How a [`SettingsRefusal`] reaches a caller — **the one place**, so a variant added later cannot
+/// be answered two different ways by the two handlers that can raise it.
+///
+/// The status is per variant, on the same reading [`connection_refused`] takes: a request that is
+/// well formed and has no address is `422`, a value that is not a setting is `413`, and a tenant
+/// whose own state conflicts with the request is `409`. The two host-side variants are `502` and
+/// `503`, split the way [`store_failure`] splits them — a store that cannot be *read* is a defect
+/// somebody has to repair, and a store that cannot be *written* may answer next time.
+///
+/// Every payload carries the bound or the alternatives it was decided against, and none carries a
+/// value.
+fn settings_refused(refusal: &SettingsRefusal) -> Response {
+    let (status, extra) = match refusal {
+        SettingsRefusal::NothingDeclared { connector } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector }),
+        ),
+        SettingsRefusal::UndeclaredService {
+            connector,
+            service,
+            services,
+        } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector, "service": service, "declared": services }),
+        ),
+        SettingsRefusal::UndeclaredSetting {
+            connector,
+            service,
+            setting,
+            declared,
+        } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({
+                "connector": connector,
+                "service": service,
+                "field": setting,
+                "declared": declared,
+            }),
+        ),
+        SettingsRefusal::SettingTooLarge {
+            connector,
+            setting,
+            bytes,
+            limit,
+        } => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "bound": "setting",
+                "sent_bytes": bytes,
+                "limit_bytes": limit,
+            }),
+        ),
+        SettingsRefusal::TenantAllowanceExhausted {
+            held,
+            adding,
+            limit,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "bound": "tenant_settings",
+                "held_bytes": held,
+                "adding_bytes": adding,
+                "limit_bytes": limit,
+            }),
+        ),
+        // A connector this host cannot read the surface of. `502`, and never a `422`: there is
+        // nothing wrong with the request and nothing the caller can send instead.
+        SettingsRefusal::Unreadable {
+            connector,
+            operation,
+            ..
+        } => (
+            StatusCode::BAD_GATEWAY,
+            json!({ "connector": connector, "operation": operation }),
+        ),
+        // The store did not take the write. `503` for `store_failure`'s reason — retrying may work
+        // — and the *reason* stays in the log, because it names this host's own paths.
+        SettingsRefusal::Unwritable { .. } => {
+            error!(%refusal, "the connection-settings store failed");
+            (StatusCode::SERVICE_UNAVAILABLE, json!({}))
+        }
+    };
+
+    // The `Unwritable` reason names this host's own filesystem, so it is the one refusal whose
+    // message does not travel. Every other variant's is written for the operator who has to act.
+    let reason = match refusal {
+        SettingsRefusal::Unwritable { .. } => {
+            "the connection-settings store could not be written, \
+                                               so nothing was changed. Retrying may work"
+                .to_string()
+        }
+        other => other.to_string(),
+    };
+
+    refuse(status, reason, extra)
 }
 
 /// The connector the catalogue declares under `id`.
@@ -1351,7 +1743,8 @@ mod tests {
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        async_trait, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES, TENANTS_ROOT,
+        async_trait, ConnectionSettings as _, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES,
+        TENANTS_ROOT,
     };
     use tower::Service;
 
@@ -1662,6 +2055,66 @@ mod tests {
         );
 
         (app, store)
+    }
+
+    /// An app with both tenants armed, a credential store **and** a settings store bound.
+    ///
+    /// Two stores, handed back separately, because the whole of X-47's placement argument is that
+    /// they are two — a test that could not look at them independently could not tell a setting
+    /// written into the credential store from one written where it belongs.
+    fn configurable_app() -> (
+        Router,
+        Arc<TestStore>,
+        Arc<exchange_host::SettingsStore>,
+        Scratch,
+    ) {
+        let store = Arc::new(TestStore::default());
+        let scratch = Scratch::new();
+        let settings = Arc::new(
+            exchange_host::SettingsStore::bind(scratch.join("settings"))
+                .expect("a fresh settings store"),
+        );
+
+        let app = super::super::app(
+            AppState::with_development_identity(Arc::new(
+                DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+            ))
+            .with_credentials(store.clone())
+            .with_settings(settings.clone()),
+        );
+
+        (app, store, settings, scratch)
+    }
+
+    /// A scratch directory for a settings file, removed on drop.
+    ///
+    /// Hand-rolled rather than pulled in, for `exchange_host::credentials`' reason: a store's tests
+    /// are the last place to add a dependency for four lines of `create_dir_all`.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+
+            let path = std::env::temp_dir().join(format!(
+                "flux-exchange-routes-settings-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir_all(&path).expect("a scratch directory");
+            Self(path.canonicalize().expect("a resolvable scratch directory"))
+        }
+
+        fn join(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// An app with the tenants armed and **no** store bound.
@@ -4085,6 +4538,291 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------------------------
+    // The settings half (X-47)
+    // -----------------------------------------------------------------------------------------
+
+    /// **X-47's surface, end to end.** A tenant asks what a templated connector needs, supplies it,
+    /// sees it as supplied, and unsets it.
+    ///
+    /// The listing is the part worth having beyond the write: X-12's finding was not that the value
+    /// could not be stored, it was that an operator staring at *"needs `endpoint.subdomain`"* had
+    /// nowhere to go. This is where to go, and it names the same `binds` targets the refusal does.
+    #[tokio::test]
+    async fn a_templated_connector_takes_the_setting_its_manifest_asks_for() {
+        let (app, _store, _settings, _scratch) = configurable_app();
+
+        let (status, needed) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/zendesk/settings",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{needed}");
+        assert_eq!(needed["connector"], "zendesk");
+        assert_eq!(
+            needed["settings"],
+            json!([
+                { "service": "default", "field": "endpoint.subdomain", "set": false },
+                { "service": "default", "field": "username.zendesk.api_token", "set": false },
+            ]),
+            "the listing names what to supply, and no value: {needed}",
+        );
+
+        let (status, supplied) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/settings/default/endpoint.subdomain",
+            Some(json!({ "value": "acme" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{supplied}");
+        assert_eq!(supplied["set"], true);
+        assert!(
+            !supplied.to_string().contains("acme\""),
+            "the answer must not repeat the value: {supplied}",
+        );
+
+        let (_, needed) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/zendesk/settings",
+            None,
+        )
+        .await;
+        assert_eq!(needed["settings"][0]["set"], true, "{needed}");
+        assert_eq!(
+            needed["settings"][1]["set"], false,
+            "and the one nobody supplied is still unsupplied: {needed}",
+        );
+
+        let (status, _) = call(
+            &app,
+            "alice",
+            Method::DELETE,
+            "/api/connections/zendesk/settings/default/endpoint.subdomain",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, gone) = call(
+            &app,
+            "alice",
+            Method::DELETE,
+            "/api/connections/zendesk/settings/default/endpoint.subdomain",
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "unsetting what is not set is a 404, not a 204: {gone}",
+        );
+    }
+
+    /// **The Acceptance's fourth item, as a behaviour.** A connection setting is not written to the
+    /// credential store, does not make a connection look `held`, and does not spend the credential
+    /// allowance.
+    ///
+    /// This is the test the placement argument rests on. Everything else about "configuration is not
+    /// a credential" is prose in `exchange_host::settings`; this is the part a diff can break.
+    #[tokio::test]
+    async fn a_setting_is_not_a_credential_and_does_not_land_in_the_credential_store() {
+        let (app, store, settings, _scratch) = configurable_app();
+
+        let (status, _) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/settings/default/endpoint.subdomain",
+            Some(json!({ "value": "acme" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        assert!(
+            store.addresses().is_empty(),
+            "a connection setting reached the credential store: {:?}",
+            store.addresses(),
+        );
+        assert_eq!(
+            store.bytes_under("tenants/acme/"),
+            0,
+            "a connection setting spent the credential allowance, whose whole argument is about \
+             the latency of the one file every credential write rewrites",
+        );
+
+        // And the connection itself is still absent: a supplied subdomain is not a connection.
+        let (status, read) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a tenant that has supplied a subdomain and no token has no connection: {read}",
+        );
+
+        // The value is where it belongs, and the store that holds it is a different one.
+        let subdomain = exchange_host::DeclaredSetting::parse("default", "endpoint.subdomain")
+            .expect("a well-formed binds target");
+        assert!(settings.is_set(
+            &Tenant::new("acme").expect("a plain tenant id"),
+            "zendesk",
+            &subdomain,
+        ));
+    }
+
+    /// The behaviour behind admitting `{service}` and `{field}` as path parameters: neither can
+    /// steer where a value lands, and neither reaches anything by being shaped like an address.
+    ///
+    /// X-39's [`a_hostile_credential_name_cannot_reach_the_address`] is the shape this follows, and
+    /// the reason is the same: widening the allowed-parameter list is an argument about *behaviour*,
+    /// so it is paid for with a test rather than with a name on a list. Every value below is refused
+    /// before anything is stored — by the declared-surface lookup itself, rather than by a filter
+    /// somebody has to keep in step.
+    #[tokio::test]
+    async fn a_hostile_service_or_field_cannot_reach_the_settings_address() {
+        let (app, store, settings, _scratch) = configurable_app();
+
+        let hostile = [
+            // Traversal, in each segment.
+            ("..", "endpoint.subdomain"),
+            ("default", "endpoint...%2F..%2Fetc"),
+            // A rendered credential path, and the credential vocabulary itself — the row of the
+            // `binds` table that is a *secret* and must not become storable here.
+            ("default", "credential.zendesk.api_token"),
+            ("default", "oauth.client_secret"),
+            // Another connector's service, and a field of the right shape nothing declares.
+            ("management", "endpoint.space_id"),
+            ("default", "endpoint.base_url"),
+        ];
+
+        for (service, field) in hostile {
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                &format!("/api/connections/zendesk/settings/{service}/{field}"),
+                Some(json!({ "value": "evil.example" })),
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "`{service}/{field}` was not refused: {body}",
+            );
+        }
+
+        // Nothing reached either store. The refusals above could each be right for the wrong
+        // reason; this is the assertion that says nothing was written whatever the reason was.
+        assert!(store.addresses().is_empty(), "{:?}", store.addresses());
+        assert_eq!(
+            settings.held_bytes(&Tenant::new("acme").expect("a plain tenant id")),
+            0
+        );
+    }
+
+    /// A setting lands under the **resolved principal's** tenant, and one tenant's is not another's.
+    ///
+    /// The settings half of `a_tenant_cannot_reach_another_tenants_connection`. There is deliberately
+    /// no vector here by which `acme` could name `globex`'s value: no route takes a tenant, so the
+    /// strongest thing either can do is ask for the same connector and see its own answer.
+    #[tokio::test]
+    async fn a_setting_belongs_to_the_resolved_principals_tenant() {
+        let (app, _store, settings, _scratch) = configurable_app();
+
+        let (status, _) = call(
+            &app,
+            "bob",
+            Method::PUT,
+            "/api/connections/zendesk/settings/default/endpoint.subdomain",
+            Some(json!({ "value": "globex" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, acme) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/zendesk/settings",
+            None,
+        )
+        .await;
+        assert_eq!(
+            acme["settings"][0]["set"], false,
+            "globex's subdomain must not appear as acme's: {acme}",
+        );
+
+        let subdomain = exchange_host::DeclaredSetting::parse("default", "endpoint.subdomain")
+            .expect("a well-formed binds target");
+        assert!(settings.is_set(
+            &Tenant::new("globex").expect("a plain tenant id"),
+            "zendesk",
+            &subdomain,
+        ));
+        assert!(!settings.is_set(
+            &Tenant::new("acme").expect("a plain tenant id"),
+            "zendesk",
+            &subdomain,
+        ));
+    }
+
+    /// A composition that bound no settings store refuses and names the setting that would have
+    /// given it one — it does not accept the value and drop it.
+    ///
+    /// X-09's rule at the surface that would have used it, and the message says what the file is
+    /// *for*: an operator who has just read the credential-store refusal would otherwise assume this
+    /// one is about secrets too.
+    #[tokio::test]
+    async fn no_settings_store_bound_refuses_and_names_the_setting() {
+        let (app, _store) = connected_app();
+
+        for (method, body) in [
+            (Method::GET, None),
+            (Method::PUT, Some(json!({ "value": "acme" }))),
+        ] {
+            let path = if method == Method::GET {
+                "/api/connections/zendesk/settings".to_owned()
+            } else {
+                "/api/connections/zendesk/settings/default/endpoint.subdomain".to_owned()
+            };
+
+            let (status, body) = call(&app, "alice", method.clone(), &path, body).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            assert_eq!(body["setting"], SETTINGS_SETTING, "{body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("no secrets")),
+                "the refusal must say what this store is for: {body}",
+            );
+        }
+    }
+
+    /// An unknown connector is a `404` here too, and the settings routes refuse an anonymous caller
+    /// the way every other route in this module does.
+    #[tokio::test]
+    async fn the_settings_routes_refuse_an_unknown_connector() {
+        let (app, _store, _settings, _scratch) = configurable_app();
+
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/nosuchvendor/settings",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert_eq!(body["connector"], "nosuchvendor");
+    }
+
     /// The Acceptance's "no route accepts an address", stated over this module's own declaration.
     ///
     /// `super::super::tests::no_published_route_takes_a_tenant_in_its_path` covers the tenant
@@ -4099,10 +4837,18 @@ mod tests {
     /// argument about behaviour rather than about spelling, so it is not left to this list —
     /// [`a_hostile_credential_name_cannot_reach_the_address`] drives a name shaped like an address
     /// straight at the route and asserts it reaches nothing.
+    ///
+    /// **X-47 widened it by two more names and paid the same price.** `{service}` and `{field}`
+    /// name a connection setting, and they are admitted on `{credential}`'s argument rather than on
+    /// a new one: both are keys into what the connector's own operations declare — `declared_settings`
+    /// derives the set, and a name outside it is refused before anything is stored — and neither
+    /// reaches a path anywhere, because the settings store renders no filesystem path from either.
+    /// The behavioural half is [`a_hostile_service_or_field_cannot_reach_the_settings_address`],
+    /// which drives address-shaped and traversing values straight at the route.
     #[test]
     fn no_route_here_accepts_an_address() {
         /// What a path here may name, each because the catalogue is what resolves it.
-        const KEYS: &[&str] = &["connector", "credential"];
+        const KEYS: &[&str] = &["connector", "credential", "service", "field"];
 
         for route in MODULE.routes {
             for parameter in route
