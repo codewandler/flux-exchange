@@ -1,8 +1,7 @@
 ---
 id: X-19
 title: "The cleartext check parses an authority the way the client that sends the secret does"
-status: ready
-priority: 1
+status: done
 epic: serve
 areas: [exchange-server]
 note: "found by X-17's reviewer, 2026-08-01: `http://evil.example\\@127.0.0.1/token` passes `carries_a_secret_safely` as loopback, while the `url` crate reqwest actually uses resolves the host to `evil.example` — so the check clears a configuration that sends the client secret in cleartext to a remote host"
@@ -56,13 +55,13 @@ The reviewer tested the rest of the obvious class and **all of it errs conservat
 `#`/`?`/`/` placement. The backslash is the one hole found.
 
 ## Acceptance
-- [ ] **Failing-first test** — `http://evil.example\@127.0.0.1/token` is **refused** at startup. It
+- [x] **Failing-first test** — `http://evil.example\@127.0.0.1/token` is **refused** at startup. It
       currently passes, so the test fails before the fix.
-- [ ] A table of hostile authority spellings is refused, including the fifteen the reviewer already
+- [x] A table of hostile authority spellings is refused, including the fifteen the reviewer already
       confirmed conservative, so the class is pinned rather than the one instance.
-- [ ] Genuine loopback spellings still pass — `http://127.0.0.1:8080/token`, `http://localhost/token`,
+- [x] Genuine loopback spellings still pass — `http://127.0.0.1:8080/token`, `http://localhost/token`,
       `http://[::1]/token` — asserted in the same run, so the fix cannot pass by refusing everything.
-- [ ] `host_in`'s doc comment states a guarantee that is **true**. If the implementation cannot make
+- [x] `host_in`'s doc comment states a guarantee that is **true**. If the implementation cannot make
       the absolute claim hold, the comment says what it actually promises.
 
 ## Notes
@@ -76,3 +75,36 @@ The reviewer tested the rest of the obvious class and **all of it errs conservat
   parser agree**, not that this one spelling is handled.
 - The same `host_in` is used for both `_TOKEN_ENDPOINT` and `_JWKS_URI`. The JWKS URI carries no
   secret, so the consequence there is weaker, but the check should not diverge between them.
+
+## Progress
+- **Done 2026-08-01.** Gate green: 39 + 159 tests, clippy clean, fmt clean. Genuine merge-base
+  failure — the hostile URL was admitted at `4395ffa` and the test failed there without any new
+  symbol.
+- **The class was measured, not assumed.** A throwaway crate outside the workspace ran **475,270**
+  generated spellings through the shipped parser, the candidate, and real `url` 2.5.8:
+  - shipped parser: **15** endpoints admitted that `url` dials to a remote host over `http` — all
+    backslash. The X-17 review found 3; the corpus also turned up `http://.\@…`, `http://%2e\@…`,
+    `http://0x7f\@…` and `http://ⓛ\@…`, the same mechanism with a different left-hand side.
+  - new parser: **0** admitted, and 0 that it admits while `url` refuses to dial at all.
+  - **15,784** remain in the *refusing* direction — `2130706433`, `0x7f.0.0.1`, trailing dot,
+    `loc%61lhost`, `ⓛocalhost`, whitespace `url` strips. The operator sees a startup refusal and the
+    secret is unsent, and the doc now names these rather than implying they do not exist.
+- `host_in` returns `Option` now, so **"this module cannot say" is a value** rather than an empty
+  string that happens not to be loopback. It follows WHATWG at the three places WHATWG decides: `\`
+  joins the authority terminator set; a bracketed literal must close and parse as an `Ipv6Addr` with
+  only a port after it; a port must be ASCII digits fitting a `u16`.
+- **The doc no longer makes the absolute claim.** It promises one direction — whenever `host_in`
+  returns a host, `url` returns the same host — names the working configurations it refuses, and
+  says the agreement is **measured, not proved**. That is the honest statement, and it is the one
+  the implementor argued for rather than restoring the stronger sentence.
+- **New refusals X-17 did not have**, and the first things to check if an operator insists a config
+  is fine: the port rule (`127.0.0.1:8080` fine, `:+80` and `:99999` refused) and the IPv6 rule
+  (`[127.0.0.1]` refused, as `url` also refuses it).
+- **Still open, deliberately:** `https` short-circuits before `host_in` runs, so
+  `https://evil.example\@127.0.0.1/token` is admitted and dialled to `evil.example` over TLS. That
+  is correct under X-17's rule, which is about *transport* and not *destination* — the secret is
+  protected in transit and the cert is checked. This module vouches for the channel, never for who
+  is on the other end. If destination is meant to be a guarantee, it is a separate story.
+- The `url` crate remains the only thing that would give back an absolute rather than a measured
+  guarantee. Not taken here — the manifest is fenced and the admit-direction hole is closed either
+  way — but it is a live follow-up rather than a closed question.

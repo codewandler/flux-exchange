@@ -25,6 +25,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **The cleartext check now parses an authority the way the client that dials it does** (X-19).
+  X-17's refusal read `http://evil.example\@127.0.0.1/token` as loopback and admitted it, while the
+  `url` crate reqwest actually dials with ends the authority at the backslash and resolves the host
+  to `evil.example` — so the client secret would have gone out as Basic credentials, in cleartext,
+  to a remote host, past the check built to stop precisely that. Operator-supplied configuration
+  only, never caller-reachable.
+
+  The agreement is now **measured**: 475,270 generated spellings through the old parser, the new one
+  and real `url` 2.5.8. The old parser admitted 15 endpoints `url` dials remotely over `http`; the
+  new one admits none. The doc no longer claims it cannot admit a cleartext endpoint — it promises
+  one direction, names the working configurations it refuses, and says the agreement is measured
+  rather than proved.
+
 - **A delete that fails half way says what it destroyed** (X-18). `DELETE` looped over a
   connection's credentials and returned a generic `503` on the first error, leaving some destroyed
   and some live while telling the operator only "retrying may work" — so a *live* vendor credential
