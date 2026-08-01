@@ -1,7 +1,7 @@
 ---
 id: X-71
 title: "The console's dev server follows the address the service was told to bind"
-status: in-progress
+status: done
 priority: 3
 areas: [console]
 note: "found by X-69 while walking its own page, 2026-08-01: console/vite.config.ts hard-codes the default bind, so a reader who sets FLUX_EXCHANGE_BIND gets a console that cannot reach the service"

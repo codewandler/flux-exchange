@@ -22,6 +22,27 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **The console's dev server follows the bind the service was told to use** (X-71). `vite.config.ts`
+  hard-coded `http://127.0.0.1:8080` as the `/api` proxy target, so a reader who moved
+  `FLUX_EXCHANGE_BIND` — the first thing anyone does when a port is taken — got a console that
+  rendered and reached nothing. X-69 hit exactly that while walking its own page and had to move the
+  bind back to finish. The target now resolves from the same setting the service reads.
+
+  **A configured value is used as written.** `0.0.0.0` is not turned into loopback and a malformed
+  address is not corrected: repairing one here would dial a service the operator did not ask for, or
+  quietly agree with a bind the service itself refused to start on. A blank value reads as unset,
+  because `FLUX_EXCHANGE_BIND=` is how a shell clears a variable rather than how it names a host.
+
+  The resolution lives in `console/vite.proxy.mts` so it can be asserted without standing up a dev
+  server, and it reads the environment off `globalThis` rather than through `@types/node` — the
+  dependency whose cost the old comment cited as the reason not to do this at all.
+
+  ⚠ **The default address is now spelled in two trees** — `DEFAULT_BIND` in `console/vite.proxy.mts`
+  and in `crates/exchange-server/src/bind.rs` — and no test ties them. That is deliberate rather than
+  overlooked: `127.0.0.1:8080` appears in several unrelated assertions in `bind.rs`, so every
+  mechanical check tried would have passed while the two disagreed, and a guard that cannot fail is
+  worse than the doc comment that now names the other file.
+
 - ⚠ **The site's credential-shape scanner could not see inside a code block** (X-69). `textOf`
   replaced each tag with a space and the syntax highlighter puts every token in its own element, so
   `export FOO=bar` reached the rule as `export FOO = bar` and the check against a value on the
