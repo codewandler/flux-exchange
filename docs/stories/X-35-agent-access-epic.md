@@ -30,7 +30,10 @@ See [`docs/designs/agent-access.md`](../designs/agent-access.md) for the argumen
 lifetimes it must not be confused with, and what it deliberately does not do.
 
 ## Children
-- **X-36** — mint an agent token, shown once, verifier stored.
+- **X-36** — mint an agent token, shown once, verifier stored. **Done.**
+- **X-40** — a leaked agent token cannot mint its own successors. **Ordered before X-37**, because
+  X-37 is what makes the hole reachable and X-36's implementor found it in the surface it had just
+  built: revocation stops being a remedy if a revoked token's descendants survive it.
 - **X-37** — an agent token authenticates a request through the existing `Identity` port.
 - **X-38** — revoke and list, so minting is not a one-way door.
 

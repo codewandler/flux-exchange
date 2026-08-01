@@ -8,6 +8,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **An agent principal can be minted, and this host keeps only a verifier** (X-36). `docs/vision.md`
+  says the primary caller is an agent, not a human — and until now `PrincipalKind::Agent` appeared
+  only in its own definition, a loopback development roster, and a comment saying agents carry their
+  own tokens. Nothing minted one, so the stated primary caller could authenticate only on loopback,
+  in the mode that exists because it must not be exposed.
+
+  `POST /api/agents` mints an agent for the caller's tenant and shows the token **once**. The store
+  keeps a digest: a test presents every value in the file — and the whole file — back to the
+  resolver, and none of them authenticates. **Reading that store is a roster disclosure; writing it
+  is a full authentication bypass**, so a group- or world-writable store is refused at startup while
+  a merely readable one warns.
+
+  It **authenticates nothing yet** — binding it to the identity port is a following story, and the
+  question of *who may mint* is settled before that lands.
+
 - **A credential can be rotated in place** (X-39). The surface could create, read and delete but not
   *replace*, so rotating a credential — the remedy for a leak — meant `DELETE` then `POST`, with a
   window where the tenant had no connection at all and anything relying on it failed.
