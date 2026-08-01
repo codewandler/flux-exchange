@@ -6,6 +6,23 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- **The flux engine line is aligned, and `connector-pack` links** (X-11). Upstream published 0.9.0:
+  `connector-pack` now requires `flux-runtime ^0.46` where it required `^0.41` against a flux line at
+  0.45 — the conflict that made execution impossible from this repository. `connector-spec` (the
+  compiler) is gone; its vocabulary now comes from `connector-address` 0.9.
+
+  `connector-pack` is a **dev-dependency**, deliberately: nothing published here executes an
+  operation yet, and a normal dependency would put the whole flux engine into every consumer's graph
+  to satisfy a proof rather than to run code. The engine line is pinned at `0.46` in one place and a
+  test refuses a second value — `flux-runtime` 0.47 exists and taking it would recreate the failure
+  this removes.
+
+  **This unblocks `invoke`, grants-gate-invoke, and per-instance connections.** Addresses are
+  unchanged: `connector-address` carries an optional instance level and `CredentialRef::new` still
+  elides it, asserted rather than assumed.
+
 ## [0.6.0] - 2026-08-01
 
 ### Added

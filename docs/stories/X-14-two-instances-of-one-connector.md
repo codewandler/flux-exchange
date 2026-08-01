@@ -1,8 +1,8 @@
 ---
 id: X-14
 title: "Two instances of one connector, told apart by a name the operator chose"
-status: blocked
-priority: 5
+status: ready
+priority: 2
 epic: connections
 note: "owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first"
 ---
@@ -107,3 +107,22 @@ refusal, not a fallback to a default.
   address is how two components stop agreeing about where a credential lives.
 - `Tenant::new` (`crates/exchange-host/src/principal.rs`) is the precedent for validating a segment
   at construction. Build on it; do not re-validate ad hoc.
+
+## Unblocked, 2026-08-01
+
+**The instance dimension is published and already in this repository's lockfile.** X-11 upgraded to
+`connector-address` 0.9, which carries C-406: `CredentialRef` gained an optional
+`@instances/<uuid>` level.
+
+Two facts X-11 verified, which this story starts from rather than re-establishing:
+
+- **`CredentialRef::new` still elides the instance level**, so today's addresses are unchanged and
+  every existing connection keeps its address. That was asserted literally in
+  `tests/engine_line.rs`, not assumed.
+- **`TenantLayout::parse` now accepts 6- and 7-segment paths** — the instanced forms — where 0.8
+  refused them as "has N segments". This repository never calls `parse`, only `render` via
+  `address_path`, so nothing here changed. It would matter to anything that starts parsing
+  operator-supplied paths, which is a thing this repository deliberately does not do.
+
+The `409` refusal that names this story was corrected by X-11: it used to tell operators the
+instance level "is not published yet; this host pins connector-spec 0.8", which is now false.

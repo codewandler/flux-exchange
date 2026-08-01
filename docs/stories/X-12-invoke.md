@@ -1,8 +1,10 @@
 ---
 id: X-12
 title: "Invoke an operation"
-status: blocked
+status: ready
 epic: invoke
+priority: 1
+areas: [exchange-host, exchange-server]
 design: docs/designs/invoke.md
 note: "the caller names an operation id and nothing else about the request is theirs — not the host, not the credential, not the tenant. That is the whole confused-deputy answer"
 ---
@@ -49,3 +51,26 @@ A caller names an operation and gets a result. This host resolves the credential
 - Catalogue gap filed upstream as flux-connectors **C-405**: `catalog::Provider` publishes no runtime,
   so `ConnectorSurface::runtime` must be derived (`Http`) until it does — and no shipped connector
   exercises the `Deployment::admits` refusal, so that test builds a fixture.
+
+## Unblocked, 2026-08-01
+
+X-11 landed: `connector-pack` 0.9.0 links against the flux 0.46 engine line, proved by
+`crates/exchange-host/tests/engine_line.rs`, which packs a real connector into a
+`flux_runtime::ToolRegistry` through `flux_web`'s `HttpRequestTool`. **The thing that made this
+impossible is gone.**
+
+Two facts X-11 established that this story inherits:
+
+- **`connector-pack` is a `dev-dependency` today.** X-11 argued that a published crate should not put
+  the whole flux engine into every consumer's graph to satisfy a proof. **This story is what promotes
+  it** — three lines from `[dev-dependencies]` to `[dependencies]` — and that is a real decision about
+  the published artifact's weight, not a formality. Say so in the report.
+- **The engine line is pinned at `0.46` in one place**, marked `ENGINE_LINE` in
+  `[workspace.dependencies]` and enforced by a test that refuses a second value. `flux-runtime` 0.47
+  exists and **must not be taken**: `connector-pack` 0.9.0 requires `^0.46`, and reaching for the
+  newest recreates the two-incompatible-types failure X-11 just removed.
+
+Also inherited, and it is the thing to be careful with: `connector-address` 0.9 carries C-406's
+**instance dimension** — `CredentialRef` gained an optional `@instances/<uuid>` level, and
+`CredentialRef::new` still elides it. X-14 is the story that uses it. Invoke must not start
+resolving credentials at instanced addresses by accident.
