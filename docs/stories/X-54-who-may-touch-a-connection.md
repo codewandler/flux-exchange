@@ -1,7 +1,7 @@
 ---
 id: X-54
 title: "Who may create a connection and rotate a credential is decided, not inherited"
-status: ready
+status: in-progress
 priority: 1
 epic: connections
 areas: [exchange-server]

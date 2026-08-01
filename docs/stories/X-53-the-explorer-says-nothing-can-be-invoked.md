@@ -1,7 +1,7 @@
 ---
 id: X-53
 title: "The explorer stops badging operations this service runs as \"not live yet\""
-status: ready
+status: in-progress
 priority: 2
 epic: catalogue
 areas: [console]

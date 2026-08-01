@@ -1,7 +1,7 @@
 ---
 id: X-13
 title: "Grants gate invocation"
-status: ready
+status: in-progress
 epic: invoke
 priority: 2
 areas: [exchange-host, exchange-server]

@@ -1,7 +1,7 @@
 ---
 id: X-52
 title: "The descriptor's guard checks what its name claims"
-status: ready
+status: in-progress
 priority: 1
 epic: agent-onboarding
 areas: [exchange-server, console]
