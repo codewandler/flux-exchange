@@ -41,7 +41,7 @@
 //! a page.
 
 use axum::extract::{Query, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
 use serde::Deserialize;
@@ -52,6 +52,7 @@ use crate::oidc::config::{
     AUTHORIZATION_ENDPOINT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, ISSUER_ENV, REDIRECT_URI_ENV,
     TENANT_ENV,
 };
+use crate::oidc::flow;
 use crate::oidc::SignInRefusal;
 use crate::session;
 use crate::state::{AppState, SignIn};
@@ -98,8 +99,21 @@ async fn signin(State(state): State<AppState>) -> Response {
         SignIn::NoTokenExchange => return no_token_exchange_page(),
     };
 
-    match oidc.authorization_url() {
-        Ok(url) => (StatusCode::SEE_OTHER, [(header::LOCATION, url)]).into_response(),
+    match oidc.authorize() {
+        // Two headers, one act: where the browser goes, and the binder that will prove on the way
+        // back that it is the same browser. Distinct header names, so the array form is safe here —
+        // see [`planting`] for why it is not where two cookies are involved.
+        Ok(authorization) => (
+            StatusCode::SEE_OTHER,
+            [
+                (header::LOCATION, authorization.url),
+                (
+                    header::SET_COOKIE,
+                    flow::planted_binder(&authorization.binder),
+                ),
+            ],
+        )
+            .into_response(),
         Err(error) => {
             // Names this host's own machinery, so it goes to the log rather than to the caller —
             // which is exactly the split `SignInRefusal` encodes, so the refusal goes through it
@@ -125,7 +139,11 @@ struct Callback {
 }
 
 /// Finish a sign-in.
-async fn callback(State(state): State<AppState>, Query(callback): Query<Callback>) -> Response {
+async fn callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(callback): Query<Callback>,
+) -> Response {
     let oidc = match state.sign_in() {
         SignIn::Oidc(oidc) => oidc,
         SignIn::Unconfigured => return unconfigured_page(),
@@ -150,12 +168,34 @@ async fn callback(State(state): State<AppState>, Query(callback): Query<Callback
         return refused(&SignInRefusal::UnknownState, StatusCode::BAD_REQUEST);
     };
 
-    let token = match oidc.complete(&presented_state, &code).await {
+    // The binder the browser is holding, if it is holding one. This is the **one** credential-shaped
+    // input the callback reads, and it is not a credential for anything: it names no principal, it
+    // opens no session on its own, and holding it is neither necessary nor sufficient for anything
+    // but finishing the one sign-in it was planted for. See the module documentation.
+    let Some(binder) = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| session::from_cookie_header(value, flow::BINDER_COOKIE))
+    else {
+        // Refused **before** the pending store is consulted, for the same two reasons the missing
+        // `code` above is: an attacker who simply omits the cookie must not fall through to the
+        // path that checks only `state`, and an answer decided without a lookup cannot report
+        // whether the `state` named is one this host is holding.
+        let refusal = SignInRefusal::NoBinder;
+        warn!(reason = %refusal, "a sign-in did not complete");
+        return refused(&refusal, StatusCode::BAD_REQUEST);
+    };
+
+    let token = match oidc.complete(&presented_state, &code, binder).await {
         Ok(token) => token,
         Err(refusal) => {
             let status = match refusal {
-                // The caller's problem, and the one this story's failing-first test drives.
-                SignInRefusal::UnknownState => StatusCode::BAD_REQUEST,
+                // The caller's problem, and what X-04's and X-15's failing-first tests drive.
+                // All three answer `400` with the same phrase; only the log tells them apart, and
+                // `SignInRefusal::caller_facing` carries the argument for that.
+                SignInRefusal::UnknownState
+                | SignInRefusal::NoBinder
+                | SignInRefusal::AnotherBrowser => StatusCode::BAD_REQUEST,
                 SignInRefusal::CodeRejected
                 | SignInRefusal::IssuerMismatch
                 | SignInRefusal::AudienceMismatch
@@ -178,16 +218,53 @@ async fn callback(State(state): State<AppState>, Query(callback): Query<Callback
 
     // The session leaves here as a cookie and in no other form. See the module documentation: this
     // response has no body a script can read a credential out of.
-    (
-        StatusCode::OK,
-        [(header::SET_COOKIE, session::planted(&token))],
-        Html(document(
-            "Signed in",
-            "You are signed in. Returning to the console…",
-            Some(AFTER_SIGN_IN),
-        )),
+    //
+    // The binder is cleared in the same breath. It is already spent server-side — the pending
+    // authorization it lived in was removed — so this only stops a value that can no longer match
+    // anything from sitting in the browser until its `Max-Age` elapses.
+    planting(
+        (
+            StatusCode::OK,
+            Html(document(
+                "Signed in",
+                "You are signed in. Returning to the console…",
+                Some(AFTER_SIGN_IN),
+            )),
+        )
+            .into_response(),
+        &[session::planted(&token), flow::cleared_binder()],
     )
-        .into_response()
+}
+
+/// A response carrying every `Set-Cookie` in `cookies`.
+///
+/// **Not** the `[(SET_COOKIE, …); N]` array form, which axum turns into repeated `HeaderMap::insert`
+/// — so a second entry silently replaces the first, and this response plants a session *and* clears
+/// the binder. A dropped `Set-Cookie` here would be a sign-in that answered "Signed in" and issued
+/// nothing, which is the failure mode with no symptom until somebody reports being logged out.
+///
+/// A cookie that cannot be a header value refuses the whole response rather than being skipped:
+/// refuse, never repair. Every value this host builds is hex and ASCII literals, so this is a branch
+/// that should never be taken — which is precisely why it must not be a silent one.
+fn planting(mut response: Response, cookies: &[String]) -> Response {
+    for cookie in cookies {
+        match header::HeaderValue::from_str(cookie) {
+            Ok(value) => {
+                response.headers_mut().append(header::SET_COOKIE, value);
+            }
+            Err(error) => {
+                error!(%error, "a Set-Cookie this host built is not a header value");
+                return page(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Sign-in refused",
+                    "this host cannot open a session right now. Try again shortly",
+                    None,
+                );
+            }
+        }
+    }
+
+    response
 }
 
 /// A refusal the caller sees: a status and a fixed phrase, never a value.
@@ -581,11 +658,8 @@ mod tests {
 
         // And the browser that really did open it still completes — otherwise everything above
         // passes on a host where nobody can sign in at all.
-        let (status, headers, body) = call(
-            app,
-            attacker.returns_with("an-authorization-code"),
-        )
-        .await;
+        let (status, headers, body) =
+            call(app, attacker.returns_with("an-authorization-code")).await;
 
         assert_eq!(
             status,
@@ -596,6 +670,160 @@ mod tests {
             planted_session(&headers).is_some(),
             "and it is the one that gets the session",
         );
+    }
+
+    /// A callback carrying **no binder at all** is refused, and issues no session.
+    ///
+    /// Its own test rather than a case inside the one above, because it is the shape an attacker
+    /// reaches for first: if omitting the cookie fell through to the path that checks only `state`,
+    /// the binding would be advisory and every walked-in victim would simply arrive without it.
+    ///
+    /// The `state` it names must also survive. This refusal is decided before the pending store is
+    /// consulted, so a cookie-less callback cannot cancel a sign-in somebody else has in flight —
+    /// asserted here by completing that very sign-in afterwards.
+    #[tokio::test]
+    async fn a_callback_carrying_no_binder_is_refused_and_spends_nothing() {
+        let exchange = Arc::new(StubExchange::returning(claims("not-yet-known")));
+        let app = oidc_app(exchange.clone());
+
+        let browser = begin(&app).await;
+        exchange.echoing(&browser.nonce);
+
+        let (status, headers, body) = call(
+            app.clone(),
+            callback_from(
+                None,
+                &format!("?state={}&code=an-authorization-code", browser.state),
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a callback with no binder must not fall through to the state-only path: {body}",
+        );
+        assert!(
+            headers.get(SET_COOKIE).is_none(),
+            "and must issue nothing at all",
+        );
+        assert!(!carries_a_token(&body), "{body}");
+
+        // Refused without touching the store, so the honest sign-in it named is untouched.
+        let (status, headers, body) =
+            call(app, browser.returns_with("an-authorization-code")).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a binder-less callback must not spend the state it named: {body}",
+        );
+        assert!(planted_session(&headers).is_some());
+    }
+
+    /// The binder is a `__Host-` cookie with `Secure`, `HttpOnly` and a `SameSite` — a pre-session
+    /// credential with a pre-session credential's protections — and it is **not** in the URL.
+    ///
+    /// `SameSite=Lax` and not `Strict`, which is the one attribute where this cookie and the session
+    /// cookie disagree. `crate::oidc::flow::BINDER_COOKIE` carries the argument; the short form is
+    /// that the binder has to survive the provider's redirect back, which `Strict` withholds, and
+    /// that `SameSite` is not what closes login-CSRF anyway — being unguessable and unplantable by
+    /// any other origin is.
+    #[tokio::test]
+    async fn the_binder_is_a_host_cookie_and_never_leaves_in_the_url() {
+        let exchange = Arc::new(StubExchange::returning(claims("not-yet-known")));
+        let app = oidc_app(exchange);
+
+        let (status, headers, _) = call(app, get(SIGNIN)).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+
+        let planted = headers
+            .get(SET_COOKIE)
+            .expect("opening a sign-in plants a binder")
+            .to_str()
+            .expect("a cookie is ASCII");
+
+        // `__Host-`: a browser refuses such a cookie unless it is `Secure`, has `Path=/` and carries
+        // no `Domain` — so no sibling subdomain can plant a binder for this host, which is what
+        // makes the value unforgeable by the attacker's origin rather than merely unguessable.
+        assert!(
+            planted.starts_with(&format!("{}=", flow::BINDER_COOKIE)),
+            "{planted}",
+        );
+        assert!(flow::BINDER_COOKIE.starts_with("__Host-"), "{planted}");
+        assert!(planted.contains("Path=/"), "{planted}");
+        assert!(!planted.contains("Domain"), "{planted}");
+        assert!(planted.contains("Secure"), "{planted}");
+        assert!(planted.contains("HttpOnly"), "{planted}");
+        assert!(planted.contains("SameSite=Lax"), "{planted}");
+        assert!(
+            !planted.contains("SameSite=Strict"),
+            "the binder must not inherit the session cookie's SameSite, which would withhold it on \
+             the provider's redirect back and refuse every sign-in: {planted}",
+        );
+
+        // It expires with the authorization request it belongs to, so a stale one cannot sit in a
+        // browser waiting to be replayed.
+        assert!(planted.contains("Max-Age="), "{planted}");
+
+        // And it never travels through the provider. A binder in the authorization URL would be
+        // read by the provider, by anything else registered for that redirect, and by whatever the
+        // browser's history and referrers reach — every one of which would then hold it.
+        let location = headers
+            .get(header::LOCATION)
+            .expect("a redirect names where it goes")
+            .to_str()
+            .expect("a location is ASCII");
+
+        let binder = planted
+            .split_once('=')
+            .and_then(|(_, rest)| rest.split(';').next())
+            .expect("a value in the planted cookie");
+
+        assert!(!binder.is_empty(), "{planted}");
+        assert!(
+            !location.contains(binder),
+            "the binder must not reach the provider: {location}",
+        );
+        assert!(
+            !location.contains(flow::BINDER_COOKIE),
+            "nor must its name: {location}",
+        );
+    }
+
+    /// A completed sign-in clears the binder it spent, alongside planting the session.
+    ///
+    /// Two `Set-Cookie` headers on one response, which is the thing `planting` exists to get right:
+    /// axum's array form would have `insert`ed and left only one, and the one it left would have
+    /// decided whether anybody was signed in.
+    #[tokio::test]
+    async fn a_completed_signin_plants_a_session_and_clears_the_binder() {
+        let exchange = Arc::new(StubExchange::returning(claims("not-yet-known")));
+        let app = oidc_app(exchange.clone());
+
+        let browser = begin(&app).await;
+        exchange.echoing(&browser.nonce);
+
+        let (status, headers, body) =
+            call(app, browser.returns_with("an-authorization-code")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let planted: Vec<&str> = headers
+            .get_all(SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect();
+
+        assert!(
+            planted_session(&headers).is_some(),
+            "the session must survive being planted beside another cookie: {planted:?}",
+        );
+
+        let cleared = planted
+            .iter()
+            .find(|value| value.starts_with(&format!("{}=", flow::BINDER_COOKIE)))
+            .expect("the spent binder is cleared");
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -642,8 +870,11 @@ mod tests {
         let forged = "0000000000000000000000000000000000000000000000000000000000000000";
         assert_ne!(forged, browser.state, "the forged state must differ");
 
-        let (status, headers, body) =
-            call(app.clone(), browser.walked_into(forged, "an-authorization-code")).await;
+        let (status, headers, body) = call(
+            app.clone(),
+            browser.walked_into(forged, "an-authorization-code"),
+        )
+        .await;
 
         assert_eq!(
             status,
@@ -1136,9 +1367,8 @@ mod tests {
 
         // Probed from a browser holding its own binder, which is the strongest prober there is: it
         // has everything a genuine callback has except a `code`.
-        let probe = |state: &str| {
-            callback_from(browser.planted.as_deref(), &format!("?state={state}"))
-        };
+        let probe =
+            |state: &str| callback_from(browser.planted.as_deref(), &format!("?state={state}"));
 
         let (known, known_headers, known_body) = call(app.clone(), probe(&browser.state)).await;
         let (unknown, _, unknown_body) = call(app.clone(), probe(forged)).await;
