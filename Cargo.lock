@@ -406,7 +406,7 @@ dependencies = [
 
 [[package]]
 name = "codewandler-flux-exchange-host"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "async-trait",
  "codewandler-connector-address",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "flux-exchange"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "axum",
  "codewandler-connector-catalog",

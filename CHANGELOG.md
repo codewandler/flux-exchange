@@ -6,7 +6,30 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-01
+
 ### Added
+
+- **You can sign in without an identity provider** (X-57). Everything this service does was reachable
+  only by a signed-in principal, and the only thing that made one was an authorization-code flow
+  against a configured OIDC provider. That was a lot of setup to look at a page.
+
+  `SignIn::available()` meant *is OIDC configured*, not *can somebody sign in here* — so a deployment
+  with the development identity armed, which **can** turn a caller into a principal, reported that it
+  could sign nobody in. It now answers the question it is named for, and `GET /api/signin` on such a
+  host serves a page explaining the mechanism instead of a refusal.
+
+  ⚠ **Loopback only, and that is structural.** A roster handle is a credential with no secret in it,
+  so `admit_bind` refuses every non-loopback address while the development identity is armed — driven
+  under review with a roster and a complete OIDC environment set *simultaneously*, refused on
+  `0.0.0.0`, `[::]` and a LAN address. A reachable deployment still needs a real provider. Local users
+  with an actual verifier are X-58.
+
+  Two things this corrected on the way. The premise that *the console hides its sign-in affordance*
+  was **false** — it renders the anchor unconditionally and nothing reads `sign_in_available`, which
+  X-43 published for exactly that purpose. And one of X-43's own assertions encoded the same
+  conflation a layer up, asserting that an *available* composition answers `/api/signin` with a
+  redirect.
 
 - **An operator can see and change what their tenant may run** (X-62). v0.9.0 gated invocation by
   grant and shipped no way to write one, so a deployment ran nothing until somebody hand-wrote a
