@@ -39,6 +39,27 @@
 //! `exchange_host::ConnectorDeclaration::address_of_declared` for the seam it is inserted at, and
 //! `docs/designs/connections.md` for the argument.
 //!
+//! # A half connection is one an operator cannot tell from a whole one
+//!
+//! Which is why `POST` resolves every address before writing any value, and why a write that fails
+//! part way is rolled back and reported through [`partly_written`] rather than left where it fell.
+//!
+//! **`DELETE` obeys the same rule and cannot use the same mechanism.** A destroyed credential
+//! cannot be put back — this host never held the plaintext to restore, which is the point of it —
+//! so there is nothing here for a rollback to do. The half-state is therefore unavoidable, and what
+//! is owed is an honest account of it: [`remove`] destroys as much as the store will allow and
+//! [`partly_destroyed`] names both halves, `destroyed` and `left_behind`, in `partly_written`'s
+//! vocabulary. This matters more in this direction than in the other, because the case a `DELETE`
+//! exists for is revoking a leaked secret.
+//!
+//! `GET` still answers `200` for such a connection, with each credential's `held` telling the truth
+//! about it. **That is deliberate and X-18 decided not to change it here**: a connector may legally
+//! hold a subset of what it declares — `tests::a_connection_may_carry_a_subset_of_what_is_declared`
+//! — so "half destroyed" and "deliberately partial" render identically, and nothing distinguishes
+//! them without a record beside the store, which this module deliberately does not keep (see
+//! [`list`]). Giving `GET` a status of its own therefore needs that record designed first, and is
+//! its own story rather than a line here.
+//!
 //! That refusal is a check-then-write, so it only means anything while nothing interleaves with it:
 //! every mutating route holds a
 //! [`ConnectionGuard`](crate::connection_guard::ConnectionGuard) claim on `(tenant, connector)`
@@ -329,21 +350,52 @@ async fn remove(
         return change_in_flight(provider);
     };
 
-    match held(store, &addresses).await {
+    let held_before = match held(store, &addresses).await {
         Err(error) => return store_failed(&error),
         // A `404` and not a `204`: deleting something that is not there is indistinguishable from
         // deleting another tenant's, and the caller should be able to tell.
         Ok(held) if held.is_empty() => return not_connected(provider, &addresses),
-        Ok(_) => {}
-    }
+        Ok(held) => held,
+    };
 
     // Every declared address, not only the ones the probe found. `SecretStore::delete` is
     // idempotent by contract, and deleting the whole set is what makes "the connection is gone"
     // true even if a value appeared between the probe and here.
-    for (_, reference) in &addresses {
-        if let Err(error) = store.delete(reference).await {
-            return store_failed(&error);
+    //
+    // **The delete direction of the rule `create` states above.** A half-*destroyed* connection is
+    // one an operator cannot tell from a revoked one, and this is the direction where that costs
+    // most: the case a `DELETE` exists for is revoking a leaked secret, so a live vendor credential
+    // surviving under a generic "retrying may work" is precisely the wrong thing to read. `create`
+    // makes the half-state impossible by rolling its writes back; **that is not available here**,
+    // because a destroyed credential cannot be put back — this host never held the plaintext to
+    // restore, which is the whole point of it. So the answer is honesty rather than repair: the
+    // loop does not stop at the first failure, as much is destroyed as the store will allow, and
+    // the refusal names both halves.
+    let mut destroyed = Vec::new();
+    let mut left_behind = Vec::new();
+    let mut failure = None;
+
+    for (declared, reference) in &addresses {
+        match store.delete(reference).await {
+            // Only what the probe saw a value at is reported destroyed. Deleting an address that
+            // held nothing is a no-op, and calling it "destroyed" would overstate what happened to
+            // an operator counting which of their secrets are now revoked.
+            Ok(()) if held_before.iter().any(|name| name == declared.name) => {
+                destroyed.push(address_path(reference));
+            }
+            Ok(()) => {}
+            // Named whether or not the probe found a value here: a failed delete is exactly the
+            // case where this host cannot say the address is empty, and the reason the whole
+            // declared set is deleted is that a value may have appeared since the probe.
+            Err(error) => {
+                left_behind.push(address_path(reference));
+                failure.get_or_insert(error);
+            }
         }
+    }
+
+    if let Some(error) = failure {
+        return partly_destroyed(provider, &error, destroyed, left_behind);
     }
 
     StatusCode::NO_CONTENT.into_response()
@@ -597,7 +649,21 @@ fn no_store() -> Response {
 /// its paths and its access — so it goes to the log, the same split the identity guard makes for an
 /// unreachable provider.
 fn store_failed(error: &StoreError) -> Response {
-    let (status, reason) = match error {
+    let (status, happened, advice) = store_failure(error);
+
+    error!(%error, "the credential store failed");
+
+    refuse(status, format!("{happened}. {advice}"), json!({}))
+}
+
+/// How a store failure is answered: its status, what happened, and what an operator is to do.
+///
+/// Split out of [`store_failed`] because [`partly_destroyed`] has to say the second half too, and
+/// two copies of this mapping is how one refusal comes to tell an operator "retrying may work"
+/// while another tells them "retrying will not help" about the same event. The whole argument for
+/// keeping the three kinds apart is on [`store_failed`].
+fn store_failure(error: &StoreError) -> (StatusCode, &'static str, &'static str) {
+    match error {
         StoreError::NotFound { .. } => {
             // Unreachable in practice: `held` filters this out. Kept because collapsing not-found
             // into a failure is exactly the mistake `StoreError` documents, and a future edit is
@@ -606,30 +672,28 @@ fn store_failed(error: &StoreError) -> Response {
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "the credential store did not answer, so this host cannot say what this tenant \
-                 has connected. Retrying may work",
+                 has connected",
+                "Retrying may work",
             )
         }
         StoreError::Unreachable { .. } => (
             StatusCode::SERVICE_UNAVAILABLE,
             "the credential store did not answer, so this host cannot say what this tenant has \
-             connected. Retrying may work",
+             connected",
+            "Retrying may work",
         ),
         StoreError::Denied { .. } => (
             StatusCode::BAD_GATEWAY,
             "the credential store refused this host's own access, so it cannot reach this \
-             tenant's credentials. Retrying will not help; an operator has to restore this host's \
-             access to the store",
+             tenant's credentials",
+            "Retrying will not help; an operator has to restore this host's access to the store",
         ),
         StoreError::Backend { .. } | StoreError::Layout { .. } => (
             StatusCode::BAD_GATEWAY,
-            "the credential store answered with something this host cannot interpret. Retrying \
-             will not help; this is a defect in the store or in how it is configured",
+            "the credential store answered with something this host cannot interpret",
+            "Retrying will not help; this is a defect in the store or in how it is configured",
         ),
-    };
-
-    error!(%error, "the credential store failed");
-
-    refuse(status, reason, json!({}))
+    }
 }
 
 /// Another change to this same connection is already in flight.
@@ -688,6 +752,52 @@ fn partly_written(
             json!({ "connector": provider.id, "left_behind": remaining }),
         ),
     }
+}
+
+/// The store failed part way through **destroying** a connection.
+///
+/// The delete direction of [`partly_written`], and deliberately its vocabulary rather than a second
+/// one for the same idea: `left_behind` names the addresses this host cannot say are empty, exactly
+/// as it does for a create whose rollback failed.
+///
+/// What it cannot borrow is `create`'s *mechanism*. There is no rollback in this direction — a
+/// destroyed credential cannot be put back, because this host never held the plaintext to restore —
+/// so `left_behind` is never `null` here the way it is for a create that undid itself. A partial
+/// delete is reported, not repaired.
+///
+/// `destroyed` is the other half, and it is the half the operator this refusal is written for
+/// needs: somebody revoking a leaked secret, who has to know which credentials are already gone so
+/// that the work left is exactly the ones named beside them. Both halves are addresses and never
+/// values, and both are this tenant's own — the same rule every refusal on this surface follows.
+fn partly_destroyed(
+    provider: &'static Provider,
+    error: &StoreError,
+    destroyed: Vec<String>,
+    left_behind: Vec<String>,
+) -> Response {
+    error!(%error, connector = provider.id, "a connection could not be fully destroyed");
+
+    // The kind survives, as it does everywhere else on this surface: a `Denied` reported as
+    // "retrying may work" would be a fresh instance of the misinformation this refusal exists to
+    // end.
+    let (status, _, advice) = store_failure(error);
+
+    refuse(
+        status,
+        format!(
+            "the credential store failed while destroying the `{}` connection, so it is now part \
+             gone and part live: the credentials at the addresses in `destroyed` are gone and \
+             cannot be put back, and the ones in `left_behind` this host could not destroy — treat \
+             those as still usable by anyone holding them. {advice}; a `DELETE \
+             /api/connections/{}` that answers `204` is what makes the connection gone",
+            provider.id, provider.id,
+        ),
+        json!({
+            "connector": provider.id,
+            "destroyed": destroyed,
+            "left_behind": left_behind,
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -754,6 +864,13 @@ mod tests {
         puts: Mutex<usize>,
         /// `delete` fails, which is what makes a rollback fail.
         deletes_fail: Mutex<bool>,
+        /// This many `delete`s succeed; the rest fail. `None` is "no limit".
+        ///
+        /// Distinct from `deletes_fail`, which fails every one from the start: driving `remove`
+        /// *part way* through a multi-credential connection needs the n-th delete to fail and the
+        /// ones before it to land.
+        deletes_allowed: Mutex<Option<usize>>,
+        deletes: Mutex<usize>,
         /// `get` yields to the runtime, widening the read-decide-write window.
         widened: Mutex<bool>,
     }
@@ -781,6 +898,16 @@ mod tests {
 
         fn deletes_fail(&self) {
             *self.deletes_fail.lock().expect("no test poisons this") = true;
+        }
+
+        /// Let `allowed` deletes land **from here** and fail every one after, so a connector
+        /// declaring two credentials can be made to fail half way through a `DELETE`.
+        ///
+        /// The count restarts, so a test may delete a whole connection first and still arm a
+        /// budget for the next one.
+        fn allow_only_deletes(&self, allowed: usize) {
+            *self.deletes.lock().expect("no test poisons this") = 0;
+            *self.deletes_allowed.lock().expect("no test poisons this") = Some(allowed);
         }
 
         /// Make the window between a probe and a write wide enough that a concurrent request
@@ -874,6 +1001,15 @@ mod tests {
 
             if *self.deletes_fail.lock().expect("no test poisons this") {
                 return Err(Failure::Unreachable.at(address_path(reference)));
+            }
+
+            {
+                let mut deletes = self.deletes.lock().expect("no test poisons this");
+                let allowed = *self.deletes_allowed.lock().expect("no test poisons this");
+                if allowed.is_some_and(|allowed| *deletes >= allowed) {
+                    return Err(Failure::Unreachable.at(address_path(reference)));
+                }
+                *deletes += 1;
             }
 
             self.held
@@ -1549,6 +1685,129 @@ mod tests {
         );
     }
 
+    /// **X-18's failing-first test.** A `DELETE` whose second credential deletion fails names what
+    /// it destroyed and what is still held, instead of a generic `store_failed`.
+    ///
+    /// Rollback is not available in this direction — a destroyed credential cannot be put back,
+    /// because this host never held the plaintext to restore — so the whole of what the refusal can
+    /// do is be honest. Before X-18 this answered a bare `503` "Retrying may work" while a live
+    /// vendor credential sat on disk, in the case a `DELETE` exists for: revoking a leaked secret.
+    ///
+    /// The whole delete is asserted **in the same run**, first, so the reporting cannot pass by
+    /// breaking delete. A second tenant holds the same connector throughout, so the disclosure
+    /// assertions at the end have something they could have leaked.
+    #[tokio::test]
+    async fn a_delete_that_fails_half_way_names_what_it_destroyed_and_what_is_still_held() {
+        const BOT_TOKEN: &str = "tenants/acme/com.slack.api/bot_token";
+        const SIGNING_SECRET: &str = "tenants/acme/com.slack.api/signing_secret";
+
+        async fn connect_slack(app: &Router, handle: &str) -> StatusCode {
+            call(
+                app,
+                handle,
+                Method::POST,
+                "/api/connections/slack",
+                Some(json!({
+                    "credentials": {
+                        "slack.bot_token": SENTINEL,
+                        "slack.signing_secret": SENTINEL,
+                    }
+                })),
+            )
+            .await
+            .0
+        }
+
+        let (app, store) = connected_app();
+
+        // `globex` holds the same connector for the whole test.
+        assert_eq!(connect_slack(&app, "bob").await, StatusCode::CREATED);
+        assert_eq!(connect_slack(&app, "alice").await, StatusCode::CREATED);
+
+        // A `DELETE` that succeeds entirely is unchanged: `204`, and nothing of this tenant's held.
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::DELETE,
+            "/api/connections/slack",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        assert_eq!(
+            store.addresses(),
+            vec![
+                "tenants/globex/com.slack.api/bot_token".to_string(),
+                "tenants/globex/com.slack.api/signing_secret".to_string(),
+            ],
+            "a whole delete holds nothing back",
+        );
+
+        // The same connection again, with the second of its two deletions made to fail.
+        assert_eq!(connect_slack(&app, "alice").await, StatusCode::CREATED);
+        store.allow_only_deletes(1);
+
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::DELETE,
+            "/api/connections/slack",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refusal}");
+        assert_eq!(
+            refusal["destroyed"],
+            json!([BOT_TOKEN]),
+            "the refusal must name what it already destroyed: {refusal}",
+        );
+        assert_eq!(
+            refusal["left_behind"],
+            json!([SIGNING_SECRET]),
+            "and what this host could not destroy, in the same vocabulary a failed create uses: \
+             {refusal}",
+        );
+        assert!(
+            refusal["error"]
+                .as_str()
+                .expect("a reason")
+                .contains("DELETE /api/connections/slack"),
+            "the refusal must say what to do about it: {refusal}",
+        );
+
+        // The store agrees with both halves: one credential is gone and one is still live.
+        assert_eq!(
+            store.at(BOT_TOKEN),
+            None,
+            "the destroyed credential is genuinely destroyed",
+        );
+        assert_eq!(
+            store.at(SIGNING_SECRET),
+            Some(SENTINEL.to_string()),
+            "and the one named in `left_behind` is genuinely still there — which is why saying so \
+             is the whole point",
+        );
+
+        // The existing disclosure guarantees, unchanged: an address, never a value, and never
+        // another tenant's anything.
+        let rendered = refusal.to_string();
+        assert!(
+            !rendered.contains(SENTINEL),
+            "a refusal names the address, never the value: {rendered}",
+        );
+        assert!(
+            !rendered.contains("globex"),
+            "a refusal must not name another tenant's address: {rendered}",
+        );
+
+        // `globex`'s connection is untouched by any of it.
+        assert_eq!(
+            store.at("tenants/globex/com.slack.api/signing_secret"),
+            Some(SENTINEL.to_string()),
+        );
+    }
+
     /// **The race the `409` has to survive.** Two concurrent `POST`s for one tenant and one
     /// connector, on a multi-threaded runtime, with the window between the probe and the write held
     /// open.
@@ -1709,6 +1968,43 @@ mod tests {
             let (_, body) = call(&app, "alice", method, path, body).await;
             answers.push(body);
         }
+
+        // X-18's refusal, which quotes two lists of addresses and must quote no value. Armed here
+        // rather than in the table above because it needs the store told to fail mid-loop.
+        let (_, partly_destroyed) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({
+                "credentials": {
+                    "slack.bot_token": SENTINEL,
+                    "slack.signing_secret": SENTINEL,
+                }
+            })),
+        )
+        .await;
+        answers.push(partly_destroyed);
+        store.allow_only_deletes(1);
+        let (status, partly_destroyed) = call(
+            &app,
+            "alice",
+            Method::DELETE,
+            "/api/connections/slack",
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this must be the partial-delete refusal, or the answer below proves nothing about \
+             it: {partly_destroyed}",
+        );
+        assert!(
+            partly_destroyed["left_behind"].is_array(),
+            "likewise: {partly_destroyed}",
+        );
+        answers.push(partly_destroyed);
 
         store.unreachable();
         let (_, unreachable) =
