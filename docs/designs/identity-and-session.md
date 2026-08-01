@@ -206,8 +206,8 @@ now takes an `Expiry` that every caller must name:
   same repair the OIDC side refuses. Arming this port already forces a loopback bind, which is where
   the protection actually is.
 
-The cookie still carries no `Max-Age`, and the argument in the last bullet below still holds — a
-second copy of the deadline, in a place this host cannot correct, buys nothing now that the server
+The cookie still carries no `Max-Age`, and the argument in the **first** bullet below still holds —
+a second copy of the deadline, in a place this host cannot correct, buys nothing now that the server
 enforces the first.
 
 ## What this deliberately does not do

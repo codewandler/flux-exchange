@@ -282,10 +282,18 @@ fn deadline(expiry: Expiry) -> Result<Option<Instant>, SessionError> {
 
 /// Seconds since the Unix epoch.
 ///
-/// The one wall clock in this binary, read here and by `Oidc::admit`. Deliberately one and not two:
-/// `admit` decides whether an id token has expired and this module decides how long the session it
-/// opens may live, and two clocks that disagreed would admit a token as valid and then refuse it a
-/// session for being expired.
+/// The one wall clock in this binary, read here and by `Oidc::admit`. Deliberately one function and
+/// not two: `admit` decides whether an id token has expired and this module decides how long the
+/// session it opens may live, and two *different* clocks that disagreed could admit a token as valid
+/// and then refuse it a session for being expired.
+///
+/// **One function is not one reading, and the difference is real.** `Oidc::complete` reads this for
+/// `admit` and reaches [`SessionStore::open`], which reads it again, so a token whose `exp` falls
+/// between the two readings is admitted and then refused `AlreadyExpired`. The window is sub-second
+/// and it fails in the safe direction — no session is issued — but the caller sees the 503 that
+/// `NoSession` carries rather than the 401 `SignInRefusal::Expired` would have given, so the status
+/// code is slightly wrong for a sub-second slice of sign-ins. Closing it means threading one reading
+/// through `complete`; it is noted with the refusal collapse in X-17 rather than claimed away here.
 ///
 /// A clock before the epoch is not a case worth a branch: `0` makes every `exp` look expired, which
 /// refuses every sign-in. That is the direction to fail in.

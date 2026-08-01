@@ -65,5 +65,17 @@ a five-minute token is as durable as the process.
   produced a compile error; the implementor said so plainly rather than dressing it up.
 - A fixture that used `expires_at: i64::MAX` had to state a realistic five minutes — a token that
   never expires is not a thing a provider issues, so that is the fixture being corrected.
-- **Carried forward:** `resolve` now sweeps the whole map under the mutex on every authenticated
-  request. Correct at the 4096 bound, but it is the first place to look if request latency moves.
+- **Reviewed PASS** by an independent pass that re-derived the pins with five of its own weakenings
+  rather than trusting the report — including `from_secs` -> `from_millis`, which the suite caught.
+  It verified indistinguishability **structurally** (one expression, no branch separating expired
+  from unknown) rather than only through the rendered-form comparison the tests use.
+- **The hot-path cost is now measured, not guessed.** Release build, isolated target dir: `resolve`
+  costs **105µs** with 4096 live entries and **17ns** once swept, and it does not scale with cores
+  because the mutex serialises it. Reaching 4096 takes 4096 completed sign-ins or loopback dev
+  access, so it is not an unauthenticated surface. Capacity retention is not a problem.
+- **One wall clock is one *function*, not one *reading*.** `complete` reads `now()` for `admit` and
+  `open` reads it again, so a token whose `exp` falls between the two is admitted and then refused
+  `AlreadyExpired` — sub-second, safe direction (no session issued), but the caller sees `NoSession`'s
+  503 rather than the 401 `Expired` would give. Corrected in the doc rather than claimed away;
+  closing it means threading one reading through `complete`, and it belongs with X-17's refusal
+  collapse.
