@@ -320,6 +320,116 @@
 }
 
 /* ---------------------------------------------------------------------------------------------
+ * The connect form.
+ *
+ * Deliberately plain. Every input here is a secret, and a field that looks like a search box is a
+ * field somebody types a production token into without noticing which page they are on.
+ * ------------------------------------------------------------------------------------------- */
+
+.connect {
+  margin-top: 40px;
+  padding: 20px 24px 24px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 10px;
+  background-color: var(--vp-c-bg-alt);
+}
+
+.connect__title {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 18px;
+  line-height: 26px;
+}
+
+.connect__intro,
+.connect__note {
+  max-width: 78ch;
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-2);
+}
+
+.connect__form {
+  display: grid;
+  gap: 14px;
+  margin-top: 20px;
+  max-width: 62ch;
+}
+
+.connect__fields {
+  display: grid;
+  gap: 14px;
+}
+
+.connect__field {
+  display: grid;
+  gap: 6px;
+}
+
+.connect__label {
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+}
+
+.connect__select,
+.connect__field input {
+  padding: 8px 10px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background-color: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.connect__field input {
+  font-family: var(--vp-font-family-mono);
+}
+
+.connect__submit {
+  justify-self: start;
+  padding: 8px 20px;
+  border: 1px solid var(--vp-c-brand-1);
+  border-radius: 6px;
+  background-color: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.connect__submit[disabled] {
+  border-color: var(--vp-c-divider);
+  background-color: var(--vp-c-default-soft);
+  color: var(--vp-c-text-3);
+  cursor: not-allowed;
+}
+
+.connect__done {
+  margin: 20px 0 0;
+  font-size: 15px;
+  color: var(--vp-c-success-1);
+}
+
+/* The one thing the console adds to a refusal: where to go instead of `DELETE`. */
+.connect__rotation {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-2);
+}
+
+.connect__rotation ul {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.connect__aside {
+  color: var(--vp-c-text-3);
+}
+
+/* ---------------------------------------------------------------------------------------------
  * The signed-out gate.
  *
  * What stands in for a screen that needs a principal. It is not an empty state: it says why there

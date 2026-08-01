@@ -42,8 +42,15 @@ function failure(reason: ServiceFailure): VNode {
   )
 }
 
-/** One connection: the connector, and each credential it declares as an address. */
-function card(connection: Connection): VNode {
+/**
+ * One connection: the connector, and each credential it declares as an address.
+ *
+ * Exported so that `Connect.mts` can show a connection it has just created through *this* renderer
+ * rather than a second one. `POST` answers with exactly the view `GET` lists, and reusing the
+ * renderer is the strongest available form of "no credential value is ever rendered back": there is
+ * one place a connection becomes HTML, and it has nowhere to put a value.
+ */
+export function connectionCard(connection: Connection): VNode {
   const declared = connection.credentials.length
   const held = connection.credentials.filter((credential) => credential.held).length
 
@@ -116,7 +123,7 @@ export default defineComponent({
       return h('section', { 'data-connections': 'ready' }, [
         h('h1', null, 'Connections'),
         state.connections.length
-          ? h('div', { class: 'connections' }, state.connections.map(card))
+          ? h('div', { class: 'connections' }, state.connections.map(connectionCard))
           : // A read that succeeded and found nothing. Distinguishable from the failure above by
             // more than a sentence: it names the endpoint that *did* answer.
             h('p', { class: 'connections__none' }, [
@@ -130,9 +137,9 @@ export default defineComponent({
           'and whether something is stored there; it cannot read one back, and neither can the ',
           'service — that is what ',
           h('em', null, 'the credential never crosses the boundary'),
-          ' means. Connecting a connector is done through ',
+          ' means. The form below writes to ',
           h('code', null, 'POST /api/connections/{connector}'),
-          '; there is no form for it here yet.',
+          ' and reads nothing.',
         ]),
       ])
     }

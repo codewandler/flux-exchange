@@ -30,12 +30,16 @@ import { fragmentPath, useRoute } from './routing'
 import {
   CONNECTORS_ENDPOINT,
   SIGNIN_ENDPOINT,
+  connect,
   loadCatalogue,
   loadConnections,
+  loadDeclaration,
   loadSession,
   signOut,
   type CatalogueState,
   type ConnectionsState,
+  type ConnectOutcome,
+  type DeclarationState,
   type SessionState,
 } from './service.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
@@ -44,6 +48,7 @@ import { isDark, toggleTheme } from './theme'
 
 import AgentOnboarding from './AgentOnboarding.mts'
 import CatalogueFailure from './CatalogueFailure.mts'
+import Connect from './Connect.mts'
 import Connections from './Connections.mts'
 import ConsoleShell from './ConsoleShell.mts'
 import OperationFacts from './OperationFacts.mts'
@@ -81,6 +86,50 @@ watch(signedIn, async (resolved) => {
   if (resolved) connections.value = await loadConnections()
 })
 
+// ---------------------------------------------------------------------------------------------
+// Wiring a connector up. The console's other job, and until X-44 the one it could not do.
+//
+// Three pieces of state and no fourth: which connector is being connected, what the service says it
+// declares, and what the last attempt did. **What the operator typed is not among them.** A value
+// lives in the input element it was typed into and in the request body, and this component holds
+// none of it — see `Connect.mts`, which is where that is enforced rather than merely intended.
+// ---------------------------------------------------------------------------------------------
+
+const chosen = shallowRef<string | null>(null)
+const declaration = shallowRef<DeclarationState | null>(null)
+const outcome = shallowRef<ConnectOutcome | null>(null)
+const connecting = shallowRef(false)
+
+/** A connector was chosen: ask the service what it declares, and forget the last attempt. */
+async function chooseConnector(connector: string) {
+  const id = connector || null
+  chosen.value = id
+  outcome.value = null
+
+  if (id === null) {
+    declaration.value = null
+    return
+  }
+
+  declaration.value = { status: 'loading' }
+  const state = await loadDeclaration(id)
+  // The reader may have moved on while that was in flight; a declaration for a connector nobody is
+  // looking at any more would render under the wrong heading.
+  if (chosen.value === id) declaration.value = state
+}
+
+/** Connect, then re-read the listing — which is where the result is shown, as addresses. */
+async function connectChosen(values: Record<string, string>) {
+  const connector = chosen.value
+  if (connector === null || connecting.value) return
+
+  connecting.value = true
+  outcome.value = await connect(connector, values)
+  connecting.value = false
+
+  if (outcome.value.status === 'connected') connections.value = await loadConnections()
+}
+
 /** Sign out, then reload — the session cookie is gone and every view on the page depends on it. */
 async function endSession() {
   await signOut()
@@ -95,6 +144,16 @@ const failure = computed(() =>
 const sessionFailure = computed(() =>
   session.value.status === 'failed' ? session.value.failure : null
 )
+
+/**
+ * Every connector the catalogue lists, by id.
+ *
+ * The connect form offers these and no others, and the console enumerates none of its own — the
+ * same rule the credential inputs follow one level down. Empty while the catalogue is still being
+ * read, which leaves the form's chooser empty rather than short: a partial list of connectors would
+ * read as the complete one.
+ */
+const connectors = computed(() => ready.value?.catalog.providers.map((provider) => provider.id) ?? [])
 
 /** The served facts about the operation on screen, when the route names one this catalogue has. */
 const facts = computed(() =>
@@ -142,7 +201,24 @@ const active = computed(() => surfaceOfRoute(route.value.name))
       <template v-else-if="route.name === 'connections'">
         <p v-if="session.status === 'loading'" class="console__loading">Reading your session…</p>
 
-        <Connections v-else-if="signedIn" :state="connections" />
+        <!--
+          The listing first, then the form. A reader lands on what is wired up — X-34's decision,
+          unchanged — and the thing that changes it sits directly beneath, where the result of using
+          it appears. On a successful connect the listing above is re-read, so the addresses are the
+          service's answer rather than this page's memory of what was sent.
+        -->
+        <template v-else-if="signedIn">
+          <Connections :state="connections" />
+          <Connect
+            :connectors="connectors"
+            :chosen="chosen"
+            :declaration="declaration"
+            :outcome="outcome"
+            :busy="connecting"
+            @choose="chooseConnector"
+            @submit="connectChosen"
+          />
+        </template>
 
         <section v-else class="gate">
           <h1>Sign in to see this tenant's connections</h1>
