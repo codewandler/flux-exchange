@@ -8,6 +8,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **The catalogue explorer stops badging operations this service runs as "not live yet"** (X-53).
+  The **fifth** rendering of one falsehood — after the onboarding page, the mint screen, the shell
+  inventory and the descriptor — this one in `console/README.md` as well as in the explorer itself.
+
+  `works` now means *this service runs this operation*: a build fact, identical for every caller, and
+  derived from the same `served` flag the server holds to its route table. The two tenant-specific
+  readings were rejected because this explorer is **anonymous** — a badge from either turns a public
+  page into a report on somebody's connections. The "could this principal invoke it" reading was
+  rejected because `admitted` is three-valued and its `null` is not `false`; folding it into a
+  boolean would make a public badge move with who is looking.
+
 - **The agent descriptor's guard checks what its name claims** (X-52). X-42's liveness test compared
   a capability's `live` flag against *does the mapped route exist*, and never against the endpoint the
   capability itself publishes — so republishing `be-minted` at `/api/session` passed 253 tests. And

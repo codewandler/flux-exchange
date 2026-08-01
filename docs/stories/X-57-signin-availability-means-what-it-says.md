@@ -70,3 +70,15 @@ wrong in the first place.
 - `DevIdentity` is **loopback-only** and stays that way. This story does not make it reachable; it
   makes the console able to use it where it is already legitimately armed.
 - Read `docs/designs/local-identity.md` § 1 before choosing a shape.
+
+## Free while you are in there — two sentences that stopped being true when OIDC landed
+
+Found by X-53 and deliberately not folded into its diff:
+
+- `console/src/service.mts:1070` — the `CONSOLE-NO-PRINCIPAL` banner still says *"this console has
+  no sign-in yet"*.
+- `console/src/service.mts:125` — the `ServedOperation` doc says *"There is no sign-in yet"*.
+
+Both are about sign-in, both are false, and both are in the surface this story is changing the
+meaning of. Fix them here rather than leaving a sixth and seventh rendering of a stale claim — this
+epic has now corrected the same class of falsehood in five places across X-42, X-52 and X-53.

@@ -1,8 +1,7 @@
 ---
 id: X-53
 title: "The explorer stops badging operations this service runs as \"not live yet\""
-status: in-progress
-priority: 2
+status: done
 epic: catalogue
 areas: [console]
 note: "found by X-42's review, 2026-08-01: the fourth rendering of the invoke falsehood. service.mts sets works: false for every operation with the comment \"nothing in flux-exchange can be invoked yet\""
