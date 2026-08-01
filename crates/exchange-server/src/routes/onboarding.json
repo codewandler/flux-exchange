@@ -47,7 +47,7 @@
       "summary": "Present the token on a request and have this host resolve you to the agent principal it minted, in that agent’s tenant.",
       "live": false,
       "call": null,
-      "withheld": "No route on this host accepts an agent token. Minting stores a verifier and hands you the token, and nothing yet resolves one back to a principal — so an agent holding a token is not a caller this service can identify. The only principals a deployment resolves today are humans who signed in through its identity provider."
+      "withheld": "No route on this host accepts an agent token. Minting stores a verifier and hands you the token, and nothing yet resolves one back to a principal — so an agent holding a token is not a caller this service can identify. What a deployment does resolve is whatever its identity port was handed: the humans an identity provider signed in, or — on a development host — the handles its own roster names, which may be agents but are names rather than tokens this service minted."
     },
     {
       "id": "invoke",

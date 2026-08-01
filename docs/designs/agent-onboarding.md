@@ -1,6 +1,6 @@
 # Design: agent onboarding
 
-**Status:** accepted · **Epic:** `agent-onboarding` · **Stories:** X-41, X-42
+**Status:** accepted · **Epic:** `agent-onboarding` · **Stories:** X-41, X-42, X-52
 
 ## Why
 
@@ -82,6 +82,44 @@ capability against `routes::MODULES`, and refuses to let a published route go un
 second half is what would have caught this on the day `invoke` landed. **The lesson to carry: a
 derivation is only as honest as the construct it derives from, and a test that two renderings agree
 cannot see that both are wrong.**
+
+#### Correction (X-52): a guard is only as strong as the field it reads
+
+The correction above holds. What its own review found is that the guard it produced —
+`a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it` — read one field of the
+document and was named for two. It compared `capability.live` against *does the `SERVED_BY` path
+exist* and never against the capability's own `call.endpoint`, so republishing `be-minted` at
+`/api/session` (a real route, and one the same file argues is **not** a capability) left every test
+in the server crate green. All three live endpoints were pinned, but by a hand-written line in a
+console test belonging to another story. **The pattern to carry: a test whose name names two facts
+has to assert both, and the way to find out is to mutate each one separately.**
+
+The `method` field was pinned by nothing at all, and the obstacle is worth recording because it
+recurs. `Route` carries a `fn() -> MethodRouter`; a `MethodRouter` cannot be asked what it answers,
+which is the same property §"How a module hands over a table rather than a `Router`" in
+`routes/mod.rs` is built around. Two shapes were on the table:
+
+- **Declare the method on `Route`, beside the `method_router`.** Rejected. It makes the document
+  agree with a declaration and leaves the declaration agreeing with nothing — two values in one
+  struct that can disagree, with the guard standing on the wrong one.
+- **Drive each published call and assert the answer is not `405`.** Taken. It asks the surface the
+  question an agent will ask it.
+
+Two things about that are worth knowing before trusting it. It proves the method **reaches a
+handler**, not that it is the only method the route serves — narrower than "the method is correct",
+and the test is named for the narrower claim. And it only works against a **resolved** caller: on a
+guarded route the `route_layer` runs before the method router, so an anonymous probe answers `401`
+for every method and cannot tell one from another. The first spelling of the test drove it
+anonymously and would have passed for `DELETE /api/agents`; its own control caught that, which is
+the argument for the control.
+
+The third finding has no test and should not pretend to. The `authenticate` withholding ended *"The
+only principals a deployment resolves today are humans who signed in through its identity
+provider"*, which is false on a development-identity deployment — the roster resolves `agent:` and
+`service:` handles, and `dev_identity::tests::a_handle_resolves_to_the_principal_the_roster_armed`
+drives one. The operative claim was true and the sentence around it was not. **A wrong argument in a
+withholding, or in a `NOT_A_CAPABILITY` line, is invisible to a test**; the only thing holding those
+is that they are written next to the code they describe and read when it changes.
 
 ### 3. A descriptor, not only a document
 

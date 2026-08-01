@@ -184,7 +184,20 @@ struct Capability {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Call {
+    /// The HTTP method, spelled as a caller sends it.
+    ///
+    /// Held by [`tests::every_published_call_reaches_a_handler_for_the_method_it_names`], which
+    /// **drives** it rather than comparing it. [`Route`] carries a `fn() -> MethodRouter` and a
+    /// `MethodRouter` cannot be asked what it answers — the same property that made `super`'s
+    /// modules hand over tables rather than routers — so the only reading of this field that is
+    /// not a second declaration is the surface's own answer to a request naming it. What that
+    /// holds is that the method reaches a handler at the published endpoint, and not that it is
+    /// the only method that route serves.
     method: String,
+    /// The route to send it to, in the route table's own spelling. Pinned to the route that
+    /// actually serves this capability by
+    /// [`tests::a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it`], and not
+    /// merely to *some* route this host publishes.
     endpoint: String,
     /// Who makes this call, and with what standing — the field an agent author gets wrong, since
     /// minting is a call a *human* makes.
@@ -606,7 +619,8 @@ mod tests {
         ),
     ];
 
-    /// **A capability is live exactly when a route on this surface serves it.**
+    /// **A capability is live exactly when a route on this surface serves it** — and it is
+    /// published at that route.
     ///
     /// The test the rework exists for. The page and the descriptor already agreed with each other;
     /// they agreed while both were wrong, because both derived from a console flag that answers a
@@ -614,6 +628,15 @@ mod tests {
     /// cannot agree with a mistake.
     ///
     /// It would have gone red on the diff that shipped `invoke` as `live: false`.
+    ///
+    /// **The second half is X-52's, and the name is why it is here rather than in a test of its
+    /// own.** Until it existed this compared `capability.live` against *does the [`SERVED_BY`] path
+    /// exist* and never against the capability's own `call.endpoint`, so republishing `be-minted`
+    /// at `/api/session` — a route this host really does publish, and one [`NOT_A_CAPABILITY`]
+    /// argues is not a capability — left every test in this crate green. All three live endpoints
+    /// happened to be pinned by a hand-written assertion in `console/test/onboarding.test.mjs`, so
+    /// nothing was wrong; the test's *name* claimed the thing it did not check, which is the
+    /// failure this repository has now corrected in five separate stories.
     #[test]
     fn a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it() {
         let document: Onboarding = serde_json::from_str(DERIVED).expect("a JSON document");
@@ -650,6 +673,161 @@ mod tests {
                  caller the vision calls primary that it cannot do the thing it does.",
                 capability.live,
                 if served { "publishes" } else { "publishes no" },
+            );
+
+            // And the route named above is the route the document tells an agent to call. The two
+            // are deliberately stated twice — once here, from the language that owns the route
+            // table, and once in the console model the artifact is generated from — so that the
+            // pair has to be kept in step rather than one of them silently drifting.
+            match (*path, capability.call.as_ref()) {
+                (Some(path), Some(call)) => assert_eq!(
+                    call.endpoint, path,
+                    "`{id}` tells an agent to call `{}`, and the route this table says serves it \
+                     is `{path}`. An endpoint that exists but does not serve the capability beside \
+                     it is worse than one that does not exist at all: the caller gets an answer, \
+                     from something else.",
+                    call.endpoint,
+                ),
+                (Some(path), None) => panic!(
+                    "`{id}` is served by `{path}` and names no call, so this document publishes a \
+                     capability an agent has no way to reach",
+                ),
+                (None, Some(call)) => panic!(
+                    "`{id}` is served by no route on this surface and names `{}` anyway, which is \
+                     an invitation to call nothing",
+                    call.endpoint,
+                ),
+                (None, None) => {}
+            }
+        }
+    }
+
+    /// A path a request can actually be sent to: `/api/operations/{operation}/invoke` matches
+    /// nothing literally, and a `404` in the probe below would read as a method this host serves.
+    ///
+    /// The same substitution `super::super::tests::probe_path` makes, written again because that
+    /// one is private to a sibling test module. Six lines said twice is the cheaper of the two
+    /// mistakes on offer — the other is widening a helper's visibility in `routes/mod.rs`, which is
+    /// the merge site every module's story already has to touch.
+    fn probe(path: &str) -> String {
+        let mut probe = String::with_capacity(path.len());
+        let mut in_parameter = false;
+
+        for character in path.chars() {
+            match character {
+                '{' => {
+                    in_parameter = true;
+                    probe.push('x');
+                }
+                '}' => in_parameter = false,
+                _ if in_parameter => {}
+                _ => probe.push(character),
+            }
+        }
+
+        probe
+    }
+
+    /// A method this build serves at none of the endpoints below, used as the probe's own control.
+    ///
+    /// Without it, `not a 405` would be satisfied by a surface that answered every method — and a
+    /// check that cannot fail is the thing this story exists to stop shipping. If a later story
+    /// gives one of these routes a `PATCH` handler this goes red, and the fix is to pick another
+    /// method rather than to drop the control.
+    const UNSERVED: Method = Method::PATCH;
+
+    /// **Every call this document publishes reaches a handler for the method it names.**
+    ///
+    /// The name is the whole claim, and it is deliberately narrower than "the method is correct":
+    /// a path serving both `GET` and `POST` would pass here with either spelling published. Every
+    /// endpoint this document names serves exactly one method on this build, so the two coincide
+    /// today — and what this holds is the half that costs a caller something either way, which is
+    /// a published method the route does not answer at all.
+    ///
+    /// **Why a request and not a comparison.** [`Route`] carries a `fn() -> MethodRouter`, so the
+    /// method is not statically readable from the route table; `super`'s own documentation says
+    /// why — "axum's `Router` cannot be asked what it answers". The alternative shape was a
+    /// `method` field on [`Route`], declared beside the `method_router` it describes. That would
+    /// have pinned this document to a declaration and left the declaration pinned to nothing: two
+    /// values in one struct that can disagree, with the guard on the wrong side of the disagreement.
+    /// Driving the published call asks the surface itself, which is the thing an agent will ask.
+    ///
+    /// **The probe is driven by a resolved caller, and that is not a convenience.** The first
+    /// spelling of this test drove it anonymously and the control caught it: on a guarded route the
+    /// `route_layer` runs *before* the method router, so an unidentified caller gets `401` for
+    /// every method and a `PATCH` this host serves nowhere is indistinguishable from the `POST` it
+    /// does. Anonymously, this test would have passed for `DELETE /api/agents` — the exact defect
+    /// it exists to catch. A rostered `user:` handle is the weakest caller that gets past both
+    /// guards on this surface (`/api/agents` is [`Access::PrincipalOfKind`]`(`[`MAY_MINT`]`)`,
+    /// which is `User` alone), and nothing is minted, stored or dispatched to get there: no agent
+    /// store and no credential store are bound, and the requests carry no body.
+    ///
+    /// [`Access::PrincipalOfKind`]: super::Access::PrincipalOfKind
+    /// [`MAY_MINT`]: super::agents::MAY_MINT
+    #[tokio::test]
+    async fn every_published_call_reaches_a_handler_for_the_method_it_names() {
+        let document: Onboarding = serde_json::from_str(DERIVED).expect("a JSON document");
+        let app = super::super::app(AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+        )));
+        // The roster's first handle, which is a `user:` — see above for why the caller has to be
+        // one this host resolves at all.
+        let caller = Some("alice");
+
+        let calls: Vec<&Call> = document
+            .capabilities
+            .iter()
+            .filter_map(|capability| capability.call.as_ref())
+            .collect();
+
+        assert!(
+            !calls.is_empty(),
+            "no call was driven, so this proves nothing",
+        );
+
+        for published in calls {
+            let method: Method = published
+                .method
+                .parse()
+                .unwrap_or_else(|_| panic!("`{}` is not an HTTP method", published.method));
+
+            assert_ne!(
+                method, UNSERVED,
+                "the document publishes the method this test uses as its control, so the control \
+                 below proves nothing",
+            );
+
+            let path = probe(&published.endpoint);
+            let (status, body) = call(&app, method, &path, caller, None).await;
+
+            assert_ne!(
+                status,
+                StatusCode::NOT_FOUND,
+                "`{} {}` reached no route at all — `{path}` is not published, which \
+                 `every_endpoint_the_document_names_is_a_published_route_and_names_no_value` says \
+                 more about: {body}",
+                published.method,
+                published.endpoint,
+            );
+            assert_ne!(
+                status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "the descriptor tells an agent to send `{} {}` and this host serves no handler for \
+                 that method there. An agent that follows this document gets a 405 from the one \
+                 field it cannot discover any other way: {body}",
+                published.method,
+                published.endpoint,
+            );
+
+            // The control, at the same path: a method this surface does not serve there is a 405,
+            // so the assertion above is reading the method and not merely the path.
+            let (control, _) = call(&app, UNSERVED, &path, caller, None).await;
+            assert_eq!(
+                control,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "`{UNSERVED} {path}` was not refused for its method, so this host answers \
+                 `{path}` whatever is sent to it and the check above cannot tell a served method \
+                 from an unserved one",
             );
         }
     }
