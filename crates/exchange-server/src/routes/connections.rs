@@ -658,10 +658,12 @@ fn store_failed(error: &StoreError) -> Response {
 
 /// How a store failure is answered: its status, what happened, and what an operator is to do.
 ///
-/// Split out of [`store_failed`] because [`partly_destroyed`] has to say the second half too, and
-/// two copies of this mapping is how one refusal comes to tell an operator "retrying may work"
-/// while another tells them "retrying will not help" about the same event. The whole argument for
-/// keeping the three kinds apart is on [`store_failed`].
+/// Split out of [`store_failed`] because the partial-failure refusals — [`partly_written`] and
+/// [`partly_destroyed`] — have to say the second half too, and two copies of this mapping is how
+/// one refusal comes to tell an operator "retrying may work" while another tells them "retrying
+/// will not help" about the same event. The whole argument for keeping the three kinds apart is on
+/// [`store_failed`], and [`tests::a_store_failure_says_what_it_has_always_said`] pins the words a
+/// caller reads so that a change to one reader cannot reword them for the others.
 fn store_failure(error: &StoreError) -> (StatusCode, &'static str, &'static str) {
     match error {
         StoreError::NotFound { .. } => {
@@ -720,6 +722,10 @@ fn change_in_flight(provider: &'static Provider) -> Response {
 /// Reports what was done about it, because "nothing was written" and "some values may still be
 /// there" send an operator to different places — and a refusal claiming the first while the second
 /// is true is worse than one that admits it does not know.
+///
+/// The two are answers to *is a retry safe*, which is about the rollback. Whether a retry is worth
+/// anything is a different question, answered by the failure's kind, and both halves say so —
+/// see the `advice` below.
 fn partly_written(
     provider: &'static Provider,
     error: &StoreError,
@@ -727,13 +733,19 @@ fn partly_written(
 ) -> Response {
     error!(%error, connector = provider.id, "a connection could not be written");
 
+    // The kind survives, as it does for [`partly_destroyed`] and for every other refusal on this
+    // surface: a `Denied` reported as `503` "retrying may work" sends an operator to retry, which
+    // is the one thing that cannot restore this host's access to the store. The rollback report
+    // below is orthogonal to it — it says whether retrying is *safe*, never whether it will help.
+    let (status, _, advice) = store_failure(error);
+
     match rolled_back {
         Ok(()) => refuse(
-            StatusCode::SERVICE_UNAVAILABLE,
+            status,
             format!(
                 "the credential store failed while writing the `{}` connection. Nothing was left \
                  behind — the values written before the failure were taken back out — so retrying \
-                 is safe",
+                 is safe. {advice}",
                 provider.id,
             ),
             json!({ "connector": provider.id, "left_behind": Value::Null }),
@@ -742,11 +754,11 @@ fn partly_written(
         // whole of what this host can still do for the operator: refuse, and say exactly where to
         // look. The values are not named, only the addresses.
         Err(remaining) => refuse(
-            StatusCode::SERVICE_UNAVAILABLE,
+            status,
             format!(
                 "the credential store failed while writing the `{}` connection, and the values \
                  already written could not be taken back out. Some credentials may remain at the \
-                 addresses below; `DELETE /api/connections/{}` before retrying",
+                 addresses below; `DELETE /api/connections/{}` before retrying. {advice}",
                 provider.id, provider.id,
             ),
             json!({ "connector": provider.id, "left_behind": remaining }),
@@ -861,6 +873,11 @@ mod tests {
         fails: Mutex<Option<Failure>>,
         /// This many `put`s succeed; the rest fail. `None` is "no limit".
         puts_allowed: Mutex<Option<usize>>,
+        /// How a `put` beyond `puts_allowed` fails. `None` is an unreachable store.
+        ///
+        /// Separate from `fails`, which fails *every* operation and so never reaches the write:
+        /// `held`'s probe refuses first, and the create path under test is the one after it.
+        put_failure: Mutex<Option<Failure>>,
         puts: Mutex<usize>,
         /// `delete` fails, which is what makes a rollback fail.
         deletes_fail: Mutex<bool>,
@@ -884,10 +901,23 @@ mod tests {
             self.fail_with(Failure::Unreachable);
         }
 
-        /// Let `allowed` writes land and fail every one after, so a connector declaring two
-        /// credentials can be made to fail half way.
+        /// Let `allowed` writes land **from here** and fail every one after, so a connector
+        /// declaring two credentials can be made to fail half way.
+        ///
+        /// The count restarts, as it does for deletes, so a test may connect another tenant first
+        /// and still arm a budget for the connection it is about to fail.
         fn allow_only(&self, allowed: usize) {
+            self.allow_only_failing_with(allowed, Failure::Unreachable);
+        }
+
+        /// The same, failing that way rather than as an unreachable store.
+        ///
+        /// A half-written create is answered from the failure's kind, so driving that path needs
+        /// each of the three the surface answers differently, not only the transient one.
+        fn allow_only_failing_with(&self, allowed: usize, failure: Failure) {
+            *self.puts.lock().expect("no test poisons this") = 0;
             *self.puts_allowed.lock().expect("no test poisons this") = Some(allowed);
+            *self.put_failure.lock().expect("no test poisons this") = Some(failure);
         }
 
         /// The store recovers: writes land again.
@@ -984,7 +1014,12 @@ mod tests {
                 let mut puts = self.puts.lock().expect("no test poisons this");
                 let allowed = *self.puts_allowed.lock().expect("no test poisons this");
                 if allowed.is_some_and(|allowed| *puts >= allowed) {
-                    return Err(Failure::Unreachable.at(address_path(reference)));
+                    let failure = self
+                        .put_failure
+                        .lock()
+                        .expect("no test poisons this")
+                        .unwrap_or(Failure::Unreachable);
+                    return Err(failure.at(address_path(reference)));
                 }
                 *puts += 1;
             }
@@ -1683,6 +1718,154 @@ mod tests {
             !refusal.to_string().contains(SENTINEL),
             "still addresses and never values: {refusal}",
         );
+    }
+
+    /// **X-20's failing-first test.** A create the store *refuses* answers with that refusal's
+    /// kind, the way a partly-failed delete has since X-18.
+    ///
+    /// `partly_written` flattened every kind to `503` "Retrying may work", so a create refused
+    /// because the store denied **this host's own** access told the operator to retry — the one
+    /// thing that cannot resolve it — instead of sending them to fix the permission. `AGENTS.md`
+    /// § Conventions: failures an operator answers differently stay distinguishable.
+    ///
+    /// Both halves of the report are driven, because the kind has to survive whether or not the
+    /// rollback succeeded, and `globex` holds the same connector throughout so the disclosure
+    /// assertions at the end have something they could have leaked.
+    #[tokio::test]
+    async fn a_create_the_store_refuses_keeps_its_kind_out_to_the_caller() {
+        const BOT_TOKEN: &str = "tenants/acme/com.slack.api/bot_token";
+
+        async fn connect_slack(app: &Router, handle: &str) -> (StatusCode, Value) {
+            call(
+                app,
+                handle,
+                Method::POST,
+                "/api/connections/slack",
+                Some(json!({
+                    "credentials": {
+                        "slack.bot_token": SENTINEL,
+                        "slack.signing_secret": SENTINEL,
+                    }
+                })),
+            )
+            .await
+        }
+
+        // `Denied` first, because it is the kind this test exists for: the one an operator answers
+        // by restoring this host's access, and the one that read as a transient before X-20.
+        for (failure, expected, must_say) in [
+            (
+                Failure::Denied,
+                StatusCode::BAD_GATEWAY,
+                "Retrying will not help; an operator has to restore this host's access to the \
+                 store",
+            ),
+            (
+                Failure::Unreachable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Retrying may work",
+            ),
+            (
+                Failure::Backend,
+                StatusCode::BAD_GATEWAY,
+                "Retrying will not help; this is a defect in the store or in how it is configured",
+            ),
+        ] {
+            // The rollback lands: nothing is left behind, and the kind still decides the answer.
+            let (app, store) = connected_app();
+            assert_eq!(connect_slack(&app, "bob").await.0, StatusCode::CREATED);
+            store.allow_only_failing_with(1, failure);
+
+            let (status, refusal) = connect_slack(&app, "alice").await;
+
+            assert_eq!(status, expected, "{failure:?}: {refusal}");
+            assert_eq!(
+                refusal["left_behind"],
+                Value::Null,
+                "{failure:?}: {refusal}"
+            );
+            assert!(
+                refusal["error"]
+                    .as_str()
+                    .expect("a reason")
+                    .contains(must_say),
+                "{failure:?} must tell the operator whether a retry is worth anything: {refusal}",
+            );
+
+            // And a rollback that fails too does not flatten it back: the addresses are still
+            // named, and so is the kind.
+            let (app, store) = connected_app();
+            assert_eq!(connect_slack(&app, "bob").await.0, StatusCode::CREATED);
+            store.allow_only_failing_with(1, failure);
+            store.deletes_fail();
+
+            let (status, refusal) = connect_slack(&app, "alice").await;
+
+            assert_eq!(status, expected, "{failure:?}: {refusal}");
+            assert_eq!(
+                refusal["left_behind"],
+                json!([BOT_TOKEN]),
+                "{failure:?}: {refusal}",
+            );
+            let reason = refusal["error"].as_str().expect("a reason");
+            assert!(
+                reason.contains(must_say),
+                "{failure:?} must tell the operator whether a retry is worth anything: {refusal}",
+            );
+            assert!(
+                reason.contains("DELETE /api/connections/slack"),
+                "and still what to do about what was left behind: {refusal}",
+            );
+
+            // The disclosure guarantees this surface owes every caller, unchanged: an address,
+            // never a value, and never another tenant's anything.
+            let rendered = refusal.to_string();
+            assert!(
+                !rendered.contains(SENTINEL),
+                "a refusal names the address, never the value: {rendered}",
+            );
+            assert!(
+                !rendered.contains("globex"),
+                "a refusal must not name another tenant's address: {rendered}",
+            );
+        }
+    }
+
+    /// The three sentences a store failure says to a caller, **byte for byte**.
+    ///
+    /// `store_failure` is read by three refusals now rather than one, and the cheapest way to
+    /// break a shared mapping is to reword it while working on one of its callers — a refusal
+    /// quietly reworded is a regression even when it reads better.
+    /// [`a_store_failure_keeps_its_kind_out_to_the_caller`] asserts the property; this asserts the
+    /// words, so a refactor of the create side cannot restate the delete side's answer.
+    #[tokio::test]
+    async fn a_store_failure_says_what_it_has_always_said() {
+        for (failure, expected) in [
+            (
+                Failure::Unreachable,
+                "the credential store did not answer, so this host cannot say what this tenant \
+                 has connected. Retrying may work",
+            ),
+            (
+                Failure::Denied,
+                "the credential store refused this host's own access, so it cannot reach this \
+                 tenant's credentials. Retrying will not help; an operator has to restore this \
+                 host's access to the store",
+            ),
+            (
+                Failure::Backend,
+                "the credential store answered with something this host cannot interpret. \
+                 Retrying will not help; this is a defect in the store or in how it is configured",
+            ),
+        ] {
+            let (app, store) = connected_app();
+            store.fail_with(failure);
+
+            let (_, refusal) =
+                call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+
+            assert_eq!(refusal["error"], expected, "{failure:?}");
+        }
     }
 
     /// **X-18's failing-first test.** A `DELETE` whose second credential deletion fails names what
