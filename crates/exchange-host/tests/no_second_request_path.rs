@@ -19,6 +19,36 @@
 //!   and whoever adds one has to write down why it is not a transport.
 //! - **Lock 2** — one seam, counted, over this crate's sources.
 //!
+//! # What lock 2 is, and what it is not
+//!
+//! Stated here rather than discovered later, because a guard that overstates its reach is worse
+//! than one that admits its edge — this repository has had to correct exactly that more than once.
+//!
+//! **Lock 2 checks names, not values.** Every rule below is a string, and it refuses a source that
+//! writes that string. It cannot see a capability that arrives under a name nobody listed, and
+//! X-48's review found one: [`rules::FORBIDDEN`] catches the crate name `flux_system`, but this
+//! crate **re-exports `ToolContext`**, and `ctx.system()` hands back the `flux_system::System` by
+//! inference — process spawn and the workspace filesystem, reached without writing any forbidden
+//! string. That particular door is now shut by [`rules::REACHES_THE_SYSTEM`]. The *class* of hole
+//! is not shut, and a source scanner cannot shut it.
+//!
+//! So what covers the rest, in the order it bites:
+//!
+//! - **Lock 1**, above, is not a name check. Its allow-list fails on *any* `[dependencies]` entry
+//!   nobody wrote a reason for, so a new capability that arrives as a dependency is caught whether
+//!   or not anyone thought of it. Its blind spot is the mirror of lock 2's: a capability reached
+//!   *transitively*, through a crate already on the list.
+//! - **Lock 3** (`tests/invoke.rs`) is behavioural: a counting transport, one dispatch per invoke,
+//!   and zero for every refusal. It proves things about the paths its tests drive and nothing about
+//!   paths nobody wrote a test for.
+//! - **The composition's own posture.** `exchange-server`'s `execution::guarded_system` builds the
+//!   one `System` a `ToolContext` here is ever made over, with `SandboxMode::Require` — so a spawn
+//!   that did slip past all three locks is confined by bubblewrap/Seatbelt or refuses. That is the
+//!   backstop for the reach this file does not have, and `the_sandbox_posture_is_chosen_and_not_inherited`
+//!   holds it.
+//!
+//! Four mechanisms, and they fail differently. None of them is the argument on its own.
+//!
 //! # If this test is red and your change is not about transports
 //!
 //! That is the intended cost, and the failure mode is deletion. **Add your dependency to
@@ -125,6 +155,25 @@ mod rules {
 
     /// Dispatching a tool. Only the seam may, and only on the operation the pack resolved.
     pub const DISPATCH: &str = ".execute(";
+
+    /// **Reaching the guarded `System` out of a `ToolContext`** (X-48).
+    ///
+    /// Upstream's own words for `ToolContext::system` are *"the only way tools reach IO"*: it hands
+    /// back the `flux_system::System`, whose `run`/`run_with_env` spawn processes and whose
+    /// `read_file`/`write_file` reach the workspace root.
+    ///
+    /// It is a rule of its own rather than an entry in [`FORBIDDEN`] because [`FORBIDDEN`] could
+    /// not see it, and that is the point worth keeping. That list catches the *crate name*
+    /// `flux_system` — but this crate re-exports `ToolContext` for a composition to implement
+    /// `Contexts` with, so `ctx.system().run(&argv, timeout)` reaches process spawn while naming
+    /// nothing on the list. A name check missed a value.
+    ///
+    /// Refusing this one call syntax closes the door rather than narrowing it: `ToolContext`'s
+    /// `workspace` field is private, so `system()` is the only accessor, and the second one
+    /// (`WorkspaceContext::system`) is spelled `.system(` too. There is no file on an exception
+    /// list, deliberately — the crate that dispatches has no business holding a `System`, and the
+    /// day one does, that is a design decision and not a scanner update.
+    pub const REACHES_THE_SYSTEM: &str = ".system(";
 
     /// Names no source in this crate may carry. `flux-system` is where flux's real IO lives —
     /// `flux_system::net` dials — and it is reachable transitively through `flux-runtime`, which is
@@ -291,6 +340,12 @@ fn the_scanner_catches_what_it_claims_to() {
             "the model-facing pack entry point",
             "connector_pack::pack(&[provider], egress, credentials, settings)",
         ),
+        // The one `FORBIDDEN` could not see: a `System` reached through the re-exported
+        // `ToolContext`, naming nothing on the crate-name list.
+        (
+            "the guarded system behind a tool context",
+            "let out = ctx.system().run(&argv, timeout).await?;",
+        ),
     ];
 
     for (what, line) in must_reject {
@@ -391,6 +446,13 @@ fn violations(sources: &[(String, String)]) -> Vec<String> {
         (
             rules::UNWRAPS_THE_TRANSPORT,
             "unwrapping the transport out of its `Egress` is the second request path, in one line",
+        ),
+        (
+            rules::REACHES_THE_SYSTEM,
+            "that hands back flux's guarded `System` — process spawn through `run`/`run_with_env` \
+             and the filesystem through `read_file`/`write_file`. It reaches all of that without \
+             naming `flux_system`, which is why it is refused by call syntax rather than by crate \
+             name",
         ),
     ] {
         for path in naming(needle) {

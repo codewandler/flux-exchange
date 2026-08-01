@@ -210,7 +210,8 @@ impl fmt::Display for StartupRefusal {
             }
             Self::Invoker { reason } => write!(
                 f,
-                "refusing to start: a credential store is bound but nothing could be composed to                  run operations with — {reason}",
+                "refusing to start: a credential store is bound but nothing could be composed to \
+                 run operations with — {reason}",
             ),
         }
     }
