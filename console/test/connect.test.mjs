@@ -73,6 +73,19 @@ const SLACK_DECLARATION = {
 /** The names in that declaration, in the connector's own order. */
 const SLACK_DECLARED = SLACK_DECLARATION.credentials.map((credential) => credential.name)
 
+/**
+ * `GET /api/catalogue/connectors/freshdesk/credentials` — a connector that declares nothing.
+ *
+ * The catalogue really does carry one: `freshdesk` publishes operations and no credential, which is
+ * why `routes/catalogue/view.rs` names it as the reason "no such connector" and "declares nothing"
+ * have to stay different answers. An empty list here is therefore a fixture and not a hypothetical.
+ */
+const FRESHDESK_DECLARATION = {
+  connector: 'freshdesk',
+  authority: 'com.freshdesk.api',
+  credentials: [],
+}
+
 /** `POST /api/connections/zendesk` answering `201`: addresses and `held`, never a value. */
 const ZENDESK_CONNECTION = {
   connector: 'zendesk',
@@ -477,5 +490,60 @@ test('a_declaration_that_could_not_be_read_is_not_a_connector_with_no_credential
   assert.ok(
     !/<input/.test(html),
     `a read that failed rendered a form with no inputs, which reads as a connector that declares none; got: ${html}`
+  )
+})
+
+/**
+ * **X-49's failing-first test**, and the other side of the one above.
+ *
+ * X-46 changed what this state *is*. Before it, the console could only learn a declaration from a
+ * refusal, so a connector declaring nothing arrived as `refused` and rendered as one. It now
+ * arrives as `ready` with an empty `credentials` — "nothing to store for this one" is an answer —
+ * and renders through the `declares-nothing` branch of `Connect.mts`. That branch was reachable
+ * from the day X-46 landed and nothing exercised it, which is what this closes.
+ *
+ * The two halves are asserted together on purpose: the state and the render are the change, and a
+ * test that stubbed the state by hand would still pass if `loadDeclaration` went back to calling
+ * this a refusal.
+ */
+test('a_connector_that_declares_nothing_says_so_rather_than_rendering_an_empty_form', async () => {
+  const service = answering(200, FRESHDESK_DECLARATION)
+  const state = await loadDeclaration('freshdesk', { fetch: service.fetch })
+
+  assert.equal(
+    state.status,
+    'ready',
+    `a connector that declares nothing is an answer, not a refusal and not an unread declaration; got: ${JSON.stringify(state)}`
+  )
+  assert.deepEqual(
+    state.declaration.credentials,
+    [],
+    'the declaration must be exactly what the catalogue published — empty, and read as empty'
+  )
+
+  const html = await form({ chosen: 'freshdesk', declaration: state })
+
+  const note = html.match(/<p[^>]*data-connect="declares-nothing"[^>]*>([\s\S]*?)<\/p>/)
+  assert.ok(
+    note,
+    `a connector that declares nothing rendered no note saying so; got: ${html}`
+  )
+  assert.match(
+    note[1],
+    /freshdesk/,
+    `the note must name the connector it is about, or it reads as a statement about the form; got: ${note[0]}`
+  )
+
+  // Not an empty set of fields. A form with no boxes and no sentence is indistinguishable from a
+  // form whose boxes failed to render, which is the confusion the test above exists to prevent —
+  // read from the other end.
+  assert.ok(
+    !html.includes('connect__fields'),
+    `the page rendered an empty field container, so a connector that declares nothing still reads as a form; got: ${html}`
+  )
+  assert.doesNotMatch(
+    html,
+    /data-connect="(refused|declaration-failed)"/,
+    `a connector that declares nothing was rendered as a refusal or an unread declaration; got: ${html}`
   )
 })

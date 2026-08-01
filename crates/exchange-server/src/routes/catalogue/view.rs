@@ -714,8 +714,16 @@ mod tests {
     /// The last Acceptance item, made mechanical: adding this route added **nothing** to the
     /// answers that existed before it, so a caller that does not ask for the declaration sees the
     /// same bytes it saw yesterday.
+    ///
+    /// Counted, for the reason `every_connector_publishes_exactly_what_it_declares` gives: every
+    /// assertion below is inside a loop over the catalogue, so a catalogue that served no operation
+    /// would pass this without comparing a single key set. The listing's own emptiness is already
+    /// caught by `the_wire_shape_of_the_listing_is_the_agreed_contract`, which looks a connector up
+    /// in it; nothing caught this one.
     #[test]
     fn the_existing_catalogue_answers_gained_no_field() {
+        let mut seen = 0usize;
+
         let listing = serde_json::to_value(connectors()).expect("serialises");
         for entry in listing["connectors"].as_array().expect("an array") {
             let mut keys: Vec<&str> = entry
@@ -766,8 +774,12 @@ mod tests {
                     "an operation of `{}` gained or lost a field",
                     provider.id,
                 );
+
+                seen += 1;
             }
         }
+
+        assert!(seen > 0, "an empty catalogue would vacuously pass");
     }
 
     /// The listing's own shape.
