@@ -8,6 +8,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A connector with a templated host can be invoked** (X-47). Invoke landed and immediately showed
+  that a large minority of connectors could not run at all: their `base_url` is templated on a
+  per-connection value — a vendor subdomain — and there was nowhere for a tenant to supply it.
+
+  **Sixteen connectors, not the thirteen first reported.** The count is derived by rehearsing the
+  shipped catalogue rather than scanning `base_url`, because four carry their configuration
+  variables elsewhere in the operation's compiled Flux — a scan would have left them broken while
+  reporting them configured.
+
+  **Configuration is not a credential and is not stored as one**: its own file, its own port, and
+  bounds never summed with the credential allowance. Values are not read back out — the listing
+  answers what a connector needs and whether it is set, never what it is.
+
 - **A connector's declared credentials are published** (X-46). `GET
   /api/catalogue/connectors/{id}/credentials` names what a connector requires. Before this, nothing
   published the fact, so the console discovered it by issuing a create it knew would be refused and
