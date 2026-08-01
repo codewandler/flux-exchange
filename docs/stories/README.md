@@ -33,8 +33,13 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-22 — One tenant cannot make every other tenant's writes slow](X-22-credential-size-bounds.md) · found by the standing credential audit, 2026-08-01: nothing bounds a credential's size or a connection's count, and every put/delete rewrites and fsyncs the whole store under one mutex — so one authenticated tenant sets the cost of every other tenant's write
+
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
+- [X-23 — A browser-facing endpoint is refused in cleartext too](X-23-browser-facing-endpoint-scheme.md) · raised by X-17's implementor and again by X-19's, 2026-08-01: BACK_CHANNEL covers only the token endpoint and the key set, so FLUX_EXCHANGE_OIDC_AUTHORIZATION_ENDPOINT and _REDIRECT_URI take any scheme without a word
+- [X-24 — A sign-in reads the clock once](X-24-one-clock-reading.md) · found by X-16's reviewer, 2026-08-01: `complete` reads now() for `admit` and `open` reads it again, so a token whose exp falls between the two readings is admitted and then refused — the caller gets NoSession's 503 rather than the 401 Expired would give
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
