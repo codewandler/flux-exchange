@@ -1,9 +1,8 @@
 ---
 id: X-13
 title: "Grants gate invocation"
-status: in-progress
+status: done
 epic: invoke
-priority: 2
 areas: [exchange-host, exchange-server]
 note: "Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect"
 ---
@@ -76,3 +75,39 @@ said so rather than pretending otherwise:
   stated gap rather than a position".
 
 So this is not a new capability bolted on; it is the thing two shipped stories are waiting for.
+
+## Closed 2026-08-01 — and what it costs, stated plainly
+
+Gate green: 366 Rust (65 + 17 + 3 + 15 + 6 + 4 + 256), 75 console.
+
+**Falsified at integration**: deleting the `admit_grant(...)` call from `Invoker::invoke` is a
+**compile error** — `cannot find value 'granted' in this scope` — exactly as X-48's runtime gate is.
+`admit_grant` consumes the runtime gate's `Admitted` and returns `Granted`; `Granted::resolve` is now
+the only route in the crate to `connector_pack::resolve`, and `Admitted::resolve` is gone. Skipping
+either gate does not compile.
+
+**The decision is derived, not listed.** `risk`, `effects` and `idempotency` come from
+`OperationFacts::of` over the catalogue, and `routes::catalogue::view`'s three private projections
+were deleted in favour of it — one projection, with a test pinning the **served bytes** against the
+gate's own view, so the catalogue cannot describe an operation differently from the thing deciding on
+it.
+
+### ⚠ The operational consequence, which is not a footnote
+
+**A deployment that upgrades runs nothing until `FLUX_EXCHANGE_GRANTS` names a file and grants are
+written into it — and no surface writes one.** Expect `503` (no store bound) or `403 not_granted`
+(store bound, tenant empty). That is the intended fail-closed posture and it is right; it is also a
+real usability regression, and it is [[X-62]], filed at priority 0.
+
+### Carried
+
+- The grant file is created `0600`; an **existing** file's mode is not verified. Stated in `grant.rs`
+  rather than implied. Whoever can write that file decides what this host runs.
+- `Grants::held` is infallible and answers empty on a poisoned lock — fail-closed, so the symptom is
+  *everything refused* rather than *everything admitted*. Sound only because the file binding reads at
+  bind time; **a lazily-reading binding must not use that shape.**
+- `effects` is derived from `hosts`. Exact for all 53 shipped connectors, asserted rather than
+  assumed; a `with_effects_within` grant would under-report the day a connector ships an effect the
+  catalogue does not publish.
+- `Granted` carries the operation, not the grant that admitted it. An execution record wants the
+  second.

@@ -8,6 +8,31 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **An operation runs only if a grant admits it** (X-13). v0.8.0 gated invocation by identity alone
+  and published that fact anonymously: *any principal this host resolves may run any operation in the
+  catalogue against its own tenant's connections.* That sentence is now false, and the descriptor says
+  what replaced it.
+
+  **The decision is derived, never listed.** A grant is a selector over what an operation *declares* —
+  its risk, its effects, its idempotency — not a set of operation ids. The route's own three
+  projections of those facts were deleted in favour of the one the gate uses, with a test pinning the
+  **served bytes** against it, so the catalogue cannot describe an operation differently from the
+  thing that decides on it.
+
+  **Both gates are a compile error to skip.** `admit_grant` consumes the runtime gate's `Admitted` and
+  returns `Granted`; `Granted::resolve` is the only route to the resolver and `Admitted::resolve` is
+  gone.
+
+  ⚠ **Fail-closed, and it will look like an outage.** A deployment that upgrades runs nothing until
+  `FLUX_EXCHANGE_GRANTS` names a file and grants are written into it, and **no surface writes one
+  yet** — expect `503` if no store is bound, `403 not_granted` if one is bound and the tenant holds
+  nothing. That is the intended posture; the surface that fixes the ergonomics is X-62.
+
+- ⚠ **Breaking, `codewandler-flux-exchange-host`:** `Invoker::new` takes a sixth argument
+  (`Arc<dyn Grants>`) and `Admitted::resolve` is replaced by `Granted::resolve`. An
+  `Option<Arc<dyn Grants>>` was rejected deliberately: its only plausible `None` behaviour is *admit
+  everything*, which is the exposure this closed.
+
 - **Only a signed-in human may supply or rotate a credential** (X-54). `POST /api/connections/{connector}`
   and `PUT /api/connections/{connector}/credentials/{credential}` are gated by principal *kind*. At
   v0.8.0 an agent could do both — measured, not inferred: an agent `POST` answered `201` and left its
