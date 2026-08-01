@@ -1,7 +1,7 @@
 ---
 id: X-48
 title: "The invoke composition's safety claims are as strong as its code"
-status: ready
+status: in-progress
 priority: 1
 epic: invoke
 areas: [exchange-host, exchange-server]
@@ -53,18 +53,29 @@ every invoke-level test drives an `http` connector, and the refusal tests call `
 workspace.** Acceptance item 6 is met in code with no tripwire.
 
 ## Acceptance
-- [ ] **Failing-first test** — removing the runtime gate from `Invoker::invoke` fails a test. That is
+- [x] **Failing-first test** — removing the runtime gate from `Invoker::invoke` fails a test. That is
       finding 4, and it is the one with a real hole behind it.
-- [ ] The sandbox posture is **chosen explicitly and written out**, like the two settings beside it,
+      → `crates/exchange-host/tests/runtime_gate.rs`.
+- [x] The sandbox posture is **chosen explicitly and written out**, like the two settings beside it,
       whichever way it is chosen. If disabled is right for this composition, say why in the code; if
       it is not, change it. **Do not leave it inherited.**
-- [ ] The `spawner` comment either becomes true or is replaced by what is actually true.
-- [ ] Lock 2 closes the `ctx.system()` path, **or** its doc states plainly that it catches names and
+      → `SandboxMode::Require`, all three fields longhand, in
+      `crates/exchange-server/src/execution.rs`'s `guarded_system`; pinned by
+      `execution::tests::the_sandbox_posture_is_chosen_and_not_inherited`.
+- [x] The `spawner` comment either becomes true or is replaced by what is actually true.
+      → replaced; `guarded_system`'s "What this is **not**" section says what `ctx.system()` reaches
+      and that an unbound `spawner` closes only the sub-agent seam.
+- [x] Lock 2 closes the `ctx.system()` path, **or** its doc states plainly that it catches names and
       not values, and names what covers the rest. A guard that overstates its reach is worse than one
       that admits its edge — three stories in this repository have now had to correct exactly that.
-- [ ] The cosmetic ones, since they are in the same files: the 18-space run inside the startup
+      → both: `rules::REACHES_THE_SYSTEM` refuses `.system(` in host sources (self-tested), and the
+      module doc's new "What lock 2 is, and what it is not" states the name-versus-value limit and
+      names the four mechanisms that cover the rest.
+- [x] The cosmetic ones, since they are in the same files: the 18-space run inside the startup
       refusal at `bind.rs`, the unused `Field` re-export (permanent public surface on a published
       crate), and `exchange-host`'s crate doc still saying "the service around them is not built".
+      → the run and the crate doc are fixed. **`Field` is not unused** — see Progress; the finding is
+      wrong and the re-export's doc now records why, so it is not filed a third time.
 
 ## Notes
 - **Nothing here is exploitable today** and the review said so. This is about the gap between what
@@ -75,8 +86,52 @@ workspace.** Acceptance item 6 is met in code with no tripwire.
   after dispatch would be told "not sent". Nothing in this tree does that. Consider whether a test
   driving a transport error through `classify` and asserting `Sent::Maybe` is worth having — the
   story that shipped it asked for a re-measure on every bump and gave nobody a way to do it.
+  **Not done here** — it is a `classify` test, not a safety-claim correction, and it wants its own
+  story.
 - Also worth knowing, and deliberately **not** in this story's Acceptance: caller path parameters are
   not percent-encoded by the upstream evaluator, so a parameter can reshape the *path* on the
   declared host. The **origin** is unmovable, which is what X-12's Acceptance asked for — but if
   "the caller cannot name the destination" is ever read as covering the path, that needs an upstream
   story rather than a local patch.
+
+## Progress
+
+**2026-08-01 — implemented on `impl/X-48`.** All five Acceptance items are ticked; one of them is
+ticked with a correction rather than a change.
+
+**Finding 4 was real and the hole was measured, not assumed.** At the merge base (`b208e53`),
+deleting `admit_runtime(self.deployment, &ConnectorSurface::of(provider))?;` from `Invoker::invoke`
+left `cargo test --workspace` at **326 passed, 0 failed**. The tripwire is
+`crates/exchange-host/tests/runtime_gate.rs`.
+
+**It reads source, and the reason is measured.** `admit_runtime`'s answer is a function of exactly
+two values — the bound `Deployment` and the runtime the catalogue declares — and every catalogue
+connector declares `http`, which both deployment classes admit. So no value reachable through
+`Invoker::invoke`'s parameters makes the gate answer anything but `Ok`, and the refusal is not
+behaviourally drivable from this side at all. The test therefore asserts presence **and order**
+(gate before `Credentials::new`, gate before `connector_pack::resolve`), is self-tested against four
+bodies it must reject and one it must accept, and its module doc states plainly that this is a claim
+about source order rather than behaviour, and names what covers the rest. If a connector ever ships
+declaring a locally-executing runtime, `invoke.rs`'s `the_whole_catalogue_declares_http` goes red
+first, and at that point a real behavioural test becomes possible and should replace this one.
+
+**Lock 2 was closed rather than only documented, and then documented anyway.**
+`rules::REACHES_THE_SYSTEM` refuses `.system(` in `exchange-host/src`. It is a rule of its own rather
+than a `FORBIDDEN` entry because `FORBIDDEN` structurally could not have caught it: it matches the
+crate name `flux_system`, and `ctx.system()` yields the `System` through the re-exported
+`ToolContext` without naming it. `ToolContext::workspace` is private and `WorkspaceContext::system`
+spells `.system(` too, so the one call syntax is the whole door. No file is on an exception list.
+
+**The sandbox was changed, not merely written out.** `SandboxMode::Require`, `network: false`,
+`extra_writable: []`, every field named so an upstream addition is a compile error here. `Require`
+means a spawn is confined by a real backend or `Sandbox::ensure_available` refuses it — the
+fail-closed reading, matching "refuse; never repair". Costs one cached, process-global backend probe
+at composition time.
+
+**`Field` is not unused, and the finding is wrong.** `DeclaredSetting::field()` returns `Field<'_>`,
+so without the re-export a composition could call that public method and not name its return type —
+and matching on it would force the composition to name `connector-pack`, which is the one thing lock
+1 exists to prevent. `tests/connection_settings.rs` already exercises it through the re-export. The
+re-export's doc now records this so it is not filed a third time. **It was deliberately not
+removed**; a reviewer expecting a deletion here should read that paragraph rather than assume the
+item was skipped.

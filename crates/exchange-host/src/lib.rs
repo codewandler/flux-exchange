@@ -28,8 +28,16 @@
 //!
 //! # Status
 //!
-//! Early. The types below are real and tested; the service around them is not built. See the
-//! repository README for what exists today.
+//! **v0.7.0, and the service around these types runs operations.** Since X-12,
+//! `POST /api/operations/{operation}/invoke` executes one catalogue operation for the caller's
+//! tenant through [`Invoker`], over a credential store, a connection-settings store and an OIDC
+//! sign-in. What is *not* built is itemized in the repository README, and keeping that page
+//! accurate is part of the job.
+//!
+//! This paragraph read *"the types below are real and tested; the service around them is not
+//! built"* for some time after that stopped being true, which is the failure mode this repository
+//! corrects most often: a claim that outlives what it describes. A doc that understates is not
+//! harmless — it sends the next reader looking for a route that is already there.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -84,6 +92,15 @@ pub use connector_secrets::{CredentialRef, Secret, SecretStore, StoreError, TENA
 /// which can build a request cannot name the pack, and the crate which names the pack cannot build
 /// a request. `exchange-server` holds `flux_web`'s `HttpRequestTool`; it reaches the pack through
 /// this doorway and through nothing else, and `tests/no_second_request_path.rs` asserts it.
+///
+/// [`Field`] is on this list for a narrower reason and it is written down because X-48's review
+/// read it as an unused re-export — permanent public surface on a published crate, added for
+/// nothing. It is not unused: [`DeclaredSetting::field`] **returns** a `Field<'_>`, so without the
+/// re-export that method's type would be unnameable by any composition, and matching on it would
+/// force the composition to name `connector-pack` — the one thing the paragraph above exists to
+/// prevent. `tests/connection_settings.rs` exercises it through this doorway. A re-export that is
+/// the return type of a public method is load-bearing whether or not anything in this tree happens
+/// to call it.
 pub use connector_pack::{ConfigStore, Egress, Field, MemoryConfig};
 
 /// The context an invocation runs in, re-exported for the same reason [`Egress`] is.

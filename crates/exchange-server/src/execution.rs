@@ -8,13 +8,16 @@
 //!
 //! # What is configured here, and why each choice is the strict one
 //!
-//! [`WebOptions`] is flux's egress envelope, and two of its fields are safety decisions rather than
-//! preferences. Both are set to the strictest available value, because a property that depends on a
-//! default staying where it is, is one edit away from gone.
+//! Three settings in [`invoker`] are safety decisions rather than preferences: two fields of
+//! [`WebOptions`], flux's egress envelope, and the [`Sandbox`] posture of the [`System`] every
+//! [`ToolContext`] is built over. Each is set to the strictest available value and **each is
+//! written out longhand**, because a property that depends on a default staying where it is, is one
+//! edit away from gone. The sandbox was the one that used to be inherited; X-48 wrote it out.
 
 use std::sync::Arc;
 
 use exchange_host::{ConfigStore, Contexts, Deployment, Egress, Invoker, SecretStore, ToolContext};
+use flux_system::sandbox::{Sandbox, SandboxMode, SandboxSettings};
 use flux_system::{System, Workspace};
 use flux_web::http::HttpRequestTool;
 use flux_web::WebOptions;
@@ -76,8 +79,7 @@ pub fn invoker(
     };
 
     // A workspace nothing in this path reads. The registry an invocation resolves holds exactly one
-    // operation and its egress; neither touches the filesystem, and `ToolContext`'s spawner is left
-    // unbound, so no process can be spawned through it either. It exists because
+    // operation and its egress, and neither touches the filesystem. It exists because
     // `ToolContext::new` takes a `System` and there is no constructor that does not.
     let root = std::env::current_dir()
         .map_err(|error| format!("the working directory is unreadable: {error}"))?;
@@ -104,7 +106,90 @@ pub fn invoker(
         // tenant, in one expression, off the resolved principal.
         settings,
         Arc::new(GuardedSystem {
-            system: Arc::new(System::new(workspace)),
+            system: Arc::new(guarded_system(workspace)),
         }),
     ))
+}
+
+/// The guarded IO handle every [`ToolContext`] is built over, **with its sandbox posture stated**.
+///
+/// A named function rather than an expression inside [`invoker`] so
+/// [`tests::the_sandbox_posture_is_chosen_and_not_inherited`] can assert what was chosen. A posture nobody
+/// can observe from a test is a posture that goes back to its default in the next refactor, which
+/// is the shape of the finding this function exists to answer.
+///
+/// # Why `Require`, written out field by field
+///
+/// `System::new` alone leaves `Sandbox::disabled()`, and upstream's own doc on that constructor
+/// says production entry points should use `from_env`/`with_sandbox` instead — it is the shape
+/// hermetic tests want. Inheriting it in [`invoker`] was the same mistake `allowed_secrets` and
+/// `private_net` are written out longhand a few lines earlier to avoid.
+///
+/// `Require` is the strict end: a spawn is confined by a real backend, or `Sandbox::ensure_available`
+/// refuses it. That is *refuse; never repair* applied to the one capability this composition holds
+/// and does not use. `network: false` narrows what a **sandboxed child** may dial and is unrelated
+/// to `private_net`, which guards the requests this host actually sends. `extra_writable` is empty
+/// because widening a writable path is a decision and nobody has made one. Every field is named
+/// rather than spread from a default, so a field upstream adds is a compile error here rather than
+/// one more inherited posture.
+///
+/// # What this is **not**
+///
+/// It is not a claim that nothing can spawn — that claim used to sit at this call site and it was
+/// false. [`ToolContext::system`](exchange_host::ToolContext::system) hands any holder of a context
+/// this `System`, whose `run`/`run_with_env` spawn processes and whose `read_file`/`write_file`
+/// reach the workspace root; an unbound `spawner` closes the *sub-agent* seam, which is a different
+/// door. Nothing on the invoke path calls `ctx.system()`, and
+/// `crates/exchange-host/tests/no_second_request_path.rs` refuses that spelling in the dispatching
+/// crate. This posture is what decides the answer if either of those stops being true.
+fn guarded_system(workspace: Workspace) -> System {
+    System::new(workspace).with_sandbox(Sandbox::resolve(SandboxSettings {
+        mode: SandboxMode::Require,
+        network: false,
+        extra_writable: Vec::new(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The finding X-48 answers.** The sandbox posture is the one this composition chose, not the
+    /// one `System::new` happens to hand out.
+    ///
+    /// Asserted against `Sandbox::disabled()` as well as against the literal mode, because the two
+    /// say different things: the literal pins *what was chosen*, and the comparison pins *that a
+    /// choice was made at all* — which is precisely what a future `System::new(workspace)` with the
+    /// `.with_sandbox` dropped would lose while still compiling and still passing every other test
+    /// in this workspace.
+    #[test]
+    fn the_sandbox_posture_is_chosen_and_not_inherited() {
+        let workspace = Workspace::new(std::env::temp_dir())
+            .expect("the temp directory is a usable workspace root");
+        let system = guarded_system(workspace);
+        let settings = system.sandbox().settings();
+
+        assert_eq!(
+            settings.mode,
+            SandboxMode::Require,
+            "a spawn this composition cannot confine must refuse rather than run unconfined",
+        );
+        assert_ne!(
+            settings.mode,
+            Sandbox::disabled().settings().mode,
+            "the sandbox is back to `System::new`'s inherited default, which upstream documents as \
+             the hermetic-test constructor and which this composition deliberately does not take",
+        );
+        assert!(
+            !settings.network,
+            "a sandboxed child of this process has no business dialling anything; the requests \
+             this host sends go through the `Egress`, under `private_net`",
+        );
+        assert!(
+            settings.extra_writable.is_empty(),
+            "widening a writable path beyond the workspace is a decision, and this is not where \
+             one was made: {:?}",
+            settings.extra_writable,
+        );
+    }
 }
