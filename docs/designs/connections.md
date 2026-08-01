@@ -333,6 +333,59 @@ answer and refusal this module can produce, and does not drive `partly_written`'
 disclosure properties are asserted directly by X-18's and X-20's own tests instead. Closing the gap
 means rearranging that test's arming order around an already-half-destroyed connection; it is
 recorded here rather than left as a false claim in the test's doc.
+*Closed by X-29 — see the addendum below.*
+
+## Addendum, 2026-08-01 — the partial delete says only what it knows (X-29)
+
+X-18's review, which ran late, found two things the addendum above did not settle. Both are about a
+`DELETE` that fails part way, and neither is a regression — they are cases the earlier stories did
+not reach.
+
+**`left_behind` asserted more than this host can know.** The refusal said the addresses in
+`left_behind` were to be treated "as still usable by anyone holding them", flatly. But a connector
+may legitimately hold a *subset* of what it declares (`a_connection_may_carry_a_subset_of_what_is_declared`),
+and `remove` deletes the whole declared set — so an address in that list may never have held
+anything. Reproduced with `slack` connected by `bot_token` alone: `signing_secret` was named as
+still-usable at an address where the store held nothing in the same run.
+
+**Decision: hedge the sentence, do not narrow the list.** The sibling `partly_written` already says
+"Some credentials *may* remain", and this now reads the same way — "a credential may remain at any of
+them, so treat every one as still usable by anyone holding it". Narrowing `left_behind` to what the
+pre-delete probe saw, the way `destroyed` is narrowed, was rejected and the asymmetry is deliberate:
+
+- The two halves are not symmetric in what a mistake costs. Calling an empty address `destroyed`
+  over-reports a revocation, so that list is narrowed. Dropping an address from `left_behind`
+  *under*-reports one — and on a revocation surface an address nobody mentions reads as gone.
+- The probe is stale by the time the loop runs, which is the stated reason the whole declared set is
+  deleted rather than only what the probe saw. A value may have appeared since. So the addresses a
+  narrowing would drop are exactly the ones this host knows least about.
+- The safe bias therefore survives intact: the list is unchanged and the *instruction* is unchanged.
+  Only the claim behind it moved, from something this host cannot know to something it can.
+
+**The first failure kind won, not the worst.** `failure.get_or_insert(error)` kept the first error
+the loop saw, so an `Unreachable` at one address followed by a `Denied` at the next answered `503`
+"retrying may work" — with the denied address named in that same response's `left_behind`. That is
+the misinformation X-18 and X-20 exist to end, in the one case where the loop sees more than one
+kind, and after X-18 made the loop best-effort it was the only place on this surface a `Denied` could
+still be answered "retrying may work".
+
+**Decision: keep the worst, ordered by `Escalation`** — transient, then restore-this-host's-access,
+then repair-the-store. The boundary that matters is the first, between a failure that may resolve
+itself and one that will not; the second separates two kinds that already share `502` and "retrying
+will not help", and is settled by which refusal admits less, since a store this host could not
+interpret should not be summarised as one that gave a clear answer. It is a second match on the same
+variants rather than a fourth element of `store_failure`'s tuple, because what a caller is *told* and
+how two failures *compare* are different questions.
+
+`TestStore` gained per-address delete control (`delete_fails_at`) to drive it. Neither a global flag
+nor a counter can arm two kinds in one `remove`, which is why no earlier story caught this.
+
+**And the coverage gap above is closed on the side that was cheap.**
+`no_answer_or_refusal_carries_a_credential_value` now drives both of `partly_written`'s branches. It
+still does not drive `allowance_change_in_flight`, which needs a tenant-wide claim held across a
+request from another task; that one names no address at all, only a connector id. The test's doc now
+carries the list of what it reaches instead of the claim that it reaches everything — three stories
+in a row had to re-discover that the claim was false.
 
 ## Addendum, 2026-08-01 — the allowance is decided at a wider claim (X-25)
 

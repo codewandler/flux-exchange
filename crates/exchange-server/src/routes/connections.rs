@@ -25,8 +25,9 @@
 //!
 //! `POST` is the only direction a credential value travels. Nothing here reads one out to a caller:
 //! `GET` answers with **addresses**, every refusal names the address it looked at, and
-//! [`tests::no_answer_or_refusal_carries_a_credential_value`] drives the whole module with a
-//! sentinel stored and asserts it appears in no response body. `AGENTS.md` § Invariants: name the
+//! [`tests::no_answer_or_refusal_carries_a_credential_value`] drives every answer and refusal it
+//! names — which is all of them but one, listed on the test itself rather than claimed here — with a
+//! sentinel stored, and asserts it appears in no response body. `AGENTS.md` § Invariants: name the
 //! address, never the value.
 //!
 //! # The second connection to one connector is refused
@@ -453,7 +454,17 @@ async fn remove(
             // declared set is deleted is that a value may have appeared since the probe.
             Err(error) => {
                 left_behind.push(address_path(reference));
-                failure.get_or_insert(error);
+
+                // The worst kind the loop saw, not the first. Keeping the first meant one
+                // `Unreachable` ahead of a `Denied` answered "retrying may work" while the denied
+                // address sat in `left_behind` below — see [`Escalation`] for the order and why
+                // this is the one place on the surface where that could still happen.
+                let worse = failure
+                    .as_ref()
+                    .is_none_or(|worst| escalation(&error) > escalation(worst));
+                if worse {
+                    failure = Some(error);
+                }
             }
         }
     }
@@ -858,6 +869,44 @@ fn store_failure(error: &StoreError) -> (StatusCode, &'static str, &'static str)
     }
 }
 
+/// How much an operator has to do about a store failure, ordered by how much that is.
+///
+/// [`remove`] deletes every declared address rather than stopping at the first failure, so its loop
+/// can see more than one kind — and it has to answer with one. Reporting the *first* it saw meant an
+/// `Unreachable` followed by a `Denied` was answered `503` "retrying may work" with the denied
+/// address named in the same response's `left_behind`, which is the misinformation [`store_failed`]
+/// argues against at length. So the worst is kept rather than the first, and "worst" is this order.
+///
+/// The boundary that matters is the first one, between a failure that may resolve itself and one
+/// that will not: on a revocation surface, telling somebody to retry when nobody is coming to fix
+/// the store is how a live credential stays live. The second boundary separates two kinds that
+/// already share a status and a "retrying will not help", and is settled by which refusal admits
+/// less — a store this host could not *interpret* is not summarised as one that gave a clear answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Escalation {
+    /// Nobody has to do anything yet; the store may answer next time.
+    Transient,
+    /// A person has to restore this host's access to the store.
+    RestoreAccess,
+    /// A person has to repair the store or how it is configured.
+    RepairTheStore,
+}
+
+/// Where a failure sits in that order.
+///
+/// Deliberately a second match on the same variants rather than a fourth field on
+/// [`store_failure`]: what a caller is *told* and how two failures *compare* are different
+/// questions, and a comparison returned from the tuple would be read as part of the answer.
+fn escalation(error: &StoreError) -> Escalation {
+    match error {
+        // A not-found is a bug in this module rather than a store failure — `store_failure` says so
+        // and warns about it. Ranked lowest so it can never win a comparison and hide a real one.
+        StoreError::NotFound { .. } | StoreError::Unreachable { .. } => Escalation::Transient,
+        StoreError::Denied { .. } => Escalation::RestoreAccess,
+        StoreError::Backend { .. } | StoreError::Layout { .. } => Escalation::RepairTheStore,
+    }
+}
+
 /// Another change to this same connection is already in flight.
 ///
 /// One at a time per `(tenant, connector)`, because deciding whether a connection exists and then
@@ -964,6 +1013,25 @@ fn partly_written(
 /// needs: somebody revoking a leaked secret, who has to know which credentials are already gone so
 /// that the work left is exactly the ones named beside them. Both halves are addresses and never
 /// values, and both are this tenant's own — the same rule every refusal on this surface follows.
+///
+/// # `left_behind` is a list of addresses, not a list of live credentials
+///
+/// The two halves are computed asymmetrically, and only one of them can be. `destroyed` is narrowed
+/// to what the pre-delete probe saw a value at, because calling an empty address "destroyed" would
+/// overstate what happened to somebody counting revoked secrets. **`left_behind` is not narrowed the
+/// same way, and must not be.** A connector may legitimately hold a subset of what it declares
+/// ([`tests::a_connection_may_carry_a_subset_of_what_is_declared`]), so an address here may never
+/// have held anything — but a failed delete is precisely the case where this host cannot say the
+/// address is empty, and the reason [`remove`] deletes the whole declared set is that a value may
+/// have appeared since the probe. Narrowing to what the probe saw would drop exactly the addresses
+/// this host knows least about, and on a revocation surface an address that goes unmentioned reads
+/// as gone. "Possibly still live" must never come out as "definitely gone", so the list stays whole.
+///
+/// What was wrong was therefore the *claim*, not the list: the sentence said flatly to treat these
+/// as still usable, where the sibling [`partly_written`] hedges with "Some credentials **may**
+/// remain". It now hedges the same way and still gives the same instruction — a caller is told that
+/// a credential may remain at any of these addresses and to treat every one as live — which is the
+/// safe bias stated as something this host can actually know.
 fn partly_destroyed(
     provider: &'static Provider,
     error: &StoreError,
@@ -981,10 +1049,11 @@ fn partly_destroyed(
         status,
         format!(
             "the credential store failed while destroying the `{}` connection, so it is now part \
-             gone and part live: the credentials at the addresses in `destroyed` are gone and \
-             cannot be put back, and the ones in `left_behind` this host could not destroy — treat \
-             those as still usable by anyone holding them. {advice}; a `DELETE \
-             /api/connections/{}` that answers `204` is what makes the connection gone",
+             gone and part unaccounted for: the credentials at the addresses in `destroyed` are \
+             gone and cannot be put back, and the addresses in `left_behind` this host could not \
+             destroy — a credential may remain at any of them, so treat every one as still usable \
+             by anyone holding it. {advice}; a `DELETE /api/connections/{}` that answers `204` is \
+             what makes the connection gone",
             provider.id, provider.id,
         ),
         json!({
@@ -1073,6 +1142,12 @@ mod tests {
         /// ones before it to land.
         deletes_allowed: Mutex<Option<usize>>,
         deletes: Mutex<usize>,
+        /// How a `delete` at a rendered address fails, for the addresses named here.
+        ///
+        /// Distinct from both flags above, which fail every delete the same way: a `remove` loop
+        /// only reports the *worst* of several kinds if it can be made to see more than one, and
+        /// neither a global flag nor a counter can arm two different kinds in one run.
+        delete_failures: Mutex<HashMap<String, Failure>>,
         /// `get` yields to the runtime, widening the read-decide-write window.
         widened: Mutex<bool>,
     }
@@ -1123,6 +1198,18 @@ mod tests {
         fn allow_only_deletes(&self, allowed: usize) {
             *self.deletes.lock().expect("no test poisons this") = 0;
             *self.deletes_allowed.lock().expect("no test poisons this") = Some(allowed);
+        }
+
+        /// Fail the `delete` at one rendered address this way, leaving every other address alone.
+        ///
+        /// The finest control the store offers, and the only one that can arm two kinds in a
+        /// single `remove`: it takes the address rather than a position in the loop, so a test
+        /// says which credential fails how rather than counting deletions to get there.
+        fn delete_fails_at(&self, path: &str, failure: Failure) {
+            self.delete_failures
+                .lock()
+                .expect("no test poisons this")
+                .insert(path.to_string(), failure);
         }
 
         /// Make the window between a probe and a write wide enough that a concurrent request
@@ -1246,6 +1333,18 @@ mod tests {
 
         async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
             self.failure(reference)?;
+
+            // Before the blanket flag and the counter, because it is the more specific
+            // instruction: a test that names an address means that address.
+            if let Some(failure) = self
+                .delete_failures
+                .lock()
+                .expect("no test poisons this")
+                .get(&address_path(reference))
+                .copied()
+            {
+                return Err(failure.at(address_path(reference)));
+            }
 
             if *self.deletes_fail.lock().expect("no test poisons this") {
                 return Err(Failure::Unreachable.at(address_path(reference)));
@@ -2515,6 +2614,175 @@ mod tests {
         );
     }
 
+    /// **X-29's failing-first test.** A `DELETE` whose deletions fail in *two* ways answers with
+    /// the kind an operator has to act on, not the kind that happened first.
+    ///
+    /// `failure.get_or_insert(error)` kept the first error the loop saw. So an `Unreachable` at the
+    /// first address followed by a `Denied` at the second answered `503` "Retrying may work" —
+    /// while the denied address sat in that same response's `left_behind`. That is the exact
+    /// misinformation X-18 and X-20 exist to end, reappearing in the one case neither covered: a
+    /// loop that sees more than one kind.
+    ///
+    /// Driven in **both orders**, because "the worst" and "the last" are indistinguishable when the
+    /// worst happens to be last — a fix that simply assigned on every error would pass half of this
+    /// and fail the other half.
+    #[tokio::test]
+    async fn a_delete_that_fails_two_ways_reports_the_kind_an_operator_must_act_on() {
+        const BOT_TOKEN: &str = "tenants/acme/com.slack.api/bot_token";
+        const SIGNING_SECRET: &str = "tenants/acme/com.slack.api/signing_secret";
+
+        async fn connect_slack(app: &Router) -> StatusCode {
+            call(
+                app,
+                "alice",
+                Method::POST,
+                "/api/connections/slack",
+                Some(json!({
+                    "credentials": {
+                        "slack.bot_token": SENTINEL,
+                        "slack.signing_secret": SENTINEL,
+                    }
+                })),
+            )
+            .await
+            .0
+        }
+
+        // Each order, and its answer — which is the same answer both ways round, because the order
+        // the loop met them in is not supposed to reach the caller at all. The advice is what
+        // distinguishes the two `502` kinds from each other; the status is what distinguishes both
+        // of them from the transient.
+        const RESTORE_ACCESS: &str =
+            "Retrying will not help; an operator has to restore this host's access to the store";
+        const REPAIR_THE_STORE: &str =
+            "Retrying will not help; this is a defect in the store or in how it is configured";
+
+        for (first, second, advice) in [
+            // The story's reproduction, and it in reverse — so that "the worst" cannot be
+            // satisfied by an implementation that merely keeps the last.
+            (Failure::Unreachable, Failure::Denied, RESTORE_ACCESS),
+            (Failure::Denied, Failure::Unreachable, RESTORE_ACCESS),
+            // The second tier of the order: two kinds that already share `502` and "retrying will
+            // not help", settled towards the one that admits less.
+            (Failure::Denied, Failure::Backend, REPAIR_THE_STORE),
+            (Failure::Backend, Failure::Denied, REPAIR_THE_STORE),
+        ] {
+            let (app, store) = connected_app();
+            assert_eq!(connect_slack(&app).await, StatusCode::CREATED);
+
+            // The loop walks the declared order, so `bot_token` is the failure that happens first.
+            store.delete_fails_at(BOT_TOKEN, first);
+            store.delete_fails_at(SIGNING_SECRET, second);
+
+            let (status, refusal) = call(
+                &app,
+                "alice",
+                Method::DELETE,
+                "/api/connections/slack",
+                None,
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::BAD_GATEWAY,
+                "a failure an operator has to act on is not answered as a transient, whichever \
+                 address it happened at ({first:?} then {second:?}): {refusal}",
+            );
+            assert!(
+                refusal["error"]
+                    .as_str()
+                    .expect("a reason")
+                    .contains(advice),
+                "and the advice is the worst kind's rather than the first kind's ({first:?} then \
+                 {second:?}): {refusal}",
+            );
+
+            // Both halves still tell the truth: nothing was destroyed, and neither address can be
+            // called empty.
+            assert_eq!(refusal["destroyed"], json!([]), "{refusal}");
+            assert_eq!(
+                refusal["left_behind"],
+                json!([BOT_TOKEN, SIGNING_SECRET]),
+                "every address whose delete failed is still named, whatever kind it failed with: \
+                 {refusal}",
+            );
+        }
+    }
+
+    /// **`left_behind` says what this host knows, and no more.**
+    ///
+    /// A connector may legitimately hold a subset of what it declares —
+    /// [`a_connection_may_carry_a_subset_of_what_is_declared`] — so an address whose delete failed
+    /// may never have held anything. The refusal nonetheless said flatly to "treat those as still
+    /// usable by anyone holding them", where the sibling [`partly_written`] hedges with "Some
+    /// credentials **may** remain".
+    ///
+    /// The list itself is deliberately **not** narrowed, and this pins that too: a failed delete is
+    /// exactly the case where this host cannot say the address is empty, so dropping the addresses
+    /// the probe did not see would turn "possibly still live" into "not mentioned", which on a
+    /// revocation surface reads as gone. What changes is the claim, not the list — and the
+    /// instruction to treat every named address as live survives it.
+    #[tokio::test]
+    async fn left_behind_hedges_about_an_address_this_host_never_saw_a_value_at() {
+        const BOT_TOKEN: &str = "tenants/acme/com.slack.api/bot_token";
+        const SIGNING_SECRET: &str = "tenants/acme/com.slack.api/signing_secret";
+
+        let (app, store) = connected_app();
+
+        // Connected with one of the two credentials slack declares, so the second address has
+        // never held anything at all.
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({ "credentials": { "slack.bot_token": SENTINEL } })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+
+        store.delete_fails_at(SIGNING_SECRET, Failure::Unreachable);
+
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::DELETE,
+            "/api/connections/slack",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refusal}");
+        assert_eq!(refusal["destroyed"], json!([BOT_TOKEN]), "{refusal}");
+        assert_eq!(
+            refusal["left_behind"],
+            json!([SIGNING_SECRET]),
+            "the address is still named — narrowing the list to what the probe saw is the \
+             under-report this surface must never make: {refusal}",
+        );
+
+        // And nothing was ever there, which is the whole point: the refusal is talking about an
+        // address this host has no evidence about either way.
+        assert_eq!(
+            store.at(SIGNING_SECRET),
+            None,
+            "the reproduction is only interesting if the address is genuinely empty",
+        );
+
+        let reason = refusal["error"].as_str().expect("a reason");
+        assert!(
+            reason.contains("a credential may remain at any of them"),
+            "the refusal must hedge about `left_behind` rather than assert it, the way \
+             `partly_written` does: {reason}",
+        );
+        assert!(
+            reason.contains("still usable by anyone holding it"),
+            "and the safe instruction must survive the hedge — this is a revocation surface, so \
+             the operator is still told to treat every named address as live: {reason}",
+        );
+    }
+
     /// **The race the `409` has to survive.** Two concurrent `POST`s for one tenant and one
     /// connector, on a multi-threaded runtime, with the window between the probe and the write held
     /// open.
@@ -2820,11 +3088,21 @@ mod tests {
         }
     }
 
-    /// **Name the address, never the value.** Every answer and every refusal this module can
-    /// produce, driven with a value stored, and the value appears in none of them.
+    /// **Name the address, never the value.** Driven with a value stored, and the value appears in
+    /// none of the answers below.
     ///
     /// Written over the *shape* of the whole body rather than over the fields somebody remembered
     /// to check, so a field added later cannot quietly start carrying one.
+    ///
+    /// **What it does and does not reach.** This claimed to drive *every* answer and refusal the
+    /// module can produce, and three stories in a row (X-20, X-25, X-29) found that it did not — so
+    /// the claim is now the list. Driven here: both listings, `show`, the unknown-connector and
+    /// undeclared-credential refusals, the `409` for a second connection, both partial-failure
+    /// refusals with their address lists, both size refusals, and a store failure. **Not driven:**
+    /// [`allowance_change_in_flight`], which needs a tenant-wide claim held across a request from
+    /// another task — machinery this test has none of, and the one refusal here that names no
+    /// address at all, only a connector id. A test that admits its gap is worth more than one whose
+    /// doc has to be re-checked against the module every time a refusal is added.
     #[tokio::test]
     async fn no_answer_or_refusal_carries_a_credential_value() {
         let (app, store) = connected_app();
@@ -2888,6 +3166,43 @@ mod tests {
             "likewise: {partly_destroyed}",
         );
         answers.push(partly_destroyed);
+
+        // X-20's refusal, in **both** its branches — the gap X-20 recorded and did not close. Each
+        // needs its own app, because arming a store to fail its writes is not something the
+        // requests above can be run through afterwards.
+        for rollback_fails in [false, true] {
+            let (half_written_app, half_written_store) = connected_app();
+            half_written_store.allow_only(1);
+            if rollback_fails {
+                half_written_store.deletes_fail();
+            }
+
+            let (status, partly_written) = call(
+                &half_written_app,
+                "alice",
+                Method::POST,
+                "/api/connections/slack",
+                Some(json!({
+                    "credentials": {
+                        "slack.bot_token": SENTINEL,
+                        "slack.signing_secret": SENTINEL,
+                    }
+                })),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this must be the half-written refusal, or the answer below proves nothing about \
+                 it: {partly_written}",
+            );
+            assert_eq!(
+                partly_written["left_behind"].is_array(),
+                rollback_fails,
+                "and it must be the branch this iteration armed: {partly_written}",
+            );
+            answers.push(partly_written);
+        }
 
         // X-22's two refusals, which quote sizes and must quote no value. The value they are
         // refusing is built out of the sentinel so that a refusal echoing any part of what was
