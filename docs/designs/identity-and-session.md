@@ -191,6 +191,25 @@ can guess, and a host that quietly downgraded to one would look exactly like a h
 `SessionToken` does not implement `Display` and its `Debug` redacts. It is a bearer credential, and
 one in a log line is a session anyone reading the log can use.
 
+## Addendum, X-16 — sessions expire, where there is something to expire with
+
+The first bullet below is superseded and is kept as the reasoning of the time. `SessionStore::open`
+now takes an `Expiry` that every caller must name:
+
+- **`Expiry::Credential { expires_at }`** — the OIDC port, carrying the id token's `exp` verbatim.
+  The session ends when the identity behind it does, and an expired entry is *removed* rather than
+  left unresolvable, so it cannot occupy the bound described two bullets down. An `exp` already past
+  or further out than thirty days refuses rather than being clamped.
+- **`Expiry::WhileTheProcessLives`** — the development port, and unchanged behaviour. What is
+  presented there is a roster handle: a name with no secret and no expiry in it, so there is nothing
+  to bind a session's end to, and any lifetime named would be one this host invented. That is the
+  same repair the OIDC side refuses. Arming this port already forces a loopback bind, which is where
+  the protection actually is.
+
+The cookie still carries no `Max-Age`, and the argument in the last bullet below still holds — a
+second copy of the deadline, in a place this host cannot correct, buys nothing now that the server
+enforces the first.
+
 ## What this deliberately does not do
 
 - **Sessions do not expire.** One lives until it is closed or until the process does, and the cookie

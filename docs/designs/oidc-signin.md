@@ -53,6 +53,24 @@ reasoning of the time, not as a description of the code. What changed:
   — no longer holds, since `SignedClaims::expires_at` now exists. This is genuine follow-on work and
   has its own story rather than being smuggled in here.
 
+## Addendum, X-16 — a session now ends when the id token does
+
+**Done.** `Oidc::complete` passes `claims.expires_at` to `SessionStore::open` as
+`Expiry::Credential`, so the bullet above and every "sessions do not expire" below it are history.
+The decisions worth carrying:
+
+- **The `exp` goes across verbatim.** A five-minute token yields a five-minute session; this host
+  invents no lifetime, since one it invented would outlive the credential it was shown.
+- **An `exp` in the past, or further out than thirty days, refuses the sign-in** rather than being
+  clamped to something plausible. Clamping would issue a session neither the provider nor this host
+  described, and the operator with the broken provider would never learn of it. `Oidc::admit`
+  already refuses an expired token, so the first is the store's own guarantee for any other caller.
+- **An expired session is removed, not merely unresolvable**, and answers as one that never existed
+  — the same `IdentityError::Rejected`, naming nothing about why.
+- **Nothing is refreshed.** This host holds the deadline the provider stated and does not ask again;
+  a refresh needs a refresh token this flow deliberately never requested. When an id token expires,
+  the human signs in again.
+
 ## What this story could not build, and why that is the shape it is
 
 **Decision: the token exchange is a port. This binary binds none, and says so at startup.**
