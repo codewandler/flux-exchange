@@ -15,7 +15,8 @@ everything below.
 > is configured. The authorization code is redeemed back-channel and the id token's signature is
 > verified against the provider's published keys, so `/api/signin` redirects to a real provider —
 > configure the eight `FLUX_EXCHANGE_OIDC_*` variables and it works end to end. Connections can be
-> created, listed and deleted per tenant; there is no `invoke`. See
+> created, listed, **rotated** and deleted per tenant, and an agent principal can be **minted** — it
+> cannot yet authenticate. There is no `invoke`. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 

@@ -81,3 +81,18 @@ all.
   wanting `slack.signing_secret` on a connection holding only `bot_token` must `DELETE` and re-`POST`,
   destroying the credential they had. `nothing_to_rotate` says so plainly rather than naming a remedy
   that answers `409`. Worth a story.
+- **Reviewed PASS**, independently rather than on the report: the reviewer built its own base proof,
+  mutation-tested every guard (five mutations, all caught), and swept **18 hostile credential names**
+  beyond the four in the diff — including another connector's declared credential at this connector's
+  path. All refused `422` with the store byte-identical. `declares()` is exact byte equality against
+  catalogue data and only `declared.leaf` reaches `CredentialRef::new`, so the path segment is a
+  lookup key and never an address component. **The relaxation of
+  `no_route_here_accepts_an_address` is genuinely paid for.**
+- **Correction from the review, and worth knowing:** the concurrent-reader half of the never-gone
+  test is **probabilistic**. Under a delete-then-put mutation it *passed* — only `store.deletes() == 0`
+  caught the regression. The structural half carries the Acceptance item on its own, and the reader
+  half should not be cited as the guard.
+- Two stale claims the review found, both corrected at integration: `connections.rs`'s module doc
+  said `writes` was "the **only** way supplied values become writes" while `write_of` is now an
+  equally public entry point (the invariant held — `writes` delegates — but the sentence was
+  load-bearing), and `README.md` still described connections as create/list/delete only.

@@ -68,8 +68,12 @@
 //! changing an upstream crate from here, or declaring a second `SecretStore` locally, and the
 //! second is exactly what has already been refused.
 //!
-//! So the bound sits at the next seam in, [`ConnectorDeclaration::writes`], which is the **only**
-//! way supplied values become writes. A composition cannot write a credential it has not addressed,
+//! So the bound sits at the next seam in: [`ConnectorDeclaration::write_of`], which admits **one**
+//! supplied value, and [`ConnectorDeclaration::writes`], which is a whole body's worth and is
+//! written in terms of it. Those two are the **only** ways supplied values become writes, and the
+//! second delegating to the first is what keeps the bound stated once — X-39 added the singular form
+//! for rotation, and `one_value_is_admitted_by_the_same_step_as_a_whole_body` is what holds them
+//! together. A composition cannot write a credential it has not addressed,
 //! and it cannot get an addressed value out of this crate without the value being admitted first —
 //! so the per-value bound is not a check a surface remembers to make, it is the step that produces
 //! the thing there is to write. What that does *not* reach is a second `SecretStore` implementation
