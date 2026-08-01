@@ -14,7 +14,8 @@ everything below.
 > start of an OIDC sign-in. It refuses to start on a reachable address while no identity provider is
 > configured. **Sign-in cannot complete**: redeeming the code needs an HTTP client and verifying the
 > id token needs a JOSE library, and this workspace has neither — so `/api/signin` serves an
-> explanation rather than a redirect. There is no connection surface and no `invoke`. See
+> explanation rather than a redirect. Connections can be created, listed and deleted per tenant;
+> there is no `invoke`. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 
@@ -76,11 +77,13 @@ against one tenant's connections, not a vendor secret.
 | | |
 |---|---|
 | `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound but not yet wired into a binary. **Real and tested (32 tests).** |
-| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port, and OIDC sign-in **up to the token exchange**. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (99 tests).** |
+| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port, OIDC sign-in **up to the token exchange**, and a per-tenant connection surface. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (99 tests).** |
 | `console/` | A Vue 3 console reading the **live catalogue** from this service, reusing the framework-free explorer components from flux-connectors. An unreachable service renders an error naming the endpoint — never an empty catalogue. |
 
 **Not built, despite being described in the design:** the second half of sign-in (the token exchange
-and id-token verification, for want of an HTTP client and a JOSE library), connections, `invoke`,
+and id-token verification, for want of an HTTP client and a JOSE library), a second connection to one
+connector (the address has no instance dimension until upstream publishes one), per-connection
+configuration, `invoke`,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
 catalogue loader. The credential store has moved off this list and is described below — with the
 caveat that it is a library binding no binary holds yet, which is a shorter distance from "not
@@ -113,13 +116,14 @@ To decommission a store, remove the **directory**, not the file — a write inte
 `fsync` and the `rename(2)` can leave a complete copy of every credential in a sibling temporary
 that `rm` on the store file alone does not touch.
 
-No binary binds it yet: the server serves `/health` without ever opening a store.
+The binary binds it when `FLUX_EXCHANGE_CREDENTIALS` names a path; unset, the connection routes
+refuse and name the setting rather than pretending a store exists.
 
 ## Try it
 
 ```bash
 cargo run                       # binds 127.0.0.1:8080; health, catalogue, session, sign-in
-cargo test --workspace          # 131 tests
+cargo test --workspace          # 167 tests
 cd console && npm install && npm run dev
 ```
 

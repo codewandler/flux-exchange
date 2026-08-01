@@ -8,6 +8,25 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Connections, addressed by a tenant the caller cannot name** (X-08, X-10). Create, list and
+  delete a connection, scoped to the caller's tenant. The credential address is **derived** —
+  `tenants/<tenant>/<authority>/<credential>`, with the tenant from the resolved principal and the
+  authority from the connector's declaration — and **no route accepts an address**. A connector that
+  declares no authority is refused rather than stored at a guessed one. Deleting a connection
+  destroys its credentials. Tenant A cannot read, use or delete tenant B's connection, and the
+  refusal names A's *own* address, never B's and never a value; 18 hostile connector ids across three
+  methods were all refused.
+
+  **A second connection to the same connector is refused (409), not silently overwritten.** The
+  address has no instance dimension yet — upstream flux-connectors C-406 adds one and this repository
+  cannot use it until it is published — so the refusal quotes the shape that will replace it and
+  names X-14. Per-connection configuration is deferred for the same reason: a vendor subdomain is
+  exactly the per-instance fact with no home until two instances can be told apart.
+
+  The refusal is guarded across the whole probe-decide-write, because a check-then-write lost to two
+  concurrent requests and produced precisely the silent overwrite it exists to prevent. **Single
+  process only**, stated in the guard, the routes and the design: two replicas over one store would
+  race again, and `SecretStore` has no compare-and-swap to close it properly.
 - **OIDC sign-in, up to the token exchange** (X-04, partial). The authorization request is real:
   authorization-code flow with PKCE `S256`, and `state` and `nonce` bound at `/api/signin`,
   single-use and TTL-bounded. A callback carrying a `state` this host did not open is refused with
