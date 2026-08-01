@@ -37,20 +37,29 @@ export default defineConfig({
   ignoreDeadLinks: false,
 
   themeConfig: {
+    // `Run it yourself` is first, and that ordering is X-69's point rather than a preference: a
+    // visitor could learn what this service refuses to do and could not learn how to start it. The
+    // nav carries it on every page because a sidebar entry is something you find only after you
+    // have decided to look.
     nav: [
+      { text: 'Run it yourself', link: '/getting-started' },
       { text: 'The boundary', link: '/boundary' },
       { text: 'The surface', link: '/surface' },
       { text: 'Releases', link: `${repo}/releases` },
     ],
 
-    // Three pages, deliberately (X-63). The volume — one page per capability, each carrying a
-    // status derived from the route table rather than written by hand — arrives with X-64 and X-65,
-    // in that order, because the mechanism has to land before the pages that depend on it.
+    // Four pages. Three were X-63's deliberate floor and the fourth is X-69's getting-started page,
+    // which is not the "volume" that story deferred: it describes how to run the software rather
+    // than claiming what any build can do, so it does not wait on the derived status badge. That
+    // volume — one page per capability, each carrying a status derived from the route table rather
+    // than written by hand — still arrives with X-64 and X-65, in that order, because the mechanism
+    // has to land before the pages that depend on it.
     sidebar: [
       {
         text: 'flux-exchange',
         items: [
           { text: 'Overview', link: '/' },
+          { text: 'Run it yourself', link: '/getting-started' },
           { text: 'The credential boundary', link: '/boundary' },
           { text: 'The surface', link: '/surface' },
         ],

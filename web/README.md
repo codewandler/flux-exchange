@@ -33,14 +33,24 @@ built HTML in `.vitepress/dist`, so it must follow a build — see the comment a
 |---|---|
 | `.vitepress/config.mts` | Site config — title, nav, sidebar, and the Pages **base path**. |
 | `index.md` | Overview: what flux-exchange is, and where the current answer about capabilities lives. |
+| `getting-started.md` | Clone, arm a local identity, sign in, reach the console — and what must be true before anything runs. |
 | `boundary.md` | The credential-boundary argument. |
 | `surface.md` | An index of the vocabulary — the things this service deals in. |
 | `test/` | Guards over the built site: the base path, and the two content rules below. |
 
-Three pages, deliberately (X-63). The volume comes later, and the ordering is the whole point of the
-epic: [X-64](../docs/stories/X-64-status-is-derived-not-written.md) makes each page's status a
-**derived** fact before [X-65](../docs/stories/X-65-the-whole-surface-is-on-the-page.md) writes the
-pages that would otherwise carry it as prose.
+Four pages. Three were X-63's deliberate floor; `getting-started.md` is
+[X-69](../docs/stories/X-69-run-it-yourself.md), and it is **not** the volume that story deferred —
+it describes how to run the software rather than claiming what a build can do, so it does not wait on
+the derived badge. That volume still comes later, and the ordering is the whole point of the epic:
+[X-64](../docs/stories/X-64-status-is-derived-not-written.md) makes each page's status a **derived**
+fact before [X-65](../docs/stories/X-65-the-whole-surface-is-on-the-page.md) writes the pages that
+would otherwise carry it as prose.
+
+`getting-started.md` is the site's first page with a fenced example, and it is why `test/` grew a
+code-block reader: the highlighter puts every token in its own element, so the scan that looks for a
+value on the right-hand side of an `=` could not see inside a code block at all. It can now, and the
+one exemption — `FOO=<a placeholder>` is a grammar rather than a value — is held to its width by a
+test of its own.
 
 ## What this site must not publish
 

@@ -7,6 +7,9 @@ hero:
   tagline: The platform layer of the flux family — a service that holds credentials, terminates channels, runs operations for many callers, and records what happened.
   actions:
     - theme: brand
+      text: Run it yourself
+      link: /getting-started
+    - theme: alt
       text: The credential boundary
       link: /boundary
     - theme: alt
