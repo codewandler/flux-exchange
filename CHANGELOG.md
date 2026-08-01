@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-01
+
 ### Changed
 
 - **Moved to the flux 0.47 engine line and the 0.10 connector catalogue** (X-67). Both pin sets in one
