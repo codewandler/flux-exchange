@@ -14,19 +14,20 @@ subdomain is exactly the per-instance fact with no home until two instances can 
 
 ## What X-12 exposed
 
-X-12 made this host execute, and the first thing that fell out was a count. **Sixteen of the
-fifty-three shipped connectors cannot be invoked at all** — zendesk, shopify, jira, confluence,
-freshdesk, okta, salesforce, supabase, mailchimp, newrelic, docusign, statuspage, bitbucket,
-cloudflare, contentful, vercel — because each declares a configuration variable its operations
+X-12 made this host execute, and the first thing that fell out was a count. **Seventeen of the
+fifty-three shipped connectors cannot be invoked at all** — bitbucket, cloudflare, confluence,
+contentful, docusign, freshdesk, jira, mailchimp, newrelic, okta, salesforce, shopify, statuspage,
+supabase, twilio, vercel, zendesk — because each declares a per-connection value its operations
 substitute into a request, and there was nowhere for a tenant to put one. `execution::invoker` bound
 `MemoryConfig::new()`, so every one of them refused by name.
 
 The refusal was correct. It failed closed, and it named the field, the service and the tenant. But a
-correct refusal is still a connector that does not work, and the shipped surface ran forty of
+correct refusal is still a connector that does not work, and the shipped surface ran thirty-six of
 fifty-three.
 
-The story's own note says thirteen. The measured number is sixteen, and the difference is the whole
-of § *The surface is read off the connector, not off its base URL* below.
+The story's own note says thirteen. The measured number is seventeen, and the difference is the
+whole of § *The surface is read off the connector, not off its base URL* below. **Thirteen of the
+seventeen are made configurable here; four are refused on purpose (§4), so this ships 49 of 53.**
 
 ## §1 The value lives in a second store, and that is the decision
 
@@ -120,18 +121,26 @@ measurement:
 | vercel | `https://api.vercel.com` | `endpoint.teamId` |
 | docusign | `https://{account_host}/restapi/…/{account_id}` | `endpoint.account_host` **and** `endpoint.account_id` |
 
-A base-URL scan finds twelve connectors and misses four entirely, plus docusign's second variable. A
-host enumerating the surface that way would tell an operator they had supplied everything and then
-refuse the call.
+A base-URL scan finds twelve of the seventeen and misses five: `bitbucket`, `cloudflare`,
+`contentful` and `vercel`, whose endpoint variables sit elsewhere in the operation's Flux, and
+`twilio`, which needs only a Basic user half that no URL scan could find at all. A host enumerating
+the surface that way would tell an operator they had supplied everything and then refuse the call.
 
 The second kind is the non-secret user half of a `basic` credential — `Field::Username`. Four
 connectors need one (zendesk, jira, confluence, twilio), and **zendesk needs both kinds**: without
 the user half it refuses before it ever reaches the subdomain. A story that shipped only
-`endpoint.*` would have left its own headline connector uninvocable.
+`endpoint.*` would have left its own headline connector uninvocable — and would have missed `twilio`
+entirely, which needs a username and nothing else.
 
 ## §4 Supplying configuration does not become a way to name a host
 
-The invariant this story is most able to break, and the shape of the attack is specific:
+**This section is a correction.** The first cut of X-47 argued that `connector-pack` already
+prevents this, and shipped a hole. The argument is recorded here with its flaw, because the flaw is
+the interesting part.
+
+### What the first cut argued, and why it was vacuous
+
+The attack shape was identified correctly:
 
 ```text
 subdomain = "acme.zendesk.com@evil.example"
@@ -139,21 +148,92 @@ subdomain = "acme.zendesk.com@evil.example"
      authority: evil.example.zendesk.com
 ```
 
-where the `@` turns everything before it into userinfo and the request reaches a host the operator
-never named, carrying that operator's own token.
+and the defence was correctly located: `connector-pack` holds the composed authority to an
+allow-list of host characters, so `@`, `:`, `/` and `%` cannot appear and no admissible value can
+delimit. That defence is real, and against **zendesk** it is complete — the template pins
+`.zendesk.com`, so every authority any admissible value composes is inside the vendor's domain.
 
-**This host does not defend against that, and must not.** `connector-pack` validates the *composed
-authority* at the one substitution point it makes, against an allow-list of host characters — so no
-permitted character can delimit, and the string a transport resolves is exactly the string the
-template composed. It does that knowing which position of the URL the value lands in, which this
-crate does not know and would have to guess.
+The flaw is that a character allow-list constrains **what a value looks like** and says nothing
+about **where the request goes**. Those two coincide only when the template pins a suffix. Where the
+variable *is* the authority they come apart entirely, and `evil.example` is a perfectly ordinary
+hostname that the character check admits without complaint.
 
-So the decision is: **store what you are given, and let the pack refuse what may not be
-substituted.** A second opinion here would be a second spelling of one rule, and the one that
-disagreed would be the one deciding whether a tenant's value can move an origin.
-`connection_settings.rs::no_setting_can_move_the_destination_host` holds the refusal to arriving and
-to dispatching nothing, on six hostile spellings, and
-`invoke.rs::no_parameter_can_move_the_destination_host` is **unmodified**.
+Measured on the shipped catalogue, before the fix:
+
+```text
+newrelic endpoint.host="evil.example"  stored_ok=true  outcome=OK
+  urls=["https://evil.example/v2/applications.json"]  X-Api-Key on the wire
+```
+
+The writer needed no special standing: the settings route is `Access::Principal`, which
+`require_principal` admits for any kind, and an agent token resolves to `PrincipalKind::Agent`. That
+is `AGENTS.md`'s *"an agent's token grants access to an operation, never to a credential"*, broken
+through a configuration field — and it was **new reachability**, because before the diff
+`execution::invoker` bound `MemoryConfig::new()` and both connectors refused before dispatch.
+
+### The rule, and where it is decided
+
+**Decision: a tenant may supply an endpoint variable only if every host template carrying it pins a
+literal vendor suffix. Where the variable is the whole authority, no value is accepted and the
+connector stays uninvocable.**
+
+The distinction is published and needs no new dependency: `connector_catalog::Operation::hosts`
+carries each operation's host templates with their templating intact. (`connector-pack`'s own `Slot`
+would also answer it and is `pub(crate)`, so the catalogue is what carries this.)
+
+`exchange_host::host_pinning` returns one of three answers:
+
+| answer | example | tenant may supply |
+| --- | --- | --- |
+| `OutsideTheAuthority` | `bitbucket` `workspace` — in no host template | yes |
+| `PinnedTo(".zendesk.com")` | `zendesk` `hosts: ["{subdomain}.zendesk.com"]` | yes |
+| `WholeAuthority("{host}")` | `newrelic` `hosts: ["{host}"]` | **no** |
+
+"Pins" means: the text after the last placeholder is a literal beginning with `.` and carrying at
+least two further labels. Two rather than one because `.com` pins nothing anybody cannot register
+under. The honest name for what is wanted is a public-suffix list, which this crate may not take as
+a dependency; the approximation is stated rather than hidden and it errs closed.
+
+The rule is about the **template**, never about the value. A rule that inspected values would be a
+blocklist of hosts, and a blocklist only catches what somebody enumerated — the same argument
+`tests/no_second_request_path.rs` makes for its dependency allow-list. `acme.newrelic.com` is refused
+exactly as `evil.example` is.
+
+### What it costs: four connectors, named
+
+| connector | template | consequence |
+| --- | --- | --- |
+| `newrelic` | `{host}` | uninvocable — `newrelic.api_key` would travel |
+| `okta` | `{domain}` | uninvocable — `okta.api_token` would travel |
+| `docusign` | `{account_host}` | uninvocable — `docusign.access_token` would travel |
+| `freshdesk` | `{domain}` | uninvocable — declares no credential, but this host would still be an open proxy |
+
+**The review that found this named two of them.** The measurement finds four: `freshdesk` and `okta`
+are the same defect and were not in the report. That is the argument for deciding this from the
+catalogue rather than from a list — a list would have shipped two more holes, and the test that
+pins the set (`no_shipped_connector_lets_a_tenant_supply_its_whole_authority`) fails if a fifth
+arrives.
+
+So the shipped surface is **49 of 53**, not 53 of 53, and the four are refused with their own
+template quoted. `GET .../settings` reports `configurable: false` and a per-field `reason`, so a
+connector refused on purpose does not read as a broken one. A smaller working surface beats a larger
+one that leaks.
+
+### Where it is enforced
+
+Twice, deliberately.
+
+- `ConnectionSettings::set` refuses, so nothing arriving through this host's surface is stored.
+- `ConfigStore::get` refuses again on the way out, so the property belongs to the **port** rather
+  than to one write path — an edited file, a backup taken before this rule existed, or a value
+  written by an older build all bypass `set` and none of them bypass this.
+
+The value is not deleted when `get` refuses it: **refuse; never repair.** A store that silently
+rewrote a file it found suspicious would destroy the evidence of how the value got there.
+
+An operator who genuinely needs one of these four binds their own `ConfigStore` in a composition
+they control. That is a decision made once at startup by somebody who can read this section — not
+one a request can make.
 
 ## §5 A missing value is still refused by name
 
@@ -195,6 +275,11 @@ The reasoning for the order:
   help text of upstream's C-87, which the catalogue does not publish.
 - **No read-back of values.** §2 argues why, and says which direction the omission errs in.
 - **No per-instance settings.** §6.
+- **Four connectors this host will not let a tenant configure at all** — `newrelic`, `okta`,
+  `docusign`, `freshdesk`. Not an oversight and not a gap to close later by relaxing §4: closing it
+  needs a place for an *operator* to pin an allowed host per tenant, which is a new surface with its
+  own authorization question and belongs in its own story. Until then they refuse, and the refusal
+  says which connector, which template and why.
 - **No validation of what a value means.** This host refuses a value at an address the connector
   never declared, and one past a bound. Whether `acme` is a real Zendesk subdomain is a question only
   Zendesk can answer, and it answers it with a `404` that reaches the caller whole.

@@ -1,10 +1,13 @@
 //! **A connector with a templated host can actually be invoked** (X-47).
 //!
-//! X-12 made this host execute and immediately exposed that sixteen of the fifty-three shipped
-//! connectors cannot be invoked at all: their `base_url` is templated on a per-instance value — a
-//! vendor subdomain — and there was **nowhere for a tenant to put it**. The invoker bound an empty
-//! `MemoryConfig`, so those connectors refused by name. The refusal was right; the surface still ran
-//! forty of fifty-three.
+//! X-12 made this host execute and immediately exposed that seventeen of the fifty-three shipped
+//! connectors cannot be invoked at all: each needs a per-connection value — a vendor subdomain, a
+//! workspace slug, the non-secret half of a Basic credential — and there was **nowhere for a tenant
+//! to put one**. The invoker bound an empty `MemoryConfig`, so those connectors refused by name. The
+//! refusal was right; the surface still ran thirty-six of fifty-three.
+//!
+//! Thirteen of the seventeen are made configurable here. **Four are refused on purpose** — see
+//! [`a_setting_cannot_become_the_destination_authority`], which is the whole of why.
 //!
 //! This file is the whole of that claim, driven the way `invoke.rs` drives its own: through a
 //! transport that records instead of sending, so "the request went to the origin this tenant
@@ -25,9 +28,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use exchange_host::{
-    declared_settings, ConnectionSettings, ConnectorDeclaration, Contexts, DeclaredCredential,
-    DeclaredSetting, Deployment, Egress, InvokeRefusal, Invoker, Principal, PrincipalKind, Secret,
-    SecretStore, Sent, SettingKind, SettingsStore, Tenant, MAX_SETTING_VALUE_BYTES,
+    declared_settings, host_pinning, ConnectionSettings, ConnectorDeclaration, Contexts,
+    DeclaredCredential, DeclaredSetting, Deployment, Egress, HostPinning, InvokeRefusal, Invoker,
+    Principal, PrincipalKind, Secret, SecretStore, Sent, SettingKind, SettingsStore, Tenant,
+    MAX_SETTING_VALUE_BYTES,
 };
 use flux_runtime::{Tool, ToolContext};
 use serde_json::{json, Value};
@@ -82,6 +86,29 @@ fn silent_egress() -> (Arc<Mutex<Wire>>, Egress) {
         async move {
             recorded.lock().expect("the wire lock").calls.push(params);
             Ok(json!({ "status": 200, "headers": {}, "body": { "ok": true } }))
+        }
+    });
+
+    (wire, Egress::new(tool))
+}
+
+/// An egress that echoes the request's own headers back in its body, and records what it carried.
+///
+/// `invoke.rs` keeps one for the reason this file needs one: it is how "the credential stayed off
+/// the wire" is told apart from "the credential stayed off the *response*". A placed credential is
+/// in the recorded params either way, which is what
+/// [`a_setting_cannot_become_the_destination_authority`] asserts against.
+fn echoing_egress() -> (Arc<Mutex<Wire>>, Egress) {
+    let wire = Arc::new(Mutex::new(Wire::default()));
+    let spec = flux_web::http::HttpRequestTool::new(&flux_web::WebOptions::default()).spec();
+
+    let recorded = wire.clone();
+    let tool = flux_runtime::tool_fn(spec, move |params: Value| {
+        let recorded = recorded.clone();
+        let echoed = params.get("headers").cloned().unwrap_or(Value::Null);
+        async move {
+            recorded.lock().expect("the wire lock").calls.push(params);
+            Ok(json!({ "status": 200, "headers": {}, "body": { "you_sent": echoed } }))
         }
     });
 
@@ -167,16 +194,53 @@ fn caller() -> Principal {
 
 /// One of zendesk's declared settings, by its `binds` spelling.
 fn zendesk_setting(binds: &str) -> DeclaredSetting {
-    declared_settings(zendesk())
-        .expect("zendesk's operations rehearse")
-        .into_iter()
-        .find(|declared| declared.binds() == binds)
-        .unwrap_or_else(|| panic!("zendesk declares `{binds}`"))
+    setting_of(zendesk(), binds)
 }
 
 fn zendesk() -> &'static connector_catalog::Provider {
-    connector_catalog::provider(connector_catalog::ProviderKey::id("zendesk"))
-        .expect("the catalogue carries zendesk")
+    provider("zendesk")
+}
+
+/// One catalogue provider by id.
+fn provider(id: &str) -> &'static connector_catalog::Provider {
+    connector_catalog::provider(connector_catalog::ProviderKey::id(id))
+        .unwrap_or_else(|| panic!("the catalogue carries `{id}`"))
+}
+
+/// One of a connector's declared settings, by its `binds` spelling.
+fn setting_of(provider: &'static connector_catalog::Provider, binds: &str) -> DeclaredSetting {
+    declared_settings(provider)
+        .expect("the connector's operations rehearse")
+        .into_iter()
+        .find(|declared| declared.binds() == binds)
+        .unwrap_or_else(|| panic!("`{}` declares `{binds}`", provider.id))
+}
+
+/// A credential store holding [`SENTINEL`] at `credential`'s address under `authority`, or holding
+/// nothing when the connector declares no credential.
+async fn credential_store(
+    authority: &'static str,
+    credential: Option<(&'static str, &'static str)>,
+) -> Arc<dyn SecretStore> {
+    let store = Arc::new(connector_pack::MemoryStore::new());
+
+    if let Some((name, leaf)) = credential {
+        let credentials = [DeclaredCredential { name, leaf }];
+        let declaration = ConnectorDeclaration {
+            connector: "fixture",
+            authority: Some(authority),
+            credentials: &credentials,
+        };
+        let reference = declaration
+            .address_of(&tenant(), name)
+            .expect("the connector declares an authority and this credential");
+        store
+            .put(&reference, &Secret::new(SENTINEL))
+            .await
+            .expect("a memory store accepts a write");
+    }
+
+    store
 }
 
 /// An invoker over one credential store, one settings store and a recording egress.
@@ -359,7 +423,7 @@ async fn a_setting_belongs_to_one_tenant() {
 ///
 /// The same argument `CredentialStore` makes for having no in-memory fallback, and it applies here
 /// with one difference worth naming: a lost subdomain is not a lost secret, it is a connector that
-/// silently stops resolving. An operator who restarts this host and finds sixteen connectors
+/// silently stops resolving. An operator who restarts this host and finds thirteen connectors
 /// refusing again has a durability bug reported to them as a configuration one.
 #[test]
 fn a_setting_survives_a_restart() {
@@ -420,7 +484,7 @@ fn a_settings_store_inside_a_working_tree_is_refused() {
 /// fallback.
 ///
 /// X-09's rule, applied to the second store. The consequence differs and the message says so: a
-/// lost credential is a lost secret, and a lost subdomain is sixteen connectors that stop resolving.
+/// lost credential is a lost secret, and a lost subdomain is thirteen connectors that stop resolving.
 #[test]
 fn an_unconfigured_settings_store_refuses_and_names_what_would_have_worked() {
     for configured in [None, Some(""), Some("   ")] {
@@ -498,6 +562,224 @@ async fn no_setting_can_move_the_destination_host() {
             ),
         }
     }
+}
+
+/// **The rework's failing-first test.** A tenant-supplied setting cannot become the destination
+/// authority — measured on the connectors where the property is *not* structurally free.
+///
+/// `no_setting_can_move_the_destination_host` above drives zendesk, whose template is
+/// `{subdomain}.zendesk.com`: a pinned suffix means every composed authority is a zendesk one
+/// whatever the value, so the property holds there for free and the test proves nothing about the
+/// shape that matters.
+///
+/// **Four shipped connectors template the whole authority.** `newrelic` declares
+/// `hosts: ["{host}"]`, `okta` and `freshdesk` `["{domain}"]`, `docusign` `["{account_host}"]` —
+/// there is no literal suffix to keep the origin at the vendor, so `evil.example` is a *valid
+/// hostname* and `connector-pack`'s character allow-list admits it. That check constrains the
+/// characters of a value, never the identity of the host, and against these four it is vacuous.
+///
+/// What that bought a caller, before this test: `newrelic-application-list` dispatched to
+/// `https://evil.example/v2/applications.json` carrying the tenant's `X-Api-Key`. The writer needs
+/// no special standing — the settings route is `Access::Principal`, which admits any kind, and an
+/// agent token resolves to one. That is `AGENTS.md`'s *"an agent's token grants access to an
+/// operation, never to a credential"*, broken through a configuration field.
+///
+/// The assertions are ordered so the **dispatch** is checked before the refusal: a run against code
+/// that stores the value fails by reporting the origin it reached and the credential it carried,
+/// which is the failure worth reading.
+#[tokio::test]
+async fn a_setting_cannot_become_the_destination_authority() {
+    // Every connector whose host template pins no suffix, with an operation and the credential it
+    // would have carried. `freshdesk` declares no credential at all — it cannot leak one, and it is
+    // driven anyway because "a caller named the host this process connects to" is the same defect
+    // with or without a secret attached.
+    /// A connector whose host template pins no suffix: what to set, what to run, and the
+    /// credential the request would have carried.
+    struct Unpinned {
+        connector: &'static str,
+        binds: &'static str,
+        operation: &'static str,
+        authority: &'static str,
+        /// `(name, leaf)`, or `None` for a connector that declares no credential at all.
+        credential: Option<(&'static str, &'static str)>,
+    }
+
+    let cases = [
+        Unpinned {
+            connector: "newrelic",
+            binds: "endpoint.host",
+            operation: "newrelic-application-list",
+            authority: "com.newrelic.api",
+            credential: Some(("newrelic.api_key", "api_key")),
+        },
+        Unpinned {
+            connector: "okta",
+            binds: "endpoint.domain",
+            operation: "okta-user-list",
+            authority: "com.okta.api",
+            credential: Some(("okta.api_token", "api_token")),
+        },
+        Unpinned {
+            connector: "docusign",
+            binds: "endpoint.account_host",
+            operation: "docusign-envelope-list",
+            authority: "com.docusign.api",
+            credential: Some(("docusign.access_token", "access_token")),
+        },
+        Unpinned {
+            connector: "freshdesk",
+            binds: "endpoint.domain",
+            operation: "freshdesk-ticket-list",
+            authority: "com.freshdesk.api",
+            credential: None,
+        },
+    ];
+
+    for case in cases {
+        let Unpinned {
+            connector,
+            binds,
+            operation,
+            authority,
+            credential,
+        } = case;
+        let (_scratch, settings) = settings_store("authority");
+        let provider = provider(connector);
+        let declared = setting_of(provider, binds);
+
+        // The attempt. Recorded rather than asserted here, so the wire assertions below are what a
+        // failing run reports first.
+        let stored = settings.set(&tenant(), connector, &declared, "evil.example");
+
+        // Whatever the store did, supply every *other* value this connector needs, so the
+        // invocation below is refused — if it is — by the authority rule and not by an unrelated
+        // missing field. Without this a vulnerable build could still refuse for the wrong reason
+        // and the test would pass while asserting nothing.
+        for other in declared_settings(provider).expect("the connector's operations rehearse") {
+            if other != declared {
+                let _ = settings.set(&tenant(), connector, &other, "supplied");
+            }
+        }
+
+        let credentials = credential_store(authority, credential).await;
+        let (wire, egress) = echoing_egress();
+        let outcome = invoker(credentials, settings, egress)
+            .invoke(&caller(), operation, json!({}))
+            .await;
+
+        let wire = wire.lock().expect("the wire lock");
+
+        // **The property.** Nothing this process sent went to a host the tenant named.
+        for n in 0..wire.count() {
+            assert_ne!(
+                wire.origin(n),
+                "https://evil.example",
+                "`{connector}` dispatched to a host the tenant supplied — a caller named the \
+                 destination through a configuration field, which is the confused deputy this host \
+                 exists to refuse (outcome: {outcome:?})",
+            );
+        }
+
+        // And the credential is not on the wire at all, wherever it went.
+        assert!(
+            !format!("{:?}", wire.calls).contains(SENTINEL),
+            "`{connector}` put this tenant's credential on a request whose host it did not choose",
+        );
+
+        // The store refused the write, which is what keeps the two assertions above true rather
+        // than lucky. A build that stored the value and happened not to dispatch is one refactor
+        // away from dispatching.
+        let refusal = stored.expect_err(
+            "a value that is the entire destination authority must not be storable at all",
+        );
+        let message = refusal.to_string();
+        assert!(
+            message.contains(connector),
+            "the refusal must name the connector: {message}",
+        );
+        assert!(
+            !message.contains("evil.example"),
+            "the refusal must not repeat the value it refused: {message}",
+        );
+    }
+}
+
+/// The rule is decided from the catalogue, over the **whole** catalogue — so a connector shipped
+/// tomorrow whose host is a bare placeholder is refused without anybody adding it to a list.
+///
+/// This is the generalisation of the test above, and it is the one that would have caught
+/// `freshdesk` and `okta`: the review that found this named `newrelic` and `docusign`, and the
+/// measurement finds four. A rule enumerated by hand would have shipped two of them.
+#[test]
+fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
+    let mut refused = Vec::new();
+
+    for provider in connector_catalog::providers() {
+        for declared in declared_settings(provider).expect("every connector's operations rehearse")
+        {
+            match host_pinning(provider, &declared) {
+                // The value never reaches the authority — it lands in a path or a query, where
+                // `connector-pack` holds it to that position's own rule.
+                HostPinning::OutsideTheAuthority => {}
+                // The composed authority always ends in this literal, so the origin stays the
+                // vendor's whatever the tenant supplies.
+                HostPinning::PinnedTo(suffix) => assert!(
+                    suffix.starts_with('.') && suffix.matches('.').count() >= 2,
+                    "`{}` {} claims to pin {suffix:?}, which pins nothing an attacker cannot \
+                     register under",
+                    provider.id,
+                    declared.binds(),
+                ),
+                HostPinning::WholeAuthority(template) => {
+                    refused.push(format!("{}/{} ({template})", provider.id, declared.binds()));
+                }
+            }
+        }
+    }
+
+    // Pinned exactly, so that a catalogue change in either direction is a failing test rather than
+    // a silent hole: a fifth connector arriving unpinned, or one of these four gaining a suffix
+    // upstream and staying refused for no reason.
+    assert_eq!(
+        refused,
+        vec![
+            "docusign/endpoint.account_host ({account_host})".to_owned(),
+            "freshdesk/endpoint.domain ({domain})".to_owned(),
+            "newrelic/endpoint.host ({host})".to_owned(),
+            "okta/endpoint.domain ({domain})".to_owned(),
+        ],
+        "the set of connectors a tenant may not configure has changed",
+    );
+}
+
+/// The refusal is actionable: it says which connectors this host will not let a tenant configure,
+/// and why, rather than reading as a bug.
+///
+/// A smaller working surface beats a larger one that leaks — but only if an operator can tell the
+/// difference between "refused on purpose" and "broken".
+#[test]
+fn a_connector_this_host_will_not_configure_says_so() {
+    let (_scratch, settings) = settings_store("unsuppliable");
+    let newrelic = provider("newrelic");
+    let host = setting_of(newrelic, "endpoint.host");
+
+    let refusal = settings
+        .set(&tenant(), "newrelic", &host, "acme.newrelic.com")
+        .expect_err("newrelic's host is the whole authority, whatever value is offered");
+
+    let message = refusal.to_string();
+    assert!(message.contains("newrelic"), "{message}");
+    assert!(message.contains("endpoint.host"), "{message}");
+    assert!(
+        message.contains("{host}"),
+        "the refusal must quote the template that pins nothing, so an operator can see why: \
+         {message}",
+    );
+
+    // Even a value that really is a New Relic host is refused. The rule is about the *template*,
+    // not about the value — a rule that inspected values would be a blocklist, and a blocklist is
+    // the thing this repository already refuses on the credential side.
+    assert!(!settings.is_set(&tenant(), "newrelic", &host));
 }
 
 /// The refusal for a missing value is **unchanged** by this story: still by name, still terminal,

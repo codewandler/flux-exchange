@@ -45,7 +45,7 @@ impl Contexts for GuardedSystem {
 /// argument for why keeping the two apart is a decision rather than a filing convention.
 ///
 /// A composition that binds no settings store passes an empty one and gets X-12's behaviour
-/// unchanged: the sixteen connectors whose operations carry a `{placeholder}` refuse by name,
+/// unchanged: the seventeen connectors that need a per-connection value refuse by name,
 /// quoting the field and the service, and the other thirty-seven run. That is the honest gap rather
 /// than a fallback — nothing is served from somewhere else.
 ///

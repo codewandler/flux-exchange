@@ -1,9 +1,14 @@
 //! **A tenant's non-secret connection settings** — the `{subdomain}` in a templated base URL.
 //!
-//! X-12 made this host execute and exposed the gap immediately: sixteen of the fifty-three shipped
-//! connectors declare a `base_url` templated on a per-instance value, and there was nowhere for a
-//! tenant to put it. The invoker bound an empty `MemoryConfig`, so those connectors refused by name
-//! — the right failure, and still a surface that ran forty of fifty-three.
+//! X-12 made this host execute and exposed the gap immediately: **seventeen** of the fifty-three
+//! shipped connectors declare a per-connection value their operations substitute into a request, and
+//! there was nowhere for a tenant to put one. The invoker bound an empty `MemoryConfig`, so those
+//! connectors refused by name — the right failure, and still a surface that ran thirty-six of
+//! fifty-three.
+//!
+//! **Thirteen of the seventeen are now configurable. Four are refused on purpose** — see
+//! [`HostPinning`] — so the surface this ships is forty-nine of fifty-three, and the four that are
+//! left say so rather than looking broken.
 //!
 //! `docs/designs/connections.md` recorded why this was deferred out of X-10: *"a vendor subdomain is
 //! exactly the per-instance fact with no home until two instances can be told apart"*. This module is
@@ -59,24 +64,38 @@
 //! pack itself makes when it projects an operation, rather than a second one beside it.
 //!
 //! Scanning `base_url` for `{placeholders}` is the obvious cheaper version and it is **wrong**, by
-//! measurement rather than by argument: it finds zendesk's `subdomain` and misses bitbucket's
-//! `workspace`, cloudflare's `zone_id`, contentful's two `space_id`s, statuspage's `page_id`,
-//! vercel's `teamId` and docusign's `account_id`, each of which is a configuration variable the
-//! operation's Flux carries somewhere other than the base URL. A host enumerating the surface that
-//! way would tell an operator they had supplied everything and then refuse the call.
+//! measurement rather than by argument. It finds twelve of the seventeen and misses five: the
+//! endpoint variables of `bitbucket`, `cloudflare`, `contentful` and `vercel` live somewhere in the
+//! operation's Flux other than the base URL, and `twilio` needs only the non-secret user half of a
+//! Basic credential, which no URL scan could find at all. A host enumerating the surface that way
+//! would tell an operator they had supplied everything and then refuse the call.
 //!
-//! # This host stores what it is given; the pack decides what may be substituted
+//! # Two questions about a value, and only one of them is the pack's
 //!
-//! Nothing here inspects a value for host-shapedness, and that is deliberate. `connector-pack`
-//! validates the **composed authority** at the one substitution point — an allow-list of host
-//! characters, so `acme.zendesk.com@evil.example` is refused rather than turned into a request to
-//! `evil.example.zendesk.com` — and it does so knowing which of a URL's positions the value lands
-//! in, which this crate does not. A second opinion here would be a second spelling of one rule, and
-//! the one that disagreed would be the one deciding whether a tenant's value can move an origin.
-//! `tests/connection_settings.rs::no_setting_can_move_the_destination_host` is what holds that
-//! refusal to arriving.
+//! **The characters** of a substituted value are `connector-pack`'s business, and this module does
+//! not second-guess them. The pack holds the composed authority to an allow-list of host characters
+//! at the one substitution point it makes, so `acme.zendesk.com@evil.example` is refused rather
+//! than turned into a request to `evil.example.zendesk.com`; it does that knowing which of a URL's
+//! positions the value lands in, which this crate does not. A second opinion here would be a second
+//! spelling of one rule, and the one that disagreed would be the one deciding what may travel.
 //!
-//! What this module *does* refuse is a value at an address the connector never declared, for
+//! **The identity of the host** is not a question the pack can answer, and X-47's first cut assumed
+//! it was. A character allow-list constrains what a value *looks like*; it says nothing about where
+//! the request goes. Where the connector's template pins a suffix — `{subdomain}.zendesk.com` — the
+//! two coincide, because any admissible value composes an authority inside the vendor's domain.
+//! Where the template **is** the variable — newrelic's `{host}`, okta's and freshdesk's `{domain}`,
+//! docusign's `{account_host}` — they come apart completely: `evil.example` is a perfectly valid
+//! hostname, the character check admits it, and the request goes wherever the caller said, carrying
+//! that tenant's credential.
+//!
+//! That is `AGENTS.md`'s *"an agent's token grants access to an operation, never to a credential"*
+//! broken through a configuration field, and it is this module's question rather than the pack's
+//! because the fact it turns on — the connector's own host template — is catalogue data this module
+//! reads and the pack does not expose. [`host_pinning`] is the answer; [`ConnectionSettings::set`]
+//! refuses on it, and [`ConfigStore::get`] refuses on it again so the property belongs to the port
+//! rather than to one write path.
+//!
+//! What this module also refuses is a value at an address the connector never declared, for
 //! [`ConnectorDeclaration`](crate::ConnectorDeclaration)'s reason: a value stored under an
 //! undeclared name sits where no operation reads it, which is a loss that looks like a success from
 //! every side.
@@ -122,7 +141,7 @@ pub const MAX_SETTING_VALUE_BYTES: usize = 1024;
 /// whole of it under one lock, so one tenant's size is every other tenant's write latency.
 ///
 /// 16 KiB is sixteen values at the per-value bound, or several hundred real ones. A tenant with
-/// every configurable connector in the compiled-in catalogue supplied — sixteen connectors,
+/// every configurable connector in the compiled-in catalogue supplied — thirteen connectors,
 /// twenty-odd values, at the tens of bytes a subdomain actually occupies — sits three orders of
 /// magnitude under it.
 ///
@@ -305,6 +324,154 @@ pub fn declared_settings(
     Ok(found.into_iter().collect())
 }
 
+/// **Whether a tenant's value can change which host a request reaches.**
+///
+/// The distinction this whole module's safety rests on, and the one the first cut of X-47 did not
+/// draw. `connector-pack` validates a substituted value against an allow-list of **host
+/// characters**, so no permitted character can delimit and the composed authority is exactly the
+/// string the template produced. That constrains the *characters* of a value. It says nothing about
+/// the *identity* of the host, and the difference between those two is the difference between these
+/// variants:
+///
+/// ```text
+/// zendesk    hosts: ["{subdomain}.zendesk.com"]   -> PinnedTo(".zendesk.com")
+/// newrelic   hosts: ["{host}"]                    -> WholeAuthority("{host}")
+/// bitbucket  hosts: ["api.bitbucket.org"]         -> OutsideTheAuthority
+/// ```
+///
+/// For zendesk the composed authority always ends in `.zendesk.com`, whatever a tenant supplies, so
+/// the origin cannot leave the vendor and a tenant naming its own subdomain is exactly the intended
+/// use. For newrelic the value **is** the authority: `evil.example` is a perfectly valid hostname,
+/// the character check admits it, and the request — carrying that tenant's `X-Api-Key` — goes
+/// wherever the caller said. Four shipped connectors are in that state.
+///
+/// # Why the rule is about the template and never about the value
+///
+/// A rule that inspected values would be a blocklist of hosts, and a blocklist only ever catches
+/// what somebody enumerated — the same argument `tests/no_second_request_path.rs` makes for its
+/// dependency allow-list. This asks a question about the **connector's own declaration**, which is
+/// `&'static` catalogue data a request cannot reach, so it is decided once per variable and is the
+/// same answer for every caller and every value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostPinning {
+    /// The variable appears in no host template, so it lands in a path or a query and cannot reach
+    /// the authority at all. `connector-pack` holds it to that position's own rule.
+    OutsideTheAuthority,
+    /// Every host template carrying this variable ends in this literal suffix, so the composed
+    /// authority is always inside the vendor's own domain.
+    ///
+    /// The suffix is what is quoted in a listing, so an operator can see *why* a value is accepted.
+    PinnedTo(String),
+    /// At least one host template carrying this variable pins no suffix, so the value **is** the
+    /// destination authority. Carries the offending template, for a refusal that shows its working.
+    WholeAuthority(String),
+}
+
+impl HostPinning {
+    /// Whether a tenant may supply a value at all.
+    ///
+    /// Matched exhaustively with no wildcard arm, deliberately: a variant added here is a new
+    /// answer to "can a caller name the host", and it must be a compile error at the one place that
+    /// decides rather than something that silently falls to `true`.
+    pub fn tenant_may_supply(&self) -> bool {
+        match self {
+            Self::OutsideTheAuthority | Self::PinnedTo(_) => true,
+            Self::WholeAuthority(_) => false,
+        }
+    }
+}
+
+/// **Whether `declared` can move the origin of `provider`'s requests** — read from the catalogue.
+///
+/// `connector_catalog::Operation::hosts` publishes each operation's host templates with their
+/// templating intact, which is what makes this decidable without a new dependency and without
+/// reaching into `connector-pack` (whose `Slot` is `pub(crate)` and not available).
+///
+/// Only [`SettingKind::Endpoint`] can reach an authority. A [`SettingKind::Username`] is the
+/// non-secret half of a Basic credential and is placed in a header, never in a URL, so it is always
+/// [`OutsideTheAuthority`](HostPinning::OutsideTheAuthority).
+///
+/// # What counts as pinned
+///
+/// The text after the **last** placeholder must be a literal starting with `.` and carrying at
+/// least two further labels — `.zendesk.com`, `.my.salesforce.com`. Two labels rather than one
+/// because `.com` pins nothing anybody cannot register under, and the honest name for the thing
+/// wanted here is a public-suffix list, which is a dependency this crate may not take. The
+/// approximation is stated rather than hidden, and it errs closed: a template it cannot read as
+/// pinned is refused.
+pub fn host_pinning(
+    provider: &'static connector_catalog::Provider,
+    declared: &DeclaredSetting,
+) -> HostPinning {
+    if declared.kind != SettingKind::Endpoint {
+        return HostPinning::OutsideTheAuthority;
+    }
+
+    let mut pinned: Option<String> = None;
+
+    for entry in provider.operations {
+        // A setting belongs to one service, and only that service's operations read it — the key
+        // carries the service for exactly this reason (C-197).
+        if entry.service != declared.service {
+            continue;
+        }
+
+        for host in entry.hosts {
+            if !mentions(host, &declared.name) {
+                continue;
+            }
+
+            match suffix_of(host) {
+                // One unpinned template is enough. A variable pinned in five operations and bare in
+                // a sixth is a variable a caller can name the host with, by choosing the sixth.
+                None => return HostPinning::WholeAuthority((*host).to_owned()),
+                Some(suffix) => pinned = Some(suffix),
+            }
+        }
+    }
+
+    pinned.map_or(HostPinning::OutsideTheAuthority, HostPinning::PinnedTo)
+}
+
+/// Whether `template` carries `{variable}` as one of its placeholders.
+///
+/// Matched as the whole braced name rather than as a substring, so `{host}` and `{account_host}`
+/// are two variables and not one containing the other.
+fn mentions(template: &str, variable: &str) -> bool {
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            return false;
+        };
+        if &after[..close] == variable {
+            return true;
+        }
+        rest = &after[close + 1..];
+    }
+    false
+}
+
+/// The literal suffix `template` pins its authority to, if it pins one.
+///
+/// `None` for a template whose last placeholder is at the end — the value is the authority — and for
+/// one whose trailing literal is too short to pin anything. See [`host_pinning`] for why two labels.
+fn suffix_of(template: &str) -> Option<String> {
+    let (_, suffix) = template.rsplit_once('}')?;
+
+    if !suffix.starts_with('.') || suffix.contains('{') {
+        return None;
+    }
+
+    let labels = suffix
+        .trim_start_matches('.')
+        .split('.')
+        .filter(|label| !label.is_empty())
+        .count();
+
+    (labels >= 2).then(|| suffix.to_owned())
+}
+
 /// **The write side of a tenant's connection settings**, as the port a composition binds.
 ///
 /// A supertrait of [`ConfigStore`] rather than a type beside it, because they are two halves of one
@@ -424,6 +591,36 @@ pub enum SettingsRefusal {
         setting: String,
         /// What that service does ask for.
         declared: Vec<String>,
+    },
+
+    /// **The value would be the destination host, so no tenant may supply it.**
+    ///
+    /// Not about the value offered — `acme.newrelic.com` is refused exactly as `evil.example` is —
+    /// because the defect is in the *template*: it pins no suffix, so whatever is substituted is
+    /// the whole authority and a caller who can write here can name the host this process sends a
+    /// tenant's credential to. `AGENTS.md`: an agent's token grants access to an operation, never
+    /// to a credential.
+    ///
+    /// The consequence is stated plainly rather than softened: this connector cannot be configured
+    /// by a tenant on this host, and it stays uninvocable. A smaller working surface beats a larger
+    /// one that leaks. An operator who genuinely wants it binds their own [`ConfigStore`] in a
+    /// composition they control, which is a decision made once at startup by somebody who can read
+    /// this paragraph — not one a request can make.
+    #[error(
+        "connector `{connector}` cannot be configured by a tenant: its `{setting}` is the whole \
+         destination host. Its own declaration templates the host as `{template}`, which pins no \
+         vendor suffix — so whatever is supplied *is* the origin this host would send \
+         `{connector}`'s credential to, and no value is safe rather than some values being unsafe. \
+         Nothing was stored. A deployment that needs this connector binds its connection settings \
+         in its own composition, where the choice is an operator's and not a caller's"
+    )]
+    WouldNameTheHost {
+        /// The connector that cannot be configured.
+        connector: String,
+        /// The `binds` target that would have been the authority.
+        setting: String,
+        /// The connector's own host template, quoted so the refusal shows its working.
+        template: String,
     },
 
     /// A supplied value is larger than a connection setting is.
@@ -838,6 +1035,22 @@ mod file {
                 });
             }
 
+            // **The authority rule**, after the address is known to exist and before anything is
+            // written. A value that would be the destination host is refused whatever it says,
+            // because the defect is in the connector's own template rather than in the value — see
+            // `HostPinning`. It sits above the size bound because "no value is acceptable here" is
+            // a stronger statement than "that one is too big", and an operator should read the
+            // stronger one.
+            if let super::HostPinning::WholeAuthority(template) =
+                super::host_pinning(provider, declared)
+            {
+                return Err(SettingsRefusal::WouldNameTheHost {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                    template,
+                });
+            }
+
             if value.len() > MAX_SETTING_VALUE_BYTES {
                 return Err(SettingsRefusal::SettingTooLarge {
                     connector: connector.to_owned(),
@@ -854,7 +1067,7 @@ mod file {
     /// Read the store at `path`, or start from an empty one if it is not there yet.
     ///
     /// A file that is *there* and unreadable is a refusal: a store this process could not parse is
-    /// one whose values are about to be silently absent, which reads to an operator as sixteen
+    /// one whose values are about to be silently absent, which reads to an operator as thirteen
     /// connectors that stopped working for no reason. **Refuse; never repair** — there is no arm
     /// here that starts empty because parsing failed.
     fn read(path: &Path) -> Result<Values, SettingsStoreError> {
@@ -888,6 +1101,23 @@ mod file {
         ///
         /// `None` means "this tenant has not configured it", and the pack turns that into a refusal
         /// naming the field rather than a request to a host with a brace in it.
+        ///
+        /// # The authority rule is applied here too, and that is not belt-and-braces
+        ///
+        /// [`ConnectionSettings::set`] refuses a value that would be the whole destination host, so
+        /// nothing arriving through this host's own surface can reach this map. This asks the same
+        /// question again on the way **out**, because `set` is not the only way bytes get into the
+        /// file: an edited store, a file restored from a backup taken before this rule existed, or a
+        /// value written by an older build all bypass it. Deciding it on read makes "no tenant value
+        /// is the destination authority" a property of the *port* rather than of one write path.
+        ///
+        /// It costs a walk of the connector's `&'static` host templates per lookup, on a port that
+        /// is read once per projection. That is the right side of the trade for the one rule whose
+        /// failure sends a tenant's credential to a caller's server.
+        ///
+        /// The value is not deleted, and deliberately: **refuse; never repair.** A store that
+        /// silently rewrote a file it found suspicious would destroy the evidence of how the value
+        /// got there, on the one path where somebody has to find that out.
         fn get(
             &self,
             tenant: &str,
@@ -896,6 +1126,16 @@ mod file {
             field: Field<'_>,
         ) -> Option<String> {
             let binds = binds_of(field);
+
+            if let Some(catalogued) =
+                connector_catalog::provider(connector_catalog::ProviderKey::id(provider))
+            {
+                let declared = DeclaredSetting::parse(service, &binds)?;
+                if !super::host_pinning(catalogued, &declared).tenant_may_supply() {
+                    return None;
+                }
+            }
+
             self.values
                 .read()
                 .ok()?
@@ -1071,7 +1311,7 @@ mod file {
             "no connection-settings store is configured: set `{setting}` to a path outside every \
              working tree, for example `{EXAMPLE_PATH}`. This host does not fall back to an \
              in-memory store — one would accept every value and lose it on restart, which reads as \
-             sixteen connectors that stopped resolving for no reason"
+             thirteen connectors that stopped resolving for no reason"
         )]
         Unconfigured {
             /// The setting that would have named one.

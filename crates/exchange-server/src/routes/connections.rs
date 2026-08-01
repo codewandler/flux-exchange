@@ -18,7 +18,7 @@
 //!
 //! # The settings half, and why it is a second store rather than more credentials (X-47)
 //!
-//! Sixteen of the shipped connectors declare a `base_url` templated on a per-connection value — a
+//! Seventeen of the shipped connectors declare a per-connection value their operations need — a
 //! vendor subdomain, a workspace slug, a space id — and until X-47 there was nowhere for a tenant to
 //! put one, so `invoke` bound an empty configuration and every one of them refused by name. The
 //! three routes above are that home.
@@ -170,9 +170,9 @@ use axum::routing::{get, put, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
-    address_path, admit_tenant_occupancy, admit_tenant_settings, declared_settings, stored_bytes,
+    address_path, admit_tenant_occupancy, declared_settings, host_pinning, stored_bytes,
     ConnectionRefusal, ConnectorDeclaration, CredentialRef, DeclaredCredential, DeclaredSetting,
-    Principal, Secret, SecretStore, SettingsRefusal, StoreError, Tenant,
+    HostPinning, Principal, Secret, SecretStore, SettingsRefusal, StoreError, Tenant,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -772,20 +772,42 @@ async fn list_settings(
         Err(refusal) => return settings_refused(&refusal),
     };
 
+    // `suppliable` is the half that stops a refused connector reading as a broken one. Four shipped
+    // connectors template their whole authority, so no tenant may supply their host at all — and an
+    // operator staring at a connection that will not work needs to be told that on purpose, with
+    // the connector's own template quoted, rather than left to conclude this host is faulty.
     let settings: Vec<Value> = declared
         .iter()
         .map(|setting| {
-            json!({
+            let pinning = host_pinning(provider, setting);
+            let mut view = json!({
                 "service": setting.service,
                 "field": setting.binds(),
                 "set": store.is_set(principal.tenant(), provider.id, setting),
-            })
+                "suppliable": pinning.tenant_may_supply(),
+            });
+
+            if let HostPinning::WholeAuthority(template) = &pinning {
+                view["reason"] = json!(format!(
+                    "`{}` declares its host as `{template}`, which pins no vendor suffix — a value \
+                     here would be the whole origin this host sends `{}`'s credential to, so no \
+                     tenant may supply it and this connector cannot be invoked on this deployment",
+                    provider.id, provider.id,
+                ));
+            }
+
+            view
         })
         .collect();
 
     Json(json!({
         "connector": provider.id,
         "vendor": provider.vendor,
+        // Whether this connector is usable at all once everything suppliable has been supplied.
+        // Derived rather than asserted, so it cannot disagree with the rows above it.
+        "configurable": declared
+            .iter()
+            .all(|setting| host_pinning(provider, setting).tenant_may_supply()),
         "settings": settings,
     }))
     .into_response()
@@ -823,26 +845,23 @@ async fn set_setting(
         return unreadable_field(provider, &service, &field);
     };
 
-    // The allowance, decided before the write and against what the write *replaces*. It is the
-    // settings allowance and never the credential one: a tenant that has filled its credential
-    // store can still supply a subdomain, and one that has filled this store is told to remove a
-    // setting rather than to disconnect a connector.
+    // **Every decision is the store's, and there is deliberately no second copy of one here.**
     //
-    // The claim is the same one every mutating route on this surface takes, for the same reason:
-    // reading an occupancy and then writing is a read-decide-write, and two of this tenant's
-    // concurrent settings writes would each read an occupancy the other had not written yet.
-    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
-        return allowance_change_in_flight(provider);
-    };
-
-    let held = store.held_bytes(principal.tenant());
-    if let Err(refusal) = admit_tenant_settings(held, body.value.len()) {
-        return settings_refused(&refusal);
-    }
-
-    // The store applies the rest — that this connector declares the service and the field, and the
-    // per-value bound — because that is where the declared surface is derived and a check made here
-    // would be a second copy of it.
+    // An earlier cut of this handler called `admit_tenant_settings(held, value.len())` before the
+    // write, under a comment claiming it decided against what the write *replaces*. It did not
+    // subtract the replaced value, so a tenant sitting on its allowance was refused a same-size
+    // rotation that `SettingsStore::set` would have accepted — the check disagreed with both its own
+    // comment and the store one line below it.
+    //
+    // The fix is to delete it rather than to correct it. The store decides the allowance under the
+    // same write lock it reads the occupancy and performs the insert under, which is a *tighter*
+    // read-decide-write than a route-level claim could be: there is no window between the read and
+    // the write for another of this tenant's requests to land in. A route-level guard on top of that
+    // would guard nothing and would be a second place for the rule to drift.
+    //
+    // So this handler resolves the address and hands over. The store applies, in order: that the
+    // connector declares this service and this field, that the field is not the destination
+    // authority, the per-value bound, and the tenant allowance.
     if let Err(refusal) = store.set(principal.tenant(), provider.id, &setting, &body.value) {
         return settings_refused(&refusal);
     }
@@ -871,10 +890,8 @@ async fn clear_setting(
         return unreadable_field(provider, &service, &field);
     };
 
-    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
-        return allowance_change_in_flight(provider);
-    };
-
+    // No claim, for [`set_setting`]'s reason: the store's own write lock spans the whole
+    // read-decide-write, and clearing only ever frees allowance.
     match store.clear(principal.tenant(), provider.id, &setting) {
         Err(refusal) => settings_refused(&refusal),
         Ok(false) => nothing_to_clear(provider, &setting),
@@ -989,6 +1006,24 @@ fn settings_refused(refusal: &SettingsRefusal) -> Response {
                 "service": service,
                 "field": setting,
                 "declared": declared,
+            }),
+        ),
+        // **No tenant may supply this, whatever the value.** `422` on the same reading as the
+        // addressing refusals — the request is well formed and there is no address here this host
+        // will accept — and deliberately not `403`, which would say "not you": nobody may write
+        // here, on any deployment, and the remedy is a composition decision rather than a
+        // permission. The template is echoed so the refusal shows its working.
+        SettingsRefusal::WouldNameTheHost {
+            connector,
+            setting,
+            template,
+        } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "host_template": template,
+                "suppliable": false,
             }),
         ),
         SettingsRefusal::SettingTooLarge {
@@ -4565,10 +4600,24 @@ mod tests {
         assert_eq!(
             needed["settings"],
             json!([
-                { "service": "default", "field": "endpoint.subdomain", "set": false },
-                { "service": "default", "field": "username.zendesk.api_token", "set": false },
+                {
+                    "service": "default",
+                    "field": "endpoint.subdomain",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "default",
+                    "field": "username.zendesk.api_token",
+                    "set": false,
+                    "suppliable": true,
+                },
             ]),
             "the listing names what to supply, and no value: {needed}",
+        );
+        assert_eq!(
+            needed["configurable"], true,
+            "zendesk's host is suffix-pinned, so a tenant can configure the whole of it: {needed}",
         );
 
         let (status, supplied) = call(
@@ -4674,6 +4723,193 @@ mod tests {
             "zendesk",
             &subdomain,
         ));
+    }
+
+    /// **The exfiltration path, refused at the surface a caller can actually reach.**
+    ///
+    /// `connection_settings.rs::a_setting_cannot_become_the_destination_authority` proves the store
+    /// refuses it; this proves the *route* does, over HTTP, as the principal any agent token
+    /// resolves to. Both are needed: the host-level test says the value cannot be stored, and this
+    /// says there is no request that stores it.
+    ///
+    /// The four connectors are the ones whose host template pins no vendor suffix, so the tenant's
+    /// value would be the whole origin this host sends their credential to.
+    #[tokio::test]
+    async fn no_route_lets_a_tenant_supply_a_connectors_whole_authority() {
+        let (app, store, settings, _scratch) = configurable_app();
+
+        for (connector, field) in [
+            ("newrelic", "endpoint.host"),
+            ("okta", "endpoint.domain"),
+            ("docusign", "endpoint.account_host"),
+            ("freshdesk", "endpoint.domain"),
+        ] {
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                &format!("/api/connections/{connector}/settings/default/{field}"),
+                Some(json!({ "value": "evil.example" })),
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "`{connector}` accepted a value that would be its whole destination host: {body}",
+            );
+            assert_eq!(body["suppliable"], false, "{body}");
+            assert!(
+                body["host_template"]
+                    .as_str()
+                    .is_some_and(|t| t.contains('{')),
+                "the refusal must quote the template that pins nothing: {body}",
+            );
+
+            // And the listing says the same thing, so a connector refused on purpose does not read
+            // as a broken one.
+            let (_, listed) = call(
+                &app,
+                "alice",
+                Method::GET,
+                &format!("/api/connections/{connector}/settings"),
+                None,
+            )
+            .await;
+            assert_eq!(
+                listed["configurable"], false,
+                "`{connector}` must report itself as not configurable: {listed}",
+            );
+            let row = listed["settings"]
+                .as_array()
+                .expect("an array")
+                .iter()
+                .find(|row| row["field"] == field)
+                .expect("the field is listed even though it cannot be supplied");
+            assert_eq!(row["suppliable"], false, "{listed}");
+            assert!(
+                row["reason"]
+                    .as_str()
+                    .is_some_and(|r| r.contains("no tenant may supply")),
+                "the listing must say why, not merely that: {listed}",
+            );
+        }
+
+        assert!(store.addresses().is_empty(), "{:?}", store.addresses());
+        assert_eq!(
+            settings.held_bytes(&Tenant::new("acme").expect("a plain tenant id")),
+            0,
+            "nothing was stored for any of them",
+        );
+    }
+
+    /// A tenant sitting on its settings allowance can still replace a value with one the same size.
+    ///
+    /// **The regression the first cut shipped.** This handler ran its own
+    /// `admit_tenant_settings(held, value.len())` before the store's, without subtracting what the
+    /// write replaced — directly under a comment claiming it did. `SettingsStore::set` is
+    /// replace-aware, so the two disagreed and the route's, being first, won. An operator whose
+    /// subdomain had changed would have been told to *remove* a setting in order to change one.
+    ///
+    /// It is only observable near the bound, which is why this fills the allowance first: with a
+    /// tenant holding 15 KiB of a 16 KiB allowance, `held + 1 KiB` exceeds it while
+    /// `held - replaced + 1 KiB` does not, and those are exactly the two readings that disagreed.
+    #[tokio::test]
+    async fn a_tenant_at_its_settings_allowance_can_still_replace_a_value() {
+        let (app, _store, settings, _scratch) = configurable_app();
+        let acme = Tenant::new("acme").expect("a plain tenant id");
+        let full = "x".repeat(exchange_host::MAX_SETTING_VALUE_BYTES);
+
+        // Every address this host will actually accept a value at, across the whole catalogue —
+        // one connector does not have enough of them to reach a per-tenant bound.
+        let addresses: Vec<(String, String, String)> = connector_catalog::providers()
+            .iter()
+            .flat_map(|provider| {
+                declared_settings(provider)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|setting| host_pinning(provider, setting).tenant_may_supply())
+                    .map(|setting| {
+                        (
+                            provider.id.to_owned(),
+                            setting.service.clone(),
+                            setting.binds(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Fill to within one value of the allowance, and remember the last address that landed.
+        let mut last = None;
+        for (connector, service, field) in &addresses {
+            if settings.held_bytes(&acme) + full.len() > exchange_host::MAX_TENANT_SETTINGS_BYTES {
+                break;
+            }
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                &format!("/api/connections/{connector}/settings/{service}/{field}"),
+                Some(json!({ "value": full })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            last = Some((connector.clone(), service.clone(), field.clone()));
+        }
+
+        let held = settings.held_bytes(&acme);
+        let (connector, service, field) = last.expect("the catalogue offers enough addresses");
+        assert!(
+            held + full.len() > exchange_host::MAX_TENANT_SETTINGS_BYTES,
+            "the tenant must be near enough the bound for the two readings to disagree; held {held}",
+        );
+
+        // Replace one of them with a value the same size. Under the shipped bug this answered 409.
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            &format!("/api/connections/{connector}/settings/{service}/{field}"),
+            Some(json!({ "value": "y".repeat(exchange_host::MAX_SETTING_VALUE_BYTES) })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "replacing a value with one the same size spends no allowance: {body}",
+        );
+        assert_eq!(
+            settings.held_bytes(&acme),
+            held,
+            "and the tenant occupies exactly what it did before",
+        );
+
+        // The bound still binds: a *new* address past the allowance is refused, so deleting the
+        // route's duplicate check did not delete the rule.
+        let mut refused = None;
+        for (connector, service, field) in &addresses {
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                &format!("/api/connections/{connector}/settings/{service}/{field}"),
+                Some(json!({ "value": full })),
+            )
+            .await;
+            if status == StatusCode::CONFLICT {
+                refused = Some(body);
+                break;
+            }
+        }
+        let refused = refused.expect("the tenant allowance must still be reachable");
+        assert_eq!(refused["bound"], "tenant_settings", "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("remove a setting")),
+            "and its remedy is about settings, not credentials: {refused}",
+        );
     }
 
     /// The behaviour behind admitting `{service}` and `{field}` as path parameters: neither can
