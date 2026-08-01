@@ -7,7 +7,9 @@
 //
 //   checked here — no deployment-specific fact (a host, an address, a port, an instance);
 //   checked here — nothing credential-shaped, however obviously fake, because a copyable example is
-//                  a copied example;
+//                  a copied example. Both of those are read twice per page — the prose, and every
+//                  fenced example as the clipboard would carry it. See [`codeBlocksOf`] for why the
+//                  second reading is not redundant, and X-69 for how it was missing;
 //   NOT checked  — "nothing beyond what `GET /api/onboarding` already discloses". That ceiling is a
 //                  judgement about a field list, not a pattern.
 //   NOT checked  — "no claim that a capability is or is not live". A sentence claiming one is
@@ -54,6 +56,16 @@ function pages() {
   return names.map((name) => ({ name, html: readFileSync(path.join(dist, name), 'utf-8') }))
 }
 
+/** The entities this file's patterns care about, decoded. */
+function decode(html) {
+  return html
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
 /**
  * The human-readable text of a page: script and style bodies removed, tags stripped, entities for
  * the characters this file's patterns care about decoded.
@@ -63,16 +75,84 @@ function pages() {
  * flag every build. What a reader could copy off the page is the text.
  */
 function textOf(html) {
-  return html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&')
+  return decode(
+    html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, ' ')
+  )
 }
+
+/**
+ * Every fenced code block of a page, as the text the copy button would put on a clipboard.
+ *
+ * **This exists because [`textOf`] cannot see a code block, and X-69 is the story that found out.**
+ * The highlighter wraps each token in its own `<span>`, so `textOf` — which replaces a tag with a
+ * *space*, correctly, or every sentence would run into the next — renders `export FOO=bar` as
+ * `export FOO = bar`. Every rule below that looks for a value on the right-hand side of an `=` then
+ * misses it. The site had no fenced block on any page until X-69 added the first one, so the rule
+ * about what an *example* may contain had never once been asked about an example.
+ *
+ * Tags are therefore stripped with **no** separator here, which reconstructs the block verbatim,
+ * and `the code-block reader reconstructs what a reader would copy` below runs this against
+ * highlighter markup it must see through.
+ */
+function codeBlocksOf(html) {
+  return [
+    ...html.matchAll(/<div class="language-[^"]*">[\s\S]*?<pre[^>]*>([\s\S]*?)<\/pre>/g),
+  ].map((match) => decode(match[1].replace(/<[^>]+>/g, '')))
+}
+
+/**
+ * Shapes that can only be a fact about somebody's running host.
+ *
+ * Hoisted out of the test that scans pages so [`codeBlocksOf`]'s own self-test can hold them, in
+ * the shape `console/test/components.test.mjs` uses: a scanner that has not just proved it catches
+ * a violation is not evidence there are none.
+ */
+const DEPLOYMENT_FACTS = [
+  [/\b\d{1,3}(?:\.\d{1,3}){3}\b/, 'an IP address'],
+  [/\blocalhost\b/i, 'localhost'],
+  [/\b127\.0\.0\.1\b/, 'the loopback address'],
+  [/:\d{2,5}\/(?:api|health)\b/, 'a host:port endpoint'],
+  [/\bhttps?:\/\/[A-Za-z0-9.-]+:\d+/, 'a URL naming a port'],
+]
+
+/**
+ * Shapes a credential takes, "however obviously fake" being the point: a reader copies the shape,
+ * fills in a real value, and the example has done its damage. So these match the *shape*, not a
+ * known-bad value.
+ */
+const CREDENTIAL_SHAPES = [
+  [/-----BEGIN [A-Z ]+-----/, 'a PEM block'],
+  [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/, 'a bearer token'],
+  [/\b(?:sk|pk|rk)-[A-Za-z0-9]{8,}/, 'an API key'],
+  [/\bgh[pousr]_[A-Za-z0-9]{8,}/, 'a GitHub token'],
+  [/\bxox[baprs]-[A-Za-z0-9-]{8,}/, 'a Slack token'],
+  [/\bAKIA[0-9A-Z]{16}\b/, 'an AWS access key id'],
+  [/\beyJ[A-Za-z0-9_-]{8,}\./, 'a JWT'],
+  // A configuration example with a value on the right-hand side, in any of the three spellings a
+  // reader could paste: `FOO=bar`, `"secret": "…"`, `password: …`.
+  //
+  // **`FOO=<something>` is exempt, and that exemption is X-69's.** A page that tells somebody how
+  // to arm a development identity has to name the variable that arms it, and the reason this rule
+  // exists — a copyable example is a copied example — is the reason a *placeholder* is the right
+  // spelling rather than a banned one: `FLUX_EXCHANGE_DEV_IDENTITY=<kind:id@tenant>` is the
+  // grammar, not a value, and pasting it verbatim makes the process refuse to start and name the
+  // entry rather than arming something. The rule is still "no value": anything but an
+  // angle-bracket placeholder, quoted or bare, fires. `the environment-variable rule admits a
+  // placeholder and still catches a value` is what holds the exemption to that width.
+  [
+    /\b[A-Z][A-Z0-9_]{3,}=(?!["']?<[^<>\n]+>["']?(?:[\s,;)]|$))\S/,
+    'an environment variable with a value',
+  ],
+  [
+    /\b(?:secret|password|passwd|token|api_key|apikey|credential)\s*[:=]\s*["'][^"']+["']/i,
+    'a configured secret',
+  ],
+  // Any long opaque run in prose. The pages are English; a 32-character unbroken token is not.
+  [/\b[A-Za-z0-9_-]{32,}\b/, 'an opaque value'],
+]
 
 /** Every `href`/`src` value in a page. */
 function linksOf(html) {
@@ -109,59 +189,169 @@ test('the site links off-site only to the flux family on GitHub', () => {
 })
 
 test('no page publishes a deployment-specific fact', () => {
-  // The site describes the software, never an instance. Each pattern is a shape that can only be
-  // about somebody's running host.
-  const forbidden = [
-    [/\b\d{1,3}(?:\.\d{1,3}){3}\b/, 'an IP address'],
-    [/\blocalhost\b/i, 'localhost'],
-    [/\b127\.0\.0\.1\b/, 'the loopback address'],
-    [/:\d{2,5}\/(?:api|health)\b/, 'a host:port endpoint'],
-    [/\bhttps?:\/\/[A-Za-z0-9.-]+:\d+/, 'a URL naming a port'],
-  ]
-
+  // The site describes the software, never an instance.
   for (const { name, html } of pages()) {
-    const text = textOf(html)
-    for (const [pattern, what] of forbidden) {
-      const hit = text.match(pattern)
-      assert.equal(
-        hit,
-        null,
-        `${name} publishes ${what} (${hit?.[0]}) — this site describes the software, never a deployment`
-      )
+    for (const scanned of [textOf(html), ...codeBlocksOf(html)]) {
+      for (const [pattern, what] of DEPLOYMENT_FACTS) {
+        const hit = scanned.match(pattern)
+        assert.equal(
+          hit,
+          null,
+          `${name} publishes ${what} (${hit?.[0]}) — this site describes the software, never a deployment`
+        )
+      }
     }
   }
 })
 
-test('no page publishes anything credential-shaped', () => {
-  // "However obviously fake" is the point: a reader copies the shape, fills in a real value, and the
-  // example has done its damage. So these match the *shape*, not a known-bad value.
-  const forbidden = [
-    [/-----BEGIN [A-Z ]+-----/, 'a PEM block'],
-    [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/, 'a bearer token'],
-    [/\b(?:sk|pk|rk)-[A-Za-z0-9]{8,}/, 'an API key'],
-    [/\bgh[pousr]_[A-Za-z0-9]{8,}/, 'a GitHub token'],
-    [/\bxox[baprs]-[A-Za-z0-9-]{8,}/, 'a Slack token'],
-    [/\bAKIA[0-9A-Z]{16}\b/, 'an AWS access key id'],
-    [/\beyJ[A-Za-z0-9_-]{8,}\./, 'a JWT'],
-    // A configuration example with a value on the right-hand side, in any of the three spellings a
-    // reader could paste: `FOO=bar`, `"secret": "…"`, `password: …`.
-    [/\b[A-Z][A-Z0-9_]{3,}=\S/, 'an environment variable with a value'],
-    [/\b(?:secret|password|passwd|token|api_key|apikey|credential)\s*[:=]\s*["'][^"']+["']/i, 'a configured secret'],
-    // Any long opaque run in prose. The pages are English; a 32-character unbroken token is not.
-    [/\b[A-Za-z0-9_-]{32,}\b/, 'an opaque value'],
-  ]
-
+test('no page publishes anything credential-shaped, in its prose or in an example', () => {
+  // Both readings of every page: the prose, and each fenced block as the clipboard would carry it.
+  // The second is not redundant — see [`codeBlocksOf`] for the reading the first cannot make.
   for (const { name, html } of pages()) {
-    const text = textOf(html)
-    for (const [pattern, what] of forbidden) {
-      const hit = text.match(pattern)
-      assert.equal(
-        hit,
-        null,
-        `${name} publishes what looks like ${what} (${hit?.[0]}) — a copyable example is a copied example`
-      )
+    for (const scanned of [textOf(html), ...codeBlocksOf(html)]) {
+      for (const [pattern, what] of CREDENTIAL_SHAPES) {
+        const hit = scanned.match(pattern)
+        assert.equal(
+          hit,
+          null,
+          `${name} publishes what looks like ${what} (${hit?.[0]}) — a copyable example is a copied example`
+        )
+      }
     }
   }
+})
+
+test('the code-block reader reconstructs what a reader would copy', () => {
+  // Run against highlighter markup it must see through, rather than trusting that it does. The
+  // fixture is one line of real `vitepress build` output with the colours shortened: every token in
+  // its own span, which is exactly what defeats a text scan that separates tags with a space.
+  const highlighted =
+    '<div class="language-sh vp-adaptive-theme"><button title="Copy Code" class="copy"></button>' +
+    '<span class="lang">sh</span><pre class="shiki vp-code" tabindex="0"><code><span class="line">' +
+    '<span style="--shiki-light:#D73A49;">export</span><span style="--shiki-light:#24292E;"> A_SETTING</span>' +
+    '<span style="--shiki-light:#D73A49;">=</span><span style="--shiki-light:#032F62;">&quot;a value&quot;</span>' +
+    '</span></code></pre></div>'
+
+  assert.deepEqual(codeBlocksOf(highlighted), ['export A_SETTING="a value"'])
+
+  // The half that makes this reader worth having: the same markup, read as prose, hides the
+  // assignment from the rule that is supposed to catch it.
+  const [envRule] = CREDENTIAL_SHAPES.filter(([, what]) => what === 'an environment variable with a value')
+  assert.ok(envRule, 'the environment-variable rule is no longer in CREDENTIAL_SHAPES')
+  assert.match(codeBlocksOf(highlighted)[0], envRule[0])
+  assert.doesNotMatch(
+    textOf(highlighted),
+    envRule[0],
+    'prose-reading now catches a tokenised assignment; if that is really true, say so and simplify — it was not true when this was written'
+  )
+})
+
+test('the environment-variable rule admits a placeholder and still catches a value', () => {
+  // The one exemption X-69 added, held to its width. A grammar is publishable; a value is not.
+  const [[pattern]] = CREDENTIAL_SHAPES.filter(
+    ([, what]) => what === 'an environment variable with a value'
+  )
+
+  for (const caught of [
+    'export FLUX_EXCHANGE_GRANTS=/home/somebody/grants',
+    'FLUX_EXCHANGE_DEV_IDENTITY="user:alice@acme"',
+    'A_SETTING=<a placeholder>then-a-value',
+    'A_SETTING=<>',
+  ]) {
+    assert.match(caught, pattern, `${caught} names a value and must not publish`)
+  }
+
+  for (const admitted of [
+    'export FLUX_EXCHANGE_DEV_IDENTITY="<kind:id@tenant>"',
+    'export FLUX_EXCHANGE_GRANTS=<a path outside every checkout>',
+    'A_SETTING=<a placeholder>, and prose after it',
+  ]) {
+    assert.doesNotMatch(admitted, pattern, `${admitted} is a grammar rather than a value`)
+  }
+})
+
+// ---------------------------------------------------------------------------------------------
+// The getting-started page (X-69)
+// ---------------------------------------------------------------------------------------------
+
+/** Where the page a stranger starts from is served. `cleanUrls`, so the link carries no suffix. */
+const GETTING_STARTED = { file: 'getting-started.html', link: `${DEPLOYED_BASE}getting-started` }
+
+/** The built getting-started page, or a failure that says what is missing rather than `undefined`. */
+function gettingStarted() {
+  const page = pages().find(({ name }) => name === GETTING_STARTED.file)
+  assert.ok(
+    page,
+    `the site publishes no ${GETTING_STARTED.file} — a visitor can read what this service refuses to do and cannot learn how to start it (X-69)`
+  )
+  return page
+}
+
+test('the loopback constraint is inside the block a reader would copy, not under it', () => {
+  // The one thing on this page that must not go wrong. A roster handle is a credential with no
+  // secret in it, which is why `admit_bind` refuses every non-loopback address while the
+  // development identity is armed — *a reachable bind whose authentication is a name anybody can
+  // guess is worse than no authentication, because the surface in front of it believes every
+  // caller.* Somebody skimming for a command reads the block and nothing else, so the constraint
+  // has to be *in* it; a page that explains local sign-in and mentions loopback three screens later
+  // is a page that gets a secret-free roster onto a public address.
+  const { name, html } = gettingStarted()
+  const blocks = codeBlocksOf(html)
+  assert.ok(blocks.length > 0, `${name} carries no example at all`)
+
+  const starting = blocks.filter((block) => /cargo run/.test(block))
+  assert.ok(
+    starting.length > 0,
+    `${name} has no block that starts the service, so there is nothing for the constraint to be inside of`
+  )
+
+  for (const block of starting) {
+    assert.match(
+      block,
+      /loopback/i,
+      `${name} starts the service in a block that does not say the bind is loopback-only — whoever copies it meets the constraint at startup instead, or does not meet it at all`
+    )
+    assert.match(
+      block,
+      /deploy/i,
+      `${name} starts the service in a block that does not say this is not how you deploy it`
+    )
+  }
+})
+
+test('the getting-started page says what must be true before anything will run', () => {
+  // Fail-closed on invocation is the correct behaviour and it looks exactly like an outage. A page
+  // that ends at "you are signed in" sends its reader into a refusal with nothing to act on.
+  const { name, html } = gettingStarted()
+  const text = textOf(html)
+
+  for (const [needle, why] of [
+    ['FLUX_EXCHANGE_GRANTS', 'the setting that has to name a file before anything runs'],
+    ['not_granted', 'the refusal a reader meets when a store is bound and the tenant holds nothing'],
+  ]) {
+    assert.ok(text.includes(needle), `${name} does not name ${needle} — ${why}`)
+  }
+})
+
+test('the getting-started page reaches the reader: the nav on every page, and the landing hero', () => {
+  // Sidebar-only would satisfy "the page exists" and not "a visitor finds it". The nav is on every
+  // page and the hero action is what a first-time visitor is offered before they read anything.
+  // `404.html` is excluded and it is the only exclusion: VitePress renders it without the theme
+  // shell, so it carries no nav on any page of any site built this way — asserting over it would be
+  // asserting about the framework rather than about this site's navigation.
+  for (const { name, html } of pages().filter(({ name }) => name !== '404.html')) {
+    assert.ok(
+      linksOf(html).includes(GETTING_STARTED.link),
+      `${name} does not link to ${GETTING_STARTED.link} — the nav is what puts the page in front of somebody who did not come looking for it`
+    )
+  }
+
+  const { html } = pages().find(({ name }) => name === 'index.html')
+  assert.match(
+    html,
+    new RegExp(`<a class="[^"]*VPButton[^"]*"[^>]*href="${GETTING_STARTED.link}"`),
+    'the landing page offers no hero action for the getting-started page — a nav entry is not the same as being handed the page'
+  )
 })
 
 test('the contributor readme is not a published page', () => {
