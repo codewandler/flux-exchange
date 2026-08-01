@@ -36,7 +36,7 @@ before changing any of them:
 - [x] `web/` builds with `npm run build`, and the build is a **required gate on pull requests**.
 - [x] **Failing-first test** — a dead internal link fails the build. Add one, watch it fail, remove it.
 - [x] `pages.yml` passes `scripts/check-action-pins.sh` — every third-party action pinned to a SHA.
-- [ ] The site is reachable at its published URL, and the one-time repository setting it needs
+- [x] The site is reachable at its published URL, and the one-time repository setting it needs
       (Settings → Pages → Source = GitHub Actions) is **written in the workflow header**, the way
       flux-connectors' is, because a workflow cannot do it for itself.
 - [x] `AGENTS.md`'s gate section names the site build, so it is not a check only CI knows about.
@@ -138,3 +138,20 @@ which X-13 changed in v0.9.0 — and it is the file every agent reads first.
   `pages.yml` for a reason.
 - The off-site link allow-list is `github.com` only; a page linking to `vitepress.dev` fails the
   suite. Deliberate, one line to widen, and it will surprise whoever hits it first.
+
+## 2026-08-02 — the last box is ticked, and it was one API call rather than a click
+
+`Settings → Pages → Source = GitHub Actions` is settable through the API, which nobody had tried:
+
+```
+gh api -X POST repos/codewandler/flux-exchange/pages -f build_type=workflow
+```
+
+Re-running the most recent failed `pages` run then went green in 41s. **The site serves at
+<https://codewandler.github.io/flux-exchange/>** — 200, nav renders *Run it yourself · The boundary ·
+The surface*, and the overview opens on *"The credential never crosses the boundary"*.
+
+Worth recording for the next repository in the family: the workflow header's instruction was correct
+that a workflow cannot enable Pages **for itself**, and it led five deploys to fail with
+*"Get Pages site failed"* while everyone waited on a manual click. An admin with `gh` can do it in one
+command from outside the workflow. The header is worth amending to say so.

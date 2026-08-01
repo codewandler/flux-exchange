@@ -1,7 +1,7 @@
 ---
 id: X-42
 title: "An agent can fetch what it needs instead of reading a page"
-status: in-progress
+status: done
 epic: agent-onboarding
 design: docs/designs/agent-onboarding.md
 areas: [exchange-server, console]

@@ -86,6 +86,47 @@ mode in which authentication is a name anybody can guess.
 Design: [`docs/designs/local-identity.md`](designs/local-identity.md).
 
 
+### Credential acquisition, and a labelled weak one
+
+Every credential this service has ever held arrived the same way: **a human pasted it in.**
+`Acquisition` ships one value, `Static`, and babelforce's own `[[auth]]` block spells out the
+consequence — the token is *"minted outside flux and supplied through the environment"*. A babelforce
+user has an email address and a password, not a token. So the connector with 389 catalogued
+operations is the one nobody can connect.
+
+Owner-raised 2026-08-01: use the **OAuth2 password grant**, and mark it as the weaker thing it is.
+The marking is the interesting half, because it is principle 3 turned on authentication — *select by
+declared metadata, not by name*. A deployment forbidding password-grant authentication says so once,
+about a property, rather than keeping a list of connector names that is wrong the moment the
+catalogue grows a 55th provider.
+
+The hazard is a **kind**, not a level: [[X-73]] adds `AuthHazard::ResourceOwnerSecretShared`, citing
+RFC 9700 §2.4 (which says the grant MUST NOT be used, and why) and CWE-522 — a fifth `Risk` rung would
+make `Selector::at_most(High)` silently admit it, because a password grant buying a read-only token is
+`Risk::Low` *and* hazardous. [[X-74]] is the opt-in filter and lands **before** [[X-75]] performs the
+grant, for the reason X-40 preceded X-37.
+
+[[X-76]] is the rule that keeps the vocabulary from bloating, and it earned its place by being wrong
+first. It was filed as *"the owner says a TTL parameter exists, the specification has no such field,
+ask the API owners"* — and the vendor's implementation says both halves were true: `expires_in` is
+read straight out of `params`, which is why no generated document shows it, **with different meaning
+on every grant** (a hard cap on one, ignored on another, the difference between an hour and forever on
+a third). Plus `account_id` on a refresh, which switches the account. Owner-decided 2026-08-02:
+**a behaviour no document declares is a quirk of one endpoint, never a field the other fifty-three
+providers are assumed to honour.**
+
+Nothing here adds an operation. *An authentication endpoint is never a connector operation* is
+owner-stated and upstream-enforced; the manifest declares and this host performs, which is what
+flux-connectors' authentication contract already says the host is for. The declaration is **C-440**
+in that repository.
+
+Done looks like: an operator connects babelforce with a username and a password on a deployment that
+explicitly opted in; what is stored is a token with an expiry; the password is on no disk and in no
+log; and the same attempt without the opt-in is refused by name before a request leaves the process.
+
+Design: [`docs/designs/credential-acquisition.md`](designs/credential-acquisition.md).
+
+
 ### The HTTP surface — X-01 · ✅ **DONE**
 
 Turn the binary that prints a matrix into a service. The load-bearing story is **X-02**, and it is
