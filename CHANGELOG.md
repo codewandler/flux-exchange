@@ -8,6 +8,23 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **OIDC sign-in, up to the token exchange** (X-04, partial). The authorization request is real:
+  authorization-code flow with PKCE `S256`, and `state` and `nonce` bound at `/api/signin`,
+  single-use and TTL-bounded. A callback carrying a `state` this host did not open is refused with
+  **no session issued** — proven by committing the whole flow *without* the binding first, where the
+  forged callback cheerfully answered "Signed in", i.e. a victim signed in as the attacker.
+
+  **It cannot complete, deliberately.** Redeeming the code needs an HTTP client and verifying the id
+  token needs a JOSE library; this workspace has neither, so `TokenExchange` is an unbound port and
+  `/api/signin` serves an explanation rather than a redirect it could never return from. Nothing
+  hand-rolls signature verification. Following X-03's precedent, a configured-but-unbound OIDC
+  composition reports **`Unbound`**, so "OIDC is configured" cannot make a reachable bind legal while
+  nothing can actually resolve a caller.
+
+  The one crypto exception is a hand-written SHA-256 for the PKCE challenge, verified against
+  `hashlib` over every message length 0..=600 and at the 2^32-bit boundary; it goes when `sha2` can
+  be depended on. The tenant is fixed at startup rather than mapped from a claim, because some
+  providers let users edit their own profile claims.
 - **Identity, bound — with a dev principal that cannot open the door** (X-03). The `Identity` port is
   wired: a request carries a session, the host resolves it to a `Principal`, and every tenant is read
   from *that* and from nothing a caller controls — asserted three times, once each for a path

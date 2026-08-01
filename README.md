@@ -8,12 +8,13 @@ happened; agents are what call operations all day. That inverts the usual assump
 everything below.
 
 > [!WARNING]
-> **Status: v0.0.1 — a charter, a type system, and an HTTP surface with exactly one route.**
+> **Status: v0.0.1 — a charter, a type system, and an HTTP surface that cannot yet sign anyone in.**
 >
-> `cargo run` now binds `127.0.0.1:8080` and answers `GET /health`. It refuses to start on a
-> reachable address while no identity provider is configured. Nothing else is served: there is no
-> sign-in, no catalogue route, no connection, and no `invoke`. It holds no credential — the store
-> exists as a library binding and no binary holds one yet. See
+> `cargo run` binds `127.0.0.1:8080` and serves health, the connector catalogue, a session, and the
+> start of an OIDC sign-in. It refuses to start on a reachable address while no identity provider is
+> configured. **Sign-in cannot complete**: redeeming the code needs an HTTP client and verifying the
+> id token needs a JOSE library, and this workspace has neither — so `/api/signin` serves an
+> explanation rather than a redirect. There is no connection surface and no `invoke`. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 
@@ -75,10 +76,11 @@ against one tenant's connections, not a vendor secret.
 | | |
 |---|---|
 | `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound but not yet wired into a binary. **Real and tested (32 tests).** |
-| `crates/exchange-server` | A service with exactly one route: `GET /health` on loopback. It refuses to start on a reachable address with no identity provider. **Tested (13 tests).** |
+| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port, and OIDC sign-in **up to the token exchange**. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (99 tests).** |
 | `console/` | A Vue 3 console reading the **live catalogue** from this service, reusing the framework-free explorer components from flux-connectors. An unreachable service renders an error naming the endpoint — never an empty catalogue. |
 
-**Not built, despite being described in the design:** sign-in, every route but `/health`, `invoke`,
+**Not built, despite being described in the design:** the second half of sign-in (the token exchange
+and id-token verification, for want of an HTTP client and a JOSE library), connections, `invoke`,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
 catalogue loader. The credential store has moved off this list and is described below — with the
 caveat that it is a library binding no binary holds yet, which is a shorter distance from "not
@@ -116,8 +118,8 @@ No binary binds it yet: the server serves `/health` without ever opening a store
 ## Try it
 
 ```bash
-cargo run                       # binds 127.0.0.1:8080, answers GET /health
-cargo test --workspace          # 45 tests
+cargo run                       # binds 127.0.0.1:8080; health, catalogue, session, sign-in
+cargo test --workspace          # 131 tests
 cd console && npm install && npm run dev
 ```
 
