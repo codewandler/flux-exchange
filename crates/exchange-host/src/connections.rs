@@ -21,31 +21,37 @@
 //! # Nothing is defaulted
 //!
 //! A connector that declares no authority has **no** address, and this refuses rather than guessing
-//! one. `connector_spec::Connector::credential_ref_for` returns `Ok(None)` for exactly that case;
+//! one. Upstream's `connector_spec::Connector::credential_ref_for` — the compiler's derivation,
+//! which this repository does not link but does agree with — returns `Ok(None)` for that case;
 //! turning it into a default would write a value to an address no operation ever reads from, which
 //! is a lost credential presented to the operator as a success. `AGENTS.md` § Invariants, last
 //! entry: refuse; never repair, and name the address rather than the value.
 //!
-//! # The address has no instance dimension *in the version this pins*
+//! # The address has an instance dimension upstream, and this does not yet spell it
 //!
 //! Nothing above varies per *connection*, so a tenant with two accounts on one connector — a
 //! sandbox Zendesk and a production one — renders one address for both. That gap is **X-14** here
-//! and **C-406** upstream, where the dimension has now landed:
+//! and **C-406** upstream, where the dimension has landed and, since X-11, is **published and
+//! pinned here**:
 //!
 //! ```text
 //! tenants/<tenant>/<authority>[/@instances/<uuid>][/<service>]/<credential>
 //! ```
 //!
-//! It is **not published**: crates.io still serves `codewandler-connector-spec` 0.8.0 and this
-//! workspace pins `"0.8"` from the registry, so the level cannot be spelled here yet — and it is
-//! not closed by spelling a second address locally either, because two spellings of an address is
-//! how two components stop agreeing where a credential lives.
+//! `connector_address::CredentialRef::for_instance` is the constructor that spells it, and
+//! `TenantInstances` is the rule for when it may be spelled. **This module still calls
+//! [`CredentialRef::new`]**, which renders the un-instanced form byte for byte — that is the whole
+//! point of upstream having made the level opt-in, since a qualified address would strand every
+//! credential already stored. Closing the gap means resolving an operator's label to a uuid, which
+//! upstream states is the *host's* job and is therefore X-14's, not a consequence of moving a pin.
+//! `tests/engine_line.rs` asserts the rendered address literally, so the day that changes it is a
+//! failing test rather than a credential written where nothing looks for it.
 //!
-//! What this module does instead is make the collision *visible* and leave the level one insertion
-//! away. [`ConnectorDeclaration::addresses`] is total and deterministic, so a caller can ask whether
+//! What this module does meanwhile is make the collision *visible* and leave the level one
+//! insertion away. [`ConnectorDeclaration::addresses`] is total and deterministic, so a caller can ask whether
 //! an address is already occupied before it writes; and
 //! [`address_of_declared`](ConnectorDeclaration::address_of_declared) is the single place any
-//! address is composed, which is where the `@instances/<uuid>` level goes when the pin moves.
+//! address is composed, which is where the `@instances/<uuid>` level goes.
 //! Upstream's note is that mapping an operator's label to that uuid is the *host's* job — this
 //! repository's, i.e. X-14 — so that function is the seam X-14 extends rather than replaces. The
 //! refusal that stands in for it meanwhile belongs to the surface that writes; see
@@ -89,8 +95,13 @@
 
 use std::collections::BTreeMap;
 
+// The address vocabulary, named directly. `connector-secrets` re-exports every name it needs from
+// `connector-address` — so `CredentialRef` here and `CredentialRef` there are one type — but it
+// does not re-export `DEFAULT_SERVICE`, which lives at the vocabulary crate's root rather than in
+// its `credential` module. Reaching for the vocabulary crate for that one constant is better than
+// restating `"default"`: the elision rule and the constant have to be the same fact.
+use connector_address::DEFAULT_SERVICE;
 use connector_secrets::{CredentialRef, Layout, Secret, TenantLayout};
-use connector_spec::DEFAULT_SERVICE;
 
 use crate::Tenant;
 
@@ -338,10 +349,11 @@ impl<'a> ConnectorDeclaration<'a> {
 
     /// The address of a credential this declaration is already known to carry.
     ///
-    /// **The one place an address is composed**, and therefore the seam X-14 extends. When
-    /// `connector-spec` publishes the instance level, the `@instances/<uuid>` segment is inserted
-    /// *here* — the function grows the tenant's chosen instance as an argument and passes it to the
-    /// upstream constructor — and no other call site re-spells the address. Upstream states that
+    /// **The one place an address is composed**, and therefore the seam X-14 extends. The instance
+    /// level is published and pinned since X-11, so the `@instances/<uuid>` segment is inserted
+    /// *here* — the function grows the tenant's chosen instance as an argument and passes it to
+    /// `CredentialRef::for_instance` instead of [`CredentialRef::new`] — and no other call site
+    /// re-spells the address. Upstream states that
     /// resolving an operator's label to that uuid is the host's job, which makes it this function's
     /// job rather than a new one beside it.
     fn address_of_declared(
@@ -357,8 +369,9 @@ impl<'a> ConnectorDeclaration<'a> {
 
         // The service segment is `DEFAULT_SERVICE`, which the layout elides — a credential is
         // declared at connector level and belongs to the connector rather than to one of its
-        // services, exactly as `connector_spec::Connector::credential_ref_for` composes it. This is
-        // a view of that composition, not a second one.
+        // services, exactly as upstream's `connector_spec::Connector::credential_ref_for` composes
+        // it. This is a view of that composition, not a second one — both spell the address through
+        // `connector-address`, which is why they cannot drift.
         CredentialRef::new(tenant.as_str(), authority, DEFAULT_SERVICE, declared.leaf).map_err(
             |reason| ConnectionRefusal::Unaddressable {
                 connector: self.connector.to_string(),

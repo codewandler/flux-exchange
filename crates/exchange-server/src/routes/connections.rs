@@ -931,12 +931,14 @@ fn connection_refused(refusal: &ConnectionRefusal) -> Response {
 
 /// **The X-14 placeholder.** A second connection to a connector this tenant already has.
 ///
-/// The address has no level at which two instances of one connector differ, so accepting this
-/// would overwrite the first connection, answer `201`, and send every later call to the wrong
-/// account while looking healthy. The refusal names the level that will replace it:
-/// `@instances/<uuid>`, which has landed in flux-connectors (C-406) and is not published — this
-/// workspace pins `connector-spec` 0.8 from the registry. Wiring it up here, including resolving a
-/// name the operator chooses to that uuid, is X-14.
+/// The address this host *derives* has no level at which two instances of one connector differ, so
+/// accepting this would overwrite the first connection, answer `201`, and send every later call to
+/// the wrong account while looking healthy. The refusal names the level that will replace it:
+/// `@instances/<uuid>`, which landed in flux-connectors (C-406) and is published and pinned here
+/// since X-11 — `connector_address::CredentialRef::for_instance` spells it. What is still missing
+/// is this host's half: resolving a name the operator chooses to that uuid, and moving the
+/// already-stored credential to the address it gains. That is X-14, and until it lands this refuses
+/// rather than deriving an address the store was never written at.
 fn already_connected(
     provider: &'static Provider,
     addresses: &[(DeclaredCredential<'_>, CredentialRef)],
@@ -954,10 +956,10 @@ fn already_connected(
             "addresses": addresses_of(addresses),
             "would_have_worked":
                 "an instance level on the address — \
-                 `tenants/<tenant>/<authority>/@instances/<uuid>/<credential>` — which has landed \
-                 in flux-connectors (C-406) and is not published yet; this host pins \
-                 connector-spec 0.8. Wiring it up, including resolving a name you choose to that \
-                 uuid, is X-14. Until then, delete the existing connection before creating another",
+                 `tenants/<tenant>/<authority>/@instances/<uuid>/<credential>` — which landed in \
+                 flux-connectors (C-406) and is published; this host does not yet resolve a name \
+                 you choose to that uuid, which is X-14. Until then, delete the existing \
+                 connection before creating another",
         }),
     )
 }
