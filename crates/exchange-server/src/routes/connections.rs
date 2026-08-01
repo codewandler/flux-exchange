@@ -56,20 +56,36 @@
 //! that answers a caller this host has not identified, so this module adds nothing to the anonymous
 //! set that `super::tests::the_anonymous_surface_is_only_what_was_declared_anonymous` enumerates.
 //!
-//! # Writing a setting is a `User`'s, and reading the surface is anyone's
+//! # Who may touch a connection, decided per route (X-47, X-54)
 //!
-//! One route here is narrower than [`Access::Principal`]:
-//! `PUT`/`DELETE /api/connections/{connector}/settings/{service}/{field}` is
-//! [`Access::PrincipalOfKind`]`(`[`MAY_CONFIGURE`]`)`. A tenant's value is substituted into the
-//! operation's own request, so a caller that can write one chooses the origin this host then sends
-//! that tenant's credential to — and `AGENTS.md` says an agent's token grants access to an
-//! operation, never to a credential. [`MAY_CONFIGURE`] carries the whole argument, including the
-//! part this **does not** close.
+//! Every route here requires a principal, and three of them require one of a particular **kind**.
+//! The division is *writing a credential or the value that steers where it goes* against
+//! *everything else*, and it is declared as data on each [`Route`] rather than checked inside a
+//! handler, so `super::tests::the_kind_gated_surface_is_only_what_was_declared` can walk it:
 //!
-//! The `GET` collection stays open to every kind, deliberately. It answers `binds` targets and a
-//! `set` boolean and no values at all, and an agent that can read *"this connection is missing
-//! `endpoint.subdomain`"* is one that can say so to the human who can supply it. Reading what a
-//! connection needs is any principal's business; writing a value into it is not.
+//! | Route | Who | Why, in one line |
+//! | --- | --- | --- |
+//! | `GET /api/connections` | any kind | addresses and a `held` boolean, never a value |
+//! | `GET /api/connections/{connector}` | any kind | the same, for one connector |
+//! | `POST /api/connections/{connector}` | a `User` | it decides which credential this tenant's operations run under |
+//! | `DELETE /api/connections/{connector}` | any kind | visible, undoable, and nothing survives revoking the token that did it |
+//! | `PUT .../credentials/{credential}` | a `User` | the same substitution as `POST`, and invisible — it replaces in place |
+//! | `GET .../settings` | any kind | `binds` targets and a `set` boolean, never a value |
+//! | `PUT`/`DELETE .../settings/{service}/{field}` | a `User` | the value is substituted into the operation's own request |
+//!
+//! [`MAY_SUPPLY_A_CREDENTIAL`] and [`MAY_CONFIGURE`] carry the arguments, including why `Service` is
+//! refused alongside `Agent` and the within-tenant gap **neither** of them closes — there is no
+//! operator kind, so *a human, not a bot* is the strongest thing a kind gate can say.
+//!
+//! **`POST` shares a path with `GET` and `DELETE` and does not share their access**, so that path
+//! is declared twice in [`MODULE`] — once for the open verbs and once for the gated one. The
+//! alternative was a check inside [`create`], which is the "a route is guarded by its handler
+//! remembering to ask" that [`Access`] exists to refuse.
+//!
+//! The reads stay open to every kind deliberately. They answer targets, addresses and booleans and
+//! no values at all, and an agent that can read *"this connection is missing `endpoint.subdomain`"*
+//! is one that can say so to the human who can supply it. Reading what a connection needs is any
+//! principal's business; writing a value into it is not.
 //!
 //! # A value goes in and never comes back
 //!
@@ -181,7 +197,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put, MethodRouter};
+use axum::routing::{get, post, put, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
@@ -286,6 +302,90 @@ pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
 /// `docs/designs/connection-settings.md` § 4.
 pub(super) const MAY_CONFIGURE: &[PrincipalKind] = &[PrincipalKind::User];
 
+/// **Who may put a credential value into this tenant's store: a `User`, and nothing else.**
+///
+/// The two routes that write a credential — `POST /api/connections/{connector}` and
+/// `PUT /api/connections/{connector}/credentials/{credential}` — and X-54's decision, which is the
+/// half X-47 ring-fenced when it gated the settings write and stopped there.
+///
+/// # Why this is inside the invariant, which does not say so in as many words
+///
+/// `AGENTS.md` reads *"an agent's token grants access to an operation, never to a credential"*, and
+/// the obvious reading is about a credential travelling **out** to the agent. Neither route does
+/// that; this host hands no value back on any route. What they do is the substitution in the other
+/// direction, and the sentence covers it on any reading that is about authority rather than about
+/// bytes: a caller that can decide **which** credential the tenant's operations run under has been
+/// granted the credential position, whether or not it ever sees a value. The account those
+/// operations then reach is the writer's, and every ticket, message and record the tenant's agents
+/// create afterwards is created there.
+///
+/// # Why it is worth a gate when the `DELETE` beside it is not
+///
+/// X-40 left `DELETE /api/connections/{connector}` at [`Access::Principal`] deliberately, on a
+/// stated test — *what does this outlive?* — and the same test is what puts these two on the other
+/// side of it:
+///
+/// - **Nothing records who supplied a credential.** A connection is what the credential store says
+///   it is (`docs/designs/connections.md`) — there is no record beside it, by design — so
+///   `GET /api/connections` answers `held: true` for a value an agent planted exactly as it does
+///   for the one a human did. A rotation is more invisible still: it replaces in place, with no
+///   observable state in which anything is missing.
+/// - **Revocation is not a remedy.** Revoking the agent's token stops the agent; it does not take
+///   the value back out of the store, and nothing points an operator at the address to look at.
+///   That is `agents::MAY_MINT`'s argument — an incomplete remedy an operator cannot see — reached
+///   by a different route.
+/// - **`DELETE` has neither property.** It is visible (`GET /api/connections` stops listing the
+///   connection), the operator holds the plaintext this host never did and can reconnect, and no
+///   authority survives it. It stays open to every kind, and
+///   [`tests::an_agent_may_still_read_a_connection_and_disconnect_one`] is what keeps this story
+///   from having quietly taken it.
+///
+/// # Why the gate is per method, and what that costs
+///
+/// `POST` shares its path with `GET` and `DELETE`, and [`Access`] is declared per [`Route`] — so
+/// this module publishes `/api/connections/{connector}` **twice**, once for the two verbs that stay
+/// open and once for the one that does not. The alternative was a rule applied inside [`create`],
+/// which is the *"a route is guarded by its handler remembering to ask"* that [`Access`] exists to
+/// refuse, and which `super::tests::the_kind_gated_surface_is_only_what_was_declared` could not
+/// see. A duplicated path costs a second line in that enumeration; an invisible gate costs the
+/// enumeration.
+///
+/// # `Service`, decided rather than deferred
+///
+/// Refused, now, on `agents::MAY_MINT`'s argument rather than a new one. A `Service` is a backend
+/// acting for its own accounts, and nothing in this repository mints a service credential, verifies
+/// one, lists one or revokes one — `PrincipalKind::Service` is a kind the identity port may return
+/// and nothing else. A credential this host cannot attribute to a revocable caller, written at an
+/// address nothing records the author of, is the same incomplete remedy one level further out of
+/// sight.
+///
+/// It is worth naming what that costs, because it is real and it is coming: **credential rotation
+/// is exactly what a service integration would want.** A provisioning backend that wires up a
+/// tenant's connectors, or rotates them on a schedule, is a legitimate caller and it is refused
+/// here. The decision is still to refuse today, on the direction the two mistakes point: admitting
+/// a kind for which no revocation path exists is a hole nobody meets until a credential leaks,
+/// while refusing one is a `403` met on the first attempt. Widening this is one kind added to this
+/// list with an argument beside it and a line changed in `KIND_GATED`; narrowing it after something
+/// depends on it is not. The story that wants `Service` here is the story that gives it a
+/// revocation path.
+///
+/// # What it does *not* close: there is no operator kind
+///
+/// `User` is **every** signed-in human of the tenant. So this gate says *a human, not a bot*; it
+/// does not and cannot say *the human who set this tenant up*. A `User` who did not supply a
+/// credential can still replace it with one they control, and every operation the tenant runs
+/// afterwards reaches their account.
+///
+/// That is the same within-tenant gap [`MAY_CONFIGURE`] records — and it is the same gap, not a
+/// second one: `docs/designs/connection-settings.md` § *What this does not close* wants a surface
+/// where an **operator** pins what a tenant may configure, and this wants a surface where an
+/// operator says which humans manage connections. Both are the authorization question — *what may
+/// this principal do* — which is X-13's grant model, and **no kind gate can answer it**. Inventing
+/// an `Operator` variant on [`PrincipalKind`] here would put a policy model in the identity
+/// vocabulary, where nothing mints it, nothing revokes it and no identity port knows how to return
+/// it. It is written down rather than left to be inferred from the absence of a test.
+pub(super) const MAY_SUPPLY_A_CREDENTIAL: &[PrincipalKind] = &[PrincipalKind::User];
+
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
     name: "connections",
@@ -294,6 +394,12 @@ pub(super) const MODULE: Module = Module {
             // Under `/api` for the reason the session route is: `vite dev` owns the origin and
             // proxies `/api` to this host, so anything outside that prefix is answered by the SPA
             // fallback instead.
+            //
+            // **Every kind, decided rather than defaulted (X-54).** The listing answers one entry
+            // per connector this tenant holds, as addresses and a `held` boolean, and never a
+            // value. An agent that can see *"this tenant has no zendesk connection"* is one that
+            // can say so instead of failing an invocation for a reason nobody can act on — the
+            // same argument the settings `GET` collection is open on.
             path: "/api/connections",
             access: Access::Principal,
             method_router: collection_route,
@@ -302,9 +408,29 @@ pub(super) const MODULE: Module = Module {
             // `{connector}` is a catalogue key, never an address. It selects *what* is being
             // connected; the tenant — the only part of the address a caller could want to move —
             // comes from the guard.
+            //
+            // **`GET` and `DELETE`, and every kind for both (X-54).** The read is the line above
+            // narrowed to one connector and carries no more than it does. The `DELETE` is X-40's
+            // own decision, restated rather than reopened: it destroys tenant data inside the
+            // tenant the caller already belongs to, an operator can see it and undo it by
+            // reconnecting, and nothing about it outlives revocation of the token that did it.
+            // Whether an agent should reach a destructive route is the grant-shaped question,
+            // which is X-13's. See `crate::routes::agents`.
             path: "/api/connections/{connector}",
             access: Access::Principal,
             method_router: connection_route,
+        },
+        Route {
+            // **The same path, for the one verb that is not open: `POST`.** Declared separately
+            // because [`Access`] is per route and the two halves of this path differ in it — a
+            // check inside [`create`] would be the handler remembering to ask, and the enumeration
+            // that walks this table could not see it. [`MAY_SUPPLY_A_CREDENTIAL`] carries the
+            // argument: a caller that decides which credential this tenant's operations run under
+            // has been granted the credential position, nothing records who supplied one, and
+            // revoking the token that did it does not take the value back out.
+            path: "/api/connections/{connector}",
+            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            method_router: create_route,
         },
         Route {
             // A path of its own, so replacing a credential is not a method away from creating one.
@@ -315,8 +441,13 @@ pub(super) const MODULE: Module = Module {
             // carries is the declared `leaf`, which the catalogue supplies and the request does
             // not; `tests::a_hostile_credential_name_cannot_reach_the_address` drives that
             // directly.
+            //
+            // **Only a `User` (X-54).** A rotation replaces the value in place, with no observable
+            // state in which anything is missing, so an agent doing it is the most invisible form
+            // of the substitution [`MAY_SUPPLY_A_CREDENTIAL`] describes — and rotation exists for
+            // revoking a leaked secret, which is an operator's act rather than a caller's.
             path: "/api/connections/{connector}/credentials/{credential}",
-            access: Access::Principal,
+            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
             method_router: credential_route,
         },
         Route {
@@ -348,8 +479,18 @@ fn collection_route() -> MethodRouter<AppState> {
     get(list)
 }
 
+/// The two verbs on `/api/connections/{connector}` that answer every kind of principal.
+///
+/// `post` is **not** here, and its absence is the mechanism rather than an omission: it is declared
+/// beside this one at the same path with its own [`Access`], and axum merges the two method routers
+/// into one path with each verb carrying the guard its own declaration asked for.
 fn connection_route() -> MethodRouter<AppState> {
-    get(show).post(create).delete(remove)
+    get(show).delete(remove)
+}
+
+/// The third verb on that path, gated to [`MAY_SUPPLY_A_CREDENTIAL`].
+fn create_route() -> MethodRouter<AppState> {
+    post(create)
 }
 
 fn credential_route() -> MethodRouter<AppState> {
@@ -5300,6 +5441,211 @@ mod tests {
         }
     }
 
+    /// **X-54's failing-first test.** An agent may not create a connection and may not rotate a
+    /// credential, and each refusal reaches an operator's log.
+    ///
+    /// The neighbour X-47 ring-fenced. The settings write was gated because a value written there
+    /// is substituted into the operation's own request; these two are the routes that write the
+    /// **credential itself**, and they were left [`Access::Principal`] — so an agent holding
+    /// nothing but an operation grant could put a value it controls at the address its tenant's
+    /// operations then run under. Not the invariant's *"never to a credential"* read as reading one
+    /// out; the substitution in the other direction, which the invariant's sentence does not name
+    /// and which [`MAY_SUPPLY_A_CREDENTIAL`] argues is inside it anyway.
+    ///
+    /// **What makes it worse than the `DELETE` beside it, which stays open to every kind:** a
+    /// planted or rotated credential leaves no trace of who put it there. `GET /api/connections`
+    /// answers `held: true` either way, this module keeps no record beside the store, and revoking
+    /// the agent's token does not take the value back out. A destroyed connection is visible and
+    /// the operator holds the plaintext to restore it; a substituted one is invisible and the
+    /// operator has nothing telling them to look.
+    ///
+    /// Four things are asserted, and the controls are what make the refusals mean anything:
+    ///
+    /// - `POST` is refused for an agent where the tenant holds no connection at all — which at the
+    ///   base of this story answered `201` and left the agent's value at the tenant's address;
+    /// - `PUT .../credentials/{credential}` is refused for an agent over a credential a **human**
+    ///   supplied, and the value at the address afterwards is still the human's;
+    /// - a `User` of the same tenant reaches both of the same addresses and is admitted, so what
+    ///   refused the agent is its kind and not a route that refuses everyone;
+    /// - both refusals are **logged**, by the guard's own `warn!`, because an agent reaching for a
+    ///   route only a human may call is the shape of a leaked token being used.
+    #[tokio::test]
+    async fn an_agent_may_not_create_a_connection_or_rotate_a_credential_and_the_refusal_is_logged()
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        /// What the agent offers. Distinct from [`SENTINEL`] so an assertion about the address can
+        /// say **whose** value is at it, rather than only that something is.
+        const SUBSTITUTED: &str = "SUBSTITUTED-NOT-THE-TENANTS-SECRET";
+        /// What the human's own rotation puts there, for the second control.
+        const ROTATED: &str = "ROTATED-NOT-A-REAL-SECRET-EITHER";
+
+        const ADDRESS: &str = "tenants/acme/com.zendesk.api/api_token";
+
+        let (app, store) = connected_app();
+
+        let warnings = Warnings::default();
+        let _log =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(warnings.clone()));
+
+        // The tenant holds nothing, which is exactly where `create` writes.
+        let (status, answered) = call(
+            &app,
+            "triage-bot",
+            Method::POST,
+            "/api/connections/zendesk",
+            Some(json!({ "credentials": { "zendesk.api_token": SUBSTITUTED } })),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an agent created this tenant's connection, so every operation the tenant runs against \
+             zendesk now runs under a credential the agent chose: {answered}",
+        );
+        assert!(
+            answered["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("user")),
+            "the refusal must name the kind that would have worked: {answered}",
+        );
+        assert!(
+            !answered.to_string().contains(SUBSTITUTED),
+            "and must never repeat the value it refused: {answered}",
+        );
+        assert!(store.addresses().is_empty(), "{:?}", store.addresses());
+
+        // **The first control.** A `User` of the same tenant connects the same connector, which is
+        // the same handler at the same address — so only the caller's kind differs.
+        let (status, created) = connect_zendesk(&app, "alice").await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "only the caller's kind may explain the difference: {created}",
+        );
+
+        // And now the credential a human supplied is there to be replaced.
+        let (status, answered) = call(
+            &app,
+            "triage-bot",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": SUBSTITUTED })),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an agent replaced this tenant's credential in place, which `GET /api/connections` \
+             cannot tell from the one the human supplied: {answered}",
+        );
+        assert!(
+            answered["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("user")),
+            "the refusal must name the kind that would have worked: {answered}",
+        );
+        assert!(
+            !answered.to_string().contains(SUBSTITUTED),
+            "and must never repeat the value it refused: {answered}",
+        );
+        assert_eq!(
+            store.at(ADDRESS).as_deref(),
+            Some(SENTINEL),
+            "the value this tenant's operations run under must be the one a human put there",
+        );
+
+        // **The second control**, for the rotation the way the first was for the create.
+        let (status, rotated) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": ROTATED })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "only the caller's kind may explain the difference: {rotated}",
+        );
+        assert_eq!(store.at(ADDRESS).as_deref(), Some(ROTATED));
+
+        // And the log an operator watches.
+        let logged = warnings.kind_refusals();
+        assert_eq!(
+            logged.len(),
+            2,
+            "each refusal must be visible to an operator, not only to the caller: {logged:?}",
+        );
+        for line in &logged {
+            assert!(
+                line.contains("triage-bot") && line.contains("acme"),
+                "the line must name the caller and its tenant, so there is something to revoke: \
+                 {line}",
+            );
+            assert!(
+                !line.contains(SUBSTITUTED),
+                "the caller's own id and tenant belong in the log; the value it offered does not: \
+                 {line}",
+            );
+        }
+    }
+
+    /// The other half of X-54's decision, and the reason the gate is declared per **method** rather
+    /// than over the path: reading a connection and destroying one stay open to every kind.
+    ///
+    /// Without this, `an_agent_may_not_create_a_connection_or_rotate_a_credential_and_the_refusal_is_logged`
+    /// is satisfied just as happily by gating `/api/connections/{connector}` whole — which would
+    /// take `GET` and `DELETE` with it, silently reversing a decision X-40 wrote down and argued
+    /// (`crate::routes::agents`, § *How far the argument reaches, and where it stops*).
+    ///
+    /// - **The two reads** answer addresses and a `held` boolean and no value at all, and an agent
+    ///   that can see *"this tenant has no zendesk connection"* is one that can say so instead of
+    ///   failing an invocation for a reason nobody can act on. Same argument the settings `GET`
+    ///   collection is open on.
+    /// - **`DELETE`** destroys tenant data inside the tenant the caller already belongs to, an
+    ///   operator can see it and undo it by reconnecting, and nothing about it outlives revocation
+    ///   of the token that did it. Whether an agent should reach a destructive route at all is the
+    ///   grant-shaped question, which is X-13's.
+    #[tokio::test]
+    async fn an_agent_may_still_read_a_connection_and_disconnect_one() {
+        let (app, store) = connected_app();
+
+        let (status, created) = connect_zendesk(&app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+
+        for path in ["/api/connections", "/api/connections/zendesk"] {
+            let (status, read) = call(&app, "triage-bot", Method::GET, path, None).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an agent must be able to see whether its tenant is connected: {read}",
+            );
+            assert!(
+                !read.to_string().contains(SENTINEL),
+                "and never the value, which is what makes the read safe to leave open: {read}",
+            );
+        }
+
+        let (status, _) = call(
+            &app,
+            "triage-bot",
+            Method::DELETE,
+            "/api/connections/zendesk",
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NO_CONTENT,
+            "destroying a connection is the grant-shaped question (X-13), not the kind-shaped one",
+        );
+        assert!(store.addresses().is_empty(), "{:?}", store.addresses());
+    }
+
     /// **The end to end.** An agent cannot cause a dispatch to an origin it named.
     ///
     /// This is the re-review's measured path, re-driven: an agent principal stores
@@ -5580,37 +5926,57 @@ mod tests {
         );
     }
 
-    /// Every route requires a principal, and exactly one of them requires a particular kind.
+    /// Every route requires a principal, and the ones that require a particular **kind** are named
+    /// here beside the constant each is declared with.
     ///
     /// Asserted here as well as in the surface-wide enumeration, because that one compares against a
     /// list somebody edits and this one cannot be satisfied by editing a list: [`Access::Anonymous`]
     /// has no arm here at all, so a connection route that stopped requiring a principal is a failure
     /// rather than a new line somewhere.
     ///
-    /// The kind-gated route is named rather than counted. A second one appearing is a decision about
-    /// who may reach a tenant's connections, and it should cost whoever makes it a line here with a
-    /// reason — see [`MAY_CONFIGURE`] for the one that exists.
+    /// The gated routes are named rather than counted, in both directions. One appearing is a
+    /// decision about who may reach a tenant's connections and should cost whoever makes it a line
+    /// with a reason; one *disappearing* is the same decision undone, which is the direction that
+    /// matters — see [`MAY_SUPPLY_A_CREDENTIAL`] and [`MAY_CONFIGURE`].
+    ///
+    /// **`/api/connections/{connector}` appears once, for its `POST`.** The entry declared beside
+    /// it in [`MODULE`] carries `GET` and `DELETE` at [`Access::Principal`], which is X-40's
+    /// decision left standing rather than swept up by X-54's;
+    /// [`tests::an_agent_may_still_read_a_connection_and_disconnect_one`] is the behavioural half of
+    /// that, since this test alone cannot tell a path gated for one verb from one gated whole.
     #[test]
-    fn every_route_here_requires_a_principal_and_only_the_setting_write_requires_a_kind() {
-        for route in MODULE.routes {
-            match route.access {
-                Access::Principal => {}
-                Access::PrincipalOfKind(kinds) => {
-                    assert_eq!(
-                        route.path, "/api/connections/{connector}/settings/{service}/{field}",
-                        "a second route here narrowed who may reach it; that is a decision, and it \
-                         belongs beside `MAY_CONFIGURE`'s argument rather than only in a route \
-                         table",
-                    );
-                    assert_eq!(kinds, MAY_CONFIGURE);
-                }
+    fn every_route_here_requires_a_principal_and_the_kind_gated_ones_are_named() {
+        let gated: Vec<(&str, &[PrincipalKind])> = MODULE
+            .routes
+            .iter()
+            .filter_map(|route| match route.access {
+                Access::Principal => None,
+                Access::PrincipalOfKind(kinds) => Some((route.path, kinds)),
                 Access::Anonymous => panic!(
                     "a connection is tenant data and answers no caller this host cannot identify: \
                      {}",
                     route.path,
                 ),
-            }
-        }
+            })
+            .collect();
+
+        assert_eq!(
+            gated,
+            vec![
+                ("/api/connections/{connector}", MAY_SUPPLY_A_CREDENTIAL),
+                (
+                    "/api/connections/{connector}/credentials/{credential}",
+                    MAY_SUPPLY_A_CREDENTIAL,
+                ),
+                (
+                    "/api/connections/{connector}/settings/{service}/{field}",
+                    MAY_CONFIGURE,
+                ),
+            ],
+            "who may reach a tenant's connections changed; every entry is a decision that belongs \
+             beside the constant it names rather than only in a route table, and these are what \
+             are gated: {gated:?}",
+        );
     }
 
     /// What a listing actually costs, and the invariant underneath it.

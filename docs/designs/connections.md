@@ -40,6 +40,10 @@ None of the three comes from the request. The surface is:
 | `/api/connections` | `GET` | nothing |
 | `/api/connections/{connector}` | `GET`, `POST`, `DELETE` | a **connector id**, and on `POST` a body of credential *values* |
 
+**Who may call which of them is the X-54 addendum below**, and it is not uniform across the verbs of
+that second row: `POST` is a `User`'s, `GET` and `DELETE` are every kind's. Nothing in this section
+changes — what a caller supplies is still a catalogue key and never an address.
+
 `{connector}` is a catalogue key — `zendesk`, `slack` — looked up in the compiled-in
 `connector_catalog` and refused with `404` when nothing declares it. It is not an address and it
 cannot become one: it never reaches a path segment of the credential address, only the
@@ -521,6 +525,10 @@ probe-decide-write, and the tenant across the allowance decision.
 
 ### A path parameter that is a catalogue key, not an address
 
+**See also the X-54 addendum below**: `PUT .../credentials/{credential}` is no longer
+`Access::Principal`. Everything in this section about `{credential}` being a catalogue key is
+unchanged; what changed is which kinds of principal reach it at all.
+
 `{credential}` is the flat-namespace name the catalogue publishes, and it is admitted on exactly
 `{connector}`'s argument: it is a key into a declaration compiled into this host, refused when the
 connector declares no such name, and it never reaches the address — the address carries the declared
@@ -529,3 +537,122 @@ that one name and paid for it with `a_hostile_credential_name_cannot_reach_the_a
 rendered addresses and traversals at the route and asserts the store is untouched — and, because the
 `UndeclaredCredential` refusal echoes the caller's own name back, asserts the refusals are **byte
 identical** whether or not another tenant holds a connection. A mirror is not an oracle.
+
+## Addendum, 2026-08-01 — who may touch a connection is decided, not inherited (X-54)
+
+X-47 gated the connection **settings** write to `PrincipalOfKind(MAY_CONFIGURE)` — humans only —
+and stopped there, which was correct: that was the narrowest change closing a *stated* invariant
+against a *measured* exfiltration. It left the two routes that write the credential itself at
+`Access::Principal`, which admits every kind, and that answer was never decided. It is what
+`Access::Principal` happened to mean before agents existed.
+
+**Decision: `POST /api/connections/{connector}` and
+`PUT /api/connections/{connector}/credentials/{credential}` are
+`Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL)` — `PrincipalKind::User` and nothing else. Every
+other route under `/api/connections` stays open to every kind, and each carries the argument for
+that beside its declaration.**
+
+| Route | Who | Why, in one line |
+| --- | --- | --- |
+| `GET /api/connections` | any kind | addresses and a `held` boolean, never a value |
+| `GET /api/connections/{connector}` | any kind | the same, for one connector |
+| `POST /api/connections/{connector}` | a `User` | it decides which credential this tenant's operations run under |
+| `DELETE /api/connections/{connector}` | any kind | visible, undoable, and nothing survives revoking the token that did it |
+| `PUT .../credentials/{credential}` | a `User` | the same substitution, and invisible — it replaces in place |
+| `GET .../settings` | any kind | `binds` targets and a `set` boolean, never a value |
+| `PUT`/`DELETE .../settings/{service}/{field}` | a `User` | X-47; the value steers where the credential is sent |
+
+### The invariant does not say this in as many words, and it covers it
+
+`AGENTS.md` reads *"an agent's token grants access to an operation, never to a credential"*, and the
+obvious reading is about a credential travelling **out** to the agent. Neither route does that —
+this host hands no value back on any route, which is the north star. What they do is the
+substitution in the other direction, and the sentence covers it on any reading that is about
+*authority* rather than about *bytes*: a caller that can decide **which** credential the tenant's
+operations run under has been granted the credential position, whether or not it ever sees a value.
+The account those operations then reach is the writer's, and every ticket, message and record the
+tenant's agents create afterwards is created there.
+
+### Why these two and not the `DELETE` beside them
+
+X-40 left `DELETE` open on a stated test — *what does this outlive?* — and the same test is what puts
+these two on the other side of it.
+
+- **Nothing records who supplied a credential.** *"A connection is what the credential store says it
+  is"* above is the reason: there is no record beside the store, deliberately. So
+  `GET /api/connections` answers `held: true` for a value an agent planted exactly as it does for the
+  one a human did. A rotation is more invisible still — X-39 made it a single atomic `put` with no
+  observable state in which anything is missing, which is a virtue for an operator and a gift to an
+  attacker.
+- **Revocation is not a remedy.** Revoking the agent's token stops the agent; it does not take the
+  value back out of the store, and nothing points an operator at the address to look at. That is
+  `agents::MAY_MINT`'s argument — an incomplete remedy an operator cannot see — reached by a
+  different route.
+- **`DELETE` has neither property.** It is visible, the operator holds the plaintext this host never
+  did and can reconnect, and no authority survives it. Whether an agent should reach a destructive
+  route at all is the **grant-shaped** question — *what may this principal do* — which is X-13.
+  `an_agent_may_still_read_a_connection_and_disconnect_one` is what keeps this story from having
+  quietly taken it, and it is a real risk: `POST` shares a path with `GET` and `DELETE`.
+
+### The gate is declared per method, so the path is declared twice
+
+`Access` is a field on a `Route`, and `/api/connections/{connector}` has three verbs that do not
+agree about it. So `routes::connections::MODULE` declares that path **twice** — once for
+`get(show).delete(remove)` at `Access::Principal`, once for `post(create)` at
+`PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL)` — and axum merges the two method routers, each verb
+carrying the guard its own declaration asked for.
+
+The alternative was a check inside `create`. It is rejected for the reason `Access` exists at all:
+*a route is not guarded by its handler remembering to ask*, and a rule applied inside a handler is
+invisible to `the_kind_gated_surface_is_only_what_was_declared`, which walks `published()`. A
+duplicated path costs one extra line in that enumeration. An invisible gate costs the enumeration.
+
+### `Service` is refused, and that is a decision made now rather than deferred
+
+Refused on `agents::MAY_MINT`'s argument rather than a new one: nothing in this repository mints a
+service credential, verifies one, lists one or revokes one — `PrincipalKind::Service` is a kind the
+identity port may return and nothing else. A credential this host cannot attribute to a revocable
+caller, written at an address nothing records the author of, is the same incomplete remedy one level
+further out of sight.
+
+What that costs is real and should be named rather than discovered: **credential rotation is exactly
+what a service integration would want.** A provisioning backend that wires a tenant's connectors up,
+or rotates them on a schedule, is a legitimate caller and it is refused here. The decision is still
+to refuse today, on the direction the two mistakes point — admitting a kind with no revocation path
+is a hole nobody meets until a credential leaks, while refusing one is a `403` met on the first
+attempt and filed as a story. Widening this is one kind added to a list with an argument beside it
+and one line changed in `KIND_GATED`; narrowing it after something depends on it is not. **The story
+that wants `Service` here is the story that gives it a revocation path.**
+
+### What this does not close: there is no operator kind
+
+`User` is **every** signed-in human of the tenant. So this gate says *a human, not a bot*; it does
+not and cannot say *the human who set this tenant up*. A `User` who did not supply a credential can
+still replace it with one they control, and every operation the tenant runs afterwards reaches their
+account.
+
+That is the same within-tenant gap [`connection-settings.md`](connection-settings.md) § *What this
+does not close* records — and it is the same gap, not a second one. That section wants a surface
+where an **operator** pins what a tenant may configure; this wants one where an operator says which
+humans manage connections. Both are the authorization question, which is X-13's grant model, and
+**no kind gate can answer it.** Inventing an `Operator` variant on `PrincipalKind` was considered
+and rejected: it would put a policy model in the identity vocabulary, where nothing mints it,
+nothing revokes it, and no identity port knows how to return it. `PrincipalKind` answers *what kind
+of caller is this*, which this host reads off the credential it issued; *which humans of a tenant
+may manage it* is a fact about a tenant's own organisation that this host is told, not one it can
+derive.
+
+### What the gate rests on, unchanged from X-47
+
+A kind gate is only as good as what the identity port reports. `dev_identity.rs` mints
+`PrincipalKind::Agent` from a roster string, and a composition whose identity port mislabels an
+agent as a user bypasses every gate here. That is the port's contract rather than this surface's,
+and it is why the roster is fixed at startup and forces a loopback bind.
+
+The second residual is X-47's, and this story does not clear it either: **the declared access is the
+only enforcement point.** The credential surface's own pattern is enforce-twice —
+`agents::MAY_MINT` is re-checked inside `AgentStore::mint` — and neither `create` nor `rotate` can
+mirror it, because both write through `SecretStore::put` on a port that takes a `CredentialRef` and
+a `Secret` and has no principal to check. Widening that port is a change to a published crate this
+repository does not own. If a second handler ever reaches `SecretStore::put` without declaring an
+access, nothing stops it.
