@@ -10,6 +10,7 @@
 // catalogue can produce resolves to a view this app actually renders.
 
 import type { PathResolver } from './catalog.mts'
+import { AGENTS_PATH } from './minting.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { nextTick, ref, type Ref } from 'vue'
 
@@ -50,6 +51,7 @@ export const fragmentPath: PathResolver = (path) => `${BASE}#${path.replace(/#/g
  */
 export type Route =
   | { name: 'connect'; anchor?: string }
+  | { name: 'agents'; anchor?: string }
   | { name: 'connections'; anchor?: string }
   | { name: 'explorer'; anchor?: string }
   | { name: 'operation'; id: string; anchor?: string }
@@ -92,6 +94,14 @@ export function parseRoute(hash: string): Route {
   // author reaches for once rather than a place an operator works, so it is reached from the footer
   // and `surfaceOfRoute` maps it to nothing, leaving the rail with no entry lit.
   if (path === ONBOARDING_PATH) return { name: 'connect', ...at }
+
+  // Where an operator mints one. A bare path with nothing in it, and it must stay that way: this is
+  // the one screen in this console that holds a credential value, and a route that could carry a
+  // segment is a value in the address bar and in every history entry after it. Like `/connect` it
+  // is not a surface of the platform — `surfaceOfRoute` maps it to nothing — because it is
+  // something an operator does with the identity they already have rather than a seventh place to
+  // go. See `minting.mts` for why the name is `/agents`.
+  if (path === AGENTS_PATH) return { name: 'agents', ...at }
 
   if (path === '/explorer') return { name: 'explorer', ...at }
 
