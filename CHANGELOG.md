@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-01
+
 ### Added
 
 - **An operation runs only if a grant admits it** (X-13). v0.8.0 gated invocation by identity alone
