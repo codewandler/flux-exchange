@@ -21,6 +21,13 @@
 // path**, and `test/shell.test.mjs` asserts that no route resolves to one and that no source
 // mounts a screen for one.
 //
+// **Two questions, and they stopped having one answer.** "Does this console have a screen for it"
+// and "does the service publish this capability" were the same question for every surface here
+// until `invoke` shipped a route with no screen behind it — and a single `built` flag standing for
+// both then answered the second one wrongly, on a page (X-41) and very nearly in a public
+// machine-readable descriptor (X-42). They are `built` and `served` now, and the second is checked
+// against the server's own route table by the Rust gate rather than kept true by remembering.
+//
 // This module is deliberately data and pure functions. It imports nothing — not Vue, not the
 // router, and certainly not `service.mts` — so the shell, the router and the tests can all read
 // the same statement of what this platform is without any of them owning it.
@@ -48,13 +55,51 @@ export interface Surface {
    * honesty invariant in its smallest form, and it is asserted.
    */
   path: string | null
-  /** Whether this surface exists in this build. */
+  /**
+   * Whether **this console** has a screen for it.
+   *
+   * A question about navigation, and only about navigation: it decides whether the rail renders a
+   * link or a disabled entry, and it is what [`path`](Surface#path) has to agree with.
+   *
+   * **It is not the same question as [`served`](Surface#served), and X-42 is where that stopped
+   * being a distinction without a difference.** Until `invoke` shipped, every surface answered both
+   * questions the same way, so one flag could stand for both and nobody could tell. Then
+   * `POST /api/operations/{operation}/invoke` landed with no screen behind it, and a reader of this
+   * file that took `built` for "does the service do this" got a false answer — one that X-41's page
+   * published to humans and X-42 came within a commit of publishing to machines.
+   */
   built: boolean
+  /**
+   * Whether **the service** publishes this capability.
+   *
+   * A question about the API: is there a route on this host that does this thing? That is what an
+   * agent is asking, and it is the field `onboarding.mts` derives from — a page and a descriptor
+   * that answered it from [`built`](Surface#built) would report the console's gaps as the
+   * platform's.
+   *
+   * **This claim is checked against the route table, in the server, in the gate.**
+   * `routes::onboarding::tests::a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it`
+   * walks `routes::MODULES` and compares; its companion refuses to let a published route go
+   * unaccounted for. So this is not a flag somebody keeps true by remembering — a route landing or
+   * leaving turns the Rust gate red until this file agrees with it.
+   *
+   * A surface the service does not serve cannot have a screen either — an unserved surface with a
+   * console screen would be a screen over nothing — and
+   * `test/onboarding.test.mjs::a_surface_the_service_does_not_serve_has_no_screen_either` asserts
+   * that direction, which is what keeps [`absent`](Surface#absent) usable as the reason a
+   * capability is withheld.
+   */
+  served: boolean
   /**
    * Why it does not exist, in this repository's own words. Empty when it does.
    *
    * Rendered on the disabled entry rather than kept as a comment, because a disabled control with
    * no reason beside it reads as a bug in the console rather than as a statement about the service.
+   *
+   * **It has to say which of the two gaps it is describing**, now that they can differ. A surface
+   * that is neither `built` nor `served` has one gap and this states it; `invoke` has a screen
+   * missing and an API present, and saying "not built" without saying which would be the same
+   * falsehood in a friendlier place.
    */
   absent: string
 }
@@ -78,6 +123,7 @@ export const SURFACES: readonly Surface[] = [
     summary: "What this tenant has wired up, and which of each connector's credentials it holds.",
     path: '/connections',
     built: true,
+    served: true,
     absent: '',
   },
   {
@@ -86,6 +132,7 @@ export const SURFACES: readonly Surface[] = [
     summary: 'Who asked, which grant admitted it, what was called and what came back.',
     path: null,
     built: false,
+    served: false,
     absent:
       'This service records nothing yet. There is no execution record to read, so there is no ' +
       'Activity screen — an empty one would say that nothing has happened, which is a different ' +
@@ -97,9 +144,15 @@ export const SURFACES: readonly Surface[] = [
     summary: 'Call a connector operation as this tenant, without ever holding its credential.',
     path: null,
     built: false,
+    // The one surface where the two questions have different answers, and the reason this field
+    // exists. `POST /api/operations/{operation}/invoke` shipped in v0.7.0 and is in the published
+    // route table; what has never been built is a screen to drive it from.
+    served: true,
     absent:
-      'Nothing in this deployment can be called. `invoke` is not built, so there is no screen to ' +
-      'call an operation from and every operation in the catalogue reads "not live yet".',
+      'The service invokes: POST /api/operations/{operation}/invoke runs one catalogue operation ' +
+      'for the caller’s own tenant. What is not built is a *screen* for it — there is nowhere in ' +
+      'this console to pick an operation, supply its parameters and read the result — so this ' +
+      'entry leads nowhere and the API is what you call.',
   },
   {
     id: 'subscribe',
@@ -107,9 +160,10 @@ export const SURFACES: readonly Surface[] = [
     summary: "Terminate a vendor's channel and receive typed, declared events.",
     path: null,
     built: false,
+    served: false,
     absent:
       '`subscribe`, the websocket and channels are not built. Nothing here terminates a channel, ' +
-      'so there is no subscription to show.',
+      'so there is no subscription to show and no route to call.',
   },
   {
     id: 'catalogue',
@@ -120,6 +174,7 @@ export const SURFACES: readonly Surface[] = [
     // so this is the path they were already written against.
     path: '/explorer',
     built: true,
+    served: true,
     absent: '',
   },
   {
@@ -129,6 +184,7 @@ export const SURFACES: readonly Surface[] = [
     // The header's affordance, not a page. Built, and deliberately pathless — see `path` above.
     path: null,
     built: true,
+    served: true,
     absent: '',
   },
 ]

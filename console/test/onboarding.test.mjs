@@ -68,21 +68,27 @@ function stepAttribute(html, id, attribute) {
   return value ? value[1] : null
 }
 
-/** `SURFACES` with one surface's `built` overridden — a hypothetical build, for (4) above. */
-const asIf = (id, built) =>
-  SURFACES.map((surface) => (surface.id === id ? { ...surface, built } : surface))
+/**
+ * `SURFACES` with one surface's fields overridden — a hypothetical build, for (4) above.
+ *
+ * Takes a patch rather than a `built` boolean since X-42: the field this page derives from is
+ * `served`, and a helper that could only move `built` would have quietly stopped exercising the
+ * derivation at all.
+ */
+const asIf = (id, patch) =>
+  SURFACES.map((surface) => (surface.id === id ? { ...surface, ...patch } : surface))
 
 // ---------------------------------------------------------------------------------------------
 // Honest by construction: what the page claims is derived, not written.
 // ---------------------------------------------------------------------------------------------
 
-test('the_page_cannot_claim_a_capability_the_console_marks_unbuilt', async () => {
+test('the_page_cannot_claim_a_capability_this_service_does_not_serve', async () => {
   const html = await page()
 
   assert.ok(STEPS.length > 0, 'the onboarding model declares no steps; everything below is vacuous')
   assert.ok(
-    SURFACES.some((surface) => !surface.built),
-    'nothing is declared unbuilt, so this test could not catch the thing it exists for'
+    SURFACES.some((surface) => !surface.served),
+    'nothing is declared unserved, so this test could not catch the thing it exists for'
   )
 
   // Both halves are non-empty. A model where everything is withheld would pass the honesty
@@ -96,18 +102,21 @@ test('the_page_cannot_claim_a_capability_the_console_marks_unbuilt', async () =>
   for (const entry of STEPS) {
     const surface = backing(entry)
 
-    // 1. Availability is the model's, not the author's: a built surface backs it, or it is withheld.
+    // 1. Availability is the model's, not the author's: a surface the *service* serves backs it, or
+    //    it is withheld. `served` and not `built` — the second answers whether this console has a
+    //    screen, and deriving an API claim from it is what made this page say `invoke` could not be
+    //    called while the route was in the published surface.
     assert.equal(
       available(entry),
-      surface !== null && surface.built,
+      surface !== null && surface.served,
       `the \`${entry.id}\` step is presented as ${available(entry) ? 'available' : 'unavailable'} and its backing surface says otherwise`
     )
 
-    if (surface && !surface.built) {
+    if (surface && !surface.served) {
       assert.equal(
         available(entry),
         false,
-        `\`${entry.id}\` is presented as available on the strength of \`${surface.id}\`, which this build marks not built`
+        `\`${entry.id}\` is presented as available on the strength of \`${surface.id}\`, which this build says the service does not serve`
       )
     }
 
@@ -148,34 +157,72 @@ test('the_page_cannot_claim_a_capability_the_console_marks_unbuilt', async () =>
 })
 
 test('the_derivation_is_live_and_not_a_coincidence', () => {
-  const invoke = STEPS.find((entry) => entry.surface === 'invoke')
-  assert.ok(invoke, 'no step is backed by the `invoke` surface, so this test proves nothing')
+  // `subscribe` and not `invoke`, since X-42: `invoke` is now served, so using it here would be
+  // asserting a hypothetical against a fact and the test would stop moving anything.
+  const subscribe = STEPS.find((entry) => entry.surface === 'subscribe')
+  assert.ok(subscribe, 'no step is backed by the `subscribe` surface, so this test proves nothing')
 
   // As this build is.
-  assert.equal(available(invoke, SURFACES), false)
-  assert.ok(withheld(invoke, SURFACES).length > 0)
+  assert.equal(available(subscribe, SURFACES), false)
+  assert.ok(withheld(subscribe, SURFACES).length > 0)
 
-  // As a build where `invoke` exists would be — no edit to the copy, and none to this file.
+  // As a build where the service serves it would be — no edit to the copy, and none to this file.
   assert.equal(
-    available(invoke, asIf('invoke', true)),
+    available(subscribe, asIf('subscribe', { served: true })),
     true,
-    'marking `invoke` built does not make the invoke step available, so the page is not actually derived from `surfaces.mts`'
+    'marking `subscribe` served does not make the subscribe step available, so the page is not actually derived from `surfaces.mts`'
   )
   assert.equal(
-    withheld(invoke, asIf('invoke', true)),
+    withheld(subscribe, asIf('subscribe', { served: true })),
     '',
-    'the invoke step still carries a reason it cannot be done in a build where it can'
+    'the subscribe step still carries a reason it cannot be done in a build where it can'
   )
 
   // And the other direction, which is the one that protects a reader: a surface that regresses to
-  // unbuilt takes its claim off the page with it.
+  // unserved takes its claim off the page with it.
   const minted = step('be-minted')
   assert.equal(available(minted, SURFACES), true)
   assert.equal(
-    available(minted, asIf(minted.surface, false)),
+    available(minted, asIf(minted.surface, { served: false })),
     false,
-    'a surface regressing to not-built leaves its claim standing on the page'
+    'a surface regressing to not-served leaves its claim standing on the page'
   )
+
+  // And the field that is *not* the one this page derives from cannot move a claim. `invoke` is
+  // the surface where the two answers differ, so it is the one that proves the page reads the
+  // right one: a console that grew a screen for it, or lost one, changes nothing here.
+  const invoke = step('invoke')
+  assert.equal(available(invoke, SURFACES), true, '`invoke` is served: the route is in the surface')
+  for (const built of [true, false]) {
+    assert.equal(
+      available(invoke, asIf('invoke', { built })),
+      true,
+      `moving \`built\` to ${built} changed whether the page claims \`invoke\`, so this page is still deriving an API claim from whether the console has a screen`
+    )
+  }
+})
+
+test('a_surface_the_service_does_not_serve_has_no_screen_either', () => {
+  // The invariant that keeps `absent` usable as the reason a capability is withheld. `built` and
+  // `served` are independent in one direction only: a route with no screen is ordinary (`invoke`),
+  // a screen over a capability the service does not serve is a screen over nothing.
+  //
+  // It matters here rather than only in the shell, because `withheld()` reads `absent` — the
+  // surface's account of why it is missing — for any surface that is not served. If such a surface
+  // could also be built, `absent` would be empty and a capability would be withheld with no reason
+  // beside it.
+  for (const surface of SURFACES) {
+    if (surface.served) continue
+    assert.equal(
+      surface.built,
+      false,
+      `\`${surface.id}\` has a screen in this console and the service does not serve it, which is a screen over nothing`
+    )
+    assert.ok(
+      surface.absent.length > 0,
+      `\`${surface.id}\` is not served and says nothing about why, so every capability standing on it is withheld with no reason`
+    )
+  }
 })
 
 test('the_reason_a_step_is_withheld_is_the_surface_s_own_words', () => {
@@ -191,7 +238,7 @@ test('the_reason_a_step_is_withheld_is_the_surface_s_own_words', () => {
       `\`${entry.id}\` is backed by the \`${surface.id}\` surface and carries its own reason as well, which is the drift this page exists to make impossible`
     )
 
-    if (!surface.built) {
+    if (!surface.served) {
       assert.equal(
         withheld(entry),
         surface.absent,
@@ -206,7 +253,7 @@ test('the_reason_a_step_is_withheld_is_the_surface_s_own_words', () => {
 // machinery that produces it.
 // ---------------------------------------------------------------------------------------------
 
-test('today_an_agent_can_be_minted_and_can_neither_authenticate_nor_invoke', async () => {
+test('today_an_agent_can_be_minted_and_the_service_invokes_but_no_agent_can_authenticate', async () => {
   const html = await page()
 
   assert.equal(
@@ -219,7 +266,23 @@ test('today_an_agent_can_be_minted_and_can_neither_authenticate_nor_invoke', asy
     false,
     'nothing in this build resolves an agent token to a principal (X-37), and the page must not imply one does'
   )
-  assert.equal(available(step('invoke')), false, '`invoke` is not built')
+
+  // **This assertion is inverted from what X-41 shipped, and the inversion is the point.** It read
+  // `assert.equal(available(step('invoke')), false, '`invoke` is not built')` — which was true of
+  // the console's screens and false of the service, because `POST /api/operations/{operation}/invoke`
+  // shipped in v0.7.0 and sat in the published route table the whole time this page told agent
+  // authors nothing could be called. The route table is what decides it now, measured in the server
+  // by `routes::onboarding::tests::a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it`.
+  assert.equal(
+    available(step('invoke')),
+    true,
+    'the service runs operations and the page must say so'
+  )
+  assert.equal(step('invoke').call.endpoint, '/api/operations/{operation}/invoke')
+  assert.ok(
+    html.includes('/api/operations/{operation}/invoke'),
+    `the page must name the route that runs an operation; got: ${html}`
+  )
 
   // The concrete step that works today, on the page and not only in the model.
   const mint = step('be-minted')
@@ -307,15 +370,27 @@ test('nothing_tenant_specific_can_reach_this_page', async () => {
     )
   }
 
-  // 4. Every endpoint it names is parameterless — no connector, no credential, no tenant could be
-  //    spelled into one. `/api/connections/{connector}` on this page would be a tenant's contents.
+  // 4. No endpoint it names has a place a *value* could go. The rule was "parameterless", which
+  //    was the right instinct written one notch too tight: it would have meant either omitting the
+  //    one route that runs an operation or describing it in prose to get past this assertion, and
+  //    a page that hides a route from a test is worse than the rule it is dodging. What must never
+  //    appear is a tenant, a principal, a credential or an address, so the parameters that may
+  //    appear are written out — `/api/connections/{connector}` on this page would still be a
+  //    tenant's contents, because `connector` is not on this list.
+  const CATALOGUE_KEYS = ['operation']
   for (const entry of STEPS) {
     if (!entry.call) continue
     assert.match(
       entry.call.endpoint,
-      /^\/api\/[a-z0-9/-]+$/,
-      `\`${entry.id}\` names \`${entry.call.endpoint}\`, which carries a parameter — this page describes the shape of the service, never its contents`
+      /^\/api\/[a-z0-9/{}-]+$/,
+      `\`${entry.id}\` names \`${entry.call.endpoint}\`, which is not a route path`
     )
+    for (const parameter of [...entry.call.endpoint.matchAll(/\{([^}]*)\}/g)].map((m) => m[1])) {
+      assert.ok(
+        CATALOGUE_KEYS.includes(parameter),
+        `\`${entry.id}\` names \`${entry.call.endpoint}\`, and \`{${parameter}}\` is not a catalogue key — a parameter that is not one is a tenant, a principal, a credential or an address, and this page describes the shape of the service and never its contents`
+      )
+    }
   }
 
   // 5. Nothing that looks like a credential address, which is the one tenant-shaped string this

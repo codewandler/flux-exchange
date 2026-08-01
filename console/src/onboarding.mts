@@ -12,13 +12,23 @@
 // honest gap. So the page does not describe this build. It **derives** from `surfaces.mts`, the same
 // declaration `ConsoleShell.mts` builds the navigation from, and the derivation is the honesty:
 //
-//   > **Nothing here may claim to work unless a surface the console already marks `built` backs it.**
+//   > **Nothing here may claim to work unless a surface the console declares the service `served`
+//   > backs it.**
 //
-// That guard is deliberately one-directional. A built surface is not proof that a particular route
-// exists — `identity` being built does not by itself mean `POST /api/agents` does. What the rule
-// buys is the direction that matters: it can only ever take a claim *off* the page, never put one
-// on. A surface regressing to unbuilt silently withdraws every step standing on it, and a step no
-// surface backs at all cannot be claimed however confidently it is written.
+// **That used to say `built`, and saying `built` was wrong.** `built` is a claim about console
+// navigation — is there a screen — and this page is answering a question about the API. The two
+// coincided for every surface until `POST /api/operations/{operation}/invoke` shipped in v0.7.0
+// with no screen behind it, at which point deriving from `built` made this page tell an agent
+// author that nothing in the deployment can be called while the route sat in the published surface.
+// X-42 caught it by measuring against the route table; `surfaces.mts` now answers the two questions
+// separately, and `routes::onboarding::tests` in the server crate is what holds `served` to the
+// route table rather than to whoever last edited it.
+//
+// The guard is still deliberately one-directional. A served surface is not proof that a *particular*
+// route exists — `identity` being served does not by itself mean `POST /api/agents` does. What the
+// rule buys is the direction that matters: it can only ever take a claim *off* the page, never put
+// one on. A surface regressing to unserved silently withdraws every step standing on it, and a step
+// no surface backs at all cannot be claimed however confidently it is written.
 //
 // **`authenticate` is the step with no surface, and that is the point.** The console's surfaces are
 // places an operator goes; authenticating is not one, so there is nothing in `surfaces.mts` to hang
@@ -44,6 +54,57 @@ import { SURFACES, type Surface } from './surfaces.mts'
 export const ONBOARDING_PATH = '/connect'
 
 /**
+ * Where the service serves the machine rendering of everything on this page (X-42).
+ *
+ * A route on the **service**, not a path in this console: a page is a human artifact and the
+ * charter's primary caller does not read pages. It is named here rather than in `service.mts`
+ * because this module is the one both renderings derive from, and because this console never
+ * fetches it — the page mentions it, so an agent author reading the page learns their agent does
+ * not have to. `crates/exchange-server/src/routes/onboarding.rs` publishes it, and
+ * `the_endpoint_the_document_names_is_the_route_that_serves_it` there is what stops the two
+ * spellings drifting.
+ */
+export const DESCRIPTOR_ENDPOINT = '/api/onboarding'
+
+/**
+ * What this service is, in the one form both renderings say it in.
+ *
+ * It lived in `AgentOnboarding.mts` until X-42 needed the same sentence on the wire. Copy that two
+ * renderings each hold their own version of is copy that disagrees within a release, which is the
+ * failure `docs/designs/agent-onboarding.md` names explicitly — so the layout file renders this
+ * and states nothing of its own.
+ */
+export const SERVICE = {
+  /** The one name this service is published under. */
+  name: 'flux-exchange',
+  /** What it does, in `docs/vision.md`'s own words. A standalone sentence, so it reads as one. */
+  summary:
+    'Holds credentials, terminates channels, runs operations for many callers and records what ' +
+    'happened. Its primary caller is an agent, not a human: people sign in to wire things up, ' +
+    'and agents are what call operations all day.',
+}
+
+/**
+ * How a caller presents a token to this service.
+ *
+ * **The scheme is a fact about the service; whether presenting one identifies you is not.** The
+ * guard reads `Authorization: Bearer <material>` today and has since X-03 — that is true of this
+ * host now, and stating it costs a stranger nothing they could not learn by sending a request.
+ * What is *not* true is that an agent's token resolves to a principal, and this constant
+ * deliberately does not say either way: [`capability`](AUTHENTICATION#capability) names the step
+ * that owns that question, so the gap is stated once, where the surface it stands on can withdraw
+ * it.
+ */
+export const AUTHENTICATION = {
+  /** The `Authorization` scheme, spelled as a caller sends it. */
+  scheme: 'Bearer',
+  /** The header it travels in. */
+  header: 'Authorization',
+  /** The [`Step`] id whose availability decides whether presenting one identifies a caller. */
+  capability: 'authenticate',
+}
+
+/**
  * The one call a step is done by.
  *
  * `caller` is separate from `note` because it is the field an agent author gets wrong: minting is a
@@ -55,11 +116,20 @@ export interface Call {
   /** The HTTP method, spelled as a caller would send it. */
   method: string
   /**
-   * The route, origin-relative.
+   * The route, origin-relative, in the route table's own spelling.
    *
-   * **Parameterless, always.** A path with a segment in it would be a connector, a credential or a
-   * tenant — this page states the shape of the service and never its contents, and
-   * `nothing_tenant_specific_can_reach_this_page` holds that over every entry here.
+   * **A parameter here may only be a catalogue key.** The rule was "parameterless, always", which
+   * was the right instinct written one notch too tight: what must never appear is a *value* — a
+   * tenant, a principal, a credential, an address — because this page states the shape of the
+   * service and never its contents. `{operation}` is none of those; it is the public vocabulary the
+   * anonymous catalogue already publishes, and refusing it would mean either omitting the one route
+   * that runs an operation or describing it in prose to dodge a test.
+   *
+   * `nothing_tenant_specific_can_reach_this_page` holds the corrected rule over every entry here,
+   * against a written-out list of the keys that are admissible, so admitting a second one is a
+   * decision somebody makes rather than a regex that already allows it. The server states the same
+   * invariant from the other side and over the whole surface, in
+   * `routes::tests::no_published_route_takes_a_tenant_in_its_path`.
    */
   endpoint: string
   /** Who makes this call, and with what standing. */
@@ -188,7 +258,32 @@ export const STEPS: readonly Step[] = [
       'Name an operation and get a result, without naming a host, a credential or a tenant. The ' +
       'credential never crosses the boundary; the authority does.',
     surface: 'invoke',
-    call: null,
+    call: {
+      method: 'POST',
+      // The one endpoint on this page that carries a parameter, and `{operation}` is a catalogue
+      // key — the same public vocabulary `/api/catalogue/connectors/{id}/operations` uses. It
+      // selects *what* runs; the tenant, the host and the credential are all derived from things
+      // the caller did not supply, which is why this is not the tenant-shaped path the rule against
+      // parameters exists to keep off this page.
+      endpoint: '/api/operations/{operation}/invoke',
+      caller:
+        'Any principal this host resolved. Today that means a signed-in human: nothing here yet ' +
+        'resolves an agent token, which is the “Authenticate as that identity” step above — so an ' +
+        'agent cannot reach this route until that one lands, however live the route is.',
+      note:
+        '{operation} is the catalogue’s own id, as served at /api/catalogue/connectors, and the ' +
+        'body is that operation’s declared parameters verbatim — there is no envelope, no tenant, ' +
+        'no connector, no host and no credential, because every one of those is derived from the ' +
+        'operation and from the principal this host resolved. The answer carries sent and ' +
+        'retryable as fields, because an HTTP status answers neither: a 502 does not say whether ' +
+        'the vendor received it. A vendor’s own 4xx comes back as 200 with its response in ' +
+        'content, unshaped — the vendor said no and we could not ask are different events. A host ' +
+        'with no credential store bound runs nothing and says so.',
+      warn:
+        'This route is gated by identity alone. There is no grant model in this build, so any ' +
+        'principal this host resolves may run any operation in the catalogue against its own ' +
+        'tenant’s connections.',
+    },
     pending: '',
   },
   {
@@ -212,6 +307,24 @@ export const STEPS: readonly Step[] = [
 ]
 
 /**
+ * The step [`AUTHENTICATION`] defers the "does it work yet" question to.
+ *
+ * It throws rather than returning `null` when nothing matches, which is the one thing this module
+ * does that could be called repair otherwise: a missing step would silently make the auth scheme
+ * look like a claim standing on nothing, and both renderings would publish it. Refuse; never
+ * repair.
+ */
+export function authenticationStep(): Step {
+  const step = STEPS.find((candidate) => candidate.id === AUTHENTICATION.capability)
+  if (!step) {
+    throw new Error(
+      `AUTHENTICATION names the \`${AUTHENTICATION.capability}\` step and no step declares that id`
+    )
+  }
+  return step
+}
+
+/**
  * The surface a step stands on, or `null` when the console declares none for it.
  *
  * `surfaces` is a parameter rather than a closed-over constant so the derivation can be exercised
@@ -227,11 +340,13 @@ export function backing(step: Step, surfaces: readonly Surface[] = SURFACES): Su
 /**
  * Whether this build lets an agent author do this, at all.
  *
- * The whole honesty rule in one expression: a surface the console marks built, or nothing.
+ * The whole honesty rule in one expression: a surface the console declares the **service** serves,
+ * or nothing. Not `built` — see the module note; that spelling reported the console's missing
+ * screens as the platform's missing capabilities, and got `invoke` wrong for two releases.
  */
 export function available(step: Step, surfaces: readonly Surface[] = SURFACES): boolean {
   const surface = backing(step, surfaces)
-  return surface !== null && surface.built
+  return surface !== null && surface.served
 }
 
 /**

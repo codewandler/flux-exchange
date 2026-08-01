@@ -21,10 +21,17 @@
 // gives — a separate file is what makes the "names no colour of its own" scan precise.
 
 import { defineComponent, h, type VNode } from 'vue'
-import { STEPS, available, pendingSummary, withheld, type Step } from './onboarding.mts'
-
-/** The service this page is about, by the one name it is published under. */
-const SERVICE = 'flux-exchange'
+import {
+  AUTHENTICATION,
+  DESCRIPTOR_ENDPOINT,
+  SERVICE,
+  STEPS,
+  authenticationStep,
+  available,
+  pendingSummary,
+  withheld,
+  type Step,
+} from './onboarding.mts'
 
 /** How to do it: the call, who makes it, and the sentence not to skim. */
 function instruction(step: Step): VNode[] {
@@ -80,11 +87,14 @@ export default defineComponent({
       h('section', { class: 'onboard', 'data-page': 'connect' }, [
         h('h1', null, 'Connect an agent'),
 
-        h('p', { class: 'onboard__lead' }, [
-          `${SERVICE} holds credentials, terminates channels, runs operations for many callers and `,
-          'records what happened. Its primary caller is an agent, not a human: people sign in to ',
-          'wire things up, and agents are what call operations all day.',
-        ]),
+        // Both halves come from `onboarding.mts` rather than from here, because X-42 publishes this
+        // same sentence on the wire and a page holding its own copy of it is a page that disagrees
+        // with the descriptor within a release.
+        h(
+          'p',
+          { class: 'onboard__lead', 'data-onboard': 'service' },
+          `${SERVICE.name} — ${SERVICE.summary}`
+        ),
 
         h('p', { class: 'onboard__lead' }, [
           'Below is what that means for an agent arriving at ',
@@ -101,6 +111,22 @@ export default defineComponent({
 
         h('section', { class: 'onboard__aside' }, [
           h('h2', null, 'What a token from here is, and is not'),
+
+          // The scheme, which is a fact about this service, and *not* a claim that presenting one
+          // works — that question belongs to a step, and pointing at it is how the gap stays
+          // stated once. Derived, because X-42 publishes the same two strings on the wire.
+          h('p', { class: 'onboard__auth', 'data-onboard': 'authentication' }, [
+            'A token is presented as ',
+            h(
+              'code',
+              { class: 'onboard__endpoint' },
+              `${AUTHENTICATION.header}: ${AUTHENTICATION.scheme} <token>`
+            ),
+            `. Whether presenting one identifies you on this build is the “${
+              authenticationStep().title
+            }” step above.`,
+          ]),
+
           h('p', null, [
             "An agent's token grants access to operations, never to credentials. A caller names an ",
             'operation and gets a result: it cannot name a host, because the URL comes from the ',
@@ -124,6 +150,15 @@ export default defineComponent({
             'It also knows nothing about you. It reads nothing over the network, signed in or not, ',
             'and names no connector, tenant, principal, address or count. It describes the shape of ',
             'this service and never its contents.',
+          ]),
+
+          // The other rendering. Named, not fetched: this page reads nothing, and an agent author
+          // who knows the document exists does not need their agent to read a page.
+          h('p', { class: 'onboard__machine', 'data-onboard': 'descriptor' }, [
+            'Your agent does not have to read any of this. The same facts are served as a small ',
+            'JSON document at ',
+            h('code', { class: 'onboard__endpoint' }, `GET ${DESCRIPTOR_ENDPOINT}`),
+            ', anonymously, deriving from the same declaration this page does.',
           ]),
         ]),
       ])

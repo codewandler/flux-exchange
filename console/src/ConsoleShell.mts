@@ -75,7 +75,10 @@ function entry(surface: Surface, active: string | null): VNode {
     },
     [
       h('span', { class: 'rail__label' }, surface.label),
-      h('span', { class: 'rail__tag' }, 'not built'),
+      // `no screen` and not `not built`: this entry is disabled because the console has nowhere to
+      // send you, which for `invoke` is not the same claim as the service being unable to do it.
+      // The tooltip carries which gap it is. See `surfaces.mts` on `built` versus `served`.
+      h('span', { class: 'rail__tag' }, 'no screen'),
     ]
   )
 }
@@ -89,10 +92,14 @@ function entry(surface: Surface, active: string | null): VNode {
 function inventory(absent: readonly Surface[]): VNode {
   const names = absent.map((surface) => surface.label).join(', ')
   return h('p', { class: 'shell__inventory', 'data-shell': 'inventory' }, [
-    h('strong', null, 'Not built: '),
-    `${names}. This deployment holds credentials and serves a catalogue of what it could run. It ` +
-      'calls nothing, terminates no channel and records nothing, so those entries lead nowhere ' +
-      'rather than to a page that would imply otherwise.',
+    h('strong', null, 'No screen: '),
+    // "Not built" and "it calls nothing" were true when X-34 wrote this and stopped being true when
+    // `invoke` shipped. What these entries have in common is that there is nowhere to click, which
+    // is a statement about this console; which of them the *service* also cannot do is the
+    // `served` flag, and the entry's own reason says so. See `surfaces.mts`.
+    `${names}. This deployment holds credentials and serves a catalogue of what it could run. ` +
+      'These entries lead nowhere rather than to a page that would imply otherwise — hover one ' +
+      'for what is missing, which is not the same answer for all of them.',
   ])
 }
 

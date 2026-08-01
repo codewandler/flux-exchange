@@ -155,9 +155,14 @@ function occurrences(haystack, needle) {
   return count
 }
 
-/** `SURFACES` with one surface's `built` overridden — a hypothetical build, as `onboarding` does. */
-const asIf = (id, built) =>
-  SURFACES.map((surface) => (surface.id === id ? { ...surface, built } : surface))
+/**
+ * `SURFACES` with one surface's fields overridden — a hypothetical build, as `onboarding` does.
+ *
+ * A patch rather than a `built` boolean since X-42: what these screens derive from is `served`, and
+ * a helper that could only move `built` would exercise nothing.
+ */
+const asIf = (id, patch) =>
+  SURFACES.map((surface) => (surface.id === id ? { ...surface, ...patch } : surface))
 
 /** Every app-layer source, with its comments removed — this repository documents by example. */
 function appSourcesWithoutComments() {
@@ -654,7 +659,18 @@ test('what_the_token_can_and_cannot_do_today_is_derived_from_surfaces', async ()
   const invoke = STEPS.find((step) => step.id === 'invoke')
   assert.ok(authenticate && invoke)
   assert.equal(available(authenticate, SURFACES), false, 'X-37 has landed; this page needs rewriting')
-  assert.equal(available(invoke, SURFACES), false)
+
+  // **Inverted by X-42, and this is the correction rather than a relaxation.** This read
+  // `assert.equal(available(invoke, SURFACES), false)`, which was true of the console's screens and
+  // false of the service: `POST /api/operations/{operation}/invoke` shipped in v0.7.0 and has been
+  // in the published route table ever since, while this screen told an operator a token could not
+  // reach it. The route table decides it now — see
+  // `routes::onboarding::tests::a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it`.
+  assert.equal(
+    available(invoke, SURFACES),
+    true,
+    'the service runs operations; this screen must not tell an operator otherwise'
+  )
 
   const stub = serving(201, MINTED)
   try {
@@ -688,38 +704,58 @@ test('the_derivation_is_live_and_takes_claims_off_the_page_rather_than_putting_t
 
   const stateOf = (surfaces, id) => tokenStanding(surfaces).find((entry) => entry.step.id === id)
 
+  // `subscribe` rather than `invoke` since X-42: `invoke` is served, so driving the hypothetical
+  // through it would be asserting a fact against itself and this test would move nothing.
+
   // As this build is.
-  assert.equal(stateOf(SURFACES, 'invoke').can, false)
-  assert.ok(stateOf(SURFACES, 'invoke').reason.length > 0)
+  assert.equal(stateOf(SURFACES, 'subscribe').can, false)
+  assert.ok(stateOf(SURFACES, 'subscribe').reason.length > 0)
 
-  // As a build where `invoke` exists would be — no edit to this screen's copy, and none here.
+  // As a build where the service serves it would be — no edit to this screen's copy, and none here.
   assert.equal(
-    stateOf(asIf('invoke', true), 'invoke').can,
+    stateOf(asIf('subscribe', { served: true }), 'subscribe').can,
     true,
-    'marking `invoke` built does not change what this screen says a token can do, so the screen is not actually derived from `surfaces.mts`'
+    'marking `subscribe` served does not change what this screen says a token can do, so the screen is not actually derived from `surfaces.mts`'
   )
   assert.equal(
-    stateOf(asIf('invoke', true), 'invoke').reason,
+    stateOf(asIf('subscribe', { served: true }), 'subscribe').reason,
     '',
-    'the invoke entry still carries a reason it cannot be done in a build where it can'
+    'the subscribe entry still carries a reason it cannot be done in a build where it can'
   )
 
-  // The direction that protects a reader: a surface regressing to unbuilt withdraws the claim
+  // The direction that protects a reader: a surface regressing to unserved withdraws the claim
   // standing on it, in the same expression and with nobody remembering to.
-  assert.equal(stateOf(asIf('invoke', false), 'invoke').can, false)
+  assert.equal(stateOf(asIf('subscribe', { served: false }), 'subscribe').can, false)
 
-  // And the authorisation sentence is itself one-directional. It is a claim that **nothing** is
-  // gated, which is only safe while every step a token would be presented for is withheld. The day
-  // one of them lands, the sentence leaves the page rather than staying and becoming false —
-  // whoever lands it has to say what a token is then admitted to, and this goes red until they do.
+  // And it reads the right field. `invoke` is the surface where "does the console have a screen"
+  // and "does the service serve it" give different answers, so it is the one that proves this
+  // screen is not deriving an API claim from the console's navigation.
+  for (const built of [true, false]) {
+    assert.equal(
+      stateOf(asIf('invoke', { built }), 'invoke').can,
+      true,
+      `moving \`built\` to ${built} changed what this screen says a token can do, so it is still reading whether the console has a screen`
+    )
+  }
+
+  // The authorisation sentence is one-directional too, and X-42 moved which event withdraws it.
+  // It used to go the moment anything a token holder does became available; that fired on `invoke`
+  // being corrected, which would have blanked the paragraph exactly when it stopped being vacuous.
+  // It now goes when a token can actually be **presented**, because that is when "what may this
+  // principal do" becomes the grant question (X-13) this screen must not answer from a surface list.
   assert.ok(
     authorisation(SURFACES).length > 0,
-    'nothing is said about what a token authorises, in a build where the answer is "nothing at all"'
+    'nothing is said about what a token authorises, in a build where a token holder would be admitted to every operation in the catalogue the moment it can present one'
+  )
+  assert.match(
+    authorisation(SURFACES),
+    /no grant model/i,
+    'the sentence no longer says that nothing is gated, which is the fact an operator minting a token is owed'
   )
   assert.equal(
-    authorisation(asIf('invoke', true)),
+    authorisation(SURFACES, /* a build where a token can be presented */ true),
     '',
-    'the screen goes on claiming a token authorises nothing beyond any principal in a build where an operation can actually be called — that claim is a grant question (X-13) and this page must stop answering it rather than answer it wrongly'
+    'the screen goes on answering what a token authorises in a build where one can actually be presented — that is a grant question (X-13) and this page must stop answering it rather than answer it wrongly'
   )
 })
 
