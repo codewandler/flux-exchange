@@ -39,6 +39,30 @@
 //! `exchange_host::ConnectorDeclaration::address_of_declared` for the seam it is inserted at, and
 //! `docs/designs/connections.md` for the argument.
 //!
+//! # What one tenant may occupy, refused before anything is written
+//!
+//! Two bounds, both decided on `POST` and both **before the first `put`**, because the store is one
+//! file that every write rewrites and `fsync`s under one mutex — so a refusal that had already
+//! written would have charged every other tenant for the thing it was refusing.
+//!
+//! - `exchange_host::MAX_CREDENTIAL_VALUE_BYTES`, per value, applied by
+//!   `ConnectorDeclaration::writes` — which is the only way a supplied value becomes a write, so
+//!   this is not a check [`create`] remembers to make. `413`.
+//! - `exchange_host::MAX_TENANT_STORE_BYTES`, per tenant across the **whole** store, applied by
+//!   `exchange_host::admit_tenant_occupancy` against [`occupied`], inside the same claim as
+//!   everything else this route decides. `409`, in this module's existing sense of it: the tenant's
+//!   own state conflicts with the request, and a `DELETE` is the remedy — telling an operator to
+//!   send less when what they have to do is disconnect something would be the wrong instruction.
+//!
+//! Both numbers are stated once, in `exchange_host::connections`, with the argument for each
+//! written beside it — including why the bound is there and not on the `SecretStore` port. Every
+//! refusal names the credential and the bound and never the value; the sizes it quotes are the
+//! caller's own.
+//!
+//! How *many* credentials a connection may carry needs no bound of its own: a name the connector
+//! does not declare is already refused, so the count is the catalogue's number rather than the
+//! caller's.
+//!
 //! # A half connection is one an operator cannot tell from a whole one
 //!
 //! Which is why `POST` resolves every address before writing any value, and why a write that fails
@@ -78,8 +102,8 @@ use axum::routing::{get, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
-    address_path, ConnectionRefusal, ConnectorDeclaration, CredentialRef, DeclaredCredential,
-    Principal, Secret, SecretStore, StoreError,
+    address_path, admit_tenant_occupancy, stored_bytes, ConnectionRefusal, ConnectorDeclaration,
+    CredentialRef, DeclaredCredential, Principal, Secret, SecretStore, StoreError, Tenant,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -204,7 +228,7 @@ async fn show(
     let declaration = declaration(provider, &declared);
     let addresses = match declaration.addresses(principal.tenant()) {
         Ok(addresses) => addresses,
-        Err(refusal) => return unaddressable(&refusal),
+        Err(refusal) => return connection_refused(&refusal),
     };
 
     match held(store, &addresses).await {
@@ -234,7 +258,7 @@ async fn create(
     let declaration = declaration(provider, &declared);
     let addresses = match declaration.addresses(principal.tenant()) {
         Ok(addresses) => addresses,
-        Err(refusal) => return unaddressable(&refusal),
+        Err(refusal) => return connection_refused(&refusal),
     };
 
     if body.credentials.is_empty() {
@@ -249,16 +273,20 @@ async fn create(
         );
     }
 
-    // Every name is resolved to an address **before** anything is written, so a body with one good
-    // name and one typo stores neither. A half-written connection is one the operator cannot tell
-    // from a working one until an operation fails.
-    let mut writes: Vec<(CredentialRef, Secret)> = Vec::new();
-    for (name, value) in &body.credentials {
-        match declaration.address_of(principal.tenant(), name) {
-            Ok(reference) => writes.push((reference, Secret::new(value))),
-            Err(refusal) => return unaddressable(&refusal),
-        }
-    }
+    // Every name is resolved to an address, and every value admitted against the per-value bound,
+    // **before** anything is written — so a body with one good name and one typo, or one good value
+    // and one that is not a credential, stores neither. A half-written connection is one the
+    // operator cannot tell from a working one until an operation fails.
+    //
+    // This is also the only way values become writes: `ConnectorDeclaration::writes` is where the
+    // bound lives, so there is no form of this loop that could write past it. See that function,
+    // and `exchange_host::connections`' module documentation, for why the bound is there rather
+    // than on the `SecretStore` port.
+    let writes: Vec<(CredentialRef, Secret)> =
+        match declaration.writes(principal.tenant(), &body.credentials) {
+            Ok(writes) => writes,
+            Err(refusal) => return connection_refused(&refusal),
+        };
 
     // Everything from here to the end of the function is one read-decide-write, and it must not
     // interleave with another change to this same connection. Without the claim, two concurrent
@@ -275,6 +303,21 @@ async fn create(
         // answers.
         Ok(held) if !held.is_empty() => return already_connected(provider, &addresses),
         Ok(_) => {}
+    }
+
+    // The second bound, and the one that is about the neighbours rather than about this request.
+    // Decided inside the claim for the same reason the `409` above is: it is a read of the store
+    // that has to still be true when this answers.
+    //
+    // What this connector already holds is not counted twice — the probe above has just
+    // established that it holds nothing, or this would have refused.
+    let adding: usize = writes.iter().map(|(_, secret)| stored_bytes(secret)).sum();
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) = admit_tenant_occupancy(held_bytes, adding) {
+        return connection_refused(&refusal);
     }
 
     for (index, (reference, secret)) in writes.iter().enumerate() {
@@ -340,7 +383,7 @@ async fn remove(
     let declaration = declaration(provider, &declared);
     let addresses = match declaration.addresses(principal.tenant()) {
         Ok(addresses) => addresses,
-        Err(refusal) => return unaddressable(&refusal),
+        Err(refusal) => return connection_refused(&refusal),
     };
 
     // The same claim `create` takes, for the same reason and against the same neighbour: a delete
@@ -454,6 +497,63 @@ async fn held(
     Ok(held)
 }
 
+/// How many bytes this tenant already occupies in the store, across **every** connector.
+///
+/// Every addressable connector in the catalogue and not only the one being connected, because the
+/// bound is on the tenant's share of the *store*. A per-connector sum would let one tenant reach
+/// the allowance once per connector, which is fifty-odd times the bound and therefore not a bound.
+///
+/// The cost is one `SecretStore::get` per address — the same walk `GET /api/connections` makes on
+/// every call, paid here on the far rarer `POST`, and against `FileStore` those are lookups in a
+/// map read once at open rather than file reads.
+///
+/// Only the *length* of each value is taken, through [`stored_bytes`]: no plaintext is ever bound
+/// to a name in this function, so there is nothing here a later `debug!` could turn into a
+/// disclosure.
+///
+/// `Err` is a store that could not answer, and the caller must not turn that into "this tenant
+/// occupies nothing" — an outage read as an empty allowance is how a bound silently stops holding.
+///
+/// # The limit this has, written down rather than discovered
+///
+/// Reading this and then writing is a read-decide-write, and the claim that covers it is per
+/// `(tenant, connector)` — see [`ConnectionGuard`](crate::connection_guard::ConnectionGuard),
+/// whose granularity X-10 chose and pinned. So **one tenant issuing concurrent `POST`s to
+/// *different* connectors can overshoot the allowance**: each reads an occupancy that the others
+/// have not written yet. The overshoot is bounded — every value still passes
+/// [`MAX_CREDENTIAL_VALUE_BYTES`](exchange_host::MAX_CREDENTIAL_VALUE_BYTES), so the worst case
+/// degrades to the per-value ceiling rather than to nothing — and it needs deliberate concurrency
+/// rather than ordinary use.
+///
+/// Closing it means serialising a tenant's connection changes across connectors, which reverses a
+/// property `connection_guard`'s own tests pin. That is a decision about that guard rather than a
+/// line here, so it is recorded as a known limit and not silently half-fixed.
+async fn occupied(store: &Arc<dyn SecretStore>, tenant: &Tenant) -> Result<usize, StoreError> {
+    let mut total = 0usize;
+
+    for provider in connector_catalog::providers() {
+        let declared = declared_credentials(provider);
+        let declaration = declaration(provider, &declared);
+
+        // A connector with no address cannot hold anything for this tenant, so it contributes
+        // nothing. Refusing the whole create because some unrelated connector is unaddressable
+        // would be the listing bug in another place.
+        let Ok(addresses) = declaration.addresses(tenant) else {
+            continue;
+        };
+
+        for (_, reference) in &addresses {
+            match store.get(reference).await {
+                Ok(secret) => total = total.saturating_add(stored_bytes(&secret)),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    Ok(total)
+}
+
 /// One connection as a caller sees it: what it is, where each credential lives, and which are set.
 ///
 /// Addresses, never values. There is deliberately no field a value could occupy.
@@ -550,32 +650,81 @@ fn not_connected(
     )
 }
 
-/// The connector has no address for this tenant, because something it must declare is missing.
-fn unaddressable(refusal: &ConnectionRefusal) -> Response {
-    refuse(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        refusal.to_string(),
-        match refusal {
-            ConnectionRefusal::UndeclaredAuthority { connector }
-            | ConnectionRefusal::NoCredentialDeclared { connector } => {
-                json!({ "connector": connector })
-            }
-            ConnectionRefusal::UndeclaredCredential {
-                connector,
-                credential,
-                declared,
-            } => json!({
+/// How a [`ConnectionRefusal`] reaches a caller — **the one place**, so a variant added upstream
+/// cannot be answered two different ways by two call sites.
+///
+/// The status is per variant, because these are not one event. The four addressing refusals are
+/// `422`: the request is well formed and there is no address for it, and nothing the caller does
+/// to its own state changes that. The two bounds are not:
+///
+/// - [`CredentialTooLarge`](ConnectionRefusal::CredentialTooLarge) is `413`, which is what it
+///   literally is — the caller sent something that is not a credential, and a smaller one works.
+/// - [`TenantAllowanceExhausted`](ConnectionRefusal::TenantAllowanceExhausted) is `409`, in this
+///   module's existing sense of it: the request is fine and the tenant's current state conflicts
+///   with it, so the remedy is a `DELETE` and a retry — the same shape as
+///   [`already_connected`] and [`change_in_flight`]. A `413` here would tell an operator to send
+///   less when what they have to do is disconnect something.
+///
+/// Every payload carries the bound it was decided against, so an operator reading the refusal
+/// learns the limit rather than guessing it, and none carries a value.
+fn connection_refused(refusal: &ConnectionRefusal) -> Response {
+    let (status, extra) = match refusal {
+        ConnectionRefusal::UndeclaredAuthority { connector }
+        | ConnectionRefusal::NoCredentialDeclared { connector } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector }),
+        ),
+        ConnectionRefusal::UndeclaredCredential {
+            connector,
+            credential,
+            declared,
+        } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({
                 "connector": connector,
                 "credential": credential,
                 "declared": declared,
             }),
-            ConnectionRefusal::Unaddressable {
-                connector,
-                credential,
-                ..
-            } => json!({ "connector": connector, "credential": credential }),
-        },
-    )
+        ),
+        ConnectionRefusal::Unaddressable {
+            connector,
+            credential,
+            ..
+        } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector, "credential": credential }),
+        ),
+        ConnectionRefusal::CredentialTooLarge {
+            connector,
+            credential,
+            bytes,
+            limit,
+        } => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({
+                "connector": connector,
+                "credential": credential,
+                "bound": "credential",
+                "sent_bytes": bytes,
+                "limit_bytes": limit,
+            }),
+        ),
+        ConnectionRefusal::TenantAllowanceExhausted {
+            held,
+            adding,
+            limit,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "bound": "tenant",
+                "held_bytes": held,
+                "adding_bytes": adding,
+                "limit_bytes": limit,
+            }),
+        ),
+    };
+
+    refuse(status, refusal.to_string(), extra)
 }
 
 /// **The X-14 placeholder.** A second connection to a connector this tenant already has.
@@ -823,7 +972,9 @@ mod tests {
     use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
-    use exchange_host::{async_trait, Tenant, TENANTS_ROOT};
+    use exchange_host::{
+        async_trait, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES, TENANTS_ROOT,
+    };
     use tower::Service;
 
     use crate::dev_identity::DevIdentity;
@@ -970,6 +1121,22 @@ mod tests {
                 .expect("no test poisons this")
                 .get(path)
                 .cloned()
+        }
+
+        /// How many bytes are stored under a rendered prefix — one tenant's whole occupancy, when
+        /// the prefix is `tenants/<tenant>/`.
+        ///
+        /// The assertion for the per-tenant bound has to be made against the *store*, not against
+        /// what the surface answered: the whole point of that bound is what ends up in the one
+        /// file every tenant's write rewrites.
+        fn bytes_under(&self, prefix: &str) -> usize {
+            self.held
+                .lock()
+                .expect("no test poisons this")
+                .iter()
+                .filter(|(path, _)| path.starts_with(prefix))
+                .map(|(_, value)| value.len())
+                .sum()
         }
 
         fn addresses(&self) -> Vec<String> {
@@ -1524,6 +1691,317 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
         assert_eq!(refusal["declared"], json!(["zendesk.api_token"]));
         assert!(store.addresses().is_empty());
+    }
+
+    /// **X-22's failing-first test.** A value too large to be a credential is refused *before*
+    /// anything is written, and the store is what says so.
+    ///
+    /// The assertion that matters is the last pair, not the status: a `413` that had already
+    /// rewritten and `fsync`-ed the whole store would have cost every other tenant the write it
+    /// was refusing. The refusal names the credential and the bound and never what was sent.
+    ///
+    /// A value at a size a credential really is, in the same run — otherwise a bound that refused
+    /// everything would pass this.
+    #[tokio::test]
+    async fn a_credential_beyond_the_bound_is_refused_and_nothing_is_written() {
+        let (app, store) = connected_app();
+
+        // Not a credential by any reading: no token, signing secret or PEM private key is this
+        // size. Spelled as a literal rather than through the constant so that this test is the
+        // same test before and after the bound exists.
+        let oversized = "x".repeat(64 * 1024);
+
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/zendesk",
+            Some(json!({ "credentials": { "zendesk.api_token": oversized } })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{refusal}");
+        assert_eq!(refusal["credential"], "zendesk.api_token", "{refusal}");
+        assert!(
+            refusal["limit_bytes"].is_number(),
+            "the refusal must name the bound, so an operator reading it learns the limit rather \
+             than guessing: {refusal}",
+        );
+        assert!(
+            !refusal.to_string().contains(&oversized),
+            "a refusal names the credential and the bound, never the value: {refusal}",
+        );
+
+        // Nothing was written. Not "the status was 4xx" — the store itself.
+        assert!(
+            store.addresses().is_empty(),
+            "a refused credential must not have been written: {:?}",
+            store.addresses(),
+        );
+        assert_eq!(store.at("tenants/acme/com.zendesk.api/api_token"), None);
+
+        // And a credential-sized value still lands, so the refusal above cannot have passed by
+        // refusing everything.
+        let (status, created) = connect_zendesk(&app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(
+            store.at("tenants/acme/com.zendesk.api/api_token"),
+            Some(SENTINEL.to_string()),
+        );
+    }
+
+    /// The bound is **stated once**, and the refusal carries that statement rather than a second
+    /// copy of the number — so an operator reading a refusal learns the limit, and a change to the
+    /// constant cannot leave a refusal quoting the old one.
+    ///
+    /// Inclusive at the bound, asserted from both sides: a value of exactly
+    /// [`MAX_CREDENTIAL_VALUE_BYTES`] is a credential, and one byte more is not.
+    #[tokio::test]
+    async fn the_credential_bound_is_stated_once_and_a_value_at_it_still_lands() {
+        let (app, store) = connected_app();
+
+        let at_the_bound = "v".repeat(MAX_CREDENTIAL_VALUE_BYTES);
+        let (status, created) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/zendesk",
+            Some(json!({ "credentials": { "zendesk.api_token": at_the_bound } })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(
+            store.at("tenants/acme/com.zendesk.api/api_token"),
+            Some(at_the_bound),
+        );
+
+        // One byte past it, as the other tenant, so the `409` for an existing connection cannot be
+        // what answers.
+        let past_the_bound = "v".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1);
+        let (status, refusal) = call(
+            &app,
+            "bob",
+            Method::POST,
+            "/api/connections/zendesk",
+            Some(json!({ "credentials": { "zendesk.api_token": past_the_bound } })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{refusal}");
+        assert_eq!(refusal["bound"], "credential", "{refusal}");
+        assert_eq!(
+            refusal["limit_bytes"],
+            json!(MAX_CREDENTIAL_VALUE_BYTES),
+            "the refusal must carry the bound itself, not a second spelling of it: {refusal}",
+        );
+        assert_eq!(
+            refusal["sent_bytes"],
+            json!(MAX_CREDENTIAL_VALUE_BYTES + 1),
+            "{refusal}",
+        );
+        assert_eq!(
+            store.at("tenants/globex/com.zendesk.api/api_token"),
+            None,
+            "one byte past the bound must have written nothing",
+        );
+    }
+
+    /// **X-22's second bound.** What one tenant may occupy across the *whole* store is bounded, and
+    /// not merely as a consequence of each value being bounded.
+    ///
+    /// Every value here is at exactly the per-value bound, so the per-value check admits all of
+    /// them and the only thing that can stop this tenant is the per-tenant one. The assertions that
+    /// matter are the last two: connectors were still left that the per-value bound alone would
+    /// have let this tenant fill, and the tenant's share of the store — the file every other
+    /// tenant's write has to rewrite — never went past the allowance.
+    #[tokio::test]
+    async fn the_total_one_tenant_can_occupy_is_bounded_and_not_only_each_value() {
+        let (app, store) = connected_app();
+
+        let at_the_value_bound = "v".repeat(MAX_CREDENTIAL_VALUE_BYTES);
+        let tenant = Tenant::new("acme").expect("a plain tenant id");
+
+        let mut connected = 0usize;
+        let mut left_unused = 0usize;
+        let mut refused: Option<(String, StatusCode, Value)> = None;
+
+        for provider in connector_catalog::providers() {
+            let declared = declared_credentials(provider);
+            let declaration = declaration(provider, &declared);
+            // A connector with no address cannot hold anything, so it is not a connector this
+            // tenant could have spent its allowance on.
+            if declaration.addresses(&tenant).is_err() {
+                continue;
+            }
+
+            if refused.is_some() {
+                left_unused += 1;
+                continue;
+            }
+
+            let credentials: serde_json::Map<String, Value> = declared
+                .iter()
+                .map(|credential| {
+                    (
+                        credential.name.to_string(),
+                        json!(at_the_value_bound.clone()),
+                    )
+                })
+                .collect();
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                &format!("/api/connections/{}", provider.id),
+                Some(json!({ "credentials": credentials })),
+            )
+            .await;
+
+            if status == StatusCode::CREATED {
+                connected += 1;
+            } else {
+                refused = Some((provider.id.to_string(), status, body));
+            }
+        }
+
+        let (connector, status, refusal) = refused.expect(
+            "a tenant writing values at the per-value bound into every catalogued connector must \
+             be stopped by the per-tenant bound",
+        );
+
+        assert!(
+            connected > 0,
+            "the per-tenant bound must admit a real connection, or it is not a bound but a \
+             refusal of everything",
+        );
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+        assert_eq!(refusal["bound"], "tenant", "{refusal}");
+        assert_eq!(
+            refusal["limit_bytes"],
+            json!(MAX_TENANT_STORE_BYTES),
+            "the refusal must name the bound it was decided against: {refusal}",
+        );
+
+        // Nothing was written for the connection that was refused. Asserted against the store, not
+        // against the status.
+        let (status, _) = call(
+            &app,
+            "alice",
+            Method::GET,
+            &format!("/api/connections/{connector}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a connection refused for the tenant's allowance must have written nothing",
+        );
+
+        // The per-value bound alone would have let this tenant carry on: there were connectors
+        // left, each of which it could have filled at the value bound.
+        assert!(
+            left_unused > 0,
+            "this catalogue is too small to tell the two bounds apart — the per-tenant bound has \
+             to bite while addressable connectors remain, or the test proves nothing",
+        );
+
+        // And the thing the bound exists to protect: this tenant's share of the one file every
+        // other tenant's write rewrites.
+        let occupied = store.bytes_under("tenants/acme/");
+        assert!(
+            occupied <= MAX_TENANT_STORE_BYTES,
+            "one tenant occupies {occupied} bytes, past the {MAX_TENANT_STORE_BYTES} it may hold",
+        );
+    }
+
+    /// Why the second bound has to exist at all, as arithmetic over this catalogue.
+    ///
+    /// A tenant may hold one value per declared address, so bounding each value alone leaves a
+    /// ceiling of `addresses × MAX_CREDENTIAL_VALUE_BYTES` — and that ceiling *grows every time
+    /// upstream adds a connector*. [`MAX_TENANT_STORE_BYTES`] does not move when the catalogue
+    /// does, which is the property worth having; this pins that it is the tighter of the two.
+    #[test]
+    fn the_per_value_bound_alone_does_not_bound_what_one_tenant_holds() {
+        let tenant = Tenant::new("acme").expect("a plain tenant id");
+        let addresses: usize = connector_catalog::providers()
+            .iter()
+            .filter_map(|provider| {
+                let declared = declared_credentials(provider);
+                declaration(provider, &declared)
+                    .addresses(&tenant)
+                    .ok()
+                    .map(|addresses| addresses.len())
+            })
+            .sum();
+
+        let per_value_ceiling = addresses * MAX_CREDENTIAL_VALUE_BYTES;
+        assert!(
+            MAX_TENANT_STORE_BYTES < per_value_ceiling,
+            "the per-value bound alone would let one tenant occupy {per_value_ceiling} bytes \
+             across {addresses} addresses, so a per-tenant bound of {MAX_TENANT_STORE_BYTES} is \
+             what actually bounds the whole",
+        );
+    }
+
+    /// **The count of credentials is the catalogue's number, not the caller's.** A body carrying
+    /// more than the connector declares carries one it does not declare, and that is already
+    /// refused before anything is written — which is what bounds how many addresses one request
+    /// can occupy.
+    ///
+    /// The declared set is connected in the same run, so the refusal cannot be passing by refusing
+    /// everything.
+    #[tokio::test]
+    async fn more_credentials_than_are_declared_is_refused_and_the_declared_set_still_lands() {
+        let (app, store) = connected_app();
+
+        let (status, refusal) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({
+                "credentials": {
+                    "slack.bot_token": SENTINEL,
+                    "slack.signing_secret": SENTINEL,
+                    "slack.one_more": SENTINEL,
+                }
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+        assert_eq!(refusal["credential"], "slack.one_more", "{refusal}");
+        assert!(
+            store.addresses().is_empty(),
+            "a body with one undeclared name must have written none of it: {:?}",
+            store.addresses(),
+        );
+
+        let (status, created) = call(
+            &app,
+            "alice",
+            Method::POST,
+            "/api/connections/slack",
+            Some(json!({
+                "credentials": {
+                    "slack.bot_token": SENTINEL,
+                    "slack.signing_secret": SENTINEL,
+                }
+            })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        assert_eq!(
+            store.addresses(),
+            vec![
+                "tenants/acme/com.slack.api/bot_token".to_string(),
+                "tenants/acme/com.slack.api/signing_secret".to_string(),
+            ],
+        );
     }
 
     /// A composition that bound no store refuses and names the setting, on every route. Not an
@@ -2188,6 +2666,67 @@ mod tests {
             "likewise: {partly_destroyed}",
         );
         answers.push(partly_destroyed);
+
+        // X-22's two refusals, which quote sizes and must quote no value. The value they are
+        // refusing is built out of the sentinel so that a refusal echoing any part of what was
+        // sent is caught, not merely one echoing the whole of it.
+        let (bounded_app, _) = connected_app();
+        let oversized = SENTINEL.repeat(MAX_CREDENTIAL_VALUE_BYTES);
+        let (status, too_large) = call(
+            &bounded_app,
+            "alice",
+            Method::POST,
+            "/api/connections/zendesk",
+            Some(json!({ "credentials": { "zendesk.api_token": oversized } })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "this must be the per-value refusal, or the answer below proves nothing about it: \
+             {too_large}",
+        );
+        answers.push(too_large);
+
+        // And the per-tenant one, reached by filling the allowance with values at the per-value
+        // bound until it bites.
+        let at_the_value_bound = SENTINEL.repeat(MAX_CREDENTIAL_VALUE_BYTES / SENTINEL.len());
+        let tenant = Tenant::new("acme").expect("a plain tenant id");
+        let mut allowance_exhausted = None;
+        for provider in connector_catalog::providers() {
+            let declared = declared_credentials(provider);
+            if declaration(provider, &declared).addresses(&tenant).is_err() {
+                continue;
+            }
+
+            let credentials: serde_json::Map<String, Value> = declared
+                .iter()
+                .map(|credential| {
+                    (
+                        credential.name.to_string(),
+                        json!(at_the_value_bound.clone()),
+                    )
+                })
+                .collect();
+
+            let (status, body) = call(
+                &bounded_app,
+                "alice",
+                Method::POST,
+                &format!("/api/connections/{}", provider.id),
+                Some(json!({ "credentials": credentials })),
+            )
+            .await;
+
+            if status == StatusCode::CONFLICT {
+                allowance_exhausted = Some(body);
+                break;
+            }
+        }
+        answers.push(
+            allowance_exhausted
+                .expect("the per-tenant allowance must be reachable, or the check below is empty"),
+        );
 
         store.unreachable();
         let (_, unreachable) =
