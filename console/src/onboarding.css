@@ -1,0 +1,208 @@
+/*
+ * The onboarding page: what an agent author is told, and what this build refuses to promise them.
+ *
+ * These rules belong to `src/AgentOnboarding.mts`, which is a render function rather than a
+ * single-file component — so it carries no `<style scoped>` and its rules live here, the same
+ * arrangement `shell.css` describes for `ConsoleShell.mts`.
+ *
+ * IT IS ITS OWN FILE for the reason `shell.css` is: **every colour here goes through a token from
+ * `tokens.css`**, and `the_onboarding_page_names_no_colour_of_its_own` in
+ * `test/onboarding.test.mjs` scans this file to hold that. No hex, no rgb(), no named colours.
+ * Light and dark come for free, because `.dark` redefines the tokens and nothing here restates a
+ * value.
+ *
+ * THE ONE VISUAL DECISION WORTH ARGUING. A step this build cannot do is dimmed and tagged, not
+ * hidden and not greyed to illegibility. A reader has to be able to read the reason — that sentence
+ * is the most useful thing on the page for anyone deciding whether to point an agent here — so
+ * `--vp-c-text-2` and not `--vp-c-text-3`, and the dimming is carried by the rule down the left
+ * edge rather than by the text colour.
+ */
+
+.onboard {
+  max-width: 76ch;
+  margin: 40px 0 0;
+}
+
+.onboard h1 {
+  margin-bottom: 8px;
+}
+
+.onboard__lead {
+  font-size: 15px;
+  line-height: 26px;
+  color: var(--vp-c-text-2);
+}
+
+/*
+ * The derived one-liner. Same treatment as the shell's inventory sentence, because it is the same
+ * kind of statement: what this deployment cannot do, read off the model rather than typed out.
+ */
+.onboard__pending {
+  margin: 24px 0 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--vp-c-divider);
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-3);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The steps.
+ * ------------------------------------------------------------------------------------------- */
+
+.onboard__steps {
+  margin: 32px 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: onboard-step;
+}
+
+.onboard__step {
+  position: relative;
+  margin: 0 0 12px;
+  padding: 18px 22px 6px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  background-color: var(--vp-c-bg-soft);
+}
+
+/*
+ * Numbered by the stylesheet rather than by an `<ol>` marker: the markers sit outside the boxes and
+ * a step that reads "3." while three steps above it cannot be done would be counting instructions
+ * the reader cannot follow. The counter runs over every step, built or not, because the sequence is
+ * the thing being explained.
+ */
+.onboard__step::before {
+  counter-increment: onboard-step;
+  content: counter(onboard-step);
+  position: absolute;
+  top: 20px;
+  left: -34px;
+  width: 22px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  line-height: 22px;
+  text-align: right;
+  color: var(--vp-c-text-3);
+}
+
+/* Not built, and it must be unmistakable — the same statement the rail makes, in a block. */
+.onboard__step--pending {
+  border-style: dashed;
+  background-color: transparent;
+}
+
+.onboard__title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: baseline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 17px;
+  line-height: 26px;
+}
+
+.onboard__step--pending .onboard__title {
+  color: var(--vp-c-text-2);
+}
+
+.onboard__tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background-color: var(--vp-c-default-soft);
+  font-family: var(--vp-font-family-base);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--vp-c-text-3);
+}
+
+.onboard__summary {
+  margin: 8px 0 0;
+  font-size: 14px;
+  line-height: 24px;
+  color: var(--vp-c-text-2);
+}
+
+/* The call, given the weight of the one thing on the page a reader will copy. */
+.onboard__call {
+  margin: 16px 0 0;
+}
+
+.onboard__endpoint {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid var(--vp-c-brand-1);
+  border-radius: 6px;
+  background-color: var(--vp-c-brand-soft);
+  font-family: var(--vp-font-family-mono);
+  font-size: var(--vp-code-font-size);
+  color: var(--vp-c-brand-1);
+}
+
+.onboard__caller,
+.onboard__note {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-2);
+}
+
+.onboard__caller {
+  color: var(--vp-c-text-3);
+}
+
+/*
+ * The sentence not to skim. `--vp-c-warning-*` is the vocabulary the carried components already use
+ * for "true, and it will cost you if you miss it", which is exactly what a credential shown once is.
+ */
+.onboard__warn {
+  margin: 12px 0 0;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background-color: var(--vp-c-warning-soft);
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-1);
+}
+
+.onboard__warn strong {
+  font-weight: 500;
+}
+
+/* The reason it cannot be done. Readable, for the argument in the file header. */
+.onboard__withheld {
+  margin: 12px 0 0;
+  padding-bottom: 12px;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-2);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The closing notes: the rules that hold regardless of what this build has got to.
+ * ------------------------------------------------------------------------------------------- */
+
+.onboard__aside {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.onboard__aside h2 {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 15px;
+  line-height: 24px;
+}
+
+.onboard__aside p {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--vp-c-text-3);
+}

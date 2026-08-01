@@ -38,9 +38,11 @@ import {
   type ConnectionsState,
   type SessionState,
 } from './service.mts'
+import { ONBOARDING_PATH } from './onboarding.mts'
 import { surfaceOfRoute } from './surfaces.mts'
 import { isDark, toggleTheme } from './theme'
 
+import AgentOnboarding from './AgentOnboarding.mts'
 import CatalogueFailure from './CatalogueFailure.mts'
 import Connections from './Connections.mts'
 import ConsoleShell from './ConsoleShell.mts'
@@ -115,6 +117,21 @@ const active = computed(() => surfaceOfRoute(route.value.name))
 
     <main>
       <!--
+        How to connect an agent, and the head of this chain on purpose.
+
+        `docs/vision.md` calls the agent this platform's primary caller, and this is the one screen
+        that depends on nothing: no session, no catalogue, no principal. Putting it first says so
+        structurally — a branch at the head of the chain has no predecessor that could gate it — and
+        `the_page_is_reachable_without_a_session` asserts it stays there. An agent that must
+        authenticate to learn how to authenticate is a closed loop.
+
+        It is passed nothing, because it describes the shape of this service and never its contents.
+      -->
+      <template v-if="route.name === 'connect'">
+        <AgentOnboarding />
+      </template>
+
+      <!--
         Connections — the first of the console's two jobs, and where a reader lands.
 
         Behind a principal, because a connection is tenant data. The gate is not an empty state: it
@@ -122,7 +139,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         answers `303` to the identity provider, so it is an anchor the browser navigates and never
         a fetch.
       -->
-      <template v-if="route.name === 'connections'">
+      <template v-else-if="route.name === 'connections'">
         <p v-if="session.status === 'loading'" class="console__loading">Reading your session…</p>
 
         <Connections v-else-if="signedIn" :state="connections" />
@@ -190,9 +207,15 @@ const active = computed(() => surfaceOfRoute(route.value.name))
       </template>
     </main>
 
+    <!--
+      The footer, and not the rail. Connecting an agent is a reference an agent author reaches for
+      once; the rail is where an operator works, and an entry there would imply it is a place to do
+      work. It is first in the line because it is the only one of the three that is a destination.
+    -->
     <footer class="console__foot">
       <p>
-        Catalogue read from <code>{{ CONNECTORS_ENDPOINT }}</code> ·
+        <a :href="fragmentPath(ONBOARDING_PATH)">Connect an agent</a> · Catalogue read from
+        <code>{{ CONNECTORS_ENDPOINT }}</code> ·
         <a href="https://github.com/codewandler/flux-exchange">codewandler/flux-exchange</a>
       </p>
     </footer>
