@@ -1,8 +1,7 @@
 ---
 id: X-34
 title: "The console presents an execution platform, not a catalogue browser"
-status: ready
-priority: 1
+status: done
 epic: catalogue
 areas: [console]
 note: "owner-raised 2026-08-01: 'flux-exchange is the execution platform - not just a catalog explorer'. The console renders one reference view and no chrome, while the service behind it holds credentials for many tenants and runs operations for them"
@@ -48,23 +47,23 @@ honest. A screen with a plausible empty state is a lie, and this repository has 
 removing exactly that class of thing.
 
 ## Acceptance
-- [ ] **Failing-first test** — a test asserts the shell renders the service's name and a navigation
+- [x] **Failing-first test** — a test asserts the shell renders the service's name and a navigation
       region organised around the platform's surfaces, and fails before the shell exists.
       `console/test/` uses `node --test` with server-rendered components; `CatalogueFailure.mts` is
       the precedent for a render function assertable without a browser.
-- [ ] Navigation covers **every surface, each marked with its true state**: Connections (built),
+- [x] Navigation covers **every surface, each marked with its true state**: Connections (built),
       Catalogue (built), Sign-in/identity (built), Invoke (**not built**), Subscribe (**not built**),
       Activity/records (**not built**).
-- [ ] **A test asserts every surface marked not-built is unreachable** — no route resolves to it and
+- [x] **A test asserts every surface marked not-built is unreachable** — no route resolves to it and
       no placeholder screen exists. This is the honesty invariant, enforced rather than intended.
-- [ ] An identity affordance in the header: signed out offers **Sign in** (a link to `/api/signin` —
+- [x] An identity affordance in the header: signed out offers **Sign in** (a link to `/api/signin` —
       it answers `303`, so it is a link and not a fetch); signed in names who, and offers sign-out.
       Read `/api/session`; do not invent a session.
-- [ ] The catalogue explorer keeps working, with its existing tests green and **unmodified**. This
+- [x] The catalogue explorer keeps working, with its existing tests green and **unmodified**. This
       story reframes what surrounds it; it does not change it.
-- [ ] **No file under `console/src/components/` is modified.** Those 15 are shared with
+- [x] **No file under `console/src/components/` is modified.** Those 15 are shared with
       flux-connectors and `components.test.mjs` enforces it — anything the shell needs is a new file.
-- [ ] Light and dark both work through the existing `tokens.css`; no second colour vocabulary.
+- [x] Light and dark both work through the existing `tokens.css`; no second colour vocabulary.
 
 ## Notes
 - The console is **one static document** with a fragment router (`routing.ts`) because there is no
@@ -77,3 +76,29 @@ removing exactly that class of thing.
   route are enough, and a follow-up can fill it. Say clearly which you did.
 - This is the first UI work in a repository whose discipline is otherwise backend. Taste is yours;
   the constraints are the honesty invariant, the carried components, and the fragment router.
+
+## Progress
+- **Done 2026-08-01.** Console 21 -> 33 tests; Rust unchanged at 43 + 182; build clean.
+- **The honesty invariant was negative-controlled, not asserted.** Three violations were introduced
+  in turn — a not-built surface given a path, then a route, then a mounted screen — and **each prong
+  was confirmed to fire on its own** before being restored. A green invariant test proves nothing by
+  itself, and this is the first test in the repository written that way.
+- **Deviation, argued and accepted: Connections got a view.** The story said a nav entry and a route
+  were enough. A route with no view is a blank screen — worse than either option offered — and
+  Connections *is* built at the API, so a disabled entry would have been a lie in the other
+  direction. Read-only: it renders addresses and `held` flags, **never values**. No connect form;
+  `POST` needs per-connector credential inputs and belongs in its own story.
+- **Deviation, argued and accepted: `/` resolves to Connections rather than the explorer.** The Goal
+  says a reader should see what is connected, and leaving the catalogue as the landing page would
+  have left it the front door. `/explorer` keeps its own path, so every `/explorer#<provider>` link
+  the carried components emit is unaffected and `routing.test.mjs` passes unmodified.
+- **None of the 15 carried components is touched**, verified by path.
+- **Carried forward — session-shape coupling.** `loadSession` reads `{principal:{id,tenant,kind}}`
+  and `Principal`'s serde is derived, so a field rename in `exchange-host` breaks the header
+  *silently* into `failed` rather than loudly. First place to look if the header goes blank.
+- **Carried forward:** `signOut()` reloads, and if `DELETE /api/session` succeeds while the cookie
+  survives (a proxy stripping `Set-Cookie`) the reload lands signed in again with no error shown —
+  `App.vue` currently discards the failure `signOut` returns.
+- **Carried forward:** the screen scanner is a regex over source text, so a screen mounted through an
+  indirection would slip past that prong. The other three are structural, so a surface would still
+  be unreachable.

@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **The console presents an execution platform** (X-34). It rendered the connector catalogue and
+  nothing else, with no header and no navigation, while the service behind it grew sign-in, expiring
+  sessions and a per-tenant connection surface. `docs/vision.md` gives the console two jobs — *wire
+  things up* and *see what happened* — and the catalogue is neither, so it has stopped being the
+  front door.
+
+  There is now a shell: the service's name, an identity affordance (sign in, or who you are and your
+  tenant), and a rail covering **every** surface with its true state. **Connections** is a read-only
+  view showing addresses and whether each credential is held — never a value. **Activity**, **Invoke**
+  and **Subscribe** are named, struck through and tagged `NOT BUILT`, and a test asserts they have no
+  path, no route and no screen — negative-controlled, so each prong is known to fire on its own.
+
+- **CI proves the MSRV the crate promises** (X-33), reading `rust-version` out of `Cargo.toml` rather
+  than repeating it. The first real run confirmed the value reaches the toolchain (`1.88`) rather
+  than silently defaulting — which would have made the job green while proving nothing.
+
 ## [0.4.0] - 2026-08-01
 
 ### Fixed

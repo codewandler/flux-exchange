@@ -38,15 +38,11 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 - [X-35 — Agent access (epic)](X-35-agent-access-epic.md) · EPIC — the vision's primary caller cannot authenticate. PrincipalKind::Agent exists as a type and appears in the loopback dev roster; nothing mints or verifies an agent's token. Not blocked by X-11, unlike everything else downstream
 - [X-36 — An agent token is minted once, and this host keeps only a verifier](X-36-mint-agent-token.md) · the first half of closing the vision's largest unblocked gap — nothing today can create a principal an agent could present
 
-### Catalogue
-- [X-34 — The console presents an execution platform, not a catalogue browser](X-34-console-shell.md) · owner-raised 2026-08-01: 'flux-exchange is the execution platform - not just a catalog explorer'. The console renders one reference view and no chrome, while the service behind it holds credentials for many tenants and runs operations for them
-
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-39 — A credential can be rotated without a window where the connection is gone](X-39-credential-rotation.md) · the surface can create and destroy a connection but not replace a credential: a second create is refused 409, so rotating a leaked secret today means DELETE then POST, and everything using it is broken in between
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
-- [X-33 — CI proves the MSRV the crate promises](X-33-msrv-job.md) · split from X-30, 2026-08-01: the job could not land while rust-version was false. The number is now 1.88 (observed, not chosen), so the job can be written against a promise that holds
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
@@ -86,6 +82,8 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 - [X-30 — CI proves the pins and the MSRV, not just the tests](X-30-ci-supply-chain-and-msrv.md) · found by X-28's implementor, 2026-08-01: ../flux fails CI when an unpinned action reappears and checks crate versions at PR time; this repo enforces both by review only, and `rust-version = 1.87` is a promise to consumers that nothing verifies
 - [X-31 — A new exchange error cannot silently inherit a refusal's status](X-31-error-to-refusal-edge.md) · found by X-26's implementor in the guard it had just written, 2026-08-01: every_refusal_states_the_status_it_answers_with pins the refusal→status edge, and nothing pins the error→refusal edge, so a new ExchangeError folded into an existing refusal would undo X-17's split without touching status()
 - [X-32 — A console test in a subdirectory is not silently skipped](X-32-console-test-discovery.md) · found by X-28's implementor while wiring the console into CI, 2026-08-01: `node --test test/*.test.mjs` matches one directory level, so a test added under test/<subdir>/ never runs and CI stays green
+- [X-33 — CI proves the MSRV the crate promises](X-33-msrv-job.md) · split from X-30, 2026-08-01: the job could not land while rust-version was false. The number is now 1.88 (observed, not chosen), so the job can be written against a promise that holds
+- [X-34 — The console presents an execution platform, not a catalogue browser](X-34-console-shell.md) · owner-raised 2026-08-01: 'flux-exchange is the execution platform - not just a catalog explorer'. The console renders one reference view and no chrome, while the service behind it holds credentials for many tenants and runs operations for them
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
