@@ -40,6 +40,14 @@ Replace `console/src/fixtures/catalog.ts` with the served catalogue.
   `application/json`, operations `200`, unknown connector `404`). The console's own error path
   behaved correctly throughout: it named the endpoint and refused to render rather than showing an
   empty catalogue, which is the Acceptance item working.
+- **Second follow-up fix:** `#/explorer#airtable` resolved to "unknown path". `CatalogSnapshot` and
+  `OperationDetail` emit `/explorer#<provider>` — a page plus an anchor, which `ProviderCard` renders
+  a matching `id` for, and an ordinary URL on the path router the components were written against.
+  This console resolves paths into a *fragment*, and a URL has one fragment, so the second `#` made
+  the first swallow the rest. Fixed in `src/routing.ts` (the host's `PathResolver` seam, **not** the
+  carried components): the anchor is percent-encoded on the way out, split off on the way back in,
+  carried on the `Route`, and scrolled to after render. Old links of the broken shape now resolve
+  too. Guarded by `console/test/routing.test.mjs`.
 - Known limits, stated rather than discovered later: the console and API must share an origin in
   deployment (no CORS story), the catalogue loads N+1 requests, and one failing connector fails the whole load by
   design — a partial catalogue rendered as complete is the same lie as an empty one.
