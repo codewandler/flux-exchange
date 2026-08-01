@@ -6,9 +6,24 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-01
+
 ## [0.1.0] - 2026-08-01
 
 ### Added
+
+- **One tenant cannot make every other tenant's writes slow** (X-22). Nothing bounded a credential's
+  size or how much of the store one tenant could occupy, and the file store rewrites and `fsync`s a
+  single file under one mutex on every write — so one tenant's data set the latency of every other
+  tenant's writes. That is shared fate between tenants in the service whose central claim is that
+  tenants share nothing.
+
+  Two bounds, because they answer different questions. **8 KiB per credential** is about *kind*: a
+  credential is a token or a signing secret, and at the largest an RSA-4096 PEM is ~3.2 KiB, so a
+  value that does not fit is not a credential that grew. **64 KiB per tenant** is the one that
+  protects the neighbours — a per-value bound alone leaves a ceiling that grows every time upstream
+  publishes another connector. An oversized value is `413`; an exhausted allowance is `409`, because
+  the remedy is to disconnect something rather than to send less.
 
 - **A browser-facing OIDC endpoint is refused in cleartext too** (X-23). X-17's refusal covered only
   the token endpoint and the key set, on the argument that a browser enforces the transport of the
