@@ -21,6 +21,13 @@
 //! [`JWKS_URI_ENV`]. Every endpoint it talks to — authorization, token, key set — is named by the
 //! operator, so which provider and which keys can mint a session here is legible from the
 //! environment alone rather than from a document re-fetched at runtime.
+//!
+//! # Cleartext is refused, and that is a claim about the channel only
+//!
+//! Every configured URL must be `https`, or `http` on loopback for a local test provider. See
+//! [`TRANSPORT_CHECKED`] for which variables and why each is on the list, and
+//! [`on_a_channel_this_host_will_use`] for the rule and — the part worth reading — for what
+//! satisfying it does **not** say. It does not say the operator named the right provider.
 
 use std::fmt;
 
@@ -33,11 +40,14 @@ use exchange_host::{Tenant, TenantError};
 pub const ISSUER_ENV: &str = "FLUX_EXCHANGE_OIDC_ISSUER";
 
 /// Where `/api/signin` sends the browser.
+///
+/// **Must be `https`, or `http` on loopback.** See [`TRANSPORT_CHECKED`]: the URL this host builds
+/// on top of it carries `state`, the `nonce` and the PKCE challenge.
 pub const AUTHORIZATION_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_AUTHORIZATION_ENDPOINT";
 
 /// Where the authorization code is redeemed, back-channel.
 ///
-/// **Must be `https`, or `http` on loopback.** See [`BACK_CHANNEL`]: this is the request that
+/// **Must be `https`, or `http` on loopback.** See [`TRANSPORT_CHECKED`]: this is the request that
 /// carries [`CLIENT_SECRET_ENV`] as HTTP Basic credentials.
 pub const TOKEN_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT";
 
@@ -50,6 +60,9 @@ pub const TOKEN_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT";
 /// what it says — would mean the set of keys that can mint a session here is decided by a document
 /// this host re-fetches at runtime, so an operator reading the configuration could not tell which
 /// keys those are. One more variable buys a deployment whose trust is legible from its environment.
+///
+/// **Must be `https`, or `http` on loopback.** See [`TRANSPORT_CHECKED`]: this decides which keys
+/// can mint a session here.
 pub const JWKS_URI_ENV: &str = "FLUX_EXCHANGE_OIDC_JWKS_URI";
 
 /// This host's client identifier at the provider. Checked against the `aud` claim.
@@ -59,29 +72,59 @@ pub const CLIENT_ID_ENV: &str = "FLUX_EXCHANGE_OIDC_CLIENT_ID";
 pub const CLIENT_SECRET_ENV: &str = "FLUX_EXCHANGE_OIDC_CLIENT_SECRET";
 
 /// Where the provider sends the browser back, exactly as registered with the provider.
+///
+/// **Must be `https`, or `http` on loopback.** See [`TRANSPORT_CHECKED`]: this is the address the
+/// authorization code comes back to.
 pub const REDIRECT_URI_ENV: &str = "FLUX_EXCHANGE_OIDC_REDIRECT_URI";
 
 /// The tenant every principal this provider authenticates belongs to. See [`OidcConfig::tenant`].
 pub const TENANT_ENV: &str = "FLUX_EXCHANGE_OIDC_TENANT";
 
-/// The variables naming an endpoint this host talks to **itself**, which must therefore be on a
-/// channel worth sending a secret over.
+/// Every variable naming a URL this host will not accept in cleartext, in [`REQUIRED`]'s order.
 ///
-/// # Why these two and not every URL here
+/// # Why the name changed
 ///
+/// X-17 called this `BACK_CHANNEL` and it held two variables, on the argument that only the
+/// requests this process makes *itself* are ones this process can insist on TLS for.
 /// [`TOKEN_ENDPOINT_ENV`] is the one request that carries [`CLIENT_SECRET_ENV`], as HTTP Basic
 /// credentials — in cleartext, over `http`, to anybody on the path, with no refusal and no symptom.
 /// [`JWKS_URI_ENV`] carries no secret, but it decides **which keys can mint a session here**, and a
-/// key set an attacker can rewrite in flight is a host that accepts tokens they signed. Both are
-/// this process talking to the provider, where the only thing that can insist on TLS is this
-/// process.
+/// key set an attacker can rewrite in flight is a host that accepts tokens they signed.
 ///
-/// [`AUTHORIZATION_ENDPOINT_ENV`] and [`REDIRECT_URI_ENV`] are deliberately **not** here. Those are
-/// addresses a *browser* navigates to, so the browser is the thing that enforces their transport,
-/// and a `redirect_uri` is in any case re-checked by the provider against a registration this host
-/// does not own. Widening this list to them is a defensible separate story; folding it in here
-/// would refuse configurations for reasons this story did not weigh.
-const BACK_CHANNEL: &[&str] = &[TOKEN_ENDPOINT_ENV, JWKS_URI_ENV];
+/// X-23 added the two browser-facing variables, which makes `BACK_CHANNEL` a name that contradicts
+/// its contents. What the list actually is, and now says, is *the URLs whose transport this host
+/// checks* — the property they share is the check, not the direction of the request.
+///
+/// # Why the browser-facing two are in it after all
+///
+/// X-17 and X-19 left them out because a browser navigates to them, so the browser enforces their
+/// transport, and a `redirect_uri` is in any case re-checked by the provider against a registration
+/// this host does not own. Both halves of that are true and neither is the whole argument:
+///
+/// - The browser does not *refuse* an `http` URL; it uses it. And the authorization URL this host
+///   builds on top of [`AUTHORIZATION_ENDPOINT_ENV`] carries `state`, the `nonce` and the PKCE
+///   challenge, each of which is readable and modifiable in flight over `http` — which is the same
+///   position X-15 closed from the other direction, by drawing those values from the OS and
+///   spending them once.
+/// - An operator who typed `http` did not decide anything. They made a mistake, at startup, in a
+///   place this host is looking, and the previous behaviour was to say nothing about it.
+///
+/// # What is deliberately *not* here
+///
+/// [`ISSUER_ENV`] is a URL and is not on this list, because it is not a channel: nothing dials it —
+/// this host does no discovery, see the module documentation — and it is compared to the `iss` claim
+/// as a string. A scheme rule on it would be a rule about spelling, not about transport.
+///
+/// # What passing this does not promise
+///
+/// See [`on_a_channel_this_host_will_use`]. `https` short-circuits before the host is even
+/// examined, so this vouches for the **channel** and never for who is on the other end of it.
+const TRANSPORT_CHECKED: &[&str] = &[
+    AUTHORIZATION_ENDPOINT_ENV,
+    TOKEN_ENDPOINT_ENV,
+    JWKS_URI_ENV,
+    REDIRECT_URI_ENV,
+];
 
 /// Every variable this module reads, in the order a refusal lists them.
 const REQUIRED: &[&str] = &[
@@ -218,28 +261,32 @@ impl OidcConfig {
         let tenant =
             Tenant::new(tenant).map_err(|source| ConfigRefusal::UnusableTenant { source })?;
 
-        // The back channel, refused here rather than at somebody's first sign-in. A host that
-        // starts and then sends its client secret in cleartext has already sent it by the time
-        // anybody could notice; a host that refuses to offer sign-in has sent nothing.
+        // Every transport-checked URL, refused here rather than at somebody's first sign-in. A host
+        // that starts and then sends its client secret in cleartext has already sent it by the time
+        // anybody could notice; a host that refuses to offer sign-in has sent nothing. The same
+        // moment serves the browser-facing two for a different reason: the operator is present at
+        // startup, and a mistyped scheme is something they can still fix cheaply.
         //
-        // Named in `BACK_CHANNEL`'s order and all at once, following `Unset`: an operator who got
-        // one of these wrong very likely got both wrong the same way, and fixing them one restart
-        // at a time is a thing we would be doing to them.
+        // Named in `TRANSPORT_CHECKED`'s order and all at once, following `Unset`: an operator who
+        // got one of these wrong very likely got all of them wrong the same way, and fixing them one
+        // restart at a time is a thing we would be doing to them.
         //
         // Paired by name rather than positionally: the positional read above already has
         // `every_configured_value_lands_in_its_own_field` holding it in step with `REQUIRED`, and
         // one such list is enough for this module to be carrying.
         let insecure: Vec<&'static str> = [
+            (AUTHORIZATION_ENDPOINT_ENV, authorization_endpoint.as_str()),
             (TOKEN_ENDPOINT_ENV, token_endpoint.as_str()),
             (JWKS_URI_ENV, jwks_uri.as_str()),
+            (REDIRECT_URI_ENV, redirect_uri.as_str()),
         ]
         .into_iter()
-        .filter(|(_, endpoint)| !carries_a_secret_safely(endpoint))
+        .filter(|(_, endpoint)| !on_a_channel_this_host_will_use(endpoint))
         .map(|(name, _)| name)
         .collect();
 
         if !insecure.is_empty() {
-            return Err(ConfigRefusal::InsecureBackChannel { insecure });
+            return Err(ConfigRefusal::InsecureEndpoint { insecure });
         }
 
         Ok(Self {
@@ -348,7 +395,8 @@ impl OidcConfig {
     }
 }
 
-/// Whether this host will send its client secret — and trust a key set — over `endpoint`.
+/// Whether `endpoint` is on a channel this host will put an OIDC value on — its client secret, a
+/// key set it trusts, or the `state`, `nonce` and PKCE challenge it sends a browser away with.
 ///
 /// # The judgment call X-17 had to make: cleartext is refused, except on loopback
 ///
@@ -376,7 +424,23 @@ impl OidcConfig {
 /// **Which host this is deciding about** is [`host_in`]'s problem, and it is the whole of the
 /// difficulty: a rule about loopback is worth nothing if the address it reads is not the one reqwest
 /// dials. See that function for what the agreement promises and where it stops.
-fn carries_a_secret_safely(endpoint: &str) -> bool {
+///
+/// # What a `true` here does not promise
+///
+/// **This is a statement about the channel and never about who is on the other end of it.** X-19
+/// recorded the mechanism and X-23 did not change it: `https` returns immediately, before the host
+/// is looked at at all. So a `true` means *if that URL is dialled or navigated to, it will be over
+/// TLS* — nothing more. In particular it does not say that
+/// [`AUTHORIZATION_ENDPOINT_ENV`] belongs to [`ISSUER_ENV`]'s provider, that [`JWKS_URI_ENV`]
+/// publishes the keys that provider actually signs with, that [`REDIRECT_URI_ENV`] is a registration
+/// the provider will honour — the provider re-checks that one against a registration this host does
+/// not own — or that the certificate on the far side is anybody in particular beyond being valid for
+/// the name the operator wrote. An operator who points these at a host they did not mean to gets a
+/// confidential channel to the wrong place, and this function is not the thing that would notice.
+///
+/// Extending the check to the browser-facing variables widened *which URLs* get this promise. It did
+/// not widen the promise.
+fn on_a_channel_this_host_will_use(endpoint: &str) -> bool {
     let Some((scheme, rest)) = endpoint.split_once("://") else {
         return false;
     };
@@ -397,7 +461,7 @@ fn carries_a_secret_safely(endpoint: &str) -> bool {
 ///
 /// The thing that matters is not that this parser is *correct*; it is that it agrees with the
 /// parser that actually dials the endpoint — `url`, which reqwest resolves the very same string
-/// with. Where the two disagree in the *admitting* direction, [`carries_a_secret_safely`] clears a
+/// with. Where the two disagree in the *admitting* direction, [`on_a_channel_this_host_will_use`] clears a
 /// configuration whose client secret then goes to a host this module never looked at. X-17 shipped
 /// exactly one such disagreement: WHATWG ends a special scheme's authority at `\` as well as at
 /// `/`, `?` and `#`, so `url` reads `http://evil.example\@127.0.0.1/token` as `evil.example` while
@@ -491,14 +555,15 @@ pub enum ConfigRefusal {
         source: TenantError,
     },
 
-    /// A back-channel endpoint is not on a channel this host will use.
+    /// A configured URL is not on a channel this host will use.
     ///
-    /// See [`carries_a_secret_safely`] for what is permitted and why. Refused at startup rather
-    /// than at the first sign-in, because by the time a sign-in has failed the client secret has
-    /// already crossed the network in cleartext.
-    InsecureBackChannel {
-        /// Every offending variable, in [`BACK_CHANNEL`]'s order. Names only the variables — the
-        /// value is the operator's own and does not need repeating back at them.
+    /// See [`on_a_channel_this_host_will_use`] for what is permitted and why, and
+    /// [`TRANSPORT_CHECKED`] for which variables this applies to. Refused at startup rather than at
+    /// the first sign-in, because by the time a sign-in has failed the client secret has already
+    /// crossed the network in cleartext and a `state` has already been offered to the path.
+    InsecureEndpoint {
+        /// Every offending variable, in [`TRANSPORT_CHECKED`]'s order. Names only the variables —
+        /// the value is the operator's own and does not need repeating back at them.
         insecure: Vec<&'static str>,
     },
 }
@@ -534,15 +599,22 @@ impl fmt::Display for ConfigRefusal {
             ),
             // Says what is wrong, what the rule is, and what the loopback exception is for — an
             // operator meeting this at startup is very often the one running a local test provider.
-            Self::InsecureBackChannel { insecure } => write!(
+            //
+            // What is at stake is said as well as what the rule is, because an operator who reads
+            // "must be https" about a URL a *browser* navigates to is entitled to ask why. The
+            // clauses are in `TRANSPORT_CHECKED`'s order, one per variable, so the list above and
+            // the reasons below can be read against each other.
+            Self::InsecureEndpoint { insecure } => write!(
                 f,
                 "{} {} not on a channel this host will use. {} must each name an https URL — or an \
-                 http one on loopback, for a local test provider: the first carries \
-                 {CLIENT_SECRET_ENV} as HTTP Basic credentials, and the second decides which keys \
-                 can mint a session here. OIDC sign-in will not be offered",
+                 http one on loopback, for a local test provider. Between them they carry the \
+                 state, the nonce and the PKCE challenge a browser is sent away with, \
+                 {CLIENT_SECRET_ENV} as HTTP Basic credentials, the key set that decides which \
+                 tokens can mint a session here, and the authorization code on its way back. OIDC \
+                 sign-in will not be offered. /health and the catalogue are unaffected",
                 insecure.join(", "),
                 if insecure.len() > 1 { "are" } else { "is" },
-                BACK_CHANNEL.join(" and "),
+                TRANSPORT_CHECKED.join(", "),
             ),
         }
     }
@@ -551,7 +623,7 @@ impl fmt::Display for ConfigRefusal {
 impl std::error::Error for ConfigRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Unset { .. } | Self::InsecureBackChannel { .. } => None,
+            Self::Unset { .. } | Self::InsecureEndpoint { .. } => None,
             Self::UnusableTenant { source } => Some(source),
         }
     }
@@ -785,7 +857,7 @@ mod tests {
 
             assert_eq!(
                 refusal,
-                ConfigRefusal::InsecureBackChannel {
+                ConfigRefusal::InsecureEndpoint {
                     insecure: vec![variable],
                 },
                 "and refused for its transport, not for something else",
@@ -803,31 +875,50 @@ mod tests {
         }
     }
 
-    /// Both at once, following `Unset`: an operator who got one wrong very likely got both wrong.
+    /// All of them at once, following `Unset`: an operator who got one wrong — a proxy in front of
+    /// everything, a copied-and-edited block of settings — very likely got all of them wrong.
     #[test]
-    fn a_refusal_names_every_cleartext_back_channel_at_once() {
+    fn a_refusal_names_every_cleartext_endpoint_at_once() {
         let mut environment = complete();
+        environment.insert(
+            AUTHORIZATION_ENDPOINT_ENV,
+            "http://accounts.example.com/a".to_string(),
+        );
         environment.insert(
             TOKEN_ENDPOINT_ENV,
             "http://accounts.example.com/t".to_string(),
         );
         environment.insert(JWKS_URI_ENV, "http://keys.example.com/j".to_string());
+        environment.insert(
+            REDIRECT_URI_ENV,
+            "http://exchange.example.com/api/signin/callback".to_string(),
+        );
 
-        let refusal = read(&environment).expect_err("both are refused");
+        let refusal = read(&environment).expect_err("all four are refused");
 
         assert_eq!(
             refusal,
-            ConfigRefusal::InsecureBackChannel {
-                insecure: BACK_CHANNEL.to_vec(),
+            ConfigRefusal::InsecureEndpoint {
+                insecure: TRANSPORT_CHECKED.to_vec(),
             },
-            "one restart, not two",
+            "one restart, not four",
         );
+
+        // Named in one message, and every one of them named. An operator who has to discover the
+        // fourth by restarting three times has been made to do our bookkeeping.
+        let message = refusal.to_string();
+        for variable in TRANSPORT_CHECKED {
+            assert!(
+                message.contains(variable),
+                "{variable} is missing: {message}"
+            );
+        }
     }
 
     /// The judgment call, pinned: **loopback http is permitted, everything else is not.**
     ///
     /// A local test identity provider is a real workflow and the rule has to leave room for it —
-    /// see [`carries_a_secret_safely`], which carries the whole argument. The refused half of this
+    /// see [`on_a_channel_this_host_will_use`], which carries the whole argument. The refused half of this
     /// table is the part that matters: a private range is still a network, an unrecognised scheme
     /// is not a channel whose safety this host has established, and `127.0.0.1` appearing as
     /// *userinfo* is a host that is not on loopback at all.
@@ -844,7 +935,7 @@ mod tests {
             "http://user:pass@127.0.0.1:8080/token",
         ] {
             assert!(
-                carries_a_secret_safely(permitted),
+                on_a_channel_this_host_will_use(permitted),
                 "{permitted} must be permitted",
             );
         }
@@ -866,7 +957,7 @@ mod tests {
             "",
         ] {
             assert!(
-                !carries_a_secret_safely(refused),
+                !on_a_channel_this_host_will_use(refused),
                 "{refused} must be refused",
             );
         }
@@ -874,7 +965,7 @@ mod tests {
 
     /// **X-19.** The parser that *decides* and the parser that *dials* must not disagree.
     ///
-    /// [`carries_a_secret_safely`] answers "is this host loopback"; `url` 2.5.8 — which reqwest
+    /// [`on_a_channel_this_host_will_use`] answers "is this host loopback"; `url` 2.5.8 — which reqwest
     /// resolves the very same string with — answers "what host is this". Where those two disagree in
     /// the *admitting* direction, this module clears a configuration that then sends
     /// [`CLIENT_SECRET_ENV`] as HTTP Basic credentials, in cleartext, to whatever host reqwest
@@ -935,7 +1026,7 @@ mod tests {
             "http:/\\127.0.0.1/token",
         ] {
             assert!(
-                !carries_a_secret_safely(hostile),
+                !on_a_channel_this_host_will_use(hostile),
                 "{hostile:?} must be refused: `url` does not read a loopback host out of it",
             );
         }
@@ -951,28 +1042,154 @@ mod tests {
             "https://accounts.example.com/token",
         ] {
             assert!(
-                carries_a_secret_safely(genuine),
+                on_a_channel_this_host_will_use(genuine),
                 "{genuine:?} must still be permitted",
             );
         }
     }
 
-    /// Every variable [`BACK_CHANNEL`] claims is checked is actually checked.
+    /// Every variable [`TRANSPORT_CHECKED`] claims is checked is actually checked, and every
+    /// variable that is checked is claimed.
     ///
-    /// The constant is what the refusal message tells an operator the rule applies to, so a
-    /// variable listed there and not enforced would be a promise this module does not keep.
+    /// The constant is what the refusal message tells an operator the rule applies to, so a variable
+    /// listed there and not enforced would be a promise this module does not keep. The converse
+    /// matters as much now that the list is four long and lives beside a second list: a variable
+    /// enforced in [`OidcConfig::read`]'s pairing and missing from the constant would be refused
+    /// under a rule the message never stated.
     #[test]
-    fn every_back_channel_variable_is_actually_enforced() {
-        for variable in BACK_CHANNEL {
+    fn every_transport_checked_variable_is_actually_enforced_and_no_other() {
+        for variable in TRANSPORT_CHECKED {
             let mut environment = complete();
             environment.insert(variable, "http://not-loopback.example/x".to_string());
 
             assert_eq!(
                 read(&environment).expect_err(&format!("{variable} is enforced")),
-                ConfigRefusal::InsecureBackChannel {
+                ConfigRefusal::InsecureEndpoint {
                     insecure: vec![variable],
                 },
             );
+        }
+
+        // The other direction. Setting *every* variable to a cleartext URL and comparing the
+        // refusal against the constant catches an enforced-but-unlisted variable, which iterating
+        // the constant cannot see. `ISSUER_ENV` is the live case: it is a URL, it is deliberately
+        // not transport-checked, and this is what says so mechanically rather than in prose.
+        let mut environment = complete();
+        for variable in REQUIRED {
+            environment.insert(variable, "http://not-loopback.example/x".to_string());
+        }
+        // `Tenant::new` runs before the transport check and would refuse that value first, which
+        // would make this assert about the wrong thing. The tenant is not a URL in any case.
+        environment.insert(TENANT_ENV, "acme".to_string());
+
+        assert_eq!(
+            read(&environment).expect_err("a wholly cleartext environment is refused"),
+            ConfigRefusal::InsecureEndpoint {
+                insecure: TRANSPORT_CHECKED.to_vec(),
+            },
+            "exactly the listed variables are enforced, and in the listed order",
+        );
+    }
+
+    /// **X-23.** A browser-facing endpoint is refused in cleartext too, naming its own variable.
+    ///
+    /// X-17 and X-19 checked only the two variables that carry a secret directly, on the argument
+    /// that a browser enforces the transport of the addresses it navigates to. It does not: the
+    /// browser will use an `http` authorization URL exactly as given, and that URL carries `state`,
+    /// the `nonce` and the PKCE challenge, each readable and modifiable in flight. An operator who
+    /// typed `http` here made a mistake this host can catch at startup, and until now it said
+    /// nothing at all.
+    ///
+    /// Asserted through the message rather than through the variant, so this test says the same
+    /// thing before and after the fix — it is the failing-first test, and it has to compile against
+    /// the code that does not yet have the refusal. The variant itself is pinned by
+    /// `every_transport_checked_variable_is_actually_enforced_and_no_other`, and the other half of
+    /// the rule — that a fix which refuses everything is not a fix — by
+    /// `every_checked_variable_admits_https_and_loopback_http`.
+    #[test]
+    fn a_cleartext_browser_facing_endpoint_is_refused_at_startup_by_name() {
+        for (variable, cleartext) in [
+            (
+                AUTHORIZATION_ENDPOINT_ENV,
+                "http://accounts.example.com/authorize",
+            ),
+            (
+                REDIRECT_URI_ENV,
+                "http://exchange.example.com/api/signin/callback",
+            ),
+        ] {
+            let mut environment = complete();
+            environment.insert(variable, cleartext.to_string());
+
+            let refusal = read(&environment).expect_err(&format!(
+                "a cleartext {variable} must be refused at startup"
+            ));
+
+            let message = refusal.to_string();
+            assert!(
+                message.contains(variable),
+                "the operator must be told which variable to fix: {message}",
+            );
+            // Refused for its transport and not for something else, and told the rule *and* the
+            // exception — the operator meeting this is very often running a local test provider.
+            assert!(message.contains("https"), "{message}");
+            assert!(message.contains("loopback"), "{message}");
+        }
+    }
+
+    /// **X-23, and the half that keeps the refusal from being a wall.** Both spellings that must go
+    /// on being accepted, for every transport-checked variable, in one run.
+    ///
+    /// The loopback exemption is the load-bearing one and it is asserted here *through the
+    /// variables* rather than through the predicate alone. X-17's argument for it is unchanged by
+    /// widening the list: **a local test identity provider is a real workflow**, it is how somebody
+    /// exercises this flow before they have a certificate for anything, and forbidding it pushes
+    /// them towards disabling verification somewhere or testing against a production provider. A
+    /// browser will navigate to `http://localhost:9000/authorize` quite happily, and those packets
+    /// reach no network interface, so there is no path to be on.
+    ///
+    /// The `https` half is here rather than left to `a_complete_environment_configures_the_flow`
+    /// because a refusal is only correct in the company of what it still admits.
+    #[test]
+    fn every_checked_variable_admits_https_and_loopback_http() {
+        // A whole local provider: every checked variable on loopback, spelled three different ways
+        // so this does not pass on one accepted form.
+        let mut loopback = complete();
+        loopback.insert(
+            AUTHORIZATION_ENDPOINT_ENV,
+            "http://localhost:9000/authorize".to_string(),
+        );
+        loopback.insert(
+            TOKEN_ENDPOINT_ENV,
+            "http://127.0.0.1:9000/token".to_string(),
+        );
+        loopback.insert(JWKS_URI_ENV, "http://[::1]:9000/jwks".to_string());
+        loopback.insert(
+            REDIRECT_URI_ENV,
+            "http://127.0.0.1:8080/api/signin/callback".to_string(),
+        );
+
+        let config =
+            read(&loopback).expect("a local test identity provider must still be admitted");
+        assert_eq!(
+            config.authorization_endpoint(),
+            "http://localhost:9000/authorize",
+            "and admitted unaltered — refuse; never repair",
+        );
+        assert_eq!(
+            config.redirect_uri(),
+            "http://127.0.0.1:8080/api/signin/callback",
+        );
+
+        // And the ordinary deployment, in the same run: `https` everywhere, admitted.
+        let https = read(&complete()).expect("an https environment must still be admitted");
+        for (variable, configured) in [
+            (AUTHORIZATION_ENDPOINT_ENV, https.authorization_endpoint()),
+            (TOKEN_ENDPOINT_ENV, https.token_endpoint()),
+            (JWKS_URI_ENV, https.jwks_uri()),
+            (REDIRECT_URI_ENV, https.redirect_uri()),
+        ] {
+            assert_eq!(configured, complete()[variable], "for {variable}");
         }
     }
 

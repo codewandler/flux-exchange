@@ -31,7 +31,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
-use crate::oidc::config::OidcConfig;
+use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
 use crate::oidc::Oidc;
 use crate::state::AppState;
@@ -153,7 +153,7 @@ fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, Sta
 /// Unset and unconfigured binds nothing, which is the state a reachable bind is already refused in.
 fn compose_identity() -> Result<AppState, StartupRefusal> {
     let Some(dev) = DevIdentity::armed()? else {
-        return Ok(compose_oidc());
+        return Ok(compose_oidc(OidcConfig::from_env()));
     };
 
     // Named as such at startup, and at `warn` rather than `info`: this line is the difference
@@ -181,8 +181,13 @@ fn compose_identity() -> Result<AppState, StartupRefusal> {
 /// has not set up federation yet. The Acceptance is explicit that this must be a startup message
 /// and an explanatory page rather than a panic — and, just as explicitly, that it must not be a
 /// login that looks fine and dies at the callback. Both branches below refuse at `/api/signin`.
-fn compose_oidc() -> AppState {
-    match OidcConfig::from_env() {
+///
+/// Takes the configuration rather than reading it, so the "never a `StartupRefusal`" claim is
+/// testable without a test mutating the process environment out from under its neighbours — see
+/// `a_cleartext_endpoint_refusal_keeps_the_rest_of_the_host_serving`. The only production caller
+/// passes [`OidcConfig::from_env`].
+fn compose_oidc(configured: Result<OidcConfig, ConfigRefusal>) -> AppState {
+    match configured {
         Err(refusal) => {
             // Names every unset variable in one message, so an operator fixes them in one pass
             // rather than one restart at a time. At `warn` rather than `error`: on a host nobody
@@ -300,7 +305,12 @@ mod tests {
 
     use std::io::ErrorKind;
 
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
     use tokio::net::TcpStream;
+    use tower::Service;
+
+    use crate::oidc::config::AUTHORIZATION_ENDPOINT_ENV;
 
     /// Send a whole request.
     ///
@@ -378,6 +388,61 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
         assert!(response.contains(r#""status":"ok""#), "{response}");
+    }
+
+    /// Drive one anonymous `GET` through a fully assembled app and report what it answered.
+    ///
+    /// The same shape as `routes::tests::anonymous_get`, over an [`AppState`] this module composed
+    /// rather than one written out in the test — which is the whole point of it being here.
+    async fn anonymous_get(state: AppState, path: &str) -> StatusCode {
+        let mut service = routes::app(state).into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("a router is always ready");
+
+        let request = HttpRequest::builder()
+            .uri(path)
+            .body(Body::empty())
+            .expect("a well-formed request");
+
+        service
+            .call(request)
+            .await
+            .expect("a router is infallible")
+            .status()
+    }
+
+    /// **X-23.** A cleartext endpoint is refused, and the rest of the host goes on serving.
+    ///
+    /// This is where "the refusal is a `ConfigRefusal`" stops being a type and becomes a behaviour.
+    /// `oidc::config`'s module documentation requires that an OIDC problem cost the operator sign-in
+    /// and nothing else — killing the process would take `/health` and the catalogue down to punish
+    /// somebody who mistyped a scheme — and [`compose_oidc`] is the only place that promise is kept
+    /// or broken. It composes a state; there is no exit path through it.
+    ///
+    /// The chain has two links and this is the second. That a cleartext authorization endpoint
+    /// produces exactly this refusal is
+    /// `oidc::config::tests::every_transport_checked_variable_is_actually_enforced_and_no_other`'s
+    /// claim, asserted there because `OidcConfig::read` is private to that module.
+    #[tokio::test]
+    async fn a_cleartext_endpoint_refusal_keeps_the_rest_of_the_host_serving() {
+        let state = compose_oidc(Err(ConfigRefusal::InsecureEndpoint {
+            insecure: vec![AUTHORIZATION_ENDPOINT_ENV],
+        }));
+
+        for (path, expected) in [
+            ("/health", StatusCode::OK),
+            ("/api/catalogue/connectors", StatusCode::OK),
+            // Sign-in is the one thing that is gone, and it says so rather than sending a browser
+            // to a provider over a channel this host refused.
+            ("/api/signin", StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            assert_eq!(
+                anonymous_get(state.clone(), path).await,
+                expected,
+                "for {path}",
+            );
+        }
     }
 
     /// The bind an operator gets when they set nothing.
