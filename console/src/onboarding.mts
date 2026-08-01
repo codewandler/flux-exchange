@@ -288,13 +288,23 @@ export const STEPS: readonly Step[] = [
         'the vendor received it. A vendor’s own 4xx comes back as 200 with its response in ' +
         'content, unshaped — the vendor said no and we could not ask are different events. A host ' +
         'with no credential store bound runs nothing and says so.',
+      // The last two sentences changed in X-62 and the change is the story. They used to read
+      // "Grants are held per tenant and there is no route that edits one, so a tenant nobody has
+      // granted anything runs nothing at all: ask whoever operates this deployment" — true when
+      // X-13 shipped the gate fail-closed with no surface behind it, and false the moment one
+      // landed. A claim about this build has to leave the page in the change that makes it false;
+      // `the_invoke_warning_names_the_route_a_grant_is_edited_at` is what holds that.
       warn:
         'This route is gated by identity and by grant. An operation runs only if a grant your ' +
         'tenant holds admits it, decided from what the operation declares — its risk, its effects, ' +
         'its idempotency — rather than from a list of names; anything else is refused with 403 ' +
         'not_granted, before any credential is read and with nothing sent. Grants are held per ' +
-        'tenant and there is no route that edits one, so a tenant nobody has granted anything runs ' +
-        'nothing at all: ask whoever operates this deployment.',
+        'tenant, and a signed-in human of that tenant edits them at PUT /api/grants, stating a ' +
+        'connector and at most a risk level rather than a list of operation ids. An agent cannot ' +
+        'write there and cannot read there either: a caller able to enumerate a tenant’s policy ' +
+        'can plan around it, which is why a refusal here names the operation and never the rule ' +
+        'that refused it. So a tenant nobody has granted anything still runs nothing at all — ask ' +
+        'whoever holds the tenant for a grant that admits what you need.',
     },
     pending: '',
   },

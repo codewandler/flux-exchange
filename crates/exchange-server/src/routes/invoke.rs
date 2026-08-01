@@ -83,11 +83,14 @@ use crate::state::AppState;
 /// `exchange_host::Grants` is `#[cfg(unix)]`, because a planted grant decides what this host will
 /// run and the file mode is what keeps that to this process's user. The port is not gated, so a
 /// composition on another platform binds its own store and still needs a name to quote.
+///
+/// `pub(super)` since X-62: [`grants`](super::grants) refuses in the same terms when no store is
+/// bound, and one setting quoted from two places would be two strings to keep in step.
 #[cfg(unix)]
-const GRANT_SETTING: &str = exchange_host::GRANT_STORE_SETTING;
+pub(super) const GRANT_SETTING: &str = exchange_host::GRANT_STORE_SETTING;
 /// The same, where the file store does not exist.
 #[cfg(not(unix))]
-const GRANT_SETTING: &str = "FLUX_EXCHANGE_GRANTS";
+pub(super) const GRANT_SETTING: &str = "FLUX_EXCHANGE_GRANTS";
 
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {

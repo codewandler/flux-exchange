@@ -110,8 +110,9 @@ knows today from the credential it issued — no grant, no connector metadata, n
 authentication-shaped, and deferring it would ship a revocation mechanism that does not revoke.
 
 **How far it reaches.** ⚠ *"Only here" was true when this was written and is not now — X-47 gated the
-connection-settings write and X-54 gated credential supply and rotation, all to `User`. Four routes
-are kind-gated; `routes::KIND_GATED` is the enforced list.* The argument below still stands and is
+connection-settings write, X-54 gated credential supply and rotation, and X-62 gated reading and
+editing a tenant's grants, all to `User`. Six routes are kind-gated; `routes::KIND_GATED` is the
+enforced list.* The argument below still stands and is
 what this section is for. `DELETE /api/connections/{connector}` stays open to every
 kind: it destroys tenant data inside the tenant the caller already belongs to, an operator can see it
 and undo it by reconnecting, and nothing about it survives revocation of the token that did it.
@@ -137,8 +138,18 @@ grant-shaped one, so it belongs to X-13 rather than to a widened route table.
   wrong twice in the same direction — claiming a narrower set of exceptions than the code enforced —
   and a design that quietly grows exceptions is how the list stops being read.*
 
-  **What is left is a gap of a different shape**: no surface edits a grant. See
-  `docs/designs/invoke.md` §6.
+  ~~**What is left is a gap of a different shape**: no surface edits a grant.~~ **X-62 closed that
+  too**: `GET`/`PUT /api/grants` read and replace a tenant's grants and `POST /api/grants/preview`
+  evaluates a proposed one, all three admitting a `User` and nothing else. So the count above is now
+  **six** kind-gated routes rather than four, and `routes::KIND_GATED` remains the enforced list.
+
+  It matters for this design in one specific way, and it is the *read* rather than the write: an
+  agent may not read its own tenant's grants either. That is not tidiness — `admit_grant` refuses
+  without naming the axis that refused it, precisely so that a token cannot enumerate a tenant's
+  policy one call at a time, and a read open to every kind would have handed the whole of it over in
+  a single request. The cost is stated rather than discovered: **an agent cannot discover in advance
+  what it may run.** It finds out by being refused, terminally, with the operation named and the
+  remedy being to ask whoever holds the tenant. See `docs/designs/invoke.md` §6.
 - **It does not add a second identity port.** `Identity` already exists and both current providers
   bind it. A third binding is the shape; a parallel mechanism is not.
 - **It does not mint tokens for humans.** Sign-in exists and works. An agent principal is a different
