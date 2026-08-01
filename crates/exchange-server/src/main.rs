@@ -32,6 +32,8 @@ use tracing_subscriber::EnvFilter;
 use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
 use crate::oidc::config::OidcConfig;
+use crate::oidc::http_exchange::HttpTokenExchange;
+use crate::oidc::Oidc;
 use crate::state::AppState;
 
 #[tokio::main]
@@ -188,20 +190,30 @@ fn compose_oidc() -> AppState {
             warn!("{refusal}");
             AppState::without_identity()
         }
-        Ok(config) => {
-            // Configured, and still not offered — because this build carries no client for the
-            // provider's token endpoint. Announced here rather than discovered at the callback, and
-            // at `error` because this *is* a fault: somebody configured a provider and will
-            // otherwise wonder why nothing happens.
-            error!(
-                issuer = config.issuer(),
-                "OIDC sign-in is configured but this build binds no token exchange, so no \
-                 authorization code could be redeemed and no sign-in can complete. /api/signin \
-                 explains rather than redirecting to a provider it cannot return from. See \
-                 docs/designs/oidc-signin.md",
-            );
-            AppState::oidc_without_a_token_exchange()
-        }
+        Ok(config) => match HttpTokenExchange::new(&config) {
+            Ok(exchange) => {
+                info!(
+                    issuer = config.issuer(),
+                    tenant = %config.tenant(),
+                    "OIDC sign-in is configured and the token exchange is bound",
+                );
+                AppState::with_oidc(Arc::new(Oidc::new(config, Arc::new(exchange))))
+            }
+            // The configuration is good and the HTTP client could not be built — a missing TLS
+            // backend, most plausibly. Still not a `StartupRefusal`: the same reasoning as an
+            // unconfigured provider, since /health and the catalogue are no less serveable for
+            // sign-in being unavailable. `/api/signin` explains rather than sending a browser to a
+            // provider this build could not return from.
+            Err(reason) => {
+                error!(
+                    issuer = config.issuer(),
+                    reason,
+                    "OIDC sign-in is configured but the token exchange could not be built, so no \
+                     authorization code could be redeemed and no sign-in can complete",
+                );
+                AppState::oidc_without_a_token_exchange()
+            }
+        },
     }
 }
 

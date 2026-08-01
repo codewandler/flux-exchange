@@ -29,8 +29,8 @@
 pub mod config;
 pub mod exchange;
 pub mod flow;
+pub mod http_exchange;
 pub mod pkce;
-mod sha256;
 
 use std::fmt;
 use std::sync::Arc;
@@ -71,9 +71,8 @@ impl Oidc {
     /// one must not end up with a half-built flow that fails at the callback. See
     /// [`SignIn`](crate::state::SignIn).
     ///
-    /// Unused in this binary until a composition binds a [`TokenExchange`]; see
-    /// `docs/designs/oidc-signin.md`.
-    #[allow(dead_code)]
+    /// The binary composes this with [`HttpTokenExchange`](super::oidc::http_exchange::HttpTokenExchange);
+    /// see `docs/designs/oidc-signin.md`.
     pub fn new(config: OidcConfig, exchange: Arc<dyn TokenExchange>) -> Self {
         Self {
             config,

@@ -14,13 +14,13 @@
 //! will fail later. "Refuse; never repair" is satisfied by refusing to *pretend sign-in works* — the
 //! failure the story names is a login that looks fine and dies at the callback.
 //!
-//! # There is no discovery
+//! # There is still no discovery
 //!
-//! A real client reads `/.well-known/openid-configuration` and learns the endpoints. That is an HTTP
-//! request, and this binary has no HTTP client (see [`super::exchange`]), so the authorization
-//! endpoint is configured rather than discovered. The token endpoint is not configured here at all:
-//! it belongs to whatever binds [`TokenExchange`](super::exchange::TokenExchange), which owns every
-//! call that leaves this process.
+//! A real client reads `/.well-known/openid-configuration` and learns the endpoints. This host does
+//! not, and now that it *has* an HTTP client that is a choice rather than a limitation: see
+//! [`JWKS_URI_ENV`]. Every endpoint it talks to — authorization, token, key set — is named by the
+//! operator, so which provider and which keys can mint a session here is legible from the
+//! environment alone rather than from a document re-fetched at runtime.
 
 use std::fmt;
 
@@ -34,6 +34,20 @@ pub const ISSUER_ENV: &str = "FLUX_EXCHANGE_OIDC_ISSUER";
 
 /// Where `/api/signin` sends the browser.
 pub const AUTHORIZATION_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_AUTHORIZATION_ENDPOINT";
+
+/// Where the authorization code is redeemed, back-channel.
+pub const TOKEN_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT";
+
+/// Where the provider publishes the keys that sign its id tokens.
+///
+/// # Why this is configured and not discovered
+///
+/// Following [`AUTHORIZATION_ENDPOINT_ENV`]'s precedent: every endpoint this host talks to is named
+/// by the operator. Discovery — fetching `<issuer>/.well-known/openid-configuration` and believing
+/// what it says — would mean the set of keys that can mint a session here is decided by a document
+/// this host re-fetches at runtime, so an operator reading the configuration could not tell which
+/// keys those are. One more variable buys a deployment whose trust is legible from its environment.
+pub const JWKS_URI_ENV: &str = "FLUX_EXCHANGE_OIDC_JWKS_URI";
 
 /// This host's client identifier at the provider. Checked against the `aud` claim.
 pub const CLIENT_ID_ENV: &str = "FLUX_EXCHANGE_OIDC_CLIENT_ID";
@@ -51,6 +65,8 @@ pub const TENANT_ENV: &str = "FLUX_EXCHANGE_OIDC_TENANT";
 const REQUIRED: &[&str] = &[
     ISSUER_ENV,
     AUTHORIZATION_ENDPOINT_ENV,
+    TOKEN_ENDPOINT_ENV,
+    JWKS_URI_ENV,
     CLIENT_ID_ENV,
     CLIENT_SECRET_ENV,
     REDIRECT_URI_ENV,
@@ -90,9 +106,9 @@ impl ClientSecret {
     /// The secret as it goes to the token endpoint.
     ///
     /// The single place the value leaves this type, and the only caller is a `TokenExchange` —
-    /// which this binary does not bind, hence the `allow`. Keeping the disclosure to one named
-    /// method is the point: `expose` is greppable, and a reviewer can enumerate every use of it.
-    #[allow(dead_code)]
+    /// namely `HttpTokenExchange`, which sends it as HTTP Basic credentials. Keeping the disclosure
+    /// to one named method is the point: `expose` is greppable, and a reviewer can enumerate every
+    /// use of it — there is exactly one.
     pub fn expose(&self) -> &str {
         &self.0
     }
@@ -110,6 +126,8 @@ impl fmt::Debug for ClientSecret {
 pub struct OidcConfig {
     issuer: String,
     authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
     client_id: String,
     client_secret: ClientSecret,
     redirect_uri: String,
@@ -159,8 +177,14 @@ impl OidcConfig {
         let mut supplied = supplied.into_iter().map(|value| value.unwrap_or_default());
         let mut next = || supplied.next().unwrap_or_default();
 
+        // Positional, and in `REQUIRED`'s order — the two lists must be read together. A field added
+        // to one and not the other silently shifts every value after it, which is why
+        // `every_configured_value_lands_in_its_own_field` gives each variable a distinguishable
+        // value and checks where it came out.
         let issuer = next();
         let authorization_endpoint = next();
+        let token_endpoint = next();
+        let jwks_uri = next();
         let client_id = next();
         let client_secret = ClientSecret(next());
         let redirect_uri = next();
@@ -175,6 +199,8 @@ impl OidcConfig {
         Ok(Self {
             issuer,
             authorization_endpoint,
+            token_endpoint,
+            jwks_uri,
             client_id,
             client_secret,
             redirect_uri,
@@ -202,6 +228,8 @@ impl OidcConfig {
         Self {
             issuer: issuer.to_string(),
             authorization_endpoint: authorization_endpoint.to_string(),
+            token_endpoint: format!("{issuer}/token"),
+            jwks_uri: format!("{issuer}/jwks"),
             client_id: client_id.to_string(),
             client_secret: ClientSecret("a-test-secret".to_string()),
             redirect_uri: "https://exchange.example.com/api/signin/callback".to_string(),
@@ -209,9 +237,32 @@ impl OidcConfig {
         }
     }
 
+    /// As [`OidcConfig::for_test`], with the back-channel endpoints pointed at a local stub.
+    ///
+    /// Its own constructor because the exchange tests need a token endpoint and a JWKS URI on a
+    /// loopback port that only exists once the stub provider is listening.
+    #[cfg(test)]
+    pub fn for_test_against(issuer: &str, client_id: &str, tenant: &str, base: &str) -> Self {
+        Self {
+            token_endpoint: format!("{base}/token"),
+            jwks_uri: format!("{base}/jwks"),
+            ..Self::for_test(issuer, client_id, tenant)
+        }
+    }
+
     /// The issuer an id token must claim.
     pub fn issuer(&self) -> &str {
         &self.issuer
+    }
+
+    /// Where the authorization code is redeemed. Back-channel: the browser never sees this.
+    pub fn token_endpoint(&self) -> &str {
+        &self.token_endpoint
+    }
+
+    /// Where the keys that sign this provider's id tokens are published.
+    pub fn jwks_uri(&self) -> &str {
+        &self.jwks_uri
     }
 
     /// Where the browser is sent to authenticate.

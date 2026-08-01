@@ -4,18 +4,17 @@
 //!
 //! Redeeming an authorization code means an HTTPS request to the provider's token endpoint, and
 //! verifying the id token that comes back means fetching the provider's JWKS and checking an RSA or
-//! ECDSA signature. **This workspace has no HTTP client and no JOSE library**, and adding one was
-//! not this story's to do.
+//! ECDSA signature. The port stays a port even now that
+//! [`HttpTokenExchange`](super::http_exchange::HttpTokenExchange) binds it, because the seam is what
+//! lets every test in [`super`] and in `routes::signin` drive the flow without a provider.
 //!
 //! What must not happen is the obvious workaround. A hand-written JWT verifier is the single most
 //! reliably broken piece of code in this problem space — `alg: none`, HMAC-versus-RSA confusion, key
 //! selection by attacker-supplied `kid`, unchecked `crit` — and every one of those bugs produces a
-//! host that accepts a token anybody can mint while looking exactly like a host that does not. So
-//! the network half is a seam: this crate states what it needs, and a composition that carries the
-//! dependencies binds it.
-//!
-//! This binary binds nothing, and says so at startup rather than at the callback. See
-//! `docs/designs/oidc-signin.md`.
+//! host that accepts a token anybody can mint while looking exactly like a host that does not.
+//! Nothing here hand-rolls one: the binding implementation delegates to `jsonwebtoken`, and the two
+//! attacks in that list that a *caller* of a JOSE library can still get wrong — algorithm confusion
+//! and `kid` selection — are answered in that module and tested there.
 //!
 //! # What an implementor owes
 //!

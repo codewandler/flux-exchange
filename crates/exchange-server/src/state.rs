@@ -126,9 +126,7 @@ impl AppState {
     /// sign-in resolves to nothing. This is the constructor that legitimately reports
     /// [`IdentityBinding::Bound`].
     ///
-    /// Unused in this binary until a composition binds a
-    /// [`TokenExchange`](crate::oidc::exchange::TokenExchange); see `docs/designs/oidc-signin.md`.
-    #[allow(dead_code)]
+    /// The binary reaches this once `HttpTokenExchange` is built; see `docs/designs/oidc-signin.md`.
     pub fn with_oidc(oidc: Arc<Oidc>) -> Self {
         Self {
             identity: BoundIdentity::Real(oidc.clone()),
