@@ -38,6 +38,30 @@ X-11 tracks the alignment. The work is upstream, in flux-connectors.
 
 ## Epics
 
+### Local identity
+
+**You cannot use this console without standing up an OIDC provider.** Everything shipped through
+v0.8.0 is reachable only by a signed-in principal, and the only thing that makes a principal is an
+authorization-code flow against a configured provider. That is a lot of setup to look at a page, and
+it stands between this platform and its own operators.
+
+The wall is not where it looks. A development identity already exists and works; `SignIn::available()`
+simply returns `true` only for OIDC, so a host with that identity armed tells the console it cannot
+sign anyone in. That conflation is [[X-57]] and it is priority 0 — nothing else in the epic is
+reachable until it lands.
+
+The rest is two **orthogonal axes**, which the original request framed as alternatives:
+authentication ([[X-58]] — users from a config file, carrying a real verifier so the binding may
+listen on a reachable address) and tenancy ([[X-59]] — one tenant, named at startup, with the
+credential address unchanged). Authentication is what unblocks the console; tenancy is a convenience.
+
+Done looks like: clone, write one config file, start the server on your own network, open the
+console, sign in, wire up a connection, invoke an operation — with no identity provider, and with no
+mode in which authentication is a name anybody can guess.
+
+Design: [`docs/designs/local-identity.md`](designs/local-identity.md).
+
+
 ### The HTTP surface — X-01 · ✅ **DONE**
 
 Turn the binary that prints a matrix into a service. The load-bearing story is **X-02**, and it is

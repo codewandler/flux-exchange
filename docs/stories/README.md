@@ -49,6 +49,12 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 - [X-55 — Lock 2 sees the crate that composes, or says why it does not](X-55-lock-2-sees-the-crate-that-composes.md) · found by X-48 round 2: lock 2 scans crates/exchange-host/src only. exchange-server gets one rule and is otherwise unscanned — including execution.rs, which holds this composition's transport and sandbox posture
 - [X-56 — The invoke design says what the locks now do](X-56-the-invoke-design-catches-up.md) · found by X-48 round 2: docs/designs/invoke.md §3 still describes lock 2 as X-12 shipped it. The design and the test have drifted, and the test is the accurate one
 
+### signing in without an identity provider
+_**You cannot use this console without standing up an OIDC provider.** That is the whole problem, and_
+- [X-57 — \"Sign-in is available\" stops meaning \"OIDC is configured\"](X-57-signin-availability-means-what-it-says.md) · the shared prerequisite for every local-identity story: SignIn::available() returns true only for SignIn::Oidc, so a host with a working development identity tells the console it cannot sign anyone in
+- [X-58 — An operator can define users in a config file and sign in on their own network](X-58-static-users-from-a-config-file.md) · the axis that actually unblocks the console: a local identity with a real secret, so it may bind a reachable address — unlike DevIdentity, whose roster handle is a name anybody can guess
+- [X-59 — A deployment can hold one tenant and stop asking which](X-59-single-tenant-deployment.md) · the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it
+
 ## Blocked
 _None._
 
