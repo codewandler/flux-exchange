@@ -15,6 +15,7 @@
 //! construction. The seam is the same; only the direction of the dependency changed.
 
 mod catalogue;
+mod connections;
 mod health;
 mod identity;
 mod signin;
@@ -39,6 +40,7 @@ const MODULES: &[Module] = &[
     catalogue::MODULE,
     identity::MODULE,
     signin::MODULE,
+    connections::MODULE,
 ];
 
 /// A feature module's contribution to the surface.

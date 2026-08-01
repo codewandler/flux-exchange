@@ -120,6 +120,17 @@ pub enum StartupRefusal {
         /// Which part of the roster was unreadable.
         source: DevIdentityRefusal,
     },
+
+    /// A credential store was named and could not be bound.
+    ///
+    /// Carries the store's refusal already rendered rather than as a typed source, because
+    /// `CredentialStoreError` is `#[cfg(unix)]` — only the file store is — and a cfg-gated variant
+    /// would make this enum two different types depending on the platform. Nothing is lost: that
+    /// refusal names the path, the mode and what would have worked, and never a value.
+    CredentialStore {
+        /// The store's own refusal.
+        reason: String,
+    },
 }
 
 impl From<DevIdentityRefusal> for StartupRefusal {
@@ -158,6 +169,7 @@ impl fmt::Display for StartupRefusal {
             }
             Self::Serving { source } => write!(f, "stopped serving: {source}"),
             Self::DevIdentity { source } => write!(f, "{source}"),
+            Self::CredentialStore { reason } => write!(f, "{reason}"),
         }
     }
 }
@@ -166,7 +178,8 @@ impl std::error::Error for StartupRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::ReachableBindWithoutIdentity { .. }
-            | Self::ReachableBindWithDevelopmentIdentity { .. } => None,
+            | Self::ReachableBindWithDevelopmentIdentity { .. }
+            | Self::CredentialStore { .. } => None,
             Self::DevIdentity { source } => Some(source),
             Self::UnreadableBind { source, .. } => Some(source),
             Self::BindUnavailable { source, .. } => Some(source),

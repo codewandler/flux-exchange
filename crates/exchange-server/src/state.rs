@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
-use exchange_host::Identity;
+use exchange_host::{Identity, SecretStore};
 
 use crate::bind::IdentityBinding;
+use crate::connection_guard::ConnectionGuard;
 use crate::dev_identity::DevIdentity;
 use crate::oidc::Oidc;
 
@@ -17,6 +18,22 @@ use crate::oidc::Oidc;
 pub struct AppState {
     identity: BoundIdentity,
     sign_in: SignIn,
+    /// Where credentials are kept, as the **port** rather than as the concrete store.
+    ///
+    /// `exchange_host::CredentialStore` is one binding of this and is `#[cfg(unix)]`, because only
+    /// the file store is; holding the port keeps the surface off that gate and keeps a deployment
+    /// that binds Vault instead able to do so. `None` is a composition that bound none, and every
+    /// route that would reach for one refuses rather than pretending — see
+    /// [`crate::routes::connections`].
+    credentials: Option<Arc<dyn SecretStore>>,
+    /// Which connection changes are in flight, so two of them cannot decide against the same
+    /// empty address and both write.
+    ///
+    /// Shared across every clone of this state, which is why it lives here rather than in the
+    /// module that uses it: `AppState` is the only thing every request holds a handle to. It is
+    /// not an `Option` — a guard with no store behind it costs nothing and guards nothing, and
+    /// making it absent would give the routes a second thing to branch on.
+    connections: Arc<ConnectionGuard>,
 }
 
 /// What this composition can offer a human who wants to sign in.
@@ -68,6 +85,8 @@ impl AppState {
         Self {
             identity: BoundIdentity::None,
             sign_in: SignIn::Unconfigured,
+            credentials: None,
+            connections: Arc::default(),
         }
     }
 
@@ -84,6 +103,8 @@ impl AppState {
         Self {
             identity: BoundIdentity::Real(identity),
             sign_in: SignIn::Unconfigured,
+            credentials: None,
+            connections: Arc::default(),
         }
     }
 
@@ -92,6 +113,8 @@ impl AppState {
         Self {
             identity: BoundIdentity::Development(identity),
             sign_in: SignIn::Unconfigured,
+            credentials: None,
+            connections: Arc::default(),
         }
     }
 
@@ -110,6 +133,8 @@ impl AppState {
         Self {
             identity: BoundIdentity::Real(oidc.clone()),
             sign_in: SignIn::Oidc(oidc),
+            credentials: None,
+            connections: Arc::default(),
         }
     }
 
@@ -123,7 +148,43 @@ impl AppState {
         Self {
             identity: BoundIdentity::None,
             sign_in: SignIn::NoTokenExchange,
+            credentials: None,
+            connections: Arc::default(),
         }
+    }
+
+    /// Bind the credential store this composition holds.
+    ///
+    /// A builder method rather than a fourth constructor or a widened signature on the three above,
+    /// for two reasons. The identity binding and the credential store are independent — every
+    /// combination of them is a real composition, and four constructors times two would be eight —
+    /// and an additive method leaves the existing spellings untouched, which is what lets a story
+    /// that adds an identity provider and a story that adds a store land without colliding.
+    ///
+    /// Not calling it is a composition with no store, which is a state every route that needs one
+    /// refuses in. There is no default here for the reason `CredentialStore` has none: a store
+    /// nobody chose is a store nobody can find the credentials in.
+    pub fn with_credentials(mut self, credentials: Arc<dyn SecretStore>) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    /// The credential store this composition bound, if it bound one.
+    ///
+    /// The port, so a route can neither reopen the store nor learn where it is. What a route may do
+    /// with it is `get`, `put` and `delete` at an address this host **derived** — never one a
+    /// caller supplied.
+    pub fn credentials(&self) -> Option<&Arc<dyn SecretStore>> {
+        self.credentials.as_ref()
+    }
+
+    /// The claims on connection changes in flight.
+    ///
+    /// Every clone of this state shares one, which is the whole point: two concurrent requests hold
+    /// two clones and must contend on the same set. See [`ConnectionGuard`] for the window it
+    /// closes and the single-process limit it closes it within.
+    pub fn connections(&self) -> &Arc<ConnectionGuard> {
+        &self.connections
     }
 
     /// Whether a request could become a principal, and whether that is safe to expose.
