@@ -155,6 +155,31 @@ state tied to the victim's *browser* as well, which means a second cookie carrie
 redirect. That is a real gap, it is out of this story's Acceptance, and it should be its own story
 rather than something quietly assumed handled.
 
+### The pending store evicts where the session store refuses
+
+**Decision: at `MAX_PENDING`, drop the oldest authorization request rather than turn the new one
+away.** This is the opposite of `SessionStore`, and the divergence is deliberate.
+
+`identity-and-session.md` argued for refusal, and the argument was good *there*: a session is minted
+behind a principal, so filling that store takes an authenticated caller looping, refusing says
+exactly that, and evicting would sign out somebody who did nothing wrong and could not tell it from
+a bug. None of that transfers. This store sits behind `GET /api/signin`, which is **anonymous**. At
+1024 entries with a ten-minute TTL, refusing at the bound means any unauthenticated caller can lock
+every real user out of signing in for ten minutes, for the cost of 1024 requests.
+
+The original code justified the bound by noting that filling it needs requests "far faster than a
+human could". That describes an attacker; it is not a reason one will not turn up.
+
+Eviction costs the evicted sign-in one click, and it fails *loudly*, at the callback, with an
+actionable message. A pending authorization is not a credential anybody holds and carries no
+invariant worth preserving — at most ten minutes of intent. Expired entries are swept first, so a
+live request is only ever discarded when the store is genuinely full of live ones.
+
+This is not "repair" in place of "refusal". Nothing weaker is substituted, nothing fails silently,
+and memory is still bounded. What changed is who pays when the bound is reached, and it should not
+be the honest user. What it does **not** do is make `/api/signin` cheap to abuse in general —
+per-IP accounting or a cost on the route is a real question, and a separate one.
+
 ## `nonce` is checked, not merely requested
 
 A missing `nonce` refuses. `admit` compares `claims.nonce.as_deref() != Some(expected)`, so `None`

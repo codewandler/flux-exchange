@@ -12,6 +12,30 @@ use crate::entropy;
 const OPAQUE_BYTES: usize = 32;
 
 /// The most authorization requests one host will hold open at once.
+///
+/// At the bound this **evicts the oldest** rather than refusing the newest — the opposite of
+/// [`SessionStore`](crate::session::SessionStore), deliberately. The difference is not the data;
+/// it is what sits in front of each store.
+///
+/// A session is minted behind a principal: filling that store takes an *authenticated* caller
+/// looping, refusing tells the operator exactly that, and the caller who would have been evicted
+/// did nothing wrong and could not tell an eviction from a bug. None of that transfers here. This
+/// store sits behind `GET /api/signin`, which is **anonymous**, so refusing at the bound would let
+/// any 1024 unauthenticated requests lock every real user out of signing in for as long as the
+/// TTL. That is a denial of service handed out for free, and "an attacker would have to send
+/// requests faster than a human" describes an attacker rather than a reason it will not happen.
+///
+/// Eviction costs the evicted sign-in one click. A pending authorization is not a credential
+/// anybody holds and carries no invariant worth preserving — it is at most [`PENDING_TTL`] of
+/// intent — and the caller whose entry went is told plainly at the callback: *could not be matched
+/// to one that started here. Start again from the sign-in page.* Refusing costs everybody instead.
+///
+/// This is not "repair" in place of "refusal". Nothing weaker is silently substituted, the sign-in
+/// that lost its entry fails loudly at the moment it matters, and memory is still bounded. What
+/// changed is only *who* pays when the bound is reached, and it should not be the honest user.
+///
+/// Expired entries are swept before any of this, so eviction only ever discards a live request
+/// when the store is genuinely full of live requests.
 const MAX_PENDING: usize = 1024;
 
 /// How long an unfinished authorization request stays usable.
@@ -61,8 +85,19 @@ impl PendingAuthorizations {
         let mut live = self.live();
         live.retain(|_, pending| pending.opened.elapsed() < PENDING_TTL);
 
-        if live.len() >= MAX_PENDING {
-            return Err(FlowError::TooManyPending { max: MAX_PENDING });
+        // Make room by dropping the request closest to expiring anyway, rather than turning this
+        // caller away. See [`MAX_PENDING`] for why this store evicts where the session store
+        // refuses.
+        while live.len() >= MAX_PENDING {
+            let Some(oldest) = live
+                .iter()
+                .min_by_key(|(_, pending)| pending.opened)
+                .map(|(state, _)| state.clone())
+            else {
+                break;
+            };
+
+            live.remove(&oldest);
         }
 
         live.insert(
@@ -138,12 +173,6 @@ pub enum FlowError {
         /// What went wrong reading it.
         source: std::io::Error,
     },
-
-    /// Too many authorization requests are already open.
-    TooManyPending {
-        /// The limit that was reached.
-        max: usize,
-    },
 }
 
 impl fmt::Display for FlowError {
@@ -155,10 +184,6 @@ impl fmt::Display for FlowError {
                  rather than falling back to a predictable state, nonce or code verifier",
                 entropy::SOURCE,
             ),
-            Self::TooManyPending { max } => write!(
-                f,
-                "cannot open an authorization request: {max} are already open and unfinished",
-            ),
         }
     }
 }
@@ -167,7 +192,6 @@ impl std::error::Error for FlowError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::NoEntropy { source } => Some(source),
-            Self::TooManyPending { .. } => None,
         }
     }
 }
@@ -266,20 +290,39 @@ mod tests {
         assert_eq!(second.verifier.challenge(), two.challenge);
     }
 
-    /// The store is bounded, because `/api/signin` is anonymous and nothing else would stop it
-    /// growing. Unlike the session store this one *expires*, so the bound is reached only by
-    /// something opening requests far faster than a human could.
+    /// A full store admits the next sign-in by evicting the oldest, and stays bounded.
+    ///
+    /// The availability property, and the reason this store diverges from
+    /// [`SessionStore`](crate::session::SessionStore): `/api/signin` is **anonymous**, so a store
+    /// that refused at the bound would let any unauthenticated caller lock every real user out of
+    /// signing in for up to [`PENDING_TTL`]. The honest user must not be the one who pays.
     #[test]
-    fn the_store_is_bounded_and_refuses_at_the_bound() {
+    fn a_full_store_evicts_the_oldest_rather_than_locking_everybody_out() {
         let pending = PendingAuthorizations::new();
 
-        for _ in 0..MAX_PENDING {
-            pending.begin().expect("the store is not yet full");
-        }
+        // A flood: enough anonymous sign-ins to fill the store.
+        let flood: Vec<String> = (0..MAX_PENDING)
+            .map(|_| pending.begin().expect("the OS has randomness").state)
+            .collect();
+        assert_eq!(pending.open(), MAX_PENDING, "the store is full");
 
+        // A real human arriving after it. This is the request that used to be refused.
+        let honest = pending
+            .begin()
+            .expect("a full store must still admit a new sign-in");
+
+        assert_eq!(pending.open(), MAX_PENDING, "and the store stays bounded");
         assert!(
-            matches!(pending.begin(), Err(FlowError::TooManyPending { .. })),
-            "a full store must refuse",
+            pending.take(&honest.state).is_some(),
+            "the sign-in that arrived at a full store must still be completable",
+        );
+        assert!(
+            pending.take(&flood[0]).is_none(),
+            "and the oldest request is what made room for it",
+        );
+        assert!(
+            pending.take(&flood[MAX_PENDING - 1]).is_some(),
+            "while everything newer than the evicted one is untouched",
         );
     }
 

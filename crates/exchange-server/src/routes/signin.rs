@@ -141,8 +141,12 @@ async fn callback(State(state): State<AppState>, Query(callback): Query<Callback
     }
 
     let (Some(presented_state), Some(code)) = (callback.state, callback.code) else {
-        // No state, no code, or neither. Indistinguishable from a callback this host did not open,
-        // and answered identically so the difference tells a prober nothing.
+        // No state, no code, or neither — refused *before* the store is consulted, so this answer
+        // is identical whether or not the state named is one this host is holding. That is what
+        // stops the callback being an oracle for "is this state live", and it is why the refusal
+        // happens here rather than after a lookup.
+        // `tests::a_callback_without_a_code_is_not_an_oracle_for_a_live_state` pins both halves:
+        // the answers match byte for byte, and the probe does not spend what it asked about.
         return refused(&SignInRefusal::UnknownState, StatusCode::BAD_REQUEST);
     };
 
@@ -932,31 +936,98 @@ mod tests {
         assert!(!carries_a_token(&body), "{body}");
     }
 
-    /// A callback missing its parameters is answered exactly as one carrying an unknown state, so
-    /// the difference tells a prober nothing about what this host was expecting.
+    /// Every shape of callback that cannot complete a sign-in, with the status each one gets.
+    ///
+    /// The statuses are pinned individually rather than accepted loosely. An earlier version of
+    /// this test allowed "400 or 401" while its name claimed the answers were identical — a test
+    /// that had stopped meaning anything, since two behaviours it declines to distinguish cannot
+    /// both be the one it is asserting.
+    ///
+    /// They differ, and the difference is deliberate. `?error=…` is the **provider** having
+    /// refused, which is an answer about a credential — `401`. The others never reach a credential
+    /// at all, so they are malformed requests — `400`. Neither reveals anything, which is the
+    /// separate and more important property asserted below.
     #[tokio::test]
-    async fn a_callback_missing_its_parameters_is_refused_like_an_unknown_state() {
+    async fn every_unusable_callback_issues_nothing() {
         let exchange = Arc::new(StubExchange::returning(claims("nonce")));
         let app = oidc_app(exchange);
 
-        for query in [
-            "",
-            "?state=only-a-state",
-            "?code=only-a-code",
-            "?error=denied",
+        for (query, expected) in [
+            ("", StatusCode::BAD_REQUEST),
+            ("?state=only-a-state", StatusCode::BAD_REQUEST),
+            ("?code=only-a-code", StatusCode::BAD_REQUEST),
+            ("?error=denied", StatusCode::UNAUTHORIZED),
+            // The provider's refusal wins even when it also echoed the rest, so a caller cannot
+            // dress an error up as a completable callback.
+            (
+                "?error=denied&state=whatever&code=whatever",
+                StatusCode::UNAUTHORIZED,
+            ),
         ] {
             let (status, headers, body) =
                 call(app.clone(), get(&format!("{CALLBACK}{query}"))).await;
 
-            assert!(
-                status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED,
-                "`{query}` answered {status}: {body}",
-            );
+            assert_eq!(status, expected, "`{query}` answered {status}: {body}");
             assert!(
                 headers.get(SET_COOKIE).is_none(),
                 "`{query}` issued a session",
             );
             assert!(!carries_a_token(&body), "`{query}`: {body}");
+            // Whatever the provider or the caller put in `error`, none of it comes back.
+            assert!(
+                !body.contains("denied"),
+                "`{query}` echoed the error: {body}"
+            );
         }
+    }
+
+    /// The probing property, which is what the previous test's name used to gesture at without
+    /// asserting: a callback that cannot be completed is answered **byte for byte identically**
+    /// whether or not the `state` it names is one this host is actually holding.
+    ///
+    /// Otherwise the callback is an oracle for "is this state live", which is the one fact about a
+    /// pending sign-in worth guessing. It holds structurally — the handler refuses a callback
+    /// lacking `code` before it ever consults the store — and this pins both halves of that: the
+    /// answers match, and the probe does not spend the state it named.
+    #[tokio::test]
+    async fn a_callback_without_a_code_is_not_an_oracle_for_a_live_state() {
+        let exchange = Arc::new(StubExchange::returning(claims("not-yet-known")));
+        let app = oidc_app(exchange.clone());
+
+        let (bound_state, nonce) = begin(&app).await;
+        let forged = "0000000000000000000000000000000000000000000000000000000000000000";
+
+        let (known, known_headers, known_body) =
+            call(app.clone(), get(&format!("{CALLBACK}?state={bound_state}"))).await;
+        let (unknown, _, unknown_body) =
+            call(app.clone(), get(&format!("{CALLBACK}?state={forged}"))).await;
+
+        assert_eq!(
+            known, unknown,
+            "a live state and a forged one must not differ in status",
+        );
+        assert_eq!(
+            known_body, unknown_body,
+            "nor in the body, byte for byte — otherwise this route reports which states exist",
+        );
+        assert!(known_headers.get(SET_COOKIE).is_none());
+
+        // And the probe must not have consumed what it asked about, or an attacker could cancel
+        // every sign-in it could guess the shape of.
+        exchange.echoing(&nonce);
+        let (status, headers, body) = call(
+            app,
+            get(&format!(
+                "{CALLBACK}?state={bound_state}&code=an-authorization-code"
+            )),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "probing a live state must not spend it: {body}",
+        );
+        assert!(headers.get(SET_COOKIE).is_some());
     }
 }
