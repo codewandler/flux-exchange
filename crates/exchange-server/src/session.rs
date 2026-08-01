@@ -16,11 +16,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
 use std::sync::Mutex;
 
 use exchange_host::Principal;
+
+use crate::entropy;
 
 /// The cookie a browser carries a session in.
 ///
@@ -32,9 +32,6 @@ pub const SESSION_COOKIE: &str = "__Host-flux_exchange_session";
 
 /// How many bytes of entropy a session token carries. 256 bits, from the OS.
 const TOKEN_BYTES: usize = 32;
-
-/// Where the token's entropy comes from.
-const ENTROPY_SOURCE: &str = "/dev/urandom";
 
 /// The most sessions one store will hold at once.
 ///
@@ -136,26 +133,18 @@ impl SessionStore {
 }
 
 /// Mint a token with 256 bits of entropy from the operating system.
+///
+/// Through [`entropy`], which is also where the OIDC `state`, `nonce` and PKCE verifier come from.
+/// One source read one way: they are four names for "a value an attacker cannot predict", and a
+/// second entropy path is how one of them quietly becomes weaker than the others.
+///
+/// Refuse; never repair. There is no weaker fallback worth having — a session token from a
+/// predictable source is a session anyone can guess, and a host that quietly downgraded to one
+/// would look exactly like a host that had not.
 fn mint() -> Result<SessionToken, SessionError> {
-    let mut bytes = [0_u8; TOKEN_BYTES];
-
-    // Refuse; never repair. There is no weaker fallback worth having: a session token from a
-    // predictable source is a session anyone can guess, and a host that quietly downgraded to one
-    // would look exactly like a host that had not.
-    File::open(ENTROPY_SOURCE)
-        .and_then(|mut source| source.read_exact(&mut bytes))
-        .map_err(|source| SessionError::NoEntropy { source })?;
-
-    // Hex rather than base64: a lookup table of two lines instead of one of sixty-four, and a
-    // session token is not long enough for the density to be worth anything.
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut token = String::with_capacity(TOKEN_BYTES * 2);
-    for byte in bytes {
-        token.push(HEX[usize::from(byte >> 4)] as char);
-        token.push(HEX[usize::from(byte & 0x0f)] as char);
-    }
-
-    Ok(SessionToken(token))
+    entropy::hex::<TOKEN_BYTES>()
+        .map(SessionToken)
+        .map_err(|source| SessionError::NoEntropy { source })
 }
 
 /// Why a session could not be opened.
@@ -179,8 +168,9 @@ impl fmt::Display for SessionError {
         match self {
             Self::NoEntropy { source } => write!(
                 f,
-                "cannot mint a session token: {ENTROPY_SOURCE} is unreadable ({source}). Refusing \
-                 rather than falling back to a predictable token",
+                "cannot mint a session token: {} is unreadable ({source}). Refusing rather than \
+                 falling back to a predictable token",
+                entropy::SOURCE,
             ),
             Self::TooManyLive { max } => write!(
                 f,

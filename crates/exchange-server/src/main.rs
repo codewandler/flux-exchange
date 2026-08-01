@@ -13,6 +13,8 @@
 
 mod bind;
 mod dev_identity;
+mod entropy;
+mod oidc;
 mod routes;
 mod session;
 mod state;
@@ -28,6 +30,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
+use crate::oidc::config::OidcConfig;
 use crate::state::AppState;
 
 #[tokio::main]
@@ -77,13 +80,16 @@ async fn serve() -> Result<(), StartupRefusal> {
 
 /// Bind the ports this composition serves with.
 ///
-/// There is exactly one identity port on offer and it is the development one, armed only by
-/// [`DEV_IDENTITY_ENV`] being set. Unset is the default and the default binds nothing, which is
-/// the state a reachable bind is already refused in — so no configuration has to be *turned off*
-/// to be safe, only turned on to be convenient. A real provider is X-04.
+/// Two identity ports are on offer and neither is the default. The development one is armed only by
+/// [`DEV_IDENTITY_ENV`] being set; failing that, OIDC sign-in is offered if it was configured. Unset
+/// and unconfigured binds nothing, which is the state a reachable bind is already refused in — so no
+/// configuration has to be *turned off* to be safe, only turned on to be useful.
+///
+/// The development identity is checked first and wins. An operator who armed a roster is working
+/// locally, and quietly federating instead would be the more surprising of the two.
 fn compose() -> Result<AppState, StartupRefusal> {
     let Some(dev) = DevIdentity::armed()? else {
-        return Ok(AppState::without_identity());
+        return Ok(compose_oidc());
     };
 
     // Named as such at startup, and at `warn` rather than `info`: this line is the difference
@@ -102,6 +108,39 @@ fn compose() -> Result<AppState, StartupRefusal> {
     );
 
     Ok(AppState::with_development_identity(Arc::new(dev)))
+}
+
+/// Offer OIDC sign-in, or say precisely why it is not on offer.
+///
+/// **Never a `StartupRefusal`.** Unconfigured sign-in is an absent feature, not a hole: `/health`
+/// and the catalogue still answer, and exiting here would take them down to punish an operator who
+/// has not set up federation yet. The Acceptance is explicit that this must be a startup message
+/// and an explanatory page rather than a panic — and, just as explicitly, that it must not be a
+/// login that looks fine and dies at the callback. Both branches below refuse at `/api/signin`.
+fn compose_oidc() -> AppState {
+    match OidcConfig::from_env() {
+        Err(refusal) => {
+            // Names every unset variable in one message, so an operator fixes them in one pass
+            // rather than one restart at a time. At `warn` rather than `error`: on a host nobody
+            // configured for sign-in this is a statement of fact, not a fault.
+            warn!("{refusal}");
+            AppState::without_identity()
+        }
+        Ok(config) => {
+            // Configured, and still not offered — because this build carries no client for the
+            // provider's token endpoint. Announced here rather than discovered at the callback, and
+            // at `error` because this *is* a fault: somebody configured a provider and will
+            // otherwise wonder why nothing happens.
+            error!(
+                issuer = config.issuer(),
+                "OIDC sign-in is configured but this build binds no token exchange, so no \
+                 authorization code could be redeemed and no sign-in can complete. /api/signin \
+                 explains rather than redirecting to a provider it cannot return from. See \
+                 docs/designs/oidc-signin.md",
+            );
+            AppState::oidc_without_a_token_exchange()
+        }
+    }
 }
 
 /// Where to listen, from the environment or from the loopback default.

@@ -6,6 +6,7 @@ use exchange_host::Identity;
 
 use crate::bind::IdentityBinding;
 use crate::dev_identity::DevIdentity;
+use crate::oidc::Oidc;
 
 /// The state the router hands to every route.
 ///
@@ -15,6 +16,28 @@ use crate::dev_identity::DevIdentity;
 #[derive(Clone)]
 pub struct AppState {
     identity: BoundIdentity,
+    sign_in: SignIn,
+}
+
+/// What this composition can offer a human who wants to sign in.
+///
+/// Three states rather than an `Option`, because "not configured" and "configured but unable to
+/// finish" are different mistakes with different fixes, and a caller shown one message for both
+/// gets sent to the wrong place. Both are answered at `/api/signin` rather than at the callback:
+/// the failure the story names is a login that looks fine and dies at the last step.
+#[derive(Clone)]
+pub enum SignIn {
+    /// No OIDC configuration was supplied, or not all of it was. `/api/signin` explains.
+    Unconfigured,
+
+    /// OIDC is configured, but this composition bound no
+    /// [`TokenExchange`](crate::oidc::exchange::TokenExchange), so an authorization code could
+    /// never be redeemed. `/api/signin` explains rather than sending the browser to a provider it
+    /// cannot return from usefully.
+    NoTokenExchange,
+
+    /// A provider is bound and the flow can complete.
+    Oidc(Arc<Oidc>),
 }
 
 /// The identity port a composition bound, and what the bind rule may conclude from it.
@@ -28,11 +51,9 @@ enum BoundIdentity {
     None,
     /// A real provider. This is what makes a reachable bind legal.
     ///
-    /// Nothing in this binary constructs one yet — X-04 binds the first, and removes this
-    /// attribute when it does. The variant is not speculative: it is what
-    /// `routes::identity::tests::a_rejected_credential_and_an_unreachable_provider_are_distinguishable`
-    /// drives, and that test needs a port which is neither absent nor the development one.
-    #[allow(dead_code)]
+    /// [`AppState::with_oidc`] is what constructs one: a federated principal is backed by a secret
+    /// the caller proved to a third party, which is the property the development identity lacks and
+    /// the reason that one is a separate variant.
     Real(Arc<dyn Identity>),
     /// The development identity, which is loopback-only for as long as it is armed.
     Development(Arc<DevIdentity>),
@@ -46,6 +67,7 @@ impl AppState {
     pub fn without_identity() -> Self {
         Self {
             identity: BoundIdentity::None,
+            sign_in: SignIn::Unconfigured,
         }
     }
 
@@ -54,11 +76,14 @@ impl AppState {
     /// This is the constructor that makes a reachable bind legal, which is why arming the
     /// development identity goes through a different one rather than through this with a flag.
     ///
-    /// Unused outside tests until X-04 binds a provider to it; see [`BoundIdentity::Real`].
-    #[allow(dead_code)]
+    /// Test-only: the binary's real provider arrives through [`AppState::with_oidc`], which binds
+    /// the identity port and the sign-in flow **together** so the two cannot drift apart. This one
+    /// exists for tests that need a port which is neither absent nor the development one.
+    #[cfg(test)]
     pub fn with_identity(identity: Arc<dyn Identity>) -> Self {
         Self {
             identity: BoundIdentity::Real(identity),
+            sign_in: SignIn::Unconfigured,
         }
     }
 
@@ -66,6 +91,38 @@ impl AppState {
     pub fn with_development_identity(identity: Arc<DevIdentity>) -> Self {
         Self {
             identity: BoundIdentity::Development(identity),
+            sign_in: SignIn::Unconfigured,
+        }
+    }
+
+    /// A composition that federates sign-in to an OIDC provider.
+    ///
+    /// One argument sets **both** the identity port and the sign-in flow, deliberately. They are
+    /// the same object: the callback opens a session in it and the guard resolves that session out
+    /// of it, so a composition that could set one without the other would be one where a completed
+    /// sign-in resolves to nothing. This is the constructor that legitimately reports
+    /// [`IdentityBinding::Bound`].
+    ///
+    /// Unused in this binary until a composition binds a
+    /// [`TokenExchange`](crate::oidc::exchange::TokenExchange); see `docs/designs/oidc-signin.md`.
+    #[allow(dead_code)]
+    pub fn with_oidc(oidc: Arc<Oidc>) -> Self {
+        Self {
+            identity: BoundIdentity::Real(oidc.clone()),
+            sign_in: SignIn::Oidc(oidc),
+        }
+    }
+
+    /// A composition whose OIDC configuration is complete but which bound no token exchange.
+    ///
+    /// **Not** an identity binding. Nothing here can authenticate a caller — no sign-in can finish
+    /// — so reporting [`IdentityBinding::Bound`] would legalise a reachable bind in front of a host
+    /// where nobody can sign in. The same reasoning that made the development identity a third
+    /// state: the bind rule asks whether anything *could* resolve a caller, and here nothing can.
+    pub fn oidc_without_a_token_exchange() -> Self {
+        Self {
+            identity: BoundIdentity::None,
+            sign_in: SignIn::NoTokenExchange,
         }
     }
 
@@ -102,6 +159,11 @@ impl AppState {
             BoundIdentity::Development(identity) => Some(identity),
             _ => None,
         }
+    }
+
+    /// What this composition can offer a caller who wants to sign in.
+    pub fn sign_in(&self) -> &SignIn {
+        &self.sign_in
     }
 }
 
