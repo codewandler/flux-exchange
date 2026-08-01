@@ -851,7 +851,21 @@ async fn a_planted_whole_authority_value_is_refused_on_the_way_out() {
 ///
 /// This is the generalisation of the test above, and it is the one that would have caught
 /// `freshdesk` and `okta`: the review that found this named `newrelic` and `docusign`, and the
-/// measurement finds four. A rule enumerated by hand would have shipped two of them.
+/// measurement finds five. A rule enumerated by hand would have shipped three of them.
+///
+/// # The fifth arrived by upstream bump, which is the mechanism working (X-67)
+///
+/// It was four against catalogue 0.9. Moving to 0.10 turned this red rather than quietly widening
+/// what a tenant may configure, which is what X-47's design said a host-template change *should*
+/// do. `intercom` is the arrival: upstream C-225 made its `base_url` `https://{host}` so an EU or
+/// AU workspace can be connected at all, and a bare placeholder is the whole authority. The
+/// refusal here is not a disagreement with that change — it is this host declining to let a
+/// *tenant* be the one who supplies it.
+///
+/// `algolia`, the 54th provider, is **not** here: it ships `{app_id}.algolia.net`, which pins two
+/// labels and lands in [`HostPinning::PinnedTo`] with the seven that were already there. Worth
+/// stating because the estimate this bump was planned against read its template as unpinnable and
+/// expected a sixth refusal; the measurement is what decided it, not the estimate.
 #[test]
 fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
     let mut refused = Vec::new();
@@ -880,13 +894,15 @@ fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
     }
 
     // Pinned exactly, so that a catalogue change in either direction is a failing test rather than
-    // a silent hole: a fifth connector arriving unpinned, or one of these four gaining a suffix
-    // upstream and staying refused for no reason.
+    // a silent hole: a sixth connector arriving unpinned, or one of these five gaining a suffix
+    // upstream and staying refused for no reason. It has already fired once for real — `intercom`
+    // is here because catalogue 0.10 moved its host, and this assertion is how anybody found out.
     assert_eq!(
         refused,
         vec![
             "docusign/endpoint.account_host ({account_host})".to_owned(),
             "freshdesk/endpoint.domain ({domain})".to_owned(),
+            "intercom/endpoint.host ({host})".to_owned(),
             "newrelic/endpoint.host ({host})".to_owned(),
             "okta/endpoint.domain ({domain})".to_owned(),
         ],

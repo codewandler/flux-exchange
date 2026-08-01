@@ -114,8 +114,8 @@ pub struct OperationView {
 /// A credential is declared at **provider** level upstream — `Provider::auth`, not
 /// `Operation::credentials`, which only *references* these names — so hanging it off the operations
 /// resource would nest a connector fact inside an answer about operations, and a client wanting
-/// only the declaration would pay for 299 operations to get two names. Putting it on
-/// [`ConnectorList`] instead would turn a directory of 53 entries into a payload for every caller
+/// only the declaration would pay for 679 operations to get two names. Putting it on
+/// [`ConnectorList`] instead would turn a directory of 54 entries into a payload for every caller
 /// that only wanted the ids.
 ///
 /// So it is a sibling of `/operations` under the same connector, which also makes the last
@@ -300,9 +300,12 @@ mod tests {
     /// exist but cannot predict which ones its own `Selector` admits, and the grant model becomes
     /// server-only folklore.
     ///
-    /// Asserted over the *whole* catalogue rather than one connector: 299 operations across 53
-    /// connectors exercise every `risk` and every `idempotency` variant, so a mapping arm that is
-    /// wrong for one value cannot hide behind a well-chosen example.
+    /// Asserted over the *whole* catalogue rather than one connector: **679 operations across 54
+    /// connectors** (measured on catalogue 0.10 in X-67) exercise every `risk` and every
+    /// `idempotency` variant, so a mapping arm that is wrong for one value cannot hide behind a
+    /// well-chosen example. The count is scale rather than contract: the walk is derived from
+    /// `catalog::providers()` and the only number asserted is that it equals
+    /// `catalog::operations().count()`.
     #[test]
     fn every_operation_carries_risk_effects_and_idempotency() {
         const RISKS: [&str; 4] = ["low", "medium", "high", "destructive"];
@@ -603,6 +606,23 @@ mod tests {
     /// still answers `404`. Collapsing the two would tell an operator that a typo is a connector
     /// needing no credential, which is the `404`-into-empty-`200` failure the operations route
     /// already refuses.
+    ///
+    /// # And the empty list is **withheld**, not public (X-67)
+    ///
+    /// X-49 pinned this render while the catalogue could not say *why* the list was empty. Upstream
+    /// C-235 closed that: `Operation::credential_requirement` now distinguishes a positively-public
+    /// operation ([`NoneRequired`](catalog::CredentialRequirement::NoneRequired)) from one whose
+    /// credential is deliberately **withheld**, and the measurement on catalogue 0.10 is one-sided —
+    /// every operation reaching this branch is `Withheld`, and the shipped catalogue contains **no**
+    /// `NoneRequired` operation at all.
+    ///
+    /// That is asserted here rather than recorded in prose because it is the premise X-50 is
+    /// written on. "This connector needs no credential" and "this connector's credential is not
+    /// something you can supply" are different answers to an operator, and the second is the true
+    /// one today. Surfacing the distinction on this body is X-50's to do — the console renders the
+    /// two identically and that is the defect X-50 names. What this pins is that the distinction
+    /// **exists in the source**, so the day upstream ships a genuinely public operation, the branch
+    /// stops being one thing and somebody finds out here.
     #[test]
     fn a_connector_that_declares_nothing_is_not_an_unknown_connector() {
         let declares_nothing = catalog::providers()
@@ -613,6 +633,31 @@ mod tests {
         let published = connector_credentials(declares_nothing.id)
             .expect("a declared-nothing connector answers");
         assert!(published.credentials.is_empty());
+
+        // Every operation of it is withheld, and none of them is public. Both halves, because
+        // "none is public" over an empty operation list would pass while saying nothing.
+        assert!(
+            !declares_nothing.operations.is_empty(),
+            "`{}` publishes no operation, so the requirement below asserts nothing",
+            declares_nothing.id,
+        );
+        for operation in declares_nothing.operations {
+            assert_eq!(
+                operation.credential_requirement,
+                catalog::CredentialRequirement::Withheld,
+                "`{}` reaches the declares-nothing render for a reason this host now has to read, \
+                 and it is not the reason X-50 assumes",
+                operation.id,
+            );
+        }
+
+        assert!(
+            catalog::operations().all(|operation| {
+                operation.credential_requirement != catalog::CredentialRequirement::NoneRequired
+            }),
+            "the catalogue now ships a positively-public operation — X-50's question stops being \
+             hypothetical, and the empty credential list has two meanings on one wire field",
+        );
 
         assert_eq!(connector_credentials("no-such-vendor"), None);
     }
