@@ -68,7 +68,12 @@
 //! points the same way, so `Service` is refused now and the story that wants it is the story that
 //! gives it a revocation path.
 //!
-//! **How far the argument reaches, and where it stops.** Only here. In particular
+//! **How far the argument reaches, and where it stops.** ⚠ *This said "only here" and was true when
+//! X-40 wrote it. It is not now: X-47 gated the connection-settings write to `User`, and X-54 gated
+//! `POST /api/connections/{connector}` and `PUT /api/connections/{connector}/credentials/{credential}`
+//! the same way. **Four routes on this surface are kind-gated**, and `routes::KIND_GATED` is the list
+//! — read that rather than this sentence, because it is enforced and this is prose.* What follows is
+//! still accurate and is the part worth keeping. In particular
 //! `DELETE /api/connections/{connector}` stays [`Access::Principal`] for every kind, and that too
 //! is decided rather than left: destroying a connection destroys *tenant data the tenant owns*,
 //! and an agent doing it is an agent acting inside the tenant it already belongs to, doing

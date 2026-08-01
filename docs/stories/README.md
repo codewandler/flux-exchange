@@ -32,7 +32,6 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 - [X-13 — Grants gate invocation](X-13-grants-gate-invoke.md) · Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
 - [X-49 — The branches X-46 opened are pinned](X-49-pin-the-branches-x46-opened.md) · found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes
-- [X-54 — Who may create a connection and rotate a credential is decided, not inherited](X-54-who-may-touch-a-connection.md) · the ring-fenced half of X-47: the settings write is now gated to humans, but POST /api/connections and PUT .../credentials/{credential} are still Access::Principal, so an agent can create a connection and replace a credential
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -45,6 +44,7 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 - [X-60 — An operator can find out who supplied a credential](X-60-who-supplied-this-credential.md) · found by X-54, 2026-08-01: nothing records who supplied a credential, which is half the reason X-54's kind gate was needed — and it means an operator cannot audit a substitution after the fact, including one another human made
 
 ### `invoke` — the caller names an operation, and nothing else is theirs
+- [X-61 — A second declaration at one path cannot hide from the anonymous enumeration](X-61-a-duplicated-path-cannot-hide-an-access.md) · found by X-54's review, 2026-08-01: setting the POST entry at a duplicated path to Access::Anonymous leaves the_anonymous_surface_is_only_what_was_declared_anonymous green — the guard that exists to make widening deliberate cannot see it
 - [X-55 — Lock 2 sees the crate that composes, or says why it does not](X-55-lock-2-sees-the-crate-that-composes.md) · found by X-48 round 2: lock 2 scans crates/exchange-host/src only. exchange-server gets one rule and is otherwise unscanned — including execution.rs, which holds this composition's transport and sandbox posture
 - [X-56 — The invoke design says what the locks now do](X-56-the-invoke-design-catches-up.md) · found by X-48 round 2: docs/designs/invoke.md §3 still describes lock 2 as X-12 shipped it. The design and the test have drifted, and the test is the accurate one
 
@@ -108,6 +108,7 @@ _None._
 - [X-48 — The invoke composition's safety claims are as strong as its code](X-48-invoke-safety-claims.md) · found by X-12's independent review, 2026-08-01: the sandbox silently takes a permissive default in the one function that writes two other settings longhand to avoid exactly that; a comment claims processes cannot be spawned when they can; and deleting the runtime gate from invoke breaks no test
 - [X-52 — The descriptor's guard checks what its name claims](X-52-the-descriptors-guard-checks-what-it-claims.md) · found by X-42's review, 2026-08-01: two published fields are pinned by nothing — the method, and which route a live capability points at. Demonstrated: republishing be-minted at /api/session keeps all 251 Rust tests green
 - [X-53 — The explorer stops badging operations this service runs as \"not live yet\"](X-53-the-explorer-says-nothing-can-be-invoked.md) · found by X-42's review, 2026-08-01: the fourth rendering of the invoke falsehood. service.mts sets works: false for every operation with the comment \"nothing in flux-exchange can be invoked yet\"
+- [X-54 — Who may create a connection and rotate a credential is decided, not inherited](X-54-who-may-touch-a-connection.md) · the ring-fenced half of X-47: the settings write is now gated to humans, but POST /api/connections and PUT .../credentials/{credential} are still Access::Principal, so an agent can create a connection and replace a credential
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

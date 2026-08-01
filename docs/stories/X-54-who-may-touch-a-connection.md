@@ -1,8 +1,7 @@
 ---
 id: X-54
 title: "Who may create a connection and rotate a credential is decided, not inherited"
-status: in-progress
-priority: 1
+status: done
 epic: connections
 areas: [exchange-server]
 note: "the ring-fenced half of X-47: the settings write is now gated to humans, but POST /api/connections and PUT .../credentials/{credential} are still Access::Principal, so an agent can create a connection and replace a credential"
@@ -105,3 +104,54 @@ declared (`routes/connections.rs`, `MODULE`).
 - A kind gate is only as good as what the identity port reports. `dev_identity.rs:47` mints
   `PrincipalKind::Agent` from a roster string; a composition whose identity port mislabels an agent
   as a user bypasses every gate in this story.
+
+## Closed 2026-08-01 — reviewed PASS, with the mechanism driven rather than reasoned about
+
+Gate green: 349 Rust (54 + 17 + 3 + 10 + 6 + 4 + 255), 75 console.
+
+**The review verified the vulnerability at the base directly** rather than accepting the revert
+experiment: at `1225dd2`, an agent `POST /api/connections/zendesk` answered **201** with
+`tenants/acme/com.zendesk.api/api_token == "AGENT-PLANTED"`, and an agent rotation answered **200**
+with `"AGENT-ROTATED"`. That is stronger than a failing test, and it is the measurement this story
+exists for.
+
+**The per-verb binding is real, not accidental.** Full matrix on `/api/connections/zendesk`:
+
+| caller | GET | POST | PUT | PATCH | DELETE | HEAD | OPTIONS |
+|---|---|---|---|---|---|---|---|
+| `alice` (User) | 404 | **201** | 405 | 405 | 404 | 404 | 405 |
+| `triage-bot` (Agent) | 404 | **403** | 403 | 403 | 404 | 404 | 403 |
+| unresolvable | 401 | 401 | 401 | 401 | 401 | 401 | 401 |
+
+`HEAD` follows **GET's** guard, never POST's. No undeclared verb reaches a handler, and the store is
+empty after every one.
+
+**Only two paths reach `SecretStore::put`** in this binary and both are now gated (`connections.rs:706`
+`create`, `:859` `rotate`). The invoke path cannot write: `Credentials`' only store call is `get`.
+
+**Delete-then-anything gives an agent nothing** — driven: human creates → agent `DELETE` 204 → agent
+`PUT` on the now-empty connector **403**, store empty. There is no two-step substitution.
+
+**`Service` was genuinely refused and had never been driven before.** No test in the tree used a
+`service:` roster entry; the reviewer added one and confirmed 403 on create and rotate, 200 on read,
+204 on delete — matching the documented decision exactly.
+
+### Carried out as [[X-61]] (priority 1)
+
+The surface-wide anonymous guard is **blind to the second declaration** at a duplicated path: setting
+this story's POST entry to `Access::Anonymous` leaves
+`the_anonymous_surface_is_only_what_was_declared_anonymous` green, because it probes by path with a
+GET and both entries resolve to the `Principal` one. Caught today only by a module-local test the next
+module to copy this pattern will not have.
+
+### Carried, smaller
+
+- **The merged router's 405 fallback takes the second declaration's guard.** Swapping the two entries
+  changes an agent's `PATCH`/`OPTIONS` from 403 to 405. Not a hole in either order; undocumented in
+  both.
+- `MAY_SUPPLY_A_CREDENTIAL` and `MAY_CONFIGURE` are interchangeable while equal — swapping one for the
+  other leaves the suite green. Divergence is safe (both tests reference the constants), but the
+  pairing is not enforced.
+- Two sentences elsewhere claimed the kind gate reached only the minting route. **X-54 widened that
+  falsehood from one route to three**, and this story's own test doc cited one of them as authority.
+  Corrected at integration in `routes/agents.rs` and `docs/designs/agent-access.md`.

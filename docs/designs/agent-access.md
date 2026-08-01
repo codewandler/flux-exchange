@@ -109,7 +109,10 @@ model, which is blocked upstream. This asks *what kind of principal is calling*,
 knows today from the credential it issued — no grant, no connector metadata, no policy. It is
 authentication-shaped, and deferring it would ship a revocation mechanism that does not revoke.
 
-**How far it reaches.** Only here, for now. `DELETE /api/connections/{connector}` stays open to every
+**How far it reaches.** ⚠ *"Only here" was true when this was written and is not now — X-47 gated the
+connection-settings write and X-54 gated credential supply and rotation, all to `User`. Four routes
+are kind-gated; `routes::KIND_GATED` is the enforced list.* The argument below still stands and is
+what this section is for. `DELETE /api/connections/{connector}` stays open to every
 kind: it destroys tenant data inside the tenant the caller already belongs to, an operator can see it
 and undo it by reconnecting, and nothing about it survives revocation of the token that did it.
 Whether an agent should reach a destructive route at all is a real question — and it is the
@@ -117,10 +120,16 @@ grant-shaped one, so it belongs to X-13 rather than to a widened route table.
 
 ## What this epic deliberately does not do
 
-- **It does not gate anything by grant.** That is X-13, blocked upstream. Until it lands, an agent
-  token authorises nothing beyond what any principal may do **except that it may not create a
-  principal** — which X-40 closed, for the reason above. The rest is a **stated gap**, not a
-  position, and the same one `invoke` will inherit.
+- **It does not gate anything by grant.** That is X-13. Until it lands, an agent token authorises
+  what any principal may do, **less four things this host decided by *kind* rather than by grant**:
+  it may not create a principal (X-40), supply a connection setting (X-47), or supply or rotate a
+  credential (X-54). Every one of those is a caller deciding *what a tenant's operations run under*,
+  which is the credential position whether or not a value is ever seen.
+
+  ⚠ *This bullet used to say the only exception was creating a principal. That stopped being true at
+  X-47 and is corrected here rather than rewritten away — a design that quietly grows exceptions is
+  how the list stops being read.* The rest remains a **stated gap**, not a position, and the same one
+  `invoke` will inherit.
 - **It does not add a second identity port.** `Identity` already exists and both current providers
   bind it. A third binding is the shape; a parallel mechanism is not.
 - **It does not mint tokens for humans.** Sign-in exists and works. An agent principal is a different

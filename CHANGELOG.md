@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **Only a signed-in human may supply or rotate a credential** (X-54). `POST /api/connections/{connector}`
+  and `PUT /api/connections/{connector}/credentials/{credential}` are gated by principal *kind*. At
+  v0.8.0 an agent could do both — measured, not inferred: an agent `POST` answered `201` and left its
+  own value at the tenant's credential address.
+
+  Neither route hands a value out, so the literal reading of *"an agent's token grants access to an
+  operation, never to a credential"* is not what they break. What they grant is the **credential
+  position** — a caller deciding which vendor account every operation the tenant runs will reach has
+  been granted it, value or no value. Two properties settle it: nothing records who supplied a
+  credential, so a listing reads identically for a planted value; and revoking the token does not take
+  the value back out.
+
+  `DELETE` stays open to every kind, deliberately. It destroys tenant data inside the tenant the
+  caller already belongs to, an operator can see and undo it, and no authority survives it. Whether an
+  agent should reach a destructive route is the *grant*-shaped question, not the kind-shaped one.
+
 ### Fixed
 
 - **The catalogue explorer stops badging operations this service runs as "not live yet"** (X-53).
