@@ -17,6 +17,7 @@
 mod catalogue;
 mod health;
 mod identity;
+mod signin;
 
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -33,7 +34,12 @@ use crate::session;
 use crate::state::AppState;
 
 /// The feature modules this app is assembled from. **This is the merge site.**
-const MODULES: &[Module] = &[health::MODULE, catalogue::MODULE, identity::MODULE];
+const MODULES: &[Module] = &[
+    health::MODULE,
+    catalogue::MODULE,
+    identity::MODULE,
+    signin::MODULE,
+];
 
 /// A feature module's contribution to the surface.
 pub struct Module {
@@ -286,6 +292,24 @@ mod tests {
             // The catalogue: what this binary *could* run, never what a caller may run.
             ("catalogue", "/api/catalogue/connectors"),
             ("catalogue", "/api/catalogue/connectors/{id}/operations"),
+            // Sign-in, and the callback it returns through. X-04's widening, and the argument the
+            // identity design asked this story to make in its own words rather than inherit.
+            //
+            // Both are anonymous because **a principal is what they exist to produce**, and
+            // neither can present one it has not obtained yet: a human arriving at `/api/signin`
+            // has nothing to offer, and the callback is a browser mid-redirect from the provider,
+            // carrying an authorization code rather than a credential of ours. Requiring a
+            // principal would make signing in possible only for callers who were already signed
+            // in.
+            //
+            // What keeps that from being a hole is that neither route *reads* a credential. The
+            // callback's authority is a single-use `state` this host drew from the OS and has not
+            // yet spent — not a cookie, not a header, nothing a caller could arrive holding — and
+            // it answers with a document and a `Set-Cookie`, never a body a script could read a
+            // token out of. `crate::routes::signin`'s module documentation carries the long form,
+            // and `the_callback_issues_a_session_only_as_a_cookie` is what holds it.
+            ("signin", "/api/signin"),
+            ("signin", "/api/signin/callback"),
         ];
 
         let mut reachable = Vec::new();
