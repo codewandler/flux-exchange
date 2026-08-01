@@ -74,20 +74,50 @@ against one tenant's connections, not a vendor secret.
 
 | | |
 |---|---|
-| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, and the `Identity` trait. **Real and tested (19 tests).** |
+| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound but not yet wired into a binary. **Real and tested (32 tests).** |
 | `crates/exchange-server` | A binary that reports what it would serve and exits. **Not a service.** |
 | `console/` | A Vue 3 console rendering **fixture data**, reusing the framework-free explorer components from flux-connectors. **No backend.** |
 
-**Not built, despite being described in the design:** sign-in, any HTTP route, the credential store,
-`invoke`, `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution
-records, and the catalogue loader. The design is ahead of the code on purpose; the gap is stated
-here so nobody has to discover it.
+**Not built, despite being described in the design:** sign-in, any HTTP route, `invoke`,
+`subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
+catalogue loader. The credential store has moved off this list and is described below — with the
+caveat that it is a library binding no binary holds yet, which is a shorter distance from "not
+built" than the section heading suggests. The design is ahead of the code on purpose; the gap is
+stated here so nobody has to discover it.
+
+### The credential store, and what does not protect it
+
+`exchange_host::CredentialStore` binds the file-backed store from `connector-secrets` rather than
+reimplementing one: a `0600` file in a `0700` directory, both modes set in the `open(2)`/`mkdir(2)`
+call and **re-checked every time the store is opened**. A widened mode is refused, never quietly
+tightened — the file already had that mode while it held values, so tightening it would hide the
+exposure instead of reporting it. A path inside a working tree is refused outright, because a
+credential under a checkout is one `git add -A` from being committed — and the path is resolved
+through every symlink and every `..` before that check, so what is inspected is where the store
+would land rather than how it was spelt. A write is a whole-file
+rewrite through a sibling temporary, `fsync` and `rename(2)`, so a crash mid-write leaves the
+previous file whole rather than truncated, and a delete rewrites immediately, so a revoked
+credential does not come back on restart.
+
+**What protects a value there is that file mode and nothing else.** There is no encryption at rest,
+no passphrase, no OS keychain integration, and no protection from `root` or from a backup that
+copies the file. That makes it the right store for a single-operator deployment and the wrong one
+for a shared machine, where `connector-secrets`' Vault-backed store is the answer. Nothing ever
+silently selects the in-memory store instead: a configuration naming no path is a **startup error**
+naming what would have worked, because a host that fell back would start, serve every route
+correctly, look exactly like a working one, and lose every credential on restart.
+
+To decommission a store, remove the **directory**, not the file — a write interrupted between the
+`fsync` and the `rename(2)` can leave a complete copy of every credential in a sibling temporary
+that `rm` on the store file alone does not touch.
+
+No binary binds it yet; the server still starts, prints the matrix above, and exits.
 
 ## Try it
 
 ```bash
 cargo run                       # prints the deployment matrix above
-cargo test --workspace          # 19 tests
+cargo test --workspace          # 32 tests
 cd console && npm install && npm run dev
 ```
 
@@ -96,12 +126,18 @@ Rust 1.87 or newer.
 ## Embedding it in your own product
 
 `codewandler-flux-exchange-host` publishes the host as a **crate**, not only a binary. Identity, the
-secret store, the transport and the runtime registry are all traits, so a product composes them into
-its own service with its own identity provider and its own runtimes — without forking anything, and
-without that product's concerns reaching the shared code.
+secret store, the transport and the runtime registry are all **ports**, so a product composes them
+into its own service with its own identity provider and its own runtimes — without forking anything,
+and without that product's concerns reaching the shared code.
 
-That is the point of the trait boundary, not a side effect of it: the public crate has no downstream
-dependency to leak through, because it has only traits.
+One implementation ships behind one of those ports: `CredentialStore`, the file-backed store above.
+It is a default, not a fixture — the port is `SecretStore`, a deployment that wants Vault or its own
+backend binds that instead and never constructs the type, and the store it wraps comes from
+`connector-secrets`, a flux-family crate, rather than from any product.
+
+That is the point of the boundary, not a side effect of it: the public crate has no **downstream**
+dependency to leak through. Traits are how that is kept true, and a default a composing binary can
+decline does not spend it.
 
 ## Licence
 
