@@ -62,15 +62,33 @@ separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
-- **`codewandler-connector-catalog`** has zero dependencies. **`connector-spec`** and
-  **`connector-secrets`** carry no flux dependency. All three are usable today.
-- **`codewandler-connector-pack` 0.8.0 requires `codewandler-flux-runtime ^0.41`**, i.e. `<0.42`,
-  while the flux family is at 0.45.0. `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`,
-  and two engine versions are two incompatible traits. **You cannot link both.** This is X-11, the
-  work is upstream, and it blocks only the `invoke` epic.
+**X-11 closed the engine-line conflict.** The connector crates are on 0.9 and `connector-pack`
+links here. What is left is one rule, and it is the one that bites:
 
-Do not "solve" this with a `path` or `git` dependency on a sibling checkout. That couples a shipped
-image to an unreviewed working tree, and the family has already decided against it.
+- **The flux engine line is `0.46`, and it is written down once** — in `[workspace.dependencies]`
+  in the root `Cargo.toml`, under the `ENGINE_LINE` marker. Every `codewandler-flux-*` pin carries
+  that value, and no member manifest pins one at all.
+- **It is not the newest.** flux publishes 0.47; `connector-pack` 0.9.0 requires
+  `codewandler-flux-runtime ^0.46`, i.e. `<0.47`. `connector_pack::pack` hands out
+  `Arc<dyn flux_runtime::Tool>`, and two engine versions are two incompatible traits with identical
+  names — Cargo resolves both happily and the failure lands at type-check somewhere else entirely.
+  **The line is set by what `connector-pack` requires, never by what is newest.**
+- Two tests in `crates/exchange-host/tests/engine_line.rs` keep this true rather than review:
+  one links `connector_pack::pack` against `flux_web::http::HttpRequestTool` so a divergence that
+  touches the seam is a compile error, and one reads the manifests so a divergence that does not
+  touch it is still caught.
+- **`connector-address` is the address vocabulary; `connector-spec` is the compiler.** Upstream
+  C-407 extracted the first out of the second, so this repository names `connector-address` and no
+  longer pulls a compiler it never called. `connector-secrets` re-exports the same vocabulary, so
+  `CredentialRef` from either is one type. `DEFAULT_SERVICE` is the exception — it lives at
+  `connector-address`'s root, not in its `credential` module, so `connector-secrets` does not
+  re-export it.
+- **`connector-pack` is a dev-dependency**, so the published `codewandler-flux-exchange-host` does
+  not carry the flux engine in consumers' graphs for code that does not exist yet. X-12 promotes it.
+- **`codewandler-connector-catalog`** still has zero dependencies.
+
+Do not "solve" an engine-line conflict with a `path` or `git` dependency on a sibling checkout. That
+couples a shipped image to an unreviewed working tree, and the family has already decided against it.
 
 ## Invariants — do not regress these
 
