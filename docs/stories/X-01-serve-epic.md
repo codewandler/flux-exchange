@@ -1,7 +1,7 @@
 ---
 id: X-01
 title: "The HTTP surface (epic)"
-status: blocked
+status: ready
 priority: 1
 epic: serve
 note: "EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate"
@@ -21,7 +21,11 @@ serves authenticated requests, without ever offering a reachable bind to an unau
 - [x] No route reads the tenant from anything a caller controls. Asserted, not intended.
 
 ## Progress
-- **Blocked on X-04, which is blocked on a dependency decision.** X-02 and X-03 are done and the
+- **Unblocked 2026-08-01: X-04 is done.** The dependency decision was taken and the token exchange
+  is bound, so sign-in completes and this epic's remaining Acceptance no longer waits on it. Two
+  children were filed out of X-04's review and belong to this epic before it can close:
+  [X-16](X-16-session-expiry.md) and [X-17](X-17-exchange-failure-modes.md).
+- **Historic — was blocked on X-04, which was blocked on a dependency decision.** X-02 and X-03 are done and the
   fourth Acceptance item — no route reads the tenant from anything a caller controls — is asserted
   rather than intended: three vector tests (path segment, body field, header) against a route that
   genuinely declares `/{tenant}`, plus `no_published_route_takes_a_tenant_in_its_path` walking the
