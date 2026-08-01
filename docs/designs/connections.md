@@ -192,7 +192,7 @@ something was is the answer that costs somebody an afternoon.
 ### What a refusal names
 
 The address, never the value. Every refusal in this module quotes the rendered path and never the
-secret, and `no_refusal_carries_a_credential_value` drives the whole module's failure paths with a
+secret, and `no_answer_or_refusal_carries_a_credential_value` drives the whole module's failure paths with a
 sentinel value stored and asserts the sentinel appears in no response body. The refusal that matters
 most is the cross-tenant one, and it is worth being precise about what it can say: a caller asking
 for a connection its tenant does not have is answered with **its own** derived address, because that
@@ -300,3 +300,36 @@ asked.
 - **No listing straight from the store.** See the cost note above; `FileStore::paths()` exists but
   is not on the `SecretStore` port, and reaching past the port for it would tie this surface to one
   store implementation.
+
+## Addendum, 2026-08-01 — a store failure keeps its kind (X-18, X-20)
+
+The rollback decision above is unchanged. What it did not say, and what two stories then had to
+establish separately, is that **the kind of store failure survives into the refusal** rather than
+being flattened.
+
+Both `partly_written` and `partly_destroyed` originally answered `503` "retrying may work" for every
+kind. A create or delete refused because the store *denied this host access* is not a condition
+retrying resolves, and an operator told to retry does that instead of fixing the permission —
+which is the misinformation `store_failed`'s own doc argues against at length, reappearing on the
+partial paths.
+
+Both now read one shared mapping, `store_failure`, returning `(status, what-happened, what-to-do)`:
+
+- **The rollback clause and the kind's advice are separate sentences**, because they answer different
+  questions. The rollback says whether a retry is *safe*; the kind says whether it is *worth
+  anything*. For `Unreachable` that reads slightly redundantly — "so retrying is safe. Retrying may
+  work" — and it was left that way deliberately, because rewording would have quietly restated a
+  sentence operators may already have seen.
+- **The three caller-facing sentences are pinned byte for byte** by
+  `a_store_failure_says_what_it_has_always_said`, so the shared mapping cannot be reworded by
+  accident. That tripwire drives them through `store_failed` only; a wording change made *inside*
+  `partly_written`'s own format strings is still uncovered.
+- Rollback is not available on the delete path at all — a destroyed credential cannot be put back,
+  because this host never held the plaintext — so there the answer is honest reporting rather than
+  restoration. See [X-18](../stories/X-18-delete-partial-failure.md).
+
+**Known coverage gap:** `no_answer_or_refusal_carries_a_credential_value` claims to drive every
+answer and refusal this module can produce, and does not drive `partly_written`'s two branches. The
+disclosure properties are asserted directly by X-18's and X-20's own tests instead. Closing the gap
+means rearranging that test's arming order around an already-half-destroyed connection; it is
+recorded here rather than left as a false claim in the test's doc.

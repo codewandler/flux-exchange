@@ -33,9 +33,6 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
-### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-20 — A create refused because the store denied us does not say 'retrying may work'](X-20-create-failure-kinds.md) · found by X-18's implementor, 2026-08-01: partly_written flattens every store-failure kind to 503, so a create refused because the store Denied this host's access tells the caller to retry — the same defect class X-18 fixed on the delete side
-
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
 
@@ -65,6 +62,7 @@ _None._
 - [X-17 — An operator can tell their own misconfiguration from a refused credential](X-17-exchange-failure-modes.md) · found by X-04's two reviewers, 2026-08-01: `ExchangeError::Rejected` collapses four causes, one of which is this host's own client secret being wrong — and it is logged as 'the provider refused the authorization code'
 - [X-18 — A delete that fails half way says what it destroyed](X-18-delete-partial-failure.md) · found by a standing audit of the credential surface, 2026-08-01: DELETE has no rollback and no partial-failure report, so a failed delete can leave a live vendor credential on disk while the operator is told only 'retrying may work'
 - [X-19 — The cleartext check parses an authority the way the client that sends the secret does](X-19-authority-parser-divergence.md) · found by X-17's reviewer, 2026-08-01: `http://evil.example\\@127.0.0.1/token` passes `carries_a_secret_safely` as loopback, while the `url` crate reqwest actually uses resolves the host to `evil.example` — so the check clears a configuration that sends the client secret in cleartext to a remote host
+- [X-20 — A create refused because the store denied us does not say 'retrying may work'](X-20-create-failure-kinds.md) · found by X-18's implementor, 2026-08-01: partly_written flattens every store-failure kind to 503, so a create refused because the store Denied this host's access tells the caller to retry — the same defect class X-18 fixed on the delete side
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

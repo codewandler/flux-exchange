@@ -25,6 +25,13 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **A create the store refuses keeps its kind** (X-20). `partly_written` flattened every
+  store-failure kind to `503` "retrying may work", so a create refused because the store *denied this
+  host access* sent the operator to retry instead of to fix the permission — the same defect X-18
+  fixed on the delete side. A partly-written create is now `502` for denied, backend and layout
+  failures. The three existing caller-facing sentences are pinned byte for byte, so the shared
+  mapping cannot be reworded by accident.
+
 - **The cleartext check now parses an authority the way the client that dials it does** (X-19).
   X-17's refusal read `http://evil.example\@127.0.0.1/token` as loopback and admitted it, while the
   `url` crate reqwest actually dials with ends the authority at the backslash and resolves the host
