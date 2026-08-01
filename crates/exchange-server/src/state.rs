@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use exchange_host::{ConnectionSettings, Identity, Invoker, SecretStore};
+use exchange_host::{Identity, Invoker, SecretStore};
 
 use crate::agent::AgentStore;
 use crate::bind::IdentityBinding;
@@ -27,17 +27,6 @@ pub struct AppState {
     /// route that would reach for one refuses rather than pretending — see
     /// [`crate::routes::connections`].
     credentials: Option<Arc<dyn SecretStore>>,
-    /// Where a tenant's **non-secret** connection values are kept, as the port.
-    ///
-    /// A separate binding from [`credentials`](Self::credentials) and a separate store behind it,
-    /// which is X-47's central decision rather than a filing one: a subdomain is not a secret, and
-    /// putting it in the credential store would make `held` and the tenant occupancy bound each
-    /// mean two things at once. `exchange_host::settings` carries the whole argument.
-    ///
-    /// `None` is a composition that bound none. Every route that would write one refuses and names
-    /// the setting, and the invoker gets an empty configuration — so the connectors that need
-    /// nothing still run and the ones that need something still refuse by name.
-    settings: Option<Arc<dyn ConnectionSettings>>,
     /// Which connection changes are in flight, so two of them cannot decide against the same
     /// empty address and both write.
     ///
@@ -137,7 +126,6 @@ impl AppState {
             identity: BoundIdentity::None,
             sign_in: SignIn::Unconfigured,
             credentials: None,
-            settings: None,
             connections: Arc::default(),
             agents: None,
             invoker: None,
@@ -158,7 +146,6 @@ impl AppState {
             identity: BoundIdentity::Real(identity),
             sign_in: SignIn::Unconfigured,
             credentials: None,
-            settings: None,
             connections: Arc::default(),
             agents: None,
             invoker: None,
@@ -171,7 +158,6 @@ impl AppState {
             identity: BoundIdentity::Development(identity),
             sign_in: SignIn::Unconfigured,
             credentials: None,
-            settings: None,
             connections: Arc::default(),
             agents: None,
             invoker: None,
@@ -192,7 +178,6 @@ impl AppState {
             identity: BoundIdentity::Real(oidc.clone()),
             sign_in: SignIn::Oidc(oidc),
             credentials: None,
-            settings: None,
             connections: Arc::default(),
             agents: None,
             invoker: None,
@@ -210,7 +195,6 @@ impl AppState {
             identity: BoundIdentity::None,
             sign_in: SignIn::NoTokenExchange,
             credentials: None,
-            settings: None,
             connections: Arc::default(),
             agents: None,
             invoker: None,
@@ -240,31 +224,6 @@ impl AppState {
     /// caller supplied.
     pub fn credentials(&self) -> Option<&Arc<dyn SecretStore>> {
         self.credentials.as_ref()
-    }
-
-    /// Bind the connection-settings store this composition holds.
-    ///
-    /// An additive builder method for [`with_credentials`](Self::with_credentials)' reason, and a
-    /// *separate* one from it on purpose: every combination of the two is a real composition. A
-    /// host with credentials and no settings store runs the thirty-seven connectors that need
-    /// nothing per connection and refuses the sixteen that do, by name — which is X-12's behaviour,
-    /// kept rather than papered over.
-    ///
-    /// **Binding one does not make a caller resolvable**, so it must never influence
-    /// [`identity_binding`](Self::identity_binding) —
-    /// `binding_a_settings_store_does_not_admit_a_reachable_bind` is that claim.
-    pub fn with_settings(mut self, settings: Arc<dyn ConnectionSettings>) -> Self {
-        self.settings = Some(settings);
-        self
-    }
-
-    /// The connection-settings store this composition bound, if it bound one.
-    ///
-    /// The port, so a route can neither reopen the store nor learn where it is. What a route may do
-    /// with it is ask whether a value is set, set one, and clear one — always at an address this
-    /// host **derived** from the resolved principal and the connector's own declaration.
-    pub fn settings(&self) -> Option<&Arc<dyn ConnectionSettings>> {
-        self.settings.as_ref()
     }
 
     /// Bind the agent store this composition holds.
@@ -571,12 +530,7 @@ mod tests {
         }
 
         let invoker = Arc::new(
-            crate::execution::invoker(
-                Arc::new(NoStore),
-                // Deciding an identity binding reads no connection setting either.
-                Arc::new(exchange_host::MemoryConfig::new()),
-            )
-            .expect("a usable workspace root"),
+            crate::execution::invoker(Arc::new(NoStore)).expect("a usable workspace root"),
         );
 
         for state in [
@@ -597,46 +551,6 @@ mod tests {
             IdentityBinding::Development,
             "and it must not change the binding a composition reports either",
         );
-    }
-
-    /// **X-47.** Binding a connection-settings store does not legalise a reachable bind.
-    ///
-    /// The fourth of this shape, and here for the reason the other three are: pinning the enum is
-    /// not pinning the wiring. The mistake it catches is the one this story makes plausible —
-    /// somebody reasons "the templated connectors work now, so this host is a real service" and
-    /// teaches `identity_binding` to say `Bound`. What a settings store holds is a subdomain; it
-    /// authenticates nobody, and a host on `0.0.0.0` that can reach sixteen more vendors with a
-    /// tenant's credentials and still cannot identify a caller is *worse* than one that cannot.
-    #[test]
-    fn binding_a_settings_store_does_not_admit_a_reachable_bind() {
-        let directory = std::env::temp_dir().join(format!(
-            "flux-exchange-state-settings-{}",
-            std::process::id()
-        ));
-        let store = Arc::new(
-            exchange_host::SettingsStore::bind(directory.join("settings")).expect("a fresh store"),
-        );
-
-        for state in [
-            AppState::without_identity().with_settings(store.clone()),
-            AppState::with_development_identity(dev()).with_settings(store.clone()),
-            AppState::oidc_without_a_token_exchange().with_settings(store.clone()),
-        ] {
-            assert!(
-                admit_bind(addr("0.0.0.0:8080"), state.identity_binding()).is_err(),
-                "binding a connection-settings store must not make a reachable bind legal",
-            );
-        }
-
-        assert_eq!(
-            AppState::with_development_identity(dev())
-                .with_settings(store)
-                .identity_binding(),
-            IdentityBinding::Development,
-            "and it must not change the binding a composition reports either",
-        );
-
-        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The concrete port is reachable only when it is the development one, because that is what

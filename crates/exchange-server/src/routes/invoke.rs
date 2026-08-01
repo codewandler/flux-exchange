@@ -121,19 +121,6 @@ async fn run(
 /// mean parsing a string this host did not compose, and a field that is right four times in five is
 /// worse than a message that is always whole. When `connector-pack` publishes the address as data,
 /// this is where it lands.
-///
-/// # `supply_at` (X-47), and why it is a route and not a parsed field
-///
-/// A `refused` message names the `binds` target that is missing — `endpoint.subdomain` — and until
-/// X-47 there was nowhere on this surface to put one, so an operator who read the refusal correctly
-/// still had nothing to do about it. `supply_at` is that missing half: the **route** that takes
-/// per-connection values for the operation's connector.
-///
-/// It is derived from the operation the caller named and from nothing in the message, for the
-/// reason stated above about the address — this host does not parse a string it did not compose.
-/// So it points at the connector's settings **collection**, which answers with every field that
-/// connector needs and which of them this tenant has supplied; picking out the one field would mean
-/// reading it back out of upstream's prose.
 fn refuse(refusal: InvokeRefusal) -> Response {
     let status = match refusal {
         // Nothing in the catalogue spells it.
@@ -154,30 +141,9 @@ fn refuse(refusal: InvokeRefusal) -> Response {
         "sent": refusal.sent(),
         "retryable": refusal.retryable(),
         "message": refusal.to_string(),
-        "supply_at": supply_at(&refusal),
     });
 
     (status, Json(body)).into_response()
-}
-
-/// Where a tenant supplies what a `refused` invocation says is missing.
-///
-/// Only for [`InvokeRefusal::Refused`], which is the one class whose remedy is a value this tenant
-/// has not supplied. A `transport` failure has nothing to supply, an unknown operation has no
-/// connector, and a runtime refusal is a property of the deployment that no value changes — each of
-/// those answers `null` rather than pointing somewhere that would not help.
-///
-/// The connector is looked up from the operation the caller named, so this route is derived from
-/// the catalogue rather than read out of upstream's message. An operation the catalogue does not
-/// spell cannot reach here — `UnknownOperation` is a different variant — but the lookup is written
-/// to answer `None` rather than to assume, because a refusal is the wrong place to panic.
-fn supply_at(refusal: &InvokeRefusal) -> Option<String> {
-    let InvokeRefusal::Refused { operation, .. } = refusal else {
-        return None;
-    };
-
-    let entry = connector_catalog::operation(connector_catalog::OperationKey::id(operation))?;
-    Some(format!("/api/connections/{}/settings", entry.provider))
 }
 
 /// No invoker is bound, so nothing can run.
@@ -334,12 +300,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_operation_is_a_404_that_says_it_was_never_sent() {
         let state = identified().with_invoker(Arc::new(
-            crate::execution::invoker(
-                Arc::new(EmptyStore),
-                // No connection settings bound: these tests drive connectors that need none.
-                Arc::new(exchange_host::MemoryConfig::new()),
-            )
-            .expect("a usable workspace root"),
+            crate::execution::invoker(Arc::new(EmptyStore)).expect("a usable workspace root"),
         ));
 
         let (status, body) =
@@ -360,12 +321,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_credential_is_a_422_that_names_the_address_and_is_terminal() {
         let state = identified().with_invoker(Arc::new(
-            crate::execution::invoker(
-                Arc::new(EmptyStore),
-                // No connection settings bound: these tests drive connectors that need none.
-                Arc::new(exchange_host::MemoryConfig::new()),
-            )
-            .expect("a usable workspace root"),
+            crate::execution::invoker(Arc::new(EmptyStore)).expect("a usable workspace root"),
         ));
 
         let (status, body) = post_json(

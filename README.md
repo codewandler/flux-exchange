@@ -80,19 +80,17 @@ against one tenant's connections, not a vendor secret.
 
 | | |
 |---|---|
-| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path, `SettingsStore` — a **separate** file-backed store for a tenant's *non-secret* per-connection values, bound by `FLUX_EXCHANGE_SETTINGS`, because a subdomain is not a credential and sharing the store would make `held` and the tenant allowance each mean two things, and `Invoker` — which runs one catalogue operation through `connector_pack` and holds no transport of its own. **Real and tested (83 tests).** |
-| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port — one that **ends when the id token behind it does** — **complete OIDC sign-in**, a per-tenant connection surface — credentials, and since X-47 the **non-secret per-connection values** a templated connector needs — and `POST /api/agents`, which **mints an agent principal for the caller's tenant and shows its token once**, and `POST /api/operations/{operation}/invoke`, a thin adapter over the host's `Invoker`. It is the **only crate here that holds an HTTP client**, and it deliberately never names `connector_pack` — a test asserts both halves. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (232 tests).** |
+| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path, and `Invoker` — which runs one catalogue operation through `connector_pack` and holds no transport of its own. **Real and tested (66 tests).** |
+| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port — one that **ends when the id token behind it does** — **complete OIDC sign-in**, a per-tenant connection surface, and `POST /api/agents`, which **mints an agent principal for the caller's tenant and shows its token once**, and `POST /api/operations/{operation}/invoke`, a thin adapter over the host's `Invoker`. It is the **only crate here that holds an HTTP client**, and it deliberately never names `connector_pack` — a test asserts both halves. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (225 tests).** |
 | `console/` | A Vue 3 **admin surface**, not a catalogue browser: it lands on this tenant's connections, reads its session from `/api/session`, and reuses the framework-free explorer components from flux-connectors for the catalogue. `invoke`, `subscribe` and activity are **named in the navigation and inert** — no route resolves to them and no placeholder screen exists, which `console/test/shell.test.mjs` asserts rather than assumes. An unreachable service renders an error naming the endpoint — never an empty catalogue and never a false "signed out". |
 
 **Not built, despite being described in the design:** a second connection to one
-connector (the address has no instance dimension until upstream publishes one),
-**grant gating on `invoke`**, which is identity-gated only until X-13,
+connector (the address has no instance dimension until upstream publishes one), per-connection
+configuration — which is why the thirteen connectors with a templated `base_url` refuse `invoke` by
+name — **grant gating on `invoke`**, which is identity-gated only until X-13,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
-catalogue loader. The credential store has moved off this list and is described below, and X-47 moved
-per-connection configuration off it too — but the honest replacement claim is narrower than "done":
-a tenant can now **supply** the values sixteen connectors need, over HTTP, and nothing renders that
-surface for a human. The console does not know these routes exist. The design is ahead of the code
-on purpose; the gap is stated here so nobody has to discover it.
+catalogue loader. The credential store has moved off this list and is described below. The design is ahead of the code on purpose; the gap is
+stated here so nobody has to discover it.
 
 ### An agent token is minted, and nothing yet verifies one
 

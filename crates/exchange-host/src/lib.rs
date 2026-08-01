@@ -47,13 +47,8 @@ mod credentials;
 mod grant;
 mod invoke;
 mod lease;
-// Where a file store may sit, asked before one is created. Shared by the two file stores this crate
-// binds, so "is this path somewhere a commit could pick it up" is one walk rather than two copies.
-#[cfg(unix)]
-mod paths;
 mod principal;
 mod runtime;
-mod settings;
 
 /// Re-exported so a composing binary can implement [`Identity`] without taking its own dependency
 /// on `async-trait`.
@@ -106,12 +101,6 @@ pub use invoke::{admit_runtime, Contexts, Invocation, InvokeRefusal, Invoker, Se
 pub use lease::{Lease, LeaseId, LeaseState};
 pub use principal::{Principal, PrincipalKind, Tenant, TenantError};
 pub use runtime::{Deployment, Runtime, RuntimeRefusal};
-pub use settings::{
-    admit_tenant_settings, declared_settings, ConnectionSettings, DeclaredSetting, SettingKind,
-    SettingsRefusal, MAX_SETTING_VALUE_BYTES, MAX_TENANT_SETTINGS_BYTES,
-};
-#[cfg(unix)]
-pub use settings::{SettingsStore, SettingsStoreError, CONNECTION_SETTINGS_SETTING};
 
 /// Errors the host raises. Every variant refuses; none repairs.
 #[derive(Debug, thiserror::Error)]
