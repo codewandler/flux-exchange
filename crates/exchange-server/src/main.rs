@@ -75,13 +75,70 @@ async fn serve() -> Result<(), StartupRefusal> {
         .map_err(|source| StartupRefusal::Serving { source })
 }
 
-/// Bind the ports this composition serves with.
+/// Bind the ports this composition serves with: an identity provider, and a credential store.
 ///
-/// There is exactly one identity port on offer and it is the development one, armed only by
-/// [`DEV_IDENTITY_ENV`] being set. Unset is the default and the default binds nothing, which is
-/// the state a reachable bind is already refused in — so no configuration has to be *turned off*
-/// to be safe, only turned on to be convenient. A real provider is X-04.
+/// Both are independent, both default to *bound to nothing*, and neither has a fallback. The
+/// argument is the same in each case and it is the one that decides the shape: a safety property
+/// that depends on a setting staying at its default is one setting away from gone, so nothing has
+/// to be turned off to be safe — only turned on to be useful.
 fn compose() -> Result<AppState, StartupRefusal> {
+    let state = compose_identity()?;
+
+    match credential_store()? {
+        Some(store) => Ok(state.with_credentials(store)),
+        None => Ok(state),
+    }
+}
+
+/// Bind the credential store the environment names, or bind none.
+///
+/// The same three states as the development identity, and for the same reason. **Unset binds
+/// nothing**, and every route that would have used a store then refuses with `503` naming this
+/// setting — which is not the in-memory fallback X-09 refuses, because nothing is served from
+/// somewhere else; the host says it cannot hold a credential. **Set and unusable refuses to
+/// start**, since a store the operator named and this process could not open is a mistake with no
+/// later moment at which it announces itself.
+///
+/// `#[cfg(unix)]` because `CredentialStore` is: what protects a value in the file store is `0600`
+/// and `0700`, and a platform that cannot spell those would get a store implying a safety it does
+/// not have. The *port* is not gated, so another platform's composition binds its own.
+#[cfg(unix)]
+fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
+    use exchange_host::{CredentialStore, CREDENTIAL_STORE_SETTING};
+
+    let Ok(configured) = std::env::var(CREDENTIAL_STORE_SETTING) else {
+        warn!(
+            "no credential store is bound ({CREDENTIAL_STORE_SETTING} is unset), so connecting a \
+             connector will refuse. Set it to a path outside every working tree to hold \
+             credentials",
+        );
+        return Ok(None);
+    };
+
+    let store = CredentialStore::bind_configured(Some(&configured)).map_err(|source| {
+        StartupRefusal::CredentialStore {
+            reason: source.to_string(),
+        }
+    })?;
+
+    // Read back off the bound store, so this line cannot name a file this process did not open.
+    info!("{}", store.banner());
+
+    Ok(Some(store.secrets()))
+}
+
+/// No file store on this platform; a composition here binds its own or holds none.
+#[cfg(not(unix))]
+fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
+    Ok(None)
+}
+
+/// Bind the identity port this composition serves with.
+///
+/// There is exactly one on offer and it is the development one, armed only by
+/// [`DEV_IDENTITY_ENV`] being set. Unset is the default and the default binds nothing, which is
+/// the state a reachable bind is already refused in. A real provider is X-04.
+fn compose_identity() -> Result<AppState, StartupRefusal> {
     let Some(dev) = DevIdentity::armed()? else {
         return Ok(AppState::without_identity());
     };

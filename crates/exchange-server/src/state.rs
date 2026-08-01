@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use exchange_host::Identity;
+use exchange_host::{Identity, SecretStore};
 
 use crate::bind::IdentityBinding;
 use crate::dev_identity::DevIdentity;
@@ -15,6 +15,14 @@ use crate::dev_identity::DevIdentity;
 #[derive(Clone)]
 pub struct AppState {
     identity: BoundIdentity,
+    /// Where credentials are kept, as the **port** rather than as the concrete store.
+    ///
+    /// `exchange_host::CredentialStore` is one binding of this and is `#[cfg(unix)]`, because only
+    /// the file store is; holding the port keeps the surface off that gate and keeps a deployment
+    /// that binds Vault instead able to do so. `None` is a composition that bound none, and every
+    /// route that would reach for one refuses rather than pretending — see
+    /// [`crate::routes::connections`].
+    credentials: Option<Arc<dyn SecretStore>>,
 }
 
 /// The identity port a composition bound, and what the bind rule may conclude from it.
@@ -46,6 +54,7 @@ impl AppState {
     pub fn without_identity() -> Self {
         Self {
             identity: BoundIdentity::None,
+            credentials: None,
         }
     }
 
@@ -59,6 +68,7 @@ impl AppState {
     pub fn with_identity(identity: Arc<dyn Identity>) -> Self {
         Self {
             identity: BoundIdentity::Real(identity),
+            credentials: None,
         }
     }
 
@@ -66,7 +76,33 @@ impl AppState {
     pub fn with_development_identity(identity: Arc<DevIdentity>) -> Self {
         Self {
             identity: BoundIdentity::Development(identity),
+            credentials: None,
         }
+    }
+
+    /// Bind the credential store this composition holds.
+    ///
+    /// A builder method rather than a fourth constructor or a widened signature on the three above,
+    /// for two reasons. The identity binding and the credential store are independent — every
+    /// combination of them is a real composition, and four constructors times two would be eight —
+    /// and an additive method leaves the existing spellings untouched, which is what lets a story
+    /// that adds an identity provider and a story that adds a store land without colliding.
+    ///
+    /// Not calling it is a composition with no store, which is a state every route that needs one
+    /// refuses in. There is no default here for the reason `CredentialStore` has none: a store
+    /// nobody chose is a store nobody can find the credentials in.
+    pub fn with_credentials(mut self, credentials: Arc<dyn SecretStore>) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    /// The credential store this composition bound, if it bound one.
+    ///
+    /// The port, so a route can neither reopen the store nor learn where it is. What a route may do
+    /// with it is `get`, `put` and `delete` at an address this host **derived** — never one a
+    /// caller supplied.
+    pub fn credentials(&self) -> Option<&Arc<dyn SecretStore>> {
+        self.credentials.as_ref()
     }
 
     /// Whether a request could become a principal, and whether that is safe to expose.

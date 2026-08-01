@@ -15,6 +15,7 @@
 //! construction. The seam is the same; only the direction of the dependency changed.
 
 mod catalogue;
+mod connections;
 mod health;
 mod identity;
 
@@ -33,7 +34,12 @@ use crate::session;
 use crate::state::AppState;
 
 /// The feature modules this app is assembled from. **This is the merge site.**
-const MODULES: &[Module] = &[health::MODULE, catalogue::MODULE, identity::MODULE];
+const MODULES: &[Module] = &[
+    health::MODULE,
+    catalogue::MODULE,
+    identity::MODULE,
+    connections::MODULE,
+];
 
 /// A feature module's contribution to the surface.
 pub struct Module {
