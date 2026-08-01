@@ -8,6 +8,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **The connector catalogue, served and read** (X-05, X-06, X-07). `GET /api/catalogue/connectors`
+  and `/api/catalogue/connectors/{id}/operations` publish 53 connectors and 299 operations with the
+  metadata a `Selector` is written over — `risk`, `effects`, `idempotency` — so the grant model stops
+  being server-only folklore. The response distinguishes **what exists** from **what a principal may
+  call**: nothing is filtered by grant, and `admitted: null` says so on the wire rather than omitting
+  an operation a caller lacks, because an agent that cannot see an operation cannot report being
+  refused. `effects` is *derived* (`network` iff the operation declares hosts, since the catalogue
+  declares no effects) and carries `effects_derived: true` so an inference is never read as a
+  declaration. Adding a connector needs no change to the route.
+
+  The console now reads that catalogue live; `console/src/fixtures/catalog.ts` and its banner are
+  deleted in the same change. An unreachable service renders an error **naming the endpoint** — "zero
+  connectors" and "cannot reach the server" must not look alike. The 15 explorer components carried
+  from flux-connectors are untouched; four findings against them were reported upstream
+  (flux-connectors C-408) rather than patched locally.
 - **A credential store, honest about what protects it** (X-09). `exchange_host::CredentialStore`
   binds `connector-secrets`' file-backed store — `0600` in a `0700` directory, modes set in the
   create call and re-checked at open, a widened mode **refused rather than tightened**, and atomic

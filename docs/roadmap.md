@@ -15,7 +15,7 @@ multi-tenant deployment refusing every locally-executing runtime, deny beating a
 and a lease requiring the same principal rather than merely the same tenant.
 
 `crates/exchange-server` prints which runtimes each deployment shape would serve, and exits.
-`console/` renders fixture data behind a banner that says so.
+`console/` reads the live catalogue from the service; the fixture banner is gone with the fixtures.
 
 **Nothing holds a credential, binds a port, or answers a request.**
 

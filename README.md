@@ -76,7 +76,7 @@ against one tenant's connections, not a vendor secret.
 |---|---|
 | `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound but not yet wired into a binary. **Real and tested (32 tests).** |
 | `crates/exchange-server` | A service with exactly one route: `GET /health` on loopback. It refuses to start on a reachable address with no identity provider. **Tested (13 tests).** |
-| `console/` | A Vue 3 console rendering **fixture data**, reusing the framework-free explorer components from flux-connectors. **No backend.** |
+| `console/` | A Vue 3 console reading the **live catalogue** from this service, reusing the framework-free explorer components from flux-connectors. An unreachable service renders an error naming the endpoint — never an empty catalogue. |
 
 **Not built, despite being described in the design:** sign-in, every route but `/health`, `invoke`,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the

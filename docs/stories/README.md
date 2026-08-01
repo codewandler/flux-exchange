@@ -30,13 +30,8 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 
 ## Now (in progress)
 - [X-03 — Bind the Identity port, with a dev identity and a session](X-03-identity-port-and-session.md) · the tenant must come from the resolved principal and from NOTHING a caller controls — not a path segment, not a body field, not a header
-- [X-06 — Serve the connector catalogue](X-06-serve-the-catalogue.md) · the operation metadata a grant is written over — risk, effects, idempotency — must be in the response, or Selector cannot be evaluated by anything but the server
-- [X-07 — The console reads the live catalogue](X-07-console-reads-the-catalogue.md) · the fixture banner must come out in the SAME change that makes it untrue — a banner that outlives its condition teaches readers to ignore banners
 
 ## Next (ready — take the top one unless the user named a story)
-
-### Catalogue
-- [X-05 — The catalogue surface (epic)](X-05-catalogue-epic.md) · connector-catalog has ZERO dependencies — no flux coupling, no IO, no runtime. This epic is unblocked by construction
 
 ### Connections
 - [X-08 — Connections and credentials (epic)](X-08-connections-epic.md) · connector-secrets and connector-spec carry NO flux dependency, so this epic is unblocked too — only invoke waits on the engine line
@@ -57,6 +52,9 @@ _None._
 
 ## Done
 - [X-02 — Serve HTTP, and refuse a reachable bind with no way to authenticate](X-02-serve-http-and-refuse-open-bind.md) · flux-server's precedent: a non-loopback bind without a token is refused AT STARTUP, because a daemon that auto-approves behind an open listener is RCE
+- [X-05 — The catalogue surface (epic)](X-05-catalogue-epic.md) · connector-catalog has ZERO dependencies — no flux coupling, no IO, no runtime. This epic is unblocked by construction
+- [X-06 — Serve the connector catalogue](X-06-serve-the-catalogue.md) · the operation metadata a grant is written over — risk, effects, idempotency — must be in the response, or Selector cannot be evaluated by anything but the server
+- [X-07 — The console reads the live catalogue](X-07-console-reads-the-catalogue.md) · the fixture banner must come out in the SAME change that makes it untrue — a banner that outlives its condition teaches readers to ignore banners
 - [X-09 — A credential store, honest about what protects it](X-09-credential-store.md) · no fallback to memory on a bad store value — a host that fell back would start, serve every route correctly, look exactly like a working one, and lose everything on restart
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._

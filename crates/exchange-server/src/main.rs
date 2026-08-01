@@ -2,9 +2,10 @@
 //!
 //! # What it serves
 //!
-//! An HTTP surface with a health route, bound to loopback by default. It holds no credential, binds
-//! no identity provider and runs no operation yet; the README carries the itemized inventory of what
-//! is not built.
+//! An HTTP surface bound to loopback by default: a health route, and the connector catalogue —
+//! what this binary *could* run, never what a caller may run, which is why every operation it
+//! serves carries `admitted: null`. It holds no credential, binds no identity provider and runs no
+//! operation yet; the README carries the itemized inventory of what is not built.
 //!
 //! What it does carry is the rule that makes the rest safe to add: **a reachable bind with no way to
 //! resolve a principal is refused at startup**, not warned about and served anyway. See

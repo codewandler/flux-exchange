@@ -12,9 +12,10 @@ pub(super) const MODULE: Module = Module {
     name: "health",
     routes: &[Route {
         path: "/health",
-        // The only anonymous route in the app. What keeps it the only one is not this line — it is
-        // `super::tests::health_is_the_only_route_reachable_without_a_principal`, which asks the
-        // assembled app rather than reading this table.
+        // Anonymous, and it has to be: an operator must be able to ask whether the process is up
+        // before it can tell them anything else. What keeps the anonymous surface honest is not this
+        // line — it is `super::tests::the_anonymous_surface_is_only_what_was_declared_anonymous`,
+        // which asks the assembled app rather than reading this table.
         access: Access::Anonymous,
         method_router: route,
     }],
