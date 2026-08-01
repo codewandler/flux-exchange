@@ -53,9 +53,15 @@
       "id": "invoke",
       "title": "Call an operation",
       "summary": "Name an operation and get a result, without naming a host, a credential or a tenant. The credential never crosses the boundary; the authority does.",
-      "live": false,
-      "call": null,
-      "withheld": "Nothing in this deployment can be called. `invoke` is not built, so there is no screen to call an operation from and every operation in the catalogue reads \"not live yet\"."
+      "live": true,
+      "call": {
+        "method": "POST",
+        "endpoint": "/api/operations/{operation}/invoke",
+        "caller": "Any principal this host resolved. Today that means a signed-in human: nothing here yet resolves an agent token, which is the “Authenticate as that identity” step above — so an agent cannot reach this route until that one lands, however live the route is.",
+        "note": "{operation} is the catalogue’s own id, as served at /api/catalogue/connectors, and the body is that operation’s declared parameters verbatim — there is no envelope, no tenant, no connector, no host and no credential, because every one of those is derived from the operation and from the principal this host resolved. The answer carries sent and retryable as fields, because an HTTP status answers neither: a 502 does not say whether the vendor received it. A vendor’s own 4xx comes back as 200 with its response in content, unshaped — the vendor said no and we could not ask are different events. A host with no credential store bound runs nothing and says so.",
+        "warn": "This route is gated by identity alone. There is no grant model in this build, so any principal this host resolves may run any operation in the catalogue against its own tenant’s connections."
+      },
+      "withheld": ""
     },
     {
       "id": "subscribe",
@@ -63,7 +69,7 @@
       "summary": "Have this host terminate a vendor’s channel, verify what arrives against the connector’s declaration, and hand you a typed event.",
       "live": false,
       "call": null,
-      "withheld": "`subscribe`, the websocket and channels are not built. Nothing here terminates a channel, so there is no subscription to show."
+      "withheld": "`subscribe`, the websocket and channels are not built. Nothing here terminates a channel, so there is no subscription to show and no route to call."
     },
     {
       "id": "read-what-happened",

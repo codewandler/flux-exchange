@@ -82,7 +82,56 @@ widening it is deliberate and tested. Whatever is published here must be reviewe
   surface regressing to unbuilt the page drops the instruction and the document would have kept
   publishing the endpoint — a capability marked not-live still inviting a call. It is now gated on
   `live`, which is the page's own rule.
-- **Carried forward:** two `withheld` strings reach the wire in console vocabulary ("there is no
-  screen to call an operation from", "there is no Activity screen"). That is deliberate — the design
-  requires the gap be stated in the surface's own words, once — but if a later story wants
-  API-shaped prose there, the place to change it is `surfaces.mts`, and the page changes with it.
+- **Carried forward:** one `withheld` string reaches the wire in console vocabulary ("there is no
+  Activity screen"). Deliberate — the design requires the gap be stated in the surface's own words,
+  once — but if a later story wants API-shaped prose there, the place to change it is
+  `surfaces.mts`, and the page changes with it.
+
+## Progress — rework, round 1
+
+**The descriptor published a false statement about `invoke`, and the coordinator caught it by
+measuring against the route table.** `POST /api/operations/{operation}/invoke` shipped in v0.7.0,
+is in `routes::MODULES`, and is gated `Access::Principal`; the document said
+`"live": false, "withheld": "Nothing in this deployment can be called."`
+
+- **The root cause was the source of truth, not the derivation.** `surfaces.mts`'s `built` answers
+  *does this console have a screen*; the page and the descriptor ask *does this service do this*.
+  The two agreed for every surface until `invoke` shipped a route with no screen. So the wiring was
+  honest and pointed at the wrong construct — and the page/descriptor agreement test could not see
+  it, because both renderings agreed **with each other** while both were wrong.
+- **`surfaces.mts` now answers the two questions separately**: `built` (a screen) and `served` (the
+  service publishes it). `invoke` is `built: false, served: true`. Nothing about the navigation
+  changed — no surface's `built` moved — so the rail is untouched.
+- **The enforcement is in Rust, against `routes::MODULES`**, which is the part worth more than the
+  agreement test: `a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it` (a capability
+  is live exactly when a route serves it) and
+  `every_published_route_is_a_capability_or_is_argued_not_to_be` (every published route is offered
+  as a capability or listed with an argument for why an agent author is not told about it). The
+  second would have gone red on the day `invoke` landed. Both demonstrated red before the fix.
+- **All six capabilities re-checked against the route table**, not against `surfaces.mts`:
+  `read-the-catalogue` → `/api/catalogue/connectors` ✓ live; `be-minted` → `/api/agents` ✓ live;
+  `invoke` → `/api/operations/{operation}/invoke` ✓ **now live** (was the falsehood); `authenticate`
+  → no route, and the claim is about the identity port, pinned by
+  `nothing_this_host_binds_resolves_an_agent_token`; `subscribe` → no route ✓; `read-what-happened`
+  → no route ✓. Only `invoke` was wrong.
+- **The same falsehood was in three renderings, and all three are corrected**, because fixing one
+  leaves them disagreeing: the onboarding page (X-41), the mint screen's token standing (X-45), and
+  the shell's "Not built: … it calls nothing" inventory sentence (X-34). The rail's per-entry tag is
+  now `no screen` rather than `not built`, which is the distinction that caused this.
+- **X-45's deliberate trip-wire fired, and was answered rather than silenced.** `minting.mts`'s
+  `authorisation()` withdrew itself the moment a token-holder step became available, with a note
+  saying whoever lands it must "say what is true instead". Withdrawing would have blanked the
+  paragraph exactly when it acquired teeth, so the sentence now states the exposure — a token that
+  can be presented will be admitted to every operation in the catalogue for its tenant, because
+  invocation is gated by identity alone — and the withdrawal is re-keyed to the event that makes it
+  a genuine grant question: a token that can actually be **presented** (`authenticate`).
+- **The "no parameters in an endpoint" rule was the right instinct one notch too tight.** It would
+  have meant omitting the one route that runs an operation, or describing it in prose to dodge a
+  test. The rule is now "no **value**": path parameters must be catalogue keys, written out as a
+  list (`operation`), so admitting a second is a decision. `/api/connections/{connector}` is still
+  refused. The Rust side additionally requires every endpoint named to be a route this host
+  actually publishes.
+- **Found while re-checking, not fixed:** `service.mts` still maps every catalogue operation to
+  `works: false` with the comment *"nothing in flux-exchange can be invoked yet"*, so the explorer
+  reads "not live yet" on operations the service can run. Same root cause, different surface
+  (X-07/X-46), and deciding what `works` should mean per operation is that story's call.

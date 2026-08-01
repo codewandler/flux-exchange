@@ -271,6 +271,7 @@ mod tests {
     use serde_json::json;
     use tower::Service;
 
+    use super::super::published;
     use crate::dev_identity::DevIdentity;
 
     /// Two tenants, so a document that leaked one could be caught leaking it.
@@ -447,37 +448,282 @@ mod tests {
         }
     }
 
-    /// No endpoint this document publishes has a place a value could go.
+    /// Every path parameter that may appear in an endpoint this document publishes, and why it is
+    /// not a value.
     ///
-    /// The console asserts the same thing over the page (`nothing_tenant_specific_can_reach_this_page`).
-    /// It is asserted again here because this is the copy that is *served*, and because the rule is
-    /// about the served surface: `/api/connections/{connector}` in this document would be a tenant's
-    /// contents wearing a shape.
+    /// Written out rather than pattern-matched, so admitting a second one is a decision somebody
+    /// makes here. The rule it enforces is not "no parameters" — that was the first spelling, and
+    /// it was the right instinct one notch too tight, since it would have meant either omitting the
+    /// one route that runs an operation or describing it in prose to get past a test. The rule is
+    /// **no value**: no tenant, no principal, no credential, no address. `/api/connections/{connector}`
+    /// in this document would be a tenant's contents wearing the shape of a route, and `{connector}`
+    /// is not on this list.
+    const CATALOGUE_KEYS: &[&str] = &[
+        // The catalogue's own operation id — `zendesk-ticket-show`. It selects *what* runs; the
+        // tenant, the host and the credential are each derived from something the caller did not
+        // supply. The same vocabulary `/api/catalogue/connectors` already publishes anonymously,
+        // so it discloses nothing this surface was keeping.
+        "operation",
+    ];
+
+    /// Every endpoint this document names is a route this host actually publishes, and none of them
+    /// has a place a *value* could go.
+    ///
+    /// The first half is the stronger one and it is new in the rework: comparing against
+    /// [`published`] rather than against a shape means a typo, a renamed route, or a document
+    /// describing an endpoint this build does not serve is a failure here rather than a `404` in
+    /// somebody's agent.
     #[test]
-    fn no_endpoint_the_document_names_could_hold_a_value() {
+    fn every_endpoint_the_document_names_is_a_published_route_and_names_no_value() {
         let document: Onboarding = serde_json::from_str(DERIVED).expect("a JSON document");
 
-        let endpoints = document
+        let endpoints: Vec<String> = document
             .capabilities
             .iter()
             .filter_map(|capability| capability.call.as_ref())
             .map(|call| call.endpoint.clone())
-            .chain(std::iter::once(document.endpoint.clone()));
-
-        let mut checked = 0;
-        for endpoint in endpoints {
-            checked += 1;
-            assert!(
-                endpoint.starts_with("/api/") && !endpoint.contains('{') && !endpoint.contains('}'),
-                "`{endpoint}` carries a parameter, and this document describes the shape of the \
-                 service and never its contents",
-            );
-        }
+            .chain(std::iter::once(document.endpoint.clone()))
+            .collect();
 
         assert!(
-            checked > 1,
-            "no endpoints were checked, so this proves nothing"
+            endpoints.len() > 1,
+            "no endpoints were checked, so this proves nothing",
         );
+
+        for endpoint in endpoints {
+            assert!(
+                published().any(|(_, route)| route.path == endpoint),
+                "the descriptor tells an agent to call `{endpoint}`, which is not a route this \
+                 host publishes",
+            );
+
+            for parameter in endpoint
+                .split('/')
+                .filter_map(|segment| segment.strip_prefix('{'))
+                .filter_map(|segment| segment.strip_suffix('}'))
+            {
+                assert!(
+                    CATALOGUE_KEYS.contains(&parameter),
+                    "`{endpoint}` carries `{{{parameter}}}`, which is not on the list of catalogue \
+                     keys this document may spell — a parameter that is not a catalogue key is a \
+                     tenant, a principal, a credential or an address, and this document describes \
+                     the shape of the service and never its contents",
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The rework's central claim: a capability's liveness is measured against the route table.
+    // ---------------------------------------------------------------------------------------
+
+    /// Every capability this document publishes, and the route on **this host's surface** that
+    /// serves it. `None` means no route does, and each of those carries its argument.
+    ///
+    /// This table is the seam the derivation crosses. The document is generated from the console's
+    /// `surfaces.mts`, which is a statement about the console; whether a capability is live is a
+    /// statement about the **route table**, and those are two different facts that agreed for every
+    /// entry until `invoke` shipped a route with no screen behind it. This is where they are made
+    /// to agree again, in the language that owns the route table, in the gate.
+    const SERVED_BY: &[(&str, Option<&str>)] = &[
+        ("read-the-catalogue", Some("/api/catalogue/connectors")),
+        ("be-minted", Some("/api/agents")),
+        // No route serves it, and no route *would*: this is a property of the identity port, not of
+        // the surface. Nothing this host binds resolves an agent token to a principal —
+        // `nothing_this_host_binds_resolves_an_agent_token` is the pin, and `crate::state`'s
+        // `binding_an_agent_store_does_not_admit_a_reachable_bind` is the other half.
+        ("authenticate", None),
+        ("invoke", Some("/api/operations/{operation}/invoke")),
+        // Nothing terminates a channel. There is no websocket, no channel and no subscription
+        // route on this surface, and `every_published_route_is_a_capability_or_is_argued_not_to_be`
+        // is what notices on the day one lands.
+        ("subscribe", None),
+        // Nothing records an execution, so there is nothing to read back.
+        ("read-what-happened", None),
+    ];
+
+    /// Every published route that backs **no** capability, and why it is not one.
+    ///
+    /// The half that would have caught `invoke` on the day it shipped. Without it the table above
+    /// is a list somebody maintains: a route can land, serve a capability this document calls
+    /// unavailable, and nothing goes red — which is exactly what happened between v0.7.0 and this
+    /// story. With it, a new route fails the gate until somebody either publishes it as a
+    /// capability or writes a sentence here saying why an agent author is not being told about it.
+    const NOT_A_CAPABILITY: &[(&str, &str)] = &[
+        (
+            "/health",
+            "liveness, for an operator's monitor. Not something an agent does with this service.",
+        ),
+        (
+            "/api/catalogue/connectors/{id}/operations",
+            "the second page of the catalogue capability, named in its own note rather than as a \
+             capability of its own — one capability per thing an agent *does*, not per route.",
+        ),
+        (
+            "/api/catalogue/connectors/{id}/credentials",
+            "what a connector declares it needs. An operator supplies those; an agent never sees a \
+             credential at all, which is the vision's fourth principle.",
+        ),
+        (
+            "/api/session",
+            "who this host resolved the caller to be. A console affordance for a signed-in human; \
+             an agent that could call it would already know who it is.",
+        ),
+        (
+            "/api/signin",
+            "a browser redirect into an identity provider. Not a call an agent makes, and the one \
+             fact about it an agent needs is the `sign_in_available` field.",
+        ),
+        (
+            "/api/signin/callback",
+            "the provider's redirect back, mid-sign-in. Nothing calls it deliberately.",
+        ),
+        (
+            "/api/signin/availability",
+            "published in this document as `sign_in_available`, so it is not a capability as well.",
+        ),
+        (
+            "/api/connections",
+            "wiring a tenant up is the *human's* job — `docs/vision.md`: people sign in to wire \
+             things up, agents call operations all day. An agent holding a token is deliberately \
+             not told to go and manage its tenant's connections.",
+        ),
+        ("/api/connections/{connector}", "as above."),
+        (
+            "/api/connections/{connector}/credentials/{credential}",
+            "as above, and it takes a credential value — the one thing this document must never \
+             invite anyone to send here.",
+        ),
+        ("/api/connections/{connector}/settings", "as above."),
+        (
+            "/api/connections/{connector}/settings/{service}/{field}",
+            "as above.",
+        ),
+        (
+            "/api/onboarding",
+            "this document itself. It names its own endpoint in `endpoint`, which is where a \
+             caller looks for it, rather than as something an agent is told to go and do.",
+        ),
+    ];
+
+    /// **A capability is live exactly when a route on this surface serves it.**
+    ///
+    /// The test the rework exists for. The page and the descriptor already agreed with each other;
+    /// they agreed while both were wrong, because both derived from a console flag that answers a
+    /// question about screens. This one derives from [`published`] — the route table itself — so it
+    /// cannot agree with a mistake.
+    ///
+    /// It would have gone red on the diff that shipped `invoke` as `live: false`.
+    #[test]
+    fn a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it() {
+        let document: Onboarding = serde_json::from_str(DERIVED).expect("a JSON document");
+
+        // The table covers the document exactly, so a capability added to the console model cannot
+        // slip past unmeasured, and a stale row cannot sit here asserting nothing.
+        let published_ids: Vec<&str> = document
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect();
+        let measured_ids: Vec<&str> = SERVED_BY.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            published_ids, measured_ids,
+            "the descriptor publishes a different set of capabilities from the one this table \
+             measures; every capability needs a row saying which route serves it",
+        );
+
+        for (id, path) in SERVED_BY {
+            let capability = document
+                .capabilities
+                .iter()
+                .find(|capability| capability.id == *id)
+                .expect("the table and the document agree, asserted above");
+
+            let served = path.is_some_and(|path| published().any(|(_, route)| route.path == path));
+
+            assert_eq!(
+                capability.live,
+                served,
+                "`{id}` is published as live={} and this host {} a route serving it ({path:?}). A \
+                 capability that is live with no route is an invitation to call nothing; one that \
+                 is withheld while its route sits in the surface is this service telling the \
+                 caller the vision calls primary that it cannot do the thing it does.",
+                capability.live,
+                if served { "publishes" } else { "publishes no" },
+            );
+        }
+    }
+
+    /// **Every published route is a capability this document names, or is argued not to be.**
+    ///
+    /// The other direction, and the one with teeth over time. The table above can only measure
+    /// capabilities that already exist; this notices a route that landed and that nobody told an
+    /// agent author about — which is precisely how `invoke` came to be described as unavailable for
+    /// two releases while it ran operations.
+    #[test]
+    fn every_published_route_is_a_capability_or_is_argued_not_to_be() {
+        let backing: Vec<&str> = SERVED_BY.iter().filter_map(|(_, path)| *path).collect();
+
+        let unaccounted: Vec<&str> = published()
+            .map(|(_, route)| route.path)
+            .filter(|path| {
+                !backing.contains(path)
+                    && !NOT_A_CAPABILITY
+                        .iter()
+                        .any(|(excluded, _)| excluded == path)
+            })
+            .collect();
+
+        assert!(
+            unaccounted.is_empty(),
+            "these routes are published and this document neither offers them as a capability nor \
+             says why not: {unaccounted:?}. Add a capability, or add a line to NOT_A_CAPABILITY \
+             with the argument — a route an agent author is never told about is a decision, and it \
+             should be one somebody made.",
+        );
+
+        // And the exclusions are all live routes, so a stale argument for a route that no longer
+        // exists cannot sit here making the check above look narrower than it is.
+        let stale: Vec<&str> = NOT_A_CAPABILITY
+            .iter()
+            .map(|(path, _)| *path)
+            .filter(|path| !published().any(|(_, route)| route.path == *path))
+            .collect();
+
+        assert!(
+            stale.is_empty(),
+            "these routes are argued not to be capabilities and are not published at all: \
+             {stale:?}",
+        );
+    }
+
+    /// The `authenticate` capability's "no route serves it" is a claim about the identity port, so
+    /// it is pinned where that fact lives rather than against the route table.
+    ///
+    /// Partial by construction — this asserts that binding the agent store gives this host nothing
+    /// that can resolve a caller, which is the shape X-37 will have to change. It is the same claim
+    /// `crate::state::tests::binding_an_agent_store_does_not_admit_a_reachable_bind` makes for the
+    /// bind rule, made here for the document that tells an agent it cannot yet authenticate.
+    #[test]
+    fn nothing_this_host_binds_resolves_an_agent_token() {
+        let directory = std::env::temp_dir().join(format!(
+            "flux-exchange-onboarding-agents-{}",
+            std::process::id()
+        ));
+        let store = Arc::new(
+            crate::agent::AgentStore::open(directory.join("agents.json")).expect("a fresh store"),
+        );
+
+        let state = AppState::without_identity().with_agents(store);
+
+        assert!(
+            state.identity().is_none(),
+            "binding the agent store gave this host something that resolves callers; if an agent \
+             token now resolves to a principal, the `authenticate` capability is live and this \
+             document is telling agent authors otherwise",
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     // ---------------------------------------------------------------------------------------

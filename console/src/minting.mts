@@ -7,21 +7,34 @@
 // into a page describing a build that no longer exists. `onboarding.mts` establishes that
 // derivation and states the rule it holds:
 //
-//   > Nothing here may claim to work unless a surface the console already marks `built` backs it.
+//   > Nothing here may claim to work unless a surface the console declares the service `served`
+//   > backs it.
 //
 // and, crucially, that the rule is **one-directional**: it can take a claim *off* a page, never put
 // one on. Everything below obeys that. [`tokenStanding`] reads availability through
 // `onboarding.mts`'s own `available`, so it cannot disagree with the onboarding page about the same
-// step; [`authorisation`] is a sentence that says *nothing is gated*, and it is withdrawn the
-// moment anything a token could be presented for becomes available, rather than being edited into
+// step; [`authorisation`] is a sentence about what a token admits its holder to, and it is
+// withdrawn the moment a token can actually be **presented**, rather than being edited into
 // something narrower by whoever happens to notice.
+//
+// **X-42 answered the trip-wire this module left, and the answer changed the sentence rather than
+// deleting it.** The withdrawal used to fire when *anything a token could be presented for* became
+// available, on the reasoning that "nothing is gated" is only safe while there is nothing to gate.
+// Measuring the document against the route table found that `invoke` had been available since
+// v0.7.0 and that three renderings — the nav, the onboarding page and this screen — were each
+// reporting otherwise, because all three read a flag that answers whether the *console* has a
+// screen. Correcting that fired this trip-wire, as designed. But withdrawing here would have left
+// an operator minting a token with nothing on the page about what it admits to, at exactly the
+// moment the answer stopped being "nothing at all" — so the sentence now states the exposure, and
+// the withdrawal is keyed on the event that genuinely makes it a grant question: a token that can
+// be presented.
 //
 // This module imports `onboarding.mts` and, for a type only, `service.mts`. It reads nothing over
 // the network — the screen does that — and it holds no state at all, which is the property that
 // matters most here: nothing in this file could be where a minted token ends up living.
 
 import type { Principal } from './service.mts'
-import { STEPS, available, withheld, type Step } from './onboarding.mts'
+import { STEPS, authenticationStep, available, withheld, type Step } from './onboarding.mts'
 import { SURFACES, type Surface } from './surfaces.mts'
 
 /**
@@ -116,28 +129,52 @@ export function tokenStanding(surfaces: readonly Surface[] = SURFACES): Standing
 /**
  * What a token minted here authorises, today — or `''` when this build has outgrown the sentence.
  *
- * The sentence is a claim that **nothing is gated**, and that is only safe to print while every
- * step a token could be presented for is withheld: today a token is presented nowhere at all, so
- * there is nothing for a grant to admit or refuse and no way for the claim to be wrong.
+ * # What it claims, and when it must stop
  *
- * So it is withdrawn rather than narrowed. The day `invoke` — or anything else a token holder does
- * — becomes available, *what may this principal do* turns into a real question, it is the grant
- * question X-13 owns, and this page has no business answering it from a surface list. Returning `''`
- * takes the claim off the screen and turns the assertion in `test/agents.test.mjs` red until
- * whoever landed that surface says what is true instead. That is the one-directional rule
- * `onboarding.mts` sets out, applied to a sentence rather than to a step.
+ * Two claims, with two different expiries. The first is that a token minted here is **presented
+ * nowhere**, which stops being true the day anything on this host resolves an agent token — and
+ * that is the `authenticate` step, which is what `presentable` watches. The second is that
+ * **nothing is gated by a grant**, which stops being true the day a grant model lands (X-13); no
+ * surface flag can see that, so it is stated as plainly as possible and it is the sentence a
+ * grant story has to come and rewrite.
+ *
+ * It is withdrawn rather than narrowed at the first of those, because once a token can be
+ * presented, *what may this principal do* is a live grant question and this screen has no business
+ * answering it from a surface list. Returning `''` takes the claim off the screen and turns
+ * `test/agents.test.mjs` red until whoever landed that step says what is true instead.
+ *
+ * # Why this no longer fires on `invoke`
+ *
+ * It used to withdraw as soon as *any* token-holder step became available, on the reasoning that a
+ * claim about gating is vacuous — and therefore safe — only while there is nothing to gate. X-42
+ * measured the descriptor against the server's route table and found `invoke` had been live since
+ * v0.7.0, so that trigger was already overdue; firing it would have blanked this paragraph exactly
+ * when it acquired teeth. An operator minting a token when the answer is "nothing at all" is owed a
+ * sentence; an operator minting one when the answer is "every operation in the catalogue, for this
+ * tenant" is owed it much more.
+ *
+ * `presentable` is a parameter only so the withdrawal branch can be exercised — nothing in the app
+ * passes it, and its default is the derivation. `test/agents.test.mjs` drives both sides.
  */
-export function authorisation(surfaces: readonly Surface[] = SURFACES): string {
+export function authorisation(
+  surfaces: readonly Surface[] = SURFACES,
+  presentable: boolean = available(authenticationStep(), surfaces)
+): string {
   const standing = tokenStanding(surfaces)
-  if (standing.length === 0 || standing.some((entry) => entry.can)) return ''
+  if (standing.length === 0 || presentable) return ''
+
+  const live = standing.filter((entry) => entry.can)
 
   return (
     'Nothing on this host resolves an agent token to a principal yet, so a token minted here is ' +
-    'presented nowhere and authorises nothing at all. When it can be presented it will authorise ' +
-    'what any principal may do, with one exception: an agent may not create a principal, so a ' +
-    'token that leaks cannot mint successors and revoking it ends the whole of the access it gave. ' +
-    'Nothing else here is gated by a grant, so there is no narrower authority to hand it — and an ' +
-    'agent’s token grants access to an operation, never to a credential.'
+    'presented nowhere and authorises nothing at all — including the ' +
+    `${live.length === 1 ? 'capability' : 'capabilities'} listed here as available, which this ` +
+    'service runs for the principals it can resolve and not for a token holder. When a token can ' +
+    'be presented it will authorise what any principal may do, and this build gates invocation by ' +
+    'identity alone: there is no grant model, so that is every operation in the catalogue against ' +
+    'this tenant’s own connections. One limit holds already — an agent may not create a principal, ' +
+    'so a token that leaks cannot mint successors and revoking it ends the whole of the access it ' +
+    'gave. And an agent’s token grants access to an operation, never to a credential.'
   )
 }
 

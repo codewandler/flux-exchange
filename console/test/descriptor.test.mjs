@@ -65,9 +65,15 @@ const descriptor = () => JSON.parse(served())
 /** The page as a browser would see it. */
 const page = () => renderToString(createSSRApp(AgentOnboarding))
 
-/** `SURFACES` with one surface's `built` overridden — a hypothetical build. */
-const asIf = (id, built) =>
-  SURFACES.map((surface) => (surface.id === id ? { ...surface, built } : surface))
+/**
+ * `SURFACES` with one surface's fields overridden — a hypothetical build.
+ *
+ * A patch rather than a `built` boolean, because the two fields this file has to tell apart are
+ * `built` (does the console have a screen) and `served` (does the service publish it), and a helper
+ * that could only move the first could not express the case that matters.
+ */
+const asIf = (id, patch) =>
+  SURFACES.map((surface) => (surface.id === id ? { ...surface, ...patch } : surface))
 
 /**
  * The readable text of a fragment of rendered HTML.
@@ -228,35 +234,51 @@ test('the_descriptor_is_derived_and_not_a_coincidence', () => {
   const today = JSON.parse(descriptorJson(SURFACES))
   const live = (document, id) => document.capabilities.find((entry) => entry.id === id)
 
-  // As this build is.
-  assert.equal(live(today, 'invoke').live, false)
-  assert.ok(live(today, 'invoke').withheld.length > 0)
+  // `subscribe` and not `invoke`, since X-42: `invoke` is served, so it can no longer stand in for
+  // a capability this build does not have.
+  assert.equal(live(today, 'subscribe').live, false)
+  assert.ok(live(today, 'subscribe').withheld.length > 0)
 
-  // As a build where `invoke` exists would be — with no edit to `descriptor.mts`, none to
+  // As a build where the service serves it would be — with no edit to `descriptor.mts`, none to
   // `onboarding.mts`, and none here.
-  const hypothetical = JSON.parse(descriptorJson(asIf('invoke', true)))
+  const hypothetical = JSON.parse(descriptorJson(asIf('subscribe', { served: true })))
   assert.equal(
-    live(hypothetical, 'invoke').live,
+    live(hypothetical, 'subscribe').live,
     true,
-    'marking `invoke` built does not make the invoke capability live, so the descriptor is not actually derived from `surfaces.mts`'
+    'marking `subscribe` served does not make the subscribe capability live, so the descriptor is not actually derived from `surfaces.mts`'
   )
   assert.equal(
-    live(hypothetical, 'invoke').withheld,
+    live(hypothetical, 'subscribe').withheld,
     '',
-    'the invoke capability still carries a reason it cannot be done in a build where it can'
+    'the subscribe capability still carries a reason it cannot be done in a build where it can'
   )
 
-  // And the direction that protects a reader: a surface regressing to unbuilt withdraws the
+  // And the direction that protects a reader: a surface regressing to unserved withdraws the
   // capability standing on it from the served document, not only from the page.
   const minted = STEPS.find((step) => step.id === 'be-minted')
   assert.equal(available(minted, SURFACES), true)
-  const regressed = JSON.parse(descriptorJson(asIf(minted.surface, false)))
+  const regressed = JSON.parse(descriptorJson(asIf(minted.surface, { served: false })))
   assert.equal(
     live(regressed, 'be-minted').live,
     false,
-    'a surface regressing to not-built leaves its capability standing in the document the service serves'
+    'a surface regressing to not-served leaves its capability standing in the document the service serves'
   )
   assert.equal(live(regressed, 'be-minted').call, null)
+
+  // **And it derives from the right field.** This is the assertion that would have caught the
+  // defect this document shipped with in round one: `invoke` is the one surface where "does the
+  // console have a screen for it" and "does the service serve it" give different answers, so it is
+  // the one that tells the two apart. A descriptor deriving from `built` publishes the platform's
+  // flagship capability as unavailable while the route sits in the surface — which is what it did,
+  // to strangers, anonymously, until the Rust side measured it against `routes::MODULES`.
+  for (const built of [true, false]) {
+    const console_screen = JSON.parse(descriptorJson(asIf('invoke', { built })))
+    assert.equal(
+      live(console_screen, 'invoke').live,
+      true,
+      `moving the console's \`built\` flag to ${built} changed what the service publishes about \`invoke\`; this document is answering an API question with a fact about console navigation`
+    )
+  }
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -266,20 +288,28 @@ test('the_descriptor_is_derived_and_not_a_coincidence', () => {
 test('the_descriptor_names_nothing_a_tenant_could_occupy', () => {
   const document = descriptor()
 
-  // Every endpoint is parameterless — `/api/connections/{connector}` here would be a tenant's
-  // contents wearing the shape of a route. The same rule `nothing_tenant_specific_can_reach_this_page`
-  // holds over the page, applied to the copy that is actually served.
+  // No endpoint has a place a *value* could go. Not "no parameters": `{operation}` is a catalogue
+  // key, the same public vocabulary the anonymous catalogue already publishes, and refusing it
+  // would mean the one route that runs an operation could not be named. What must never appear is
+  // a tenant, a principal, a credential or an address — `/api/connections/{connector}` here would
+  // be a tenant's contents wearing the shape of a route, and `connector` is not on this list.
+  //
+  // The server states the same rule over the served copy, and adds the half this side cannot: that
+  // every endpoint named is a route it actually publishes.
+  const CATALOGUE_KEYS = ['operation']
   const endpoints = [
     document.endpoint,
     ...document.capabilities.filter((entry) => entry.call).map((entry) => entry.call.endpoint),
   ]
   assert.ok(endpoints.length > 1, 'no endpoints were checked, so this proves nothing')
   for (const endpoint of endpoints) {
-    assert.match(
-      endpoint,
-      /^\/api\/[a-z0-9/-]+$/,
-      `\`${endpoint}\` carries a parameter; this document describes the shape of the service, never its contents`
-    )
+    assert.match(endpoint, /^\/api\/[a-z0-9/{}-]+$/, `\`${endpoint}\` is not a route path`)
+    for (const parameter of [...endpoint.matchAll(/\{([^}]*)\}/g)].map((match) => match[1])) {
+      assert.ok(
+        CATALOGUE_KEYS.includes(parameter),
+        `\`${endpoint}\` carries \`{${parameter}}\`, which is not a catalogue key; this document describes the shape of the service and never its contents`
+      )
+    }
   }
 
   // And nothing that looks like a credential address, which is the one tenant-shaped string this

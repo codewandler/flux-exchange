@@ -62,6 +62,27 @@ An onboarding page that says *"you can be issued an identity; you cannot yet use
 what will change when you can"* is genuinely useful — it tells an agent author exactly where the
 platform is. That is the page to build.
 
+#### Correction (X-42): deriving from `surfaces.mts` was right; deriving from `built` was not
+
+This section's promise — *honesty becomes a property of the wiring rather than of whoever last
+edited the copy* — held exactly as written, and wired the page to the wrong construct. `built` in
+`surfaces.mts` answers **"does this console have a screen"**; the page and the descriptor are
+answering **"does this service do this"**. Those had the same answer for every surface when X-41 was
+written, so nothing distinguished them. Then `POST /api/operations/{operation}/invoke` shipped in
+v0.7.0 with no screen behind it, and three renderings — the navigation, the onboarding page and the
+mint screen — each began reporting that this deployment could call nothing, while the route sat in
+the published surface running operations.
+
+The prose above is stale in the same way: *"can invoke nothing at all (X-12, blocked upstream)"* was
+true when it was written and is not now.
+
+So `surfaces.mts` answers the two questions separately — `built` and `served` — and `served` is not
+kept true by remembering: `routes::onboarding::tests` in the server crate measures every published
+capability against `routes::MODULES`, and refuses to let a published route go unaccounted for. That
+second half is what would have caught this on the day `invoke` landed. **The lesson to carry: a
+derivation is only as honest as the construct it derives from, and a test that two renderings agree
+cannot see that both are wrong.**
+
 ### 3. A descriptor, not only a document
 
 "Similar to a skill" is the right instinct: what an agent wants is a small, stable, fetchable
