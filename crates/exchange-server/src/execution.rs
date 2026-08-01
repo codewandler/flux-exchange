@@ -113,10 +113,15 @@ pub fn invoker(
 
 /// The guarded IO handle every [`ToolContext`] is built over, **with its sandbox posture stated**.
 ///
-/// A named function rather than an expression inside [`invoker`] so
-/// [`tests::the_sandbox_posture_is_chosen_and_not_inherited`] can assert what was chosen. A posture nobody
-/// can observe from a test is a posture that goes back to its default in the next refactor, which
-/// is the shape of the finding this function exists to answer.
+/// A named function rather than an expression inside [`invoker`], so the posture is a value a test
+/// can hold — [`tests::the_sandbox_posture_is_chosen_and_not_inherited`] asserts what this returns.
+///
+/// Be exact about what that buys, because the first draft of this sentence was not. **The test
+/// pins this function, not [`invoker`]'s call to it.** Reverting `invoker` to a bare
+/// `System::new(workspace)` would leave the test green. What catches *that* is a different
+/// mechanism: this function would then have no non-test caller, which is `dead_code`, which is an
+/// error under the gate's `clippy --all-targets -- -D warnings`. Two mechanisms, one of them not
+/// the one the shape of this code suggests.
 ///
 /// # Why `Require`, written out field by field
 ///
@@ -125,13 +130,22 @@ pub fn invoker(
 /// hermetic tests want. Inheriting it in [`invoker`] was the same mistake `allowed_secrets` and
 /// `private_net` are written out longhand a few lines earlier to avoid.
 ///
-/// `Require` is the strict end: a spawn is confined by a real backend, or `Sandbox::ensure_available`
-/// refuses it. That is *refuse; never repair* applied to the one capability this composition holds
-/// and does not use. `network: false` narrows what a **sandboxed child** may dial and is unrelated
-/// to `private_net`, which guards the requests this host actually sends. `extra_writable` is empty
-/// because widening a writable path is a decision and nobody has made one. Every field is named
-/// rather than spread from a default, so a field upstream adds is a compile error here rather than
-/// one more inherited posture.
+/// `Require` is the strict end, with three outcomes rather than the two it is easy to state:
+///
+/// 1. a real backend (bubblewrap, Seatbelt) confines the child;
+/// 2. no usable backend, and `Sandbox::ensure_available` **refuses the spawn** — *refuse; never
+///    repair*, applied to the one capability this composition holds and does not use;
+/// 3. a truthy `FLUX_SANDBOXED` in this process's environment resolves `Backend::AlreadyConfined`
+///    **without probing**, and satisfies `Require` with no backend of this process's own. That is
+///    upstream's inheritance marker for "an outer flux sandbox already confines this whole tree",
+///    and it is operator-controlled ambient state: nothing on a request path can set it, but an
+///    operator who exports it by accident gets outcome 3 where they expected outcome 2.
+///
+/// `network: false` narrows what a **sandboxed child** may dial and is unrelated to `private_net`,
+/// which guards the requests this host actually sends. `extra_writable` is empty because widening a
+/// writable path is a decision and nobody has made one. Every field is named rather than spread
+/// from a default, so a field upstream adds is a compile error here rather than one more inherited
+/// posture.
 ///
 /// # What this is **not**
 ///
@@ -139,9 +153,19 @@ pub fn invoker(
 /// false. [`ToolContext::system`](exchange_host::ToolContext::system) hands any holder of a context
 /// this `System`, whose `run`/`run_with_env` spawn processes and whose `read_file`/`write_file`
 /// reach the workspace root; an unbound `spawner` closes the *sub-agent* seam, which is a different
-/// door. Nothing on the invoke path calls `ctx.system()`, and
-/// `crates/exchange-host/tests/no_second_request_path.rs` refuses that spelling in the dispatching
-/// crate. This posture is what decides the answer if either of those stops being true.
+/// door.
+///
+/// Nor does it cover *every* spawn, which is the other easy overstatement. `System::build_command`
+/// consults `Sandbox::ensure_available` only for `Confinement::Sandboxed`, so the exempt paths —
+/// `run_exempt`, `spawn_debug_pipe` — skip the posture entirely. The claim is about
+/// `run`/`run_with_env` and their streamed forms, and no further.
+///
+/// What holds the rest is `crates/exchange-host/tests/no_second_request_path.rs`, which bounds
+/// which files in the dispatching crate may hold a `ToolContext` at all. Read its "What lock 2 is,
+/// and what it is not" for the boundary that matters here: **this function is in
+/// `exchange-server` and that scanner never reads it**, so this posture is a property of this
+/// repository's composition and not of the published crate. A downstream binary implements
+/// `Contexts` itself and gets whatever `System` it built.
 fn guarded_system(workspace: Workspace) -> System {
     System::new(workspace).with_sandbox(Sandbox::resolve(SandboxSettings {
         mode: SandboxMode::Require,
@@ -159,9 +183,12 @@ mod tests {
     ///
     /// Asserted against `Sandbox::disabled()` as well as against the literal mode, because the two
     /// say different things: the literal pins *what was chosen*, and the comparison pins *that a
-    /// choice was made at all* — which is precisely what a future `System::new(workspace)` with the
-    /// `.with_sandbox` dropped would lose while still compiling and still passing every other test
-    /// in this workspace.
+    /// choice was made at all*.
+    ///
+    /// What it does **not** pin is that [`invoker`] still calls [`guarded_system`] — this test
+    /// holds the helper, and a revert at the call site would leave it green. `dead_code` under the
+    /// gate's `-D warnings` is what covers that, and it is named on [`guarded_system`] so the next
+    /// reader does not infer a guarantee from the shape of the code.
     #[test]
     fn the_sandbox_posture_is_chosen_and_not_inherited() {
         let workspace = Workspace::new(std::env::temp_dir())

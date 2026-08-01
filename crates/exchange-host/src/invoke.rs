@@ -38,10 +38,12 @@
 use std::sync::Arc;
 
 use connector_pack::{ConfigStore, Configuration, Credentials, Egress};
-use flux_runtime::ToolContext;
+use flux_runtime::{Tool, ToolContext};
 use serde_json::Value;
 
-use crate::{ConnectorSurface, Deployment, Principal, Runtime, RuntimeRefusal, SecretStore};
+use crate::{
+    Admitted, ConnectorSurface, Deployment, Principal, Runtime, RuntimeRefusal, SecretStore,
+};
 
 /// A source of fresh [`ToolContext`]s — **one per invocation**.
 ///
@@ -80,14 +82,55 @@ where
 /// exists because isolating a locally-executing runtime is an OS or pod concern that cannot be done
 /// from inside one Rust process, and an override would be a lie about that.
 ///
+/// **It returns [`Admitted`] rather than `()`**, and that is the load-bearing part rather than a
+/// convenience. `Admitted::resolve` is the only route from this module to `connector_pack::resolve`,
+/// and an `Admitted` cannot be constructed — so calling this and discarding the answer does not
+/// type-check any more than not calling it at all. Read [`Admitted`] for the whole argument and for
+/// what it still does not cover; the short version is that the previous guard was a source scanner
+/// and a source scanner cannot tell a live call from a string literal.
+///
 /// # Errors
 ///
 /// [`RuntimeRefusal`] when this deployment will not serve the connector's declared runtime.
 pub fn admit_runtime(
     deployment: Deployment,
     surface: &ConnectorSurface,
-) -> Result<(), RuntimeRefusal> {
-    deployment.admits(surface.runtime)
+) -> Result<Admitted, RuntimeRefusal> {
+    Admitted::of(deployment, surface.runtime)
+}
+
+impl Admitted {
+    /// **The dispatch seam, hung off the gate's answer.**
+    ///
+    /// `self` by value, and an inherent method on [`Admitted`] rather than a free call inside
+    /// [`Invoker::invoke`], because that placement *is* the enforcement: `connector_pack::resolve`
+    /// has no other caller in this crate, `Admitted` has a private field in `runtime.rs`, and so
+    /// there is no expression in `invoke` that reaches the pack without an `Ok` from the gate. The
+    /// three mutations that defeated X-48's first attempt — a discarded `Result`, a call under
+    /// `if false`, and the marker moved into a string literal — are each a compile error here.
+    ///
+    /// It is a method on the witness rather than a private method of [`Invoker`] taking one,
+    /// because an ignored `_admitted: Admitted` parameter is a parameter the next person deletes as
+    /// dead weight. A receiver is not deletable without rewriting the call.
+    ///
+    /// What it does **not** hold: somebody writing `connector_pack::resolve(…)` directly in
+    /// `invoke` again. That leaves this method unused, which is `dead_code` — an error under the
+    /// gate's `clippy -D warnings` — and it puts a second pack entry point in the crate, which
+    /// `tests/no_second_request_path.rs` counts. Two mechanisms, neither of them a regex.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the pack refuses with, unshaped. [`InvokeRefusal::classify`] sorts it into "was it
+    /// sent?" at the call site, where the invocation's redactor is in hand.
+    fn resolve(
+        self,
+        entry: &'static connector_catalog::Operation,
+        egress: Egress,
+        credentials: Credentials,
+        settings: Configuration,
+    ) -> flux_core::Result<Arc<dyn Tool>> {
+        connector_pack::resolve(entry, egress, credentials, settings)
+    }
 }
 
 /// What this host will run an operation with.
@@ -172,7 +215,11 @@ impl Invoker {
 
         // 2. The deployment gate. Before the store, and before projection: there is no reason to
         //    read a secret for, or project, a connector this deployment will not execute.
-        admit_runtime(self.deployment, &ConnectorSurface::of(provider))?;
+        //
+        //    The `Admitted` it hands back is not a formality — it is the only key to step 6. See
+        //    `Admitted` in `runtime.rs`: the ordering below is a comment, but *that the gate ran at
+        //    all* is checked by the compiler rather than by anything anybody has to remember.
+        let admitted = admit_runtime(self.deployment, &ConnectorSurface::of(provider))?;
 
         // 3. (X-13's slot.) The grant check goes **here** — after the runtime refusal, which is a
         //    property of the deployment and the same answer for every principal, and before the
@@ -193,11 +240,15 @@ impl Invoker {
         // 5. A context nothing else holds, before anything resolves a credential into it.
         let ctx = self.contexts.fresh();
 
-        // 6. The seam. `resolve` rather than `pack` is the caller-facing half of upstream's C-413:
-        //    `pack` installs what a host *advertises* and withholds `expose = false` operations,
-        //    which for an execute route would withhold the *call* as a side effect of withholding
-        //    the *tool*. Both run the identical admission checks.
-        let tool = connector_pack::resolve(entry, self.egress.clone(), credentials, settings)
+        // 6. The seam, reached **through the gate's answer** — `admitted` is consumed here and there
+        //    is no other way in, which is what makes step 2 unskippable rather than merely present.
+        //
+        //    `resolve` rather than `pack` is the caller-facing half of upstream's C-413: `pack`
+        //    installs what a host *advertises* and withholds `expose = false` operations, which for
+        //    an execute route would withhold the *call* as a side effect of withholding the *tool*.
+        //    Both run the identical admission checks.
+        let tool = admitted
+            .resolve(entry, self.egress.clone(), credentials, settings)
             .map_err(|error| InvokeRefusal::classify(entry, error, &ctx))?;
 
         // 7. Inside this call and nowhere else: the pack resolves the credential, registers every
