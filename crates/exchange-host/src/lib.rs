@@ -38,6 +38,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+mod connections;
 // Unix only, and for the reason `connector_secrets::file` is: the whole of what protects a value in
 // the file store is `0600` and `0700`, and a platform that cannot spell those would get a store that
 // implied a safety it did not have.
@@ -57,6 +58,17 @@ mod runtime;
 /// that cannot be implemented without guessing a dependency version is not much of a port.
 pub use async_trait::async_trait;
 
+/// The addressing and the store port, re-exported rather than redefined.
+///
+/// Same argument as [`async_trait`] above, and the same failure it prevents. A composition binds a
+/// [`SecretStore`] and holds [`CredentialRef`]s that this crate derived; if it had to name
+/// `connector-secrets` itself to do so, it would be guessing a version, and a `CredentialRef` from a
+/// different one is a different type with an identical name — an error about mismatched types where
+/// the actual problem is a dependency line. There is one credential addressing scheme in this
+/// ecosystem and this is a doorway to it, not a second copy.
+pub use connector_secrets::{CredentialRef, Secret, SecretStore, StoreError, TENANTS_ROOT};
+
+pub use connections::{address_path, ConnectionRefusal, ConnectorDeclaration, DeclaredCredential};
 #[cfg(unix)]
 pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
 pub use grant::{Effect, Grant, Idempotency, OperationFacts, Risk, Selector};
