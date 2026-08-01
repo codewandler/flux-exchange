@@ -44,6 +44,57 @@ import { SURFACES, type Surface } from './surfaces.mts'
 export const ONBOARDING_PATH = '/connect'
 
 /**
+ * Where the service serves the machine rendering of everything on this page (X-42).
+ *
+ * A route on the **service**, not a path in this console: a page is a human artifact and the
+ * charter's primary caller does not read pages. It is named here rather than in `service.mts`
+ * because this module is the one both renderings derive from, and because this console never
+ * fetches it — the page mentions it, so an agent author reading the page learns their agent does
+ * not have to. `crates/exchange-server/src/routes/onboarding.rs` publishes it, and
+ * `the_endpoint_the_document_names_is_the_route_that_serves_it` there is what stops the two
+ * spellings drifting.
+ */
+export const DESCRIPTOR_ENDPOINT = '/api/onboarding'
+
+/**
+ * What this service is, in the one form both renderings say it in.
+ *
+ * It lived in `AgentOnboarding.mts` until X-42 needed the same sentence on the wire. Copy that two
+ * renderings each hold their own version of is copy that disagrees within a release, which is the
+ * failure `docs/designs/agent-onboarding.md` names explicitly — so the layout file renders this
+ * and states nothing of its own.
+ */
+export const SERVICE = {
+  /** The one name this service is published under. */
+  name: 'flux-exchange',
+  /** What it does, in `docs/vision.md`'s own words. A standalone sentence, so it reads as one. */
+  summary:
+    'Holds credentials, terminates channels, runs operations for many callers and records what ' +
+    'happened. Its primary caller is an agent, not a human: people sign in to wire things up, ' +
+    'and agents are what call operations all day.',
+}
+
+/**
+ * How a caller presents a token to this service.
+ *
+ * **The scheme is a fact about the service; whether presenting one identifies you is not.** The
+ * guard reads `Authorization: Bearer <material>` today and has since X-03 — that is true of this
+ * host now, and stating it costs a stranger nothing they could not learn by sending a request.
+ * What is *not* true is that an agent's token resolves to a principal, and this constant
+ * deliberately does not say either way: [`capability`](AUTHENTICATION#capability) names the step
+ * that owns that question, so the gap is stated once, where the surface it stands on can withdraw
+ * it.
+ */
+export const AUTHENTICATION = {
+  /** The `Authorization` scheme, spelled as a caller sends it. */
+  scheme: 'Bearer',
+  /** The header it travels in. */
+  header: 'Authorization',
+  /** The [`Step`] id whose availability decides whether presenting one identifies a caller. */
+  capability: 'authenticate',
+}
+
+/**
  * The one call a step is done by.
  *
  * `caller` is separate from `note` because it is the field an agent author gets wrong: minting is a
@@ -210,6 +261,24 @@ export const STEPS: readonly Step[] = [
     pending: '',
   },
 ]
+
+/**
+ * The step [`AUTHENTICATION`] defers the "does it work yet" question to.
+ *
+ * It throws rather than returning `null` when nothing matches, which is the one thing this module
+ * does that could be called repair otherwise: a missing step would silently make the auth scheme
+ * look like a claim standing on nothing, and both renderings would publish it. Refuse; never
+ * repair.
+ */
+export function authenticationStep(): Step {
+  const step = STEPS.find((candidate) => candidate.id === AUTHENTICATION.capability)
+  if (!step) {
+    throw new Error(
+      `AUTHENTICATION names the \`${AUTHENTICATION.capability}\` step and no step declares that id`
+    )
+  }
+  return step
+}
 
 /**
  * The surface a step stands on, or `null` when the console declares none for it.

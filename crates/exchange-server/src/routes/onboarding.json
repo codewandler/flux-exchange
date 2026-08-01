@@ -1,0 +1,77 @@
+{
+  "descriptor": "flux-exchange.agent-onboarding",
+  "version": 1,
+  "endpoint": "/api/onboarding",
+  "service": {
+    "name": "flux-exchange",
+    "summary": "Holds credentials, terminates channels, runs operations for many callers and records what happened. Its primary caller is an agent, not a human: people sign in to wire things up, and agents are what call operations all day."
+  },
+  "authentication": {
+    "scheme": "Bearer",
+    "header": "Authorization",
+    "capability": "authenticate",
+    "live": false
+  },
+  "capabilities": [
+    {
+      "id": "read-the-catalogue",
+      "title": "Read what this build could run",
+      "summary": "Every connector this deployment carries and every operation each one declares — what it is, what it costs, and what effects it has.",
+      "live": true,
+      "call": {
+        "method": "GET",
+        "endpoint": "/api/catalogue/connectors",
+        "caller": "Anyone. This route resolves no principal and takes no token.",
+        "note": "One connector per entry, with the count of operations it declares; the operations themselves are at the same path under the connector id, at /api/catalogue/connectors/{id}/operations. It answers what exists, not what you may call — with no principal resolved every operation comes back admitted: null, which is a third value and not a refusal.",
+        "warn": ""
+      },
+      "withheld": ""
+    },
+    {
+      "id": "be-minted",
+      "title": "Be issued an identity",
+      "summary": "An agent is a principal of exactly one tenant. It does not sign in: a human who already is mints it and hands over the token.",
+      "live": true,
+      "call": {
+        "method": "POST",
+        "endpoint": "/api/agents",
+        "caller": "A signed-in human, from this console. Not the agent — the route requires a principal, and an agent has none until this call has been made for it.",
+        "note": "Send id, what to call the agent within the tenant, and expires_at, seconds since the Unix epoch. The expiry is never defaulted: a body without one is refused rather than given a lifetime this host picked. There is no tenant field, and there is nowhere one could be put — the tenant is read from the caller this host resolved, and a tenant in the body is ignored rather than honoured.",
+        "warn": "The response carries the token, and it is shown once. This host keeps a verifier rather than the token, so nothing here can show it to you again. Lose it and mint another."
+      },
+      "withheld": ""
+    },
+    {
+      "id": "authenticate",
+      "title": "Authenticate as that identity",
+      "summary": "Present the token on a request and have this host resolve you to the agent principal it minted, in that agent’s tenant.",
+      "live": false,
+      "call": null,
+      "withheld": "No route on this host accepts an agent token. Minting stores a verifier and hands you the token, and nothing yet resolves one back to a principal — so an agent holding a token is not a caller this service can identify. The only principals a deployment resolves today are humans who signed in through its identity provider."
+    },
+    {
+      "id": "invoke",
+      "title": "Call an operation",
+      "summary": "Name an operation and get a result, without naming a host, a credential or a tenant. The credential never crosses the boundary; the authority does.",
+      "live": false,
+      "call": null,
+      "withheld": "Nothing in this deployment can be called. `invoke` is not built, so there is no screen to call an operation from and every operation in the catalogue reads \"not live yet\"."
+    },
+    {
+      "id": "subscribe",
+      "title": "Receive a vendor’s events",
+      "summary": "Have this host terminate a vendor’s channel, verify what arrives against the connector’s declaration, and hand you a typed event.",
+      "live": false,
+      "call": null,
+      "withheld": "`subscribe`, the websocket and channels are not built. Nothing here terminates a channel, so there is no subscription to show."
+    },
+    {
+      "id": "read-what-happened",
+      "title": "Read back what you did",
+      "summary": "Who asked, which grant admitted it, what was called and what came back.",
+      "live": false,
+      "call": null,
+      "withheld": "This service records nothing yet. There is no execution record to read, so there is no Activity screen — an empty one would say that nothing has happened, which is a different claim entirely."
+    }
+  ]
+}

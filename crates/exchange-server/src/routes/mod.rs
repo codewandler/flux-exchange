@@ -20,6 +20,7 @@ mod connections;
 mod health;
 mod identity;
 mod invoke;
+mod onboarding;
 mod signin;
 
 use axum::extract::{Request, State};
@@ -45,6 +46,7 @@ const MODULES: &[Module] = &[
     connections::MODULE,
     agents::MODULE,
     invoke::MODULE,
+    onboarding::MODULE,
 ];
 
 /// A feature module's contribution to the surface.
@@ -326,6 +328,37 @@ mod tests {
             .status()
     }
 
+    /// Drive one anonymous `GET` through a fully assembled app and report the status **and** the
+    /// body.
+    ///
+    /// The body half is what [`anonymous_get`] deliberately drops, and a route that exists to
+    /// publish a document to strangers cannot be checked without it: "answered 200" is not the
+    /// claim, "answered with this and nothing more" is.
+    async fn anonymous_get_body(app: Router, path: &str) -> (StatusCode, String) {
+        let mut service = app.into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("a router is always ready");
+
+        let request = HttpRequest::builder()
+            .uri(path)
+            .body(Body::empty())
+            .expect("a well-formed request");
+
+        let response = service
+            .call(request)
+            .await
+            .expect("a router is infallible")
+            .into_response();
+
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a response body");
+
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// Drive one `GET` carrying a development roster handle, and report the status and the body —
     /// a refusal aimed at an identified caller is only worth anything if what it says can be read.
     async fn authenticated_get(app: Router, path: &str, handle: &str) -> (StatusCode, String) {
@@ -466,6 +499,21 @@ mod tests {
             // identically. `crate::routes::signin::availability` carries the long form, including
             // why this is not a field on `/api/session`.
             ("signin", "/api/signin/availability"),
+            // The agent descriptor. X-42's widening, and the one on this list that had to be
+            // argued field by field rather than route by route — `crate::routes::onboarding`
+            // carries that argument, and the types there are `deny_unknown_fields` so a field
+            // added to the console model cannot reach this surface without somebody writing one.
+            //
+            // Anonymous because an agent that must already be authenticated to learn how to
+            // authenticate is a closed loop, which is `docs/designs/agent-onboarding.md` §1 and
+            // the same shape as `/api/signin` above. What it publishes is a compile-time artifact
+            // describing **this build**: identical bytes in every deployment of a version, reading
+            // nothing from the composition, the store, the catalogue or the request. The single
+            // exception is `sign_in_available`, which is the boolean the route two lines up
+            // already publishes — embedding it costs a stranger nothing they could not learn with
+            // one more request, and withholding it would make the document dishonest on exactly
+            // the deployment the story names.
+            ("onboarding", "/api/onboarding"),
         ];
 
         let mut reachable = Vec::new();
@@ -568,6 +616,69 @@ mod tests {
         assert!(
             !body.contains("agent"),
             "the refusal must name nothing about what exists: {body}",
+        );
+    }
+
+    /// **X-42's failing-first test.** This surface serves an agent descriptor, it serves it to a
+    /// caller it has not identified, and it is declared [`Access::Anonymous`] to do so.
+    ///
+    /// Stated as an enumeration over [`published`] rather than as a claim about one module, in the
+    /// shape `the_surface_mints_an_agent_principal_and_refuses_an_anonymous_caller` uses: a
+    /// descriptor that stopped being published and one that quietly stopped being anonymous are
+    /// both this story undone, and the second is the more likely of the two — a route that is
+    /// reachable only by a caller who already has a principal is exactly the closed loop
+    /// `docs/designs/agent-onboarding.md` §1 rejects.
+    ///
+    /// The three assertions on the document are the minimum the Acceptance names: it says what
+    /// this service is, it says which capabilities are live, and — on a host with **no identity
+    /// provider configured**, which is what `AppState::without_identity` is — it says sign-in is
+    /// unavailable rather than pretending. Everything else the descriptor promises is held by
+    /// `onboarding::tests` and by `console/test/descriptor.test.mjs`.
+    #[tokio::test]
+    async fn the_surface_serves_an_agent_descriptor_anonymously() {
+        let descriptor: Vec<_> = published()
+            .filter(|(module, _)| module.name == "onboarding")
+            .map(|(_, route)| (route.path, route.access))
+            .collect();
+
+        assert_eq!(
+            descriptor,
+            vec![("/api/onboarding", Access::Anonymous)],
+            "nothing on this surface publishes an agent descriptor, so the caller the vision calls \
+             primary can learn what this service is only by reading a console page",
+        );
+
+        let (status, body) =
+            anonymous_get_body(app(AppState::without_identity()), "/api/onboarding").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "an agent arriving with no principal is exactly who this document is for: {body}",
+        );
+
+        let document: serde_json::Value =
+            serde_json::from_str(&body).expect("the descriptor is a JSON document");
+
+        assert_eq!(
+            document["service"]["name"], "flux-exchange",
+            "the descriptor must say what this service is: {body}",
+        );
+        assert!(
+            document["capabilities"]
+                .as_array()
+                .is_some_and(
+                    |capabilities| capabilities.iter().any(|entry| entry["live"] == true)
+                        && capabilities.iter().any(|entry| entry["live"] == false)
+                ),
+            "the descriptor must say which capabilities are live, and this build has both kinds — \
+             a document where everything is live claims a platform that does not exist, and one \
+             where nothing is tells an agent author nothing: {body}",
+        );
+        assert_eq!(
+            document["sign_in_available"], false,
+            "this host has no identity provider configured, and the descriptor must say so rather \
+             than pretend: {body}",
         );
     }
 
