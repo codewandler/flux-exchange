@@ -183,6 +183,84 @@ fn the_engine_line_is_recorded_in_exactly_one_place() {
     }
 }
 
+/// The resolved graph, read at compile time — what the manifest above actually produced.
+const WORKSPACE_LOCK: &str = include_str!("../../../Cargo.lock");
+
+/// **The lock carries one engine line, not two** (X-67).
+///
+/// The test above reads the *manifest*, because that is where a pin is authored and where a bump is
+/// done. This one reads the *lock*, because a manifest stating one line proves nothing about what
+/// resolved: a dependency requiring `^0.46` alongside this workspace's `0.47` puts both in the tree,
+/// Cargo writes both down without complaint, and the manifest is silent about it. That is the
+/// failure the `ENGINE_LINE` comment records having reasoned about by hand for `connector-pack`,
+/// and reasoning is what this replaces.
+///
+/// Stolen from flux-connectors' `crates/connector-cli/tests/flux_engine_line.rs`, which asserts the
+/// same property over both graphs there. It is rewritten to read lines rather than to parse TOML,
+/// following [`value_of`] below: `Cargo.lock` writes `name` and `version` one per line inside each
+/// `[[package]]` block, so a parse would buy nothing and would cost a dependency.
+///
+/// **Only the `0.x` crates are the engine.** flux also publishes stable-vocabulary crates
+/// (`codewandler-flux-spec`, `codewandler-flux-evidence`, `codewandler-flux-datasource`, …) on
+/// `1.x` lines of their own, which are not versioned with the engine and must not be dragged onto
+/// it. `codewandler-flux-exchange-host` is this workspace's own crate and carries the workspace
+/// version, so it is excluded by the same rule that excludes it from [`flux_pins`] — a `0.9.0` that
+/// answers a different question.
+#[test]
+fn the_lock_carries_one_engine_line() {
+    let recorded = WORKSPACE_MANIFEST
+        .lines()
+        .find_map(|line| value_of(line, "# ENGINE_LINE"))
+        .expect("the workspace manifest records the engine line");
+
+    let locked: Vec<(&str, &str)> = locked_flux_packages().collect();
+    assert!(
+        !locked.is_empty(),
+        "no `codewandler-flux-*` package found in `Cargo.lock`, so this test is reading the wrong \
+         file and would pass whatever resolved",
+    );
+
+    let off_line: Vec<String> = locked
+        .iter()
+        .filter(|(_, version)| version.starts_with("0.") && !on_line(version, recorded))
+        .map(|(package, version)| format!("{package} {version}"))
+        .collect();
+
+    assert!(
+        off_line.is_empty(),
+        "`Cargo.lock` resolves flux engine crates off the recorded line {recorded:?}: {off_line:?} \
+         — a `0.x` requirement is semver-incompatible across minor versions, so each of these is a \
+         second, separate copy of flux in one build: two `flux_runtime::Tool` traits with identical \
+         names, and a host that can link only one of them",
+    );
+}
+
+/// Every `codewandler-flux-*` entry in the lock, as `(name, version)`, this workspace's own excluded.
+///
+/// A `Vec`-shaped walk rather than a map keyed by name, because the whole question is whether a
+/// package appears more than once — collapsing duplicates would delete the finding.
+fn locked_flux_packages() -> impl Iterator<Item = (&'static str, &'static str)> {
+    WORKSPACE_LOCK.split("[[package]]").filter_map(|block| {
+        let name = block.lines().find_map(|line| value_of(line, "name"))?;
+        // This workspace's own crate shares the family prefix and carries the workspace version.
+        if !name.starts_with("codewandler-flux-") || name == "codewandler-flux-exchange-host" {
+            return None;
+        }
+        Some((
+            name,
+            block.lines().find_map(|line| value_of(line, "version"))?,
+        ))
+    })
+}
+
+/// Whether `version` (`0.47.1`) falls inside `line` (`0.47`).
+///
+/// A prefix comparison rather than a semver parse, for the same reason [`value_of`] is not a TOML
+/// parse: the line *is* the recorded prefix, and nothing here needs to order two versions.
+fn on_line(version: &str, line: &str) -> bool {
+    version == line || version.starts_with(&format!("{line}."))
+}
+
 /// Every flux **engine** pin in one manifest, as `(package, version)`.
 ///
 /// A `path` dependency is skipped because it is one of this workspace's own crates —

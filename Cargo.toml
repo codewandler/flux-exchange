@@ -29,33 +29,41 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `exchange-host`'s `tests/engine_line.rs` reads this file and refuses a second one. Bumping the
 # engine is therefore editing this number and the pins beside it, in this file, and nothing else.
 #
-# **It is 0.46, not the newest 0.47, and that is not an oversight.** `connector-pack` 0.9.0 requires
-# `codewandler-flux-runtime ^0.46`, which for a `0.x` crate Cargo reads as `>=0.46.0, <0.47.0`. The
-# flux family has since published 0.47.0; taking it would put two `flux-runtime` versions in the
-# graph, and `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>` — two versions are two
-# distinct traits with identical names, which is the exact failure this story existed to remove.
-# **The engine line is set by what `connector-pack` requires, never by what is newest.** Raise it
-# when a `connector-pack` release asks for more.
+# **It is 0.47 because `connector-pack` 0.10.0 requires it** (X-67), and that ordering is the rule
+# rather than a coincidence. A `0.x` requirement is `>=0.47.0, <0.48.0` to Cargo, so the line *is*
+# the compatibility unit: `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, and two
+# `flux-runtime` versions in one graph are two distinct traits with identical names — Cargo resolves
+# both happily and `rustc` rejects them somewhere else entirely. **The engine line is set by what
+# `connector-pack` requires, never by what is newest.** It sat at 0.46 from X-11 until X-67 while
+# 0.47 was already published, and it moved only when a `connector-pack` release asked for more.
 #
-# ENGINE_LINE = "0.46"
+# **The two pin sets move together, in one commit.** Raising `codewandler-flux-*` while
+# `codewandler-connector-*` stays a line behind — or the reverse — is exactly what puts both lines
+# in one lock. `exchange-host`'s `tests/engine_line.rs` holds that from three sides: one test
+# *links* `connector_pack::pack` against `flux_web`'s tools so a divergence touching the seam is a
+# compile error, one reads the pins below, and one reads `Cargo.lock` — because a manifest stating
+# one line proves nothing about what **resolved**, and a transitive requirement a line behind is
+# invisible here.
+#
+# ENGINE_LINE = "0.47"
 #
 # flux's vocabulary crate: the `Error` and `Result` every `Tool::execute` answers with. Its own
 # dependencies are `serde`, `serde_json` and `thiserror` and nothing else, which is why it is the one
 # engine crate `exchange-host` may name without weakening lock 1 — telling a refusal that precedes
 # dispatch from a transport failure means matching on that enum, and matching on it means naming it.
-flux-core = { package = "codewandler-flux-core", version = "0.46" }
-flux-runtime = { package = "codewandler-flux-runtime", version = "0.46" }
+flux-core = { package = "codewandler-flux-core", version = "0.47" }
+flux-runtime = { package = "codewandler-flux-runtime", version = "0.47" }
 # flux's guarded-IO facade. Named here only because `flux_runtime::ToolContext::new` takes an
 # `Arc<System>` and there is no other constructor — so a composition that wants to invoke an
 # operation has to build one. It is **not** in `exchange-host`'s `[dependencies]`: it carries
 # `flux_system::net`, which dials, and the crate that dispatches holds no transport (X-12, lock 1).
-flux-system = { package = "codewandler-flux-system", version = "0.46" }
-flux-web = { package = "codewandler-flux-web", version = "0.46" }
+flux-system = { package = "codewandler-flux-system", version = "0.47" }
+flux-web = { package = "codewandler-flux-web", version = "0.47" }
 
-# The connector crates, all on the 0.9 line. `connector-catalog` has no dependencies at all and
+# The connector crates, all on the 0.10 line. `connector-catalog` has no dependencies at all and
 # `connector-secrets` defaults to no features (its Vault client and reqwest sit behind `vault`).
 #
-# `connector-address` 0.9.0 is the **address vocabulary**, and it replaces `connector-spec` here.
+# `connector-address` is the **address vocabulary**, and it replaces `connector-spec` here.
 # That is a reorganisation rather than a rename (upstream C-407): `connector-spec` is the connector
 # *compiler* — the IR, the OpenAPI ingest, the lockfile writer — and re-exporting a few hundred
 # lines of addressing from it dragged that whole compiler onto crates.io permanently. The
@@ -64,10 +72,10 @@ flux-web = { package = "codewandler-flux-web", version = "0.46" }
 # vocabulary, so it names the vocabulary and no longer pulls a compiler it never called into.
 #
 # `connector-pack` is a **dev-dependency only**, deliberately — see `exchange-host`'s manifest.
-connector-address = { package = "codewandler-connector-address", version = "0.9" }
-connector-catalog = { package = "codewandler-connector-catalog", version = "0.9" }
-connector-pack = { package = "codewandler-connector-pack", version = "0.9" }
-connector-secrets = { package = "codewandler-connector-secrets", version = "0.9" }
+connector-address = { package = "codewandler-connector-address", version = "0.10" }
+connector-catalog = { package = "codewandler-connector-catalog", version = "0.10" }
+connector-pack = { package = "codewandler-connector-pack", version = "0.10" }
+connector-secrets = { package = "codewandler-connector-secrets", version = "0.10" }
 # The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family
 # precedent is sibling flux-connectors, which already uses reqwest and jsonwebtoken for exactly this
 # exchange; the alternative was hand-rolling signature verification, which nobody should do.

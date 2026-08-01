@@ -656,3 +656,85 @@ mirror it, because both write through `SecretStore::put` on a port that takes a 
 a `Secret` and has no principal to check. Widening that port is a change to a published crate this
 repository does not own. If a second handler ever reaches `SecretStore::put` without declaring an
 access, nothing stops it.
+
+## Addendum, 2026-08-01 — an empty credential list now says *why*, and this host declines to (X-67)
+
+**Decision: the catalogue's new `Declared` / `Withheld` / `NoneRequired` distinction is read and
+asserted, and it is deliberately *not* published on
+`GET /api/catalogue/connectors/{id}/credentials` in this story. X-50 owns that, and this addendum
+is the measurement it was waiting for.**
+
+Catalogue 0.10 (upstream C-235) added `connector_catalog::Operation::credential_requirement`. Until
+it, an empty `Operation::credentials` meant one of two opposite things and nothing could tell them
+apart: the vendor genuinely wants no credential, or a credential is needed and the connector cannot
+declare it. This repository has a whole branch keyed on that ambiguity — X-46 publishes declarations,
+X-49 pinned the `declares-nothing` render with `freshdesk` as the one connector reaching it, and
+X-50 asks whether such a connector can be connected at all.
+
+### The measurement, which is one-sided
+
+Over catalogue 0.10, walking `connector_catalog::operations()`:
+
+| Requirement | Operations | Providers |
+|---|---|---|
+| `Declared` | 670 | 53 |
+| `Withheld` (`no-credential`) | 9 | `freshdesk`, all of it |
+| `NoneRequired` (`no-credential-required`) | **0** | — |
+
+**There is no positively-public operation in the shipped catalogue.** The one connector reaching the
+`declares-nothing` branch is not a connector that needs nothing; it is a connector whose API key
+occupies the Basic *username* position, which upstream's model treats as non-secret config, so
+declaring it would route a live key outside the secret gate. Nothing is missing and nothing is
+supplyable, *and the operation does not work* — upstream's own words for it are that this is
+"neither of the other two states".
+
+### Why that answers X-50's question rather than this one
+
+X-50 asks: *is a credential-less connection a thing this platform has?* Its argument is that a
+connection exists exactly when the store holds a value at a derived address, so a connector with
+nothing to store has no address to occupy and the disabled Connect button is correct. That argument
+survives — but its *example* does not. `freshdesk` was never the credential-less connector the
+question is about, and the catalogue now says so in a field rather than by an absence.
+
+So the note X-50 has to write is a sentence this measurement changes: not "this connector needs no
+credential, and a connection is a stored value, so there is nothing to connect", but "this
+connector's credential cannot be supplied through this platform, so it cannot be connected and it
+will not work". The second is the one an operator can act on, and it agrees with X-47's refusal of
+the same connector for a different reason — which is X-50's fourth Acceptance item, and now
+reachable, because both refusals are about `freshdesk` being unserviceable rather than about two
+unrelated gaps.
+
+### Why the distinction is not published here
+
+Three reasons, in the order they bind:
+
+1. **It is per-operation and this body is per-connector.** `credential_requirement` sits on
+   `Operation`; `ConnectorCredentials` publishes `Provider::auth`. Folding nine operation-level
+   facts into one connector-level field is a modelling decision with a wrong answer available
+   (a connector whose operations disagree), and X-67 is a bump.
+2. **The console renders the two identically and this story may not touch it.** A field nothing
+   reads is a wire change that buys nothing; the value arrives when the note changes, and the note
+   is `Connect.mts`'s.
+3. **X-46 pinned these answers byte-identical, and X-50 is open against them.** Adding a field here
+   ahead of X-50 would decide X-50's question in a commit that is not about it.
+
+What *is* done here is that the fact stops being invisible:
+`a_connector_that_declares_nothing_is_not_an_unknown_connector` now asserts both halves — every
+operation reaching the branch is `Withheld`, and no operation anywhere is `NoneRequired`. The day
+upstream ships a genuinely public operation, the empty list has two meanings on one wire field and
+that test is what says so.
+
+### Two catalogue facts this bump also measured, recorded where they will be looked for
+
+- **`freshdesk` is still the only connector with no provider-level `auth`**, and the listing still
+  probes **60 addresses across 53 addressable connectors** — 54 in catalogue 0.10. The address count
+  did not move even though `algolia` arrived declaring one, because upstream C-430 withdrew
+  Postmark's whole `account` service and the credential it needed went with it. The numbers in
+  *A connection is what the credential store says it is* above were written against catalogue 0.8.0
+  and are re-measured here rather than left to decay.
+- **`intercom`'s refusal is now over-broad, and deliberately left that way.** C-225 gave it
+  `https://{host}` with a *closed set* of three vendor hostnames (`config_choices` on `Provider`,
+  new in 0.10), so the value a tenant supplies cannot in fact be anything they choose. `host_pinning`
+  reads the template and not the choice set, so it returns `WholeAuthority` and X-47's rule refuses
+  the connector. That is fail-closed and correct under the rule as written; teaching `host_pinning`
+  to admit a closed set is a safety-surface change that belongs in a story of its own, not in a bump.

@@ -97,21 +97,26 @@ separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
-**X-11 closed the engine-line conflict.** The connector crates are on 0.9 and `connector-pack`
-links here. What is left is one rule, and it is the one that bites:
+**X-11 closed the engine-line conflict; X-67 moved the line.** The connector crates are on 0.10 and
+`connector-pack` links here. What is left is one rule, and it is the one that bites:
 
-- **The flux engine line is `0.46`, and it is written down once** — in `[workspace.dependencies]`
+- **The flux engine line is `0.47`, and it is written down once** — in `[workspace.dependencies]`
   in the root `Cargo.toml`, under the `ENGINE_LINE` marker. Every `codewandler-flux-*` pin carries
   that value, and no member manifest pins one at all.
-- **It is not the newest.** flux publishes 0.47; `connector-pack` 0.9.0 requires
-  `codewandler-flux-runtime ^0.46`, i.e. `<0.47`. `connector_pack::pack` hands out
-  `Arc<dyn flux_runtime::Tool>`, and two engine versions are two incompatible traits with identical
-  names — Cargo resolves both happily and the failure lands at type-check somewhere else entirely.
-  **The line is set by what `connector-pack` requires, never by what is newest.**
-- Two tests in `crates/exchange-host/tests/engine_line.rs` keep this true rather than review:
+- **It is set by what `connector-pack` requires, never by what is newest.** `connector-pack` 0.10.0
+  requires `codewandler-flux-runtime ^0.47`, and that is the whole reason 0.47 is allowed now — it
+  had been published for some time while this repository stayed on 0.46, because 0.9.0 required
+  `^0.46`. `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, and two engine versions
+  are two incompatible traits with identical names — Cargo resolves both happily and the failure
+  lands at type-check somewhere else entirely.
+- **Both pin sets move in one commit.** `codewandler-flux-*` and `codewandler-connector-*` are one
+  bump, never two. Raising either alone is exactly what puts two engine lines in one lock.
+- Three tests in `crates/exchange-host/tests/engine_line.rs` keep this true rather than review:
   one links `connector_pack::pack` against `flux_web::http::HttpRequestTool` so a divergence that
-  touches the seam is a compile error, and one reads the manifests so a divergence that does not
-  touch it is still caught.
+  touches the seam is a compile error, one reads the manifests so a divergence that does not touch
+  it is still caught, and one reads `Cargo.lock` — because a manifest stating one line proves
+  nothing about what *resolved*, and a transitive requirement a line behind is invisible in the
+  manifest. That third one is ported from flux-connectors' `flux_engine_line.rs`.
 - **`connector-address` is the address vocabulary; `connector-spec` is the compiler.** Upstream
   C-407 extracted the first out of the second, so this repository names `connector-address` and no
   longer pulls a compiler it never called. `connector-secrets` re-exports the same vocabulary, so
