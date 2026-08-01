@@ -1,8 +1,7 @@
 ---
 id: X-29
 title: "A partial delete does not overstate what survived, or understate why"
-status: ready
-priority: 2
+status: done
 epic: connections
 areas: [exchange-server]
 note: "found by X-18's belated review, 2026-08-01: `left_behind` names addresses that never held a value and calls them still usable, and a mixed-kind delete loop reports the FIRST failure kind — so a Denied address can be reported with 'retrying may work'"
@@ -45,15 +44,15 @@ self-corrects on retry, and both halves are named. But it is now the only place 
 a `Denied` can be answered "retrying may work".
 
 ## Acceptance
-- [ ] **Failing-first test** — a delete loop that sees both `Unreachable` and `Denied` answers with
+- [x] **Failing-first test** — a delete loop that sees both `Unreachable` and `Denied` answers with
       the kind an operator must act on, not the one that happened first. `TestStore` has no
       per-address failure control today; adding it is part of this story.
-- [ ] `left_behind`'s wording no longer asserts an address is live when this host cannot know that.
+- [x] `left_behind`'s wording no longer asserts an address is live when this host cannot know that.
       Either narrow the list the way `destroyed` is narrowed, or hedge the sentence the way
       `partly_written` does — decide which, and say why the other is wrong.
-- [ ] Whichever is chosen, the **safe bias is preserved**: this is a revocation surface, so
+- [x] Whichever is chosen, the **safe bias is preserved**: this is a revocation surface, so
       "possibly still live" must never read as "definitely gone".
-- [ ] The three caller-facing sentences stay byte-identical, still pinned by
+- [x] The three caller-facing sentences stay byte-identical, still pinned by
       `a_store_failure_says_what_it_has_always_said`.
 
 ## Notes
@@ -69,3 +68,25 @@ a `Denied` can be answered "retrying may work".
   (noted by X-25). No disclosure has actually been found — each new refusal names only a connector
   id and addresses — but a test whose doc overstates its coverage is worse than one that admits the
   gap, and this is the third story to record the same drift. Fix the claim or fix the coverage.
+
+## Progress
+- **Done 2026-08-01.** Gate green: 43 + 182 tests. Genuine merge-base failure — both tests failed at
+  the base with all diff hunks inside `mod tests`, and the final form was re-proved after commit.
+- **Hedging was chosen over narrowing, and the argument is in the code.** The pre-delete probe is
+  stale by the time the loop runs — that staleness is the *stated* reason `remove` deletes the whole
+  declared set — so the addresses a narrowing would drop are exactly the ones this host has no
+  evidence about. `destroyed` can be narrowed because its failure mode is **over**-reporting a
+  revocation; `left_behind`'s is **under**-reporting one. Not the same risk.
+- The list is byte-for-byte the same set and the safe instruction is unchanged; only the claim moved,
+  from "these are live" to "a credential may remain at any of them".
+- **The mixed-kind test drives all four orderings**, so "the worst" cannot be satisfied by an
+  implementation that merely keeps the last. `TestStore` gained per-address failure control — which
+  is why no earlier story caught this: neither the global flag nor the counter could arm two kinds
+  in one `remove`.
+- The third finding is closed too: the disclosure test now drives both of `partly_written`'s
+  branches and its doc **lists what it reaches** instead of claiming it reaches everything.
+  `allowance_change_in_flight` is still undriven and the doc now says so.
+- **Carried forward:** a partial `DELETE` now answers `502` rather than `503` whenever any address
+  failed `Denied`/`Backend`/`Layout`. Anything retrying on `503` and not `502` changes behaviour.
+- **Carried forward:** `TestStore`'s failure controls are now five overlapping knobs whose precedence
+  exists only in the order of the `if`s. Due a consolidation; deliberately not done here.

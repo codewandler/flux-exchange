@@ -6,7 +6,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-01
+
 ### Fixed
+
+- **A partial delete reports the worst failure, and claims only what it knows** (X-29). The loop kept
+  the *first* failure kind, so an unreachable store followed by a denied one answered "retrying may
+  work" while a denied address sat in that same response. And `left_behind` told an operator to treat
+  addresses as still usable when a connector may legitimately hold a subset of what it declares — so
+  some had never held anything. The claim now hedges; the list and the safe instruction are
+  unchanged. A partial `DELETE` answers `502` rather than `503` when any address failed in a way
+  retrying will not fix.
+
+- **Console tests are found at every depth** (X-32). The test script globbed one directory level, so
+  a test in a subfolder never ran and the suite reported green — which became a silently-green
+  pipeline once CI started running it.
 
 - **`rust-version` was wrong, and shipped wrong in three releases** (X-30). The manifest declared
   `1.87`. It has never been true: `jsonwebtoken`, `time`, `time-core` and `time-macros` each require
