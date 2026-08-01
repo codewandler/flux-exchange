@@ -10,6 +10,7 @@
 // catalogue can produce resolves to a view this app actually renders.
 
 import type { PathResolver } from './catalog.mts'
+import { ONBOARDING_PATH } from './onboarding.mts'
 import { nextTick, ref, type Ref } from 'vue'
 
 /**
@@ -48,6 +49,7 @@ export const fragmentPath: PathResolver = (path) => `${BASE}#${path.replace(/#/g
  * act on by itself.
  */
 export type Route =
+  | { name: 'connect'; anchor?: string }
   | { name: 'connections'; anchor?: string }
   | { name: 'explorer'; anchor?: string }
   | { name: 'operation'; id: string; anchor?: string }
@@ -85,6 +87,11 @@ export function parseRoute(hash: string): Route {
   // its own path — `/explorer` is the one the carried components emit — so every link they produce
   // still resolves exactly as it did.
   if (path === '/' || path === '/connections') return { name: 'connections', ...at }
+
+  // How to connect an agent. Deliberately not a surface of the platform — it is a reference an agent
+  // author reaches for once rather than a place an operator works, so it is reached from the footer
+  // and `surfaceOfRoute` maps it to nothing, leaving the rail with no entry lit.
+  if (path === ONBOARDING_PATH) return { name: 'connect', ...at }
 
   if (path === '/explorer') return { name: 'explorer', ...at }
 
