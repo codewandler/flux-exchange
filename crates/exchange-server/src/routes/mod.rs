@@ -14,6 +14,7 @@
 //! routes as data and its `Router` is *derived* from them, so [`published`] is the whole surface by
 //! construction. The seam is the same; only the direction of the dependency changed.
 
+mod catalogue;
 mod health;
 
 use axum::extract::{Request, State};
@@ -30,7 +31,7 @@ use tracing::warn;
 use crate::state::AppState;
 
 /// The feature modules this app is assembled from. **This is the merge site.**
-const MODULES: &[Module] = &[health::MODULE];
+const MODULES: &[Module] = &[health::MODULE, catalogue::MODULE];
 
 /// A feature module's contribution to the surface.
 pub struct Module {
@@ -220,13 +221,34 @@ mod tests {
         probe
     }
 
-    /// The Acceptance's enumeration. Ask the **assembled app**, route by route, which ones answer a
-    /// caller it cannot identify — and check the answer is health and nothing else.
+    /// Every route that answers a caller this host cannot identify, and the argument for each one
+    /// being on the list.
     ///
-    /// This walks [`published`] rather than a list written out here, so a module added by a later
-    /// story is covered the day it lands, including one that publishes an unguarded route.
+    /// **Health, and the catalogue.** X-02 wrote this asserting health was the only one; X-06 added
+    /// the catalogue and this is the deliberate widening, not a paper-over. The case, in short:
+    /// `crate::routes::catalogue` serves `&'static` data compiled in from a published crates.io
+    /// package, identical in every deployment of this version. It names no tenant, no principal and
+    /// no credential, it never reads a grant, and it never filters — `admitted: null` on every
+    /// operation says on the wire what the code does structurally. Requiring a principal would not
+    /// make it stricter, because no identity provider binds until X-03; it would make it `401`
+    /// forever. `crate::routes::catalogue`'s module documentation carries the long form.
+    ///
+    /// The test keeps its teeth either way: it walks [`published`] and compares against a set
+    /// written out **here**, so a route that becomes anonymous without anyone arguing for it in
+    /// this list still fails.
     #[tokio::test]
-    async fn health_is_the_only_route_reachable_without_a_principal() {
+    async fn the_anonymous_surface_is_only_what_was_declared_anonymous() {
+        /// Every route allowed to answer without a principal. Adding a line here is the decision;
+        /// the assertion below is only the enforcement.
+        const ANONYMOUS: &[(&str, &str)] = &[
+            // Liveness: an operator has to be able to ask whether the process is up before it can
+            // tell them anything else.
+            ("health", "/health"),
+            // The catalogue: what this binary *could* run, never what a caller may run.
+            ("catalogue", "/api/catalogue/connectors"),
+            ("catalogue", "/api/catalogue/connectors/{id}/operations"),
+        ];
+
         let mut reachable = Vec::new();
 
         for (module, route) in published() {
@@ -239,10 +261,9 @@ mod tests {
         }
 
         assert_eq!(
-            reachable,
-            [("health", "/health")],
-            "every route but /health must refuse a caller with no principal; \
-             these answered one: {reachable:?}",
+            reachable, ANONYMOUS,
+            "the set of routes answering a caller with no principal changed; every entry needs an \
+             argument written beside it in ANONYMOUS, and these are what answered: {reachable:?}",
         );
     }
 
