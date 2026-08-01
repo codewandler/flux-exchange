@@ -66,13 +66,18 @@ pub struct AppState {
 
 /// What this composition can offer a human who wants to sign in.
 ///
-/// Three states rather than an `Option`, because "not configured" and "configured but unable to
-/// finish" are different mistakes with different fixes, and a caller shown one message for both
-/// gets sent to the wrong place. Both are answered at `/api/signin` rather than at the callback:
-/// the failure the story names is a login that looks fine and dies at the last step.
+/// Four states rather than an `Option`, because they are answered differently at `/api/signin`:
+/// "not configured" and "configured but unable to finish" are different mistakes with different
+/// fixes, and a caller shown one message for both gets sent to the wrong place. All of them are
+/// answered there rather than at the callback: the failure X-04's story names is a login that looks
+/// fine and dies at the last step.
+///
+/// **These four states are the operator's, not the caller's.** What crosses the wire is
+/// [`available`](Self::available) — one boolean — and the argument for that collapse is on it.
 #[derive(Clone)]
 pub enum SignIn {
-    /// No OIDC configuration was supplied, or not all of it was. `/api/signin` explains.
+    /// No OIDC configuration was supplied, or not all of it was, and no other provider is armed.
+    /// `/api/signin` explains.
     Unconfigured,
 
     /// OIDC is configured, but this composition bound no
@@ -81,28 +86,68 @@ pub enum SignIn {
     /// cannot return from usefully.
     NoTokenExchange,
 
+    /// The development identity is armed, so a caller can become a principal **here** rather than
+    /// by being sent anywhere.
+    ///
+    /// A unit variant, unlike [`Oidc`](Self::Oidc), and that is the difference in one line: the
+    /// federated state carries its port because `/api/signin` calls `authorize()` on it, whereas
+    /// there is nothing this state's `/api/signin` would do with a port. Signing in against it is
+    /// `POST /api/session`, which reaches the concrete port through
+    /// [`AppState::development_identity`] — the accessor that already exists for exactly that, and
+    /// the reason carrying a second handle here would be two things to keep in step rather than
+    /// one.
+    ///
+    /// **It does not follow that this composition may be reached from anywhere.** A roster handle
+    /// is a credential with no secret in it, so [`identity_binding`](AppState::identity_binding)
+    /// still reports [`IdentityBinding::Development`] and the bind rule still refuses every
+    /// address but loopback. Whether a caller *can* sign in and whether this host may be *exposed*
+    /// are two questions, and this variant answers only the first —
+    /// `tests::available_says_whether_a_caller_can_become_a_principal` pins both at once.
+    Development,
+
     /// A provider is bound and the flow can complete.
     Oidc(Arc<Oidc>),
 }
 
 impl SignIn {
-    /// Whether a human could complete a sign-in against this composition.
+    /// Whether **this deployment can turn a caller into a principal**.
     ///
-    /// Three states collapse to one boolean, and the collapse is the point rather than a loss.
-    /// The three are what an **operator** needs, because "not configured" and "configured but
-    /// unable to finish" have different remedies — `crate::routes::signin`'s two explanatory pages
-    /// say so, to a human who asked for a login. What a **caller** may know is narrower: whether
-    /// sign-in works is a fact about the service, and which of the two ways it does not work is a
-    /// fact about the configuration. Telling them apart on the wire would report to an anonymous
-    /// caller whether this host's OIDC settings are set, which is a piece of the deployment's
-    /// shape and none of their business.
+    /// That sentence is the whole of X-57. It used to read "is OIDC configured", which was the same
+    /// answer for three of the four states and the wrong one for the fourth: arming the development
+    /// identity binds a port that mints principals from a roster and a `POST /api/session` that
+    /// exchanges one for a session, and this reported that nobody could sign in. The console reads
+    /// this field to decide whether to offer signing in at all, so the host most likely to be
+    /// somebody's first run of this software was the one it declined to offer a way into.
     ///
-    /// Matched exhaustively and with no wildcard arm, deliberately: a fourth variant must be a
+    /// # Four states collapse to one boolean, and the collapse is the point
+    ///
+    /// The four are what an **operator** needs, because "not configured", "configured but unable to
+    /// finish" and "signed in locally" have different remedies and different instructions —
+    /// `crate::routes::signin`'s three explanatory answers say so, to a human who asked for a login.
+    /// What a **caller** may know is narrower: whether sign-in works is a fact about the service,
+    /// and *how* it works is a fact about the configuration. Telling them apart on the wire would
+    /// report to an anonymous caller whether this host's OIDC settings are set, or that its
+    /// credential is a name somebody could guess — each a piece of the deployment's shape and none
+    /// of their business.
+    ///
+    /// **A boolean still suffices, and widening it was the reflex to resist.** The tempting shape
+    /// was a three-valued field — unavailable, redirect, form — on the reasoning that a console
+    /// needs to know *how* to sign somebody in and not merely *whether*. It is the wrong place to
+    /// answer that, for two reasons. Publishing "how" anonymously is publishing which kind of
+    /// provider a deployment runs, which is the property this function collapsed states to protect
+    /// in the first place. And nothing needs it published: the affordance a console renders is a
+    /// link to `/api/signin`, and **`/api/signin` is where "how" is answered** — to a caller who
+    /// has come to sign in, by the route whose job that is, one request later. Conflating "can
+    /// anyone" with "by what means" is precisely how this function came to mean the wrong thing.
+    ///
+    /// Matched exhaustively and with no wildcard arm, deliberately: a fifth variant must be a
     /// compile error here rather than something that silently falls to `false`, because the arm a
     /// new state belongs in is the whole decision.
+    ///
+    /// [`IdentityBinding::Development`]: crate::bind::IdentityBinding::Development
     pub fn available(&self) -> bool {
         match self {
-            SignIn::Oidc(_) => true,
+            SignIn::Oidc(_) | SignIn::Development => true,
             SignIn::Unconfigured | SignIn::NoTokenExchange => false,
         }
     }
@@ -166,10 +211,15 @@ impl AppState {
     }
 
     /// A composition with the development identity armed.
+    ///
+    /// One argument sets **both** the identity port and the sign-in state, for
+    /// [`with_oidc`](Self::with_oidc)'s reason: they are the same decision, and a composition that
+    /// could arm the port without saying a caller can sign in is the one X-57 found in the tree —
+    /// a host that mints principals and reports that it cannot.
     pub fn with_development_identity(identity: Arc<DevIdentity>) -> Self {
         Self {
             identity: BoundIdentity::Development(identity),
-            sign_in: SignIn::Unconfigured,
+            sign_in: SignIn::Development,
             credentials: None,
             settings: None,
             connections: Arc::default(),
@@ -663,6 +713,69 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// **X-57.** `available()` answers whether this composition can turn a caller into a
+    /// principal — not whether OIDC is configured.
+    ///
+    /// A table over **every** constructor, for `each_constructor_reports_its_own_binding`'s
+    /// reason: the two questions this type answers are decided per composition, and a constructor
+    /// absent from a table is an answer nothing asserts. The two are deliberately pinned side by
+    /// side here, because the whole risk of this story is that widening one widens the other —
+    /// `arming_the_development_identity_does_not_admit_a_reachable_bind` is the same claim driven
+    /// through the bind rule.
+    #[test]
+    fn available_says_whether_a_caller_can_become_a_principal() {
+        for (composition, state, available, binding) in [
+            (
+                "nothing configured at all",
+                AppState::without_identity(),
+                false,
+                IdentityBinding::Unbound,
+            ),
+            (
+                "OIDC configured with nothing able to redeem a code",
+                AppState::oidc_without_a_token_exchange(),
+                false,
+                IdentityBinding::Unbound,
+            ),
+            (
+                "a bound OIDC provider",
+                AppState::with_oidc(oidc()),
+                true,
+                IdentityBinding::Bound,
+            ),
+            (
+                "the development identity armed",
+                AppState::with_development_identity(dev()),
+                true,
+                IdentityBinding::Development,
+            ),
+            (
+                // Test-only, and the one row where the two answers deliberately disagree: it binds
+                // an identity port and no sign-in flow at all, which is a composition the binary
+                // cannot produce. It is here so the table covers every constructor rather than
+                // every constructor somebody remembered.
+                "a bare identity port with no sign-in flow",
+                AppState::with_identity(dev()),
+                false,
+                IdentityBinding::Bound,
+            ),
+        ] {
+            assert_eq!(
+                state.sign_in().available(),
+                available,
+                "{composition}: `available` answers whether this deployment can turn a caller \
+                 into a principal",
+            );
+            assert_eq!(
+                state.identity_binding(),
+                binding,
+                "{composition}: and saying a caller can sign in must never change what the bind \
+                 rule is told — a roster handle is a credential with no secret in it, and the \
+                 loopback-only rule is the whole of what stands in front of it",
+            );
+        }
     }
 
     /// The concrete port is reachable only when it is the development one, because that is what
