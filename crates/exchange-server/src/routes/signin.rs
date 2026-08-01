@@ -876,6 +876,44 @@ mod tests {
         );
     }
 
+    /// **X-24.** An id token that has expired is refused as a credential, not as an outage.
+    ///
+    /// `401` and not `503`, which is the status half of the story: the caller is told the provider's
+    /// answer was not accepted, and not that this host cannot open a session right now — the second
+    /// sends a human away to try again shortly when what they need is to sign in again. The
+    /// distinction is the same one `a_refusal_tells_the_caller_nothing_about_the_provider` holds for
+    /// an unreachable provider, pinned here for the refusal `Oidc::admit` produces.
+    ///
+    /// The status is what the sub-second window used to get wrong, because the store's
+    /// `AlreadyExpired` arrived as `NoSession`. What keeps the two decisions on one reading of the
+    /// clock is `oidc::tests::a_sign_in_decides_against_one_reading_of_the_clock`; this is the
+    /// answer that reading buys.
+    #[tokio::test]
+    async fn an_expired_id_token_is_refused_as_a_credential_and_not_as_an_outage() {
+        let exchange = Arc::new(StubExchange::returning(SignedClaims {
+            expires_at: session::now() - 1,
+            ..claims("not-yet-known")
+        }));
+        let app = oidc_app(exchange.clone());
+
+        let browser = begin(&app).await;
+        exchange.echoing(&browser.nonce);
+
+        let (status, headers, body) =
+            call(app, browser.returns_with("an-authorization-code")).await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "an expired id token is the caller's problem and must not read as this host's: {body}",
+        );
+        assert!(
+            planted_session(&headers).is_none(),
+            "and a refusal must issue nothing at all",
+        );
+        assert!(!carries_a_token(&body), "{body}");
+    }
+
     // ---------------------------------------------------------------------------------------
     // X-04's failing-first test.
     // ---------------------------------------------------------------------------------------

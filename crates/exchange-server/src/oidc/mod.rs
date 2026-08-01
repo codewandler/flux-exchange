@@ -156,7 +156,34 @@ impl Oidc {
             .await
             .map_err(SignInRefusal::from)?;
 
-        let principal = self.admit(&claims, &pending.nonce, now())?;
+        // The one reading this sign-in gets, taken once the provider has answered so that a slow
+        // token endpoint cannot make it stale, and passed down from here.
+        self.admit_and_open(&claims, &pending.nonce, now())
+    }
+
+    /// Admit a signature-verified id token and open the session it earns, **both against `now`**.
+    ///
+    /// One argument and one reading, which is the whole of X-24. Whether the token has expired and
+    /// how much of its life the session inherits are two questions about the same instant, and this
+    /// host used to ask the clock once for each: [`Oidc::admit`] took a reading, and
+    /// [`SessionStore::open`] took another a moment later. A token whose `exp` fell between them was
+    /// admitted by the first and refused [`SessionError::AlreadyExpired`] by the second. Nothing was
+    /// issued — it failed in the safe direction — but the caller was told this host could not open a
+    /// session, `SignInRefusal::NoSession`'s `503`, when what had happened was that their token
+    /// expired, which is [`SignInRefusal::Expired`]'s `401`, and the operator's log said the same
+    /// wrong thing. Threading the reading through here leaves no line between the two decisions that
+    /// could consult the clock again.
+    ///
+    /// Separate from [`Oidc::complete`] and taking `now` as an argument for the reason
+    /// [`Oidc::admit`] does: the window this closes is sub-second, so the only way to state it as a
+    /// test is to name the instant rather than to race one.
+    fn admit_and_open(
+        &self,
+        claims: &SignedClaims,
+        expected_nonce: &str,
+        now: i64,
+    ) -> Result<SessionToken, SignInRefusal> {
+        let principal = self.admit(claims, expected_nonce, now)?;
 
         // The session ends when the id token does. The `exp` goes across verbatim: a provider that
         // issues a five-minute token gets a five-minute session, because a host that outlived the
@@ -166,6 +193,7 @@ impl Oidc {
                 principal,
                 Expiry::Credential {
                     expires_at: claims.expires_at,
+                    as_of: now,
                 },
             )
             .map_err(SignInRefusal::NoSession)
@@ -764,6 +792,7 @@ mod tests {
                     .expect("well-formed claims"),
                 Expiry::Credential {
                     expires_at: now() + 300,
+                    as_of: now(),
                 },
             )
             .expect("the OS has randomness");
@@ -784,6 +813,65 @@ mod tests {
             format!("{expired:?}"),
             format!("{never_existed:?}"),
             "an expired session must not be distinguishable from one that never existed",
+        );
+    }
+
+    /// **X-24.** One sign-in decides against one reading of the clock.
+    ///
+    /// Two cases either side of a single injected instant, because separately each of them passes
+    /// for the wrong reason:
+    ///
+    /// 1. An `exp` **at** the reading is expired — a session that ends at `t` does not resolve at
+    ///    `t`, and the credential behind it is no different. The caller is told the id token
+    ///    expired, which `routes::signin` answers `401`, rather than that this host could not open
+    ///    a session, which is [`SignInRefusal::NoSession`]'s `503`.
+    /// 2. An `exp` **one second past** it opens a session. This is the half a second reading
+    ///    breaks: the token is admitted against the first reading and then refused
+    ///    [`SessionError::AlreadyExpired`] by a later one, so the answer describes the store when
+    ///    what happened was that the token expired. Without this case the test would pass on a host
+    ///    that refused every sign-in.
+    ///
+    /// The instant is injected rather than raced. The window a second reading opens is sub-second,
+    /// so a test that waited for it would be one that usually proved nothing; [`Oidc::admit`]
+    /// already takes `now` as an argument for exactly this reason.
+    #[test]
+    fn a_sign_in_decides_against_one_reading_of_the_clock() {
+        // Deliberately not the wall clock, so neither case can be decided by one.
+        const NOW: i64 = 1_000_000_000;
+
+        let oidc = oidc();
+
+        let refusal = oidc
+            .admit_and_open(
+                &SignedClaims {
+                    expires_at: NOW,
+                    ..good()
+                },
+                NONCE,
+                NOW,
+            )
+            .expect_err("a token whose `exp` is the moment it is read against has expired");
+
+        assert!(
+            matches!(refusal, SignInRefusal::Expired),
+            "an `exp` on the boundary must be refused as an expired credential, not as a store \
+             that could not open a session: {refusal:?}",
+        );
+
+        let token = oidc
+            .admit_and_open(
+                &SignedClaims {
+                    expires_at: NOW + 1,
+                    ..good()
+                },
+                NONCE,
+                NOW,
+            )
+            .expect("a token still inside its life must open a session against that same reading");
+
+        assert!(
+            oidc.sessions.resolve(token.as_str()).is_some(),
+            "and the session it opened must resolve",
         );
     }
 

@@ -97,9 +97,23 @@ pub enum Expiry {
     /// issuing a five-minute token yields a five-minute session here; this host invents no lifetime
     /// of its own, because a host that did would be honouring a credential it had already decided
     /// to disbelieve.
+    ///
+    /// `as_of` is the instant that `exp` is measured against, and it is the caller's rather than
+    /// this module's. Whether a credential has expired and how much of its life a session inherits
+    /// are two questions about one moment, and the caller has already asked the first — `Oidc::admit`
+    /// takes the same reading. Reading the clock again here would answer the second question at a
+    /// later moment than the first, so a token could be admitted and then refused
+    /// [`SessionError::AlreadyExpired`] a fraction of a second later. It carried no session with it,
+    /// but it did carry the wrong refusal out to the caller and the wrong line into the log.
+    ///
+    /// It sits on this arm and not on [`SessionStore::open`], so that
+    /// [`WhileTheProcessLives`](Self::WhileTheProcessLives) is not made to name an instant it has no
+    /// use for. Nothing about that arm is decided against the wall clock.
     Credential {
         /// The `exp` claim, as seconds since the Unix epoch.
         expires_at: i64,
+        /// The instant `expires_at` is judged against, as seconds since the Unix epoch.
+        as_of: i64,
     },
 
     /// Nothing bounds this session but the process it lives in.
@@ -249,6 +263,10 @@ impl SessionStore {
 
 /// The instant a session opened now stops resolving, or `None` if only the process bounds it.
 ///
+/// A pure function of the [`Expiry`] it is given: the wall clock reaches it as
+/// [`Expiry::Credential`]'s `as_of` rather than being read here, so the answer is measured against
+/// the same instant the caller admitted the credential against. See that arm.
+///
 /// Both refusals are deliberate, and both are refusals rather than repairs:
 ///
 /// - **An `exp` that has already passed** yields no session at all. The alternative — minting one
@@ -258,13 +276,13 @@ impl SessionStore {
 ///   the map by taking a different route in.
 /// - **An `exp` further out than [`MAX_SESSION_SECONDS`]** yields none either. See that constant.
 fn deadline(expiry: Expiry) -> Result<Option<Instant>, SessionError> {
-    let Expiry::Credential { expires_at } = expiry else {
+    let Expiry::Credential { expires_at, as_of } = expiry else {
         return Ok(None);
     };
 
     // Saturating, because `exp` is a number a provider chose and `i64::MIN` must arrive here as a
     // very expired token rather than as an overflow.
-    let remaining = expires_at.saturating_sub(now());
+    let remaining = expires_at.saturating_sub(as_of);
 
     if remaining <= 0 {
         return Err(SessionError::AlreadyExpired { expires_at });
@@ -282,18 +300,19 @@ fn deadline(expiry: Expiry) -> Result<Option<Instant>, SessionError> {
 
 /// Seconds since the Unix epoch.
 ///
-/// The one wall clock in this binary, read here and by `Oidc::admit`. Deliberately one function and
-/// not two: `admit` decides whether an id token has expired and this module decides how long the
-/// session it opens may live, and two *different* clocks that disagreed could admit a token as valid
-/// and then refuse it a session for being expired.
+/// The one wall clock in this binary. Deliberately one function and not two: whether an id token has
+/// expired and how long the session it opens may live are two questions about the same moment, and
+/// two *different* clocks that disagreed could admit a token as valid and then refuse it a session
+/// for being expired.
 ///
-/// **One function is not one reading, and the difference is real.** `Oidc::complete` reads this for
-/// `admit` and reaches [`SessionStore::open`], which reads it again, so a token whose `exp` falls
-/// between the two readings is admitted and then refused `AlreadyExpired`. The window is sub-second
-/// and it fails in the safe direction — no session is issued — but the caller sees the 503 that
-/// `NoSession` carries rather than the 401 `SignInRefusal::Expired` would have given, so the status
-/// code is slightly wrong for a sub-second slice of sign-ins. Closing it means threading one reading
-/// through `complete`; it is noted with the refusal collapse in X-17 rather than claimed away here.
+/// **Nothing in this module reads it.** [`deadline`] is handed the instant it decides against, as
+/// [`Expiry::Credential`]'s `as_of`, so a session's deadline is measured against whatever reading
+/// admitted the credential rather than against a second one taken later.
+///
+/// That is a claim about one call path — `Oidc::complete` reads this once and passes the reading
+/// down — and not a property of the type system. A future caller of [`SessionStore::open`] that read
+/// this for itself would be taking its own reading again, which is the thing `as_of` exists to make
+/// visible at the call site rather than to make impossible.
 ///
 /// A clock before the epoch is not a case worth a branch: `0` makes every `exp` look expired, which
 /// refuses every sign-in. That is the direction to fail in.
@@ -515,8 +534,11 @@ mod tests {
 
     /// An `exp` five minutes out, as a provider that issues short-lived tokens would state it.
     fn in_five_minutes() -> Expiry {
+        let now = now();
+
         Expiry::Credential {
-            expires_at: now() + 300,
+            expires_at: now + 300,
+            as_of: now,
         }
     }
 
@@ -612,6 +634,7 @@ mod tests {
                 alice(),
                 Expiry::Credential {
                     expires_at: now() + 300,
+                    as_of: now(),
                 },
             )
             .expect("randomness");
@@ -620,6 +643,7 @@ mod tests {
                 alice(),
                 Expiry::Credential {
                     expires_at: now() + 8 * 3600,
+                    as_of: now(),
                 },
             )
             .expect("randomness");
@@ -659,6 +683,7 @@ mod tests {
             alice(),
             Expiry::Credential {
                 expires_at: now() - 1,
+                as_of: now(),
             },
         );
         assert!(
@@ -672,6 +697,7 @@ mod tests {
             alice(),
             Expiry::Credential {
                 expires_at: i64::MAX,
+                as_of: now(),
             },
         );
         assert!(
