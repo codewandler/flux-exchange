@@ -1,0 +1,10 @@
+# The Node toolchain is contained under `web/`; only its dependencies and build output are ignored.
+# `web/package-lock.json` is committed so CI installs the same tree `npm ci` installs here.
+#
+# No trailing slash on `node_modules`, deliberately, and the reason is ../flux-connectors' (C-100): a
+# trailing slash ignores a *directory* only, so a `node_modules` that is a **symlink** — which is how
+# a second worktree usually gets its dependencies — is not ignored, and `git add -A web/` stages it
+# as a mode-120000 blob holding a machine-absolute path that dangles everywhere else.
+/node_modules
+/.vitepress/dist/
+/.vitepress/cache/
