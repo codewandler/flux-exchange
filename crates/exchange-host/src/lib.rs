@@ -107,8 +107,8 @@ pub use lease::{Lease, LeaseId, LeaseState};
 pub use principal::{Principal, PrincipalKind, Tenant, TenantError};
 pub use runtime::{Deployment, Runtime, RuntimeRefusal};
 pub use settings::{
-    admit_tenant_settings, declared_settings, ConnectionSettings, DeclaredSetting, SettingKind,
-    SettingsRefusal, MAX_SETTING_VALUE_BYTES, MAX_TENANT_SETTINGS_BYTES,
+    admit_tenant_settings, declared_settings, host_pinning, ConnectionSettings, DeclaredSetting,
+    HostPinning, SettingKind, SettingsRefusal, MAX_SETTING_VALUE_BYTES, MAX_TENANT_SETTINGS_BYTES,
 };
 #[cfg(unix)]
 pub use settings::{SettingsStore, SettingsStoreError, CONNECTION_SETTINGS_SETTING};

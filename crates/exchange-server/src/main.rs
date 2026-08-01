@@ -120,7 +120,7 @@ fn compose() -> Result<AppState, StartupRefusal> {
         // setting, which is the honest answer rather than a hole.
         // An empty configuration when nothing was bound, and deliberately not a refusal: the
         // settings store is what the *templated* connectors need, and a host without one is still a
-        // working host for the rest of the catalogue. What it must not do is pretend — the sixteen
+        // working host for the rest of the catalogue. What it must not do is pretend — the seventeen
         // that need a value refuse by name, quoting the field and the service.
         let configuration = settings.map_or_else(
             || Arc::new(exchange_host::MemoryConfig::new()) as Arc<dyn exchange_host::ConfigStore>,
@@ -234,7 +234,7 @@ fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, Sta
 /// `exchange_host::settings` carries that argument at length.
 ///
 /// Unset is therefore a *warning* rather than a silent absence, and it names the consequence
-/// precisely: sixteen connectors refuse by name until this is set, and the rest are unaffected.
+/// precisely: seventeen connectors refuse by name until this is set, and the rest are unaffected.
 ///
 /// `#[cfg(unix)]` because the file binding is, for [`credential_store`]'s reason with less at stake:
 /// the modes there are what protects a credential, and here they are hygiene for a customer's data.
@@ -247,7 +247,7 @@ fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>
         warn!(
             "no connection-settings store is bound ({CONNECTION_SETTINGS_SETTING} is unset), so \
              every connector whose base URL is templated on a per-connection value — zendesk, \
-             shopify, jira and thirteen others — will refuse by name. Set it to a path outside \
+             shopify, jira and fourteen others — will refuse by name. Set it to a path outside \
              every working tree. It holds no secrets; credentials stay in the credential store",
         );
         return Ok(None);

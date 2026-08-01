@@ -247,7 +247,7 @@ impl AppState {
     /// An additive builder method for [`with_credentials`](Self::with_credentials)' reason, and a
     /// *separate* one from it on purpose: every combination of the two is a real composition. A
     /// host with credentials and no settings store runs the thirty-seven connectors that need
-    /// nothing per connection and refuses the sixteen that do, by name — which is X-12's behaviour,
+    /// nothing per connection and refuses the seventeen that do, by name — which is X-12's behaviour,
     /// kept rather than papered over.
     ///
     /// **Binding one does not make a caller resolvable**, so it must never influence
@@ -605,7 +605,7 @@ mod tests {
     /// not pinning the wiring. The mistake it catches is the one this story makes plausible —
     /// somebody reasons "the templated connectors work now, so this host is a real service" and
     /// teaches `identity_binding` to say `Bound`. What a settings store holds is a subdomain; it
-    /// authenticates nobody, and a host on `0.0.0.0` that can reach sixteen more vendors with a
+    /// authenticates nobody, and a host on `0.0.0.0` that can reach thirteen more vendors with a
     /// tenant's credentials and still cannot identify a caller is *worse* than one that cannot.
     #[test]
     fn binding_a_settings_store_does_not_admit_a_reachable_bind() {

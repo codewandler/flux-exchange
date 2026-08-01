@@ -108,6 +108,21 @@ mod rules {
     /// calls the tool inside it; doing so *is* the second request path, in one line.
     pub const UNWRAPS_THE_TRANSPORT: &str = ".tool()";
 
+    /// **The pack's third entry point** (X-47). `Rehearsal` parses an operation's Flux and reports
+    /// what it would need and what request it would build.
+    ///
+    /// It is **not** a bypass today and is not being treated as one: it takes no `Egress`, holds no
+    /// transport and has no `execute`, so nothing reached through it can dispatch. It is counted
+    /// because it is a *pack entry point this file did not know about* — [`SEAM`] and
+    /// [`MODEL_FACING_SEAM`] were the whole list, and a third one appearing without the scanner
+    /// noticing is exactly the erosion this file exists to make impossible. If upstream ever gives
+    /// it a transport, the failure should be a red test here rather than a discovery in production.
+    pub const REHEARSAL: &str = "connector_pack::Rehearsal";
+
+    /// Files allowed to name [`REHEARSAL`]: the one that derives a connector's configuration
+    /// surface from its operations' own Flux.
+    pub const MAY_NAME_REHEARSAL: &[&str] = &["settings.rs"];
+
     /// Dispatching a tool. Only the seam may, and only on the operation the pack resolved.
     pub const DISPATCH: &str = ".execute(";
 
@@ -310,6 +325,27 @@ fn the_scanner_catches_what_it_claims_to() {
         !found.is_empty(),
         "the scanner accepted `Egress` in a third file",
     );
+
+    // The pack's third entry point, outside the one file that derives a configuration surface with
+    // it. Driven in both directions, because a rule that rejected `settings.rs` too would be one
+    // somebody deletes rather than one that guards anything.
+    let rehearsing = |name: &str| {
+        (
+            name.to_owned(),
+            format!(
+                "let r = {}::of(id, provider, service, flux)?;",
+                rules::REHEARSAL
+            ),
+        )
+    };
+    assert!(
+        violations(&[seam(), rehearsing("settings.rs")]).is_empty(),
+        "the scanner rejects the one file that may derive a configuration surface",
+    );
+    assert!(
+        !violations(&[seam(), rehearsing("elsewhere.rs")]).is_empty(),
+        "the scanner accepted the pack's third entry point in a file that may not name it",
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -390,6 +426,21 @@ fn violations(sources: &[(String, String)]) -> Vec<String> {
             found.push(format!(
                 "`{path}` names `Egress`; the transport port belongs to the seam and to the \
                  crate root that re-exports it, so that where it travels is readable in one place.",
+            ));
+        }
+    }
+
+    for path in naming(rules::REHEARSAL) {
+        if !rules::MAY_NAME_REHEARSAL
+            .iter()
+            .any(|allowed| path.ends_with(allowed))
+        {
+            found.push(format!(
+                "`{path}` names `{}`, the pack's third entry point. It cannot dispatch today — no \
+                 `Egress`, no `execute` — so this is a count rather than a refusal: the list of \
+                 ways into `connector-pack` from this crate is bounded on purpose, and a new one \
+                 belongs in `MAY_NAME_REHEARSAL` with a reason.",
+                rules::REHEARSAL,
             ));
         }
     }
