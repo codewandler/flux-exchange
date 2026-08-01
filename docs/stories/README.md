@@ -32,11 +32,13 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 _None._
 
 ## Next (ready — take the top one unless the user named a story)
-_None._
+
+### Serve
+- [X-16 — A session ends when the identity behind it does](X-16-session-expiry.md) · deferred twice — X-03 left it to X-04 on the grounds that an id token has an `exp` to bind to, and X-04 deferred it again because no composition could produce an id token. X-04 now can, so the reason is gone
+- [X-17 — An operator can tell their own misconfiguration from a refused credential](X-17-exchange-failure-modes.md) · found by X-04's two reviewers, 2026-08-01: `ExchangeError::Rejected` collapses four causes, one of which is this host's own client secret being wrong — and it is logged as 'the provider refused the authorization code'
 
 ## Blocked
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
-- [X-04 — OIDC sign-in](X-04-oidc-signin.md) · signing in proves who the operator is; it mints no token for any vendor operation. Connecting a provider is a different flow with a different consent screen
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
 - [X-12 — Invoke an operation](X-12-invoke.md) · the caller names an operation id and nothing else about the request is theirs — not the host, not the credential, not the tenant. That is the whole confused-deputy answer
 - [X-13 — Grants gate invocation](X-13-grants-gate-invoke.md) · Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect
@@ -48,6 +50,7 @@ _None._
 ## Done
 - [X-02 — Serve HTTP, and refuse a reachable bind with no way to authenticate](X-02-serve-http-and-refuse-open-bind.md) · flux-server's precedent: a non-loopback bind without a token is refused AT STARTUP, because a daemon that auto-approves behind an open listener is RCE
 - [X-03 — Bind the Identity port, with a dev identity and a session](X-03-identity-port-and-session.md) · the tenant must come from the resolved principal and from NOTHING a caller controls — not a path segment, not a body field, not a header
+- [X-04 — OIDC sign-in](X-04-oidc-signin.md) · signing in proves who the operator is; it mints no token for any vendor operation. Connecting a provider is a different flow with a different consent screen
 - [X-05 — The catalogue surface (epic)](X-05-catalogue-epic.md) · connector-catalog has ZERO dependencies — no flux coupling, no IO, no runtime. This epic is unblocked by construction
 - [X-06 — Serve the connector catalogue](X-06-serve-the-catalogue.md) · the operation metadata a grant is written over — risk, effects, idempotency — must be in the response, or Selector cannot be evaluated by anything but the server
 - [X-07 — The console reads the live catalogue](X-07-console-reads-the-catalogue.md) · the fixture banner must come out in the SAME change that makes it untrue — a banner that outlives its condition teaches readers to ignore banners

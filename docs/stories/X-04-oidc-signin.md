@@ -1,8 +1,7 @@
 ---
 id: X-04
 title: "OIDC sign-in"
-status: blocked
-priority: 6
+status: done
 epic: serve
 design: docs/designs/oidc-signin.md
 note: "signing in proves who the operator is; it mints no token for any vendor operation. Connecting a provider is a different flow with a different consent screen"
@@ -14,7 +13,7 @@ note: "signing in proves who the operator is; it mints no token for any vendor o
 A human can sign in with an OIDC provider, and the resulting principal names a tenant.
 
 ## Acceptance
-- [ ] Authorization-code flow with PKCE, state and nonce validated.
+- [x] Authorization-code flow with PKCE, state and nonce validated.
 - [x] **Failing-first test** — a callback whose `state` does not match the one bound at `/signin` is
       refused with no session issued.
 - [x] The client secret comes from the environment and from nowhere else, and its `Debug` prints a
@@ -23,7 +22,31 @@ A human can sign in with an OIDC provider, and the resulting principal names a t
       that serves an explanatory page — not a panic, and not a broken login that fails at the callback.
 
 ## Progress
-- **Merged and reviewed PASS, but PARTIAL — this story is blocked on a dependency decision.**
+- **The dependency decision was taken by the owner on 2026-08-01: `reqwest` + `jsonwebtoken` +
+  `sha2`.** This is the record two reviewers looked for in the tree and could not find, so it is
+  written here rather than left in a session log. It lifts the dependency fence **for this story
+  only**; the manifests and `Cargo.lock` are therefore a legitimate part of X-04's diff and not a
+  fence violation. `sha2` also retires the hand-written `oidc/sha256.rs`.
+- **Correction, from review:** the manifest comment claiming this "does not acquire a C toolchain
+  dependency" was **wrong**. reqwest's `rustls` feature resolves to `__rustls-aws-lc-rs`, so
+  `aws-lc-rs` / `aws-lc-sys` (C and assembly) are in the build, and a container without a C
+  toolchain that built this repository before will now fail. OpenSSL and a second TLS stack are
+  genuinely absent, which was the other half of the claim and does hold.
+- **Closed 2026-08-01.** The token exchange is bound and sign-in completes end to end. Gate green:
+  142 tests, clippy clean under `-D warnings`, fmt clean.
+- **Two independent reviews attacked the diff before it merged.** The crypto envelope held: a token
+  MAC'd with the provider's public key as an HMAC secret is refused (forged with *both* the PEM and
+  the JWK modulus spelling, because a vulnerable verifier passes whichever bytes it holds),
+  `alg: none` is refused, an unpublished `kid` is refused with no try-until-one-verifies path, and
+  the claim-check split was verified claim by claim against `Oidc::admit` rather than taken on trust.
+- **Both reviews caught the first commit shipping a red gate**: `REQUIRED` gained two variables and
+  the `complete()` test fixture did not, failing five config tests.
+  `every_configured_value_lands_in_its_own_field` now pins the positional read that allowed it — the
+  drift it was specified to catch had already happened once.
+- Follow-on work filed rather than smuggled in: [X-16](X-16-session-expiry.md) (session expiry, whose
+  stated blocker this story removes) and [X-17](X-17-exchange-failure-modes.md) (an operator's own
+  misconfiguration is currently reported as a refused credential).
+- **Historic — merged and reviewed PASS, but PARTIAL, blocked on a dependency decision.**
   Everything on this side of the network seam is built and tested: the authorization URL, PKCE
   `S256`, `state` and `nonce` generation and validation, `iss`/`aud`/`exp`/`sub`/`nonce` admission,
   the config refusal and explanatory page. `TokenExchange` is a **port with no binding**, so

@@ -8,6 +8,38 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **OIDC sign-in completes** (X-04, closing the `PARTIAL` this story shipped as). The owner took the
+  dependency decision on 2026-08-01 — `reqwest`, `jsonwebtoken`, `sha2` — and `TokenExchange` is no
+  longer an unbound port. The authorization code is redeemed back-channel with `client_secret_basic`
+  and the id token's signature is verified against the provider's published keys, so `/api/signin`
+  redirects to a real provider instead of serving an explanation, and the composition reports
+  `Bound`. Configure the eight `FLUX_EXCHANGE_OIDC_*` variables and sign-in works end to end.
+
+  **The permitted algorithms are derived from the JWK's key type and never from the token header**,
+  which is what closes `alg: none` and RSA/HMAC algorithm confusion — the two attacks a *caller* of
+  a JOSE library can still get wrong. Both are tested, the confusion case forged with both the
+  published PEM and the JWK modulus spelling, because a vulnerable verifier passes whichever bytes
+  it happens to hold. An unpublished `kid` is refused rather than falling back to trying keys until
+  one verifies; a token with no `kid` resolves only when the provider publishes exactly one key.
+
+  **Signature verification only.** Every claim check — `iss`, `aud`, `exp`, `nonce`, `sub` — stays in
+  `Oidc::admit`, where it was already tested, so an expired token is refused as `Expired` rather than
+  collapsing into a generic rejection. Two independent reviews verified that split claim by claim
+  against `admit` rather than taking the comment on trust.
+
+  `sha2` retires the hand-written `oidc/sha256.rs`, which existed only because no digest crate was
+  allowed in. RFC 7636 Appendix A's vector is unchanged and still passes, which is what makes the
+  swap checkable rather than merely plausible.
+
+  Two endpoints are configured rather than discovered — `FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT` and
+  `_JWKS_URI`. Discovery stays rejected, now on a different argument: with an HTTP client available
+  it is a choice, and it keeps which keys can mint a session here legible from the environment
+  rather than from a document re-fetched at runtime.
+
+  **Note for deployers:** reqwest's `rustls` feature resolves to `aws-lc-rs`, so this build now
+  compiles C and assembly. A container with no C toolchain that built this repository before will
+  fail. OpenSSL and a second TLS stack are genuinely absent.
+
 - **A sign-in a victim did not start cannot become a session in their browser** (X-15). Server-side
   `state` closes a *forged* callback, not login-CSRF: an attacker who starts a sign-in here honestly,
   authenticates at the provider as themselves and stops at the redirect holds a genuine `code` and a

@@ -10,12 +10,12 @@ everything below.
 > [!WARNING]
 > **Status: v0.0.1 — a charter, a type system, and an HTTP surface that cannot yet sign anyone in.**
 >
-> `cargo run` binds `127.0.0.1:8080` and serves health, the connector catalogue, a session, and the
-> start of an OIDC sign-in. It refuses to start on a reachable address while no identity provider is
-> configured. **Sign-in cannot complete**: redeeming the code needs an HTTP client and verifying the
-> id token needs a JOSE library, and this workspace has neither — so `/api/signin` serves an
-> explanation rather than a redirect. Connections can be created, listed and deleted per tenant;
-> there is no `invoke`. See
+> `cargo run` binds `127.0.0.1:8080` and serves health, the connector catalogue, a session, and a
+> **complete** OIDC sign-in. It refuses to start on a reachable address while no identity provider
+> is configured. The authorization code is redeemed back-channel and the id token's signature is
+> verified against the provider's published keys, so `/api/signin` redirects to a real provider —
+> configure the eight `FLUX_EXCHANGE_OIDC_*` variables and it works end to end. Connections can be
+> created, listed and deleted per tenant; there is no `invoke`. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 
@@ -77,11 +77,10 @@ against one tenant's connections, not a vendor secret.
 | | |
 |---|---|
 | `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path. **Real and tested (39 tests).** |
-| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port, OIDC sign-in **up to the token exchange**, and a per-tenant connection surface. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (128 tests).** |
+| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port, **complete OIDC sign-in**, and a per-tenant connection surface. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (142 tests).** |
 | `console/` | A Vue 3 console reading the **live catalogue** from this service, reusing the framework-free explorer components from flux-connectors. An unreachable service renders an error naming the endpoint — never an empty catalogue. |
 
-**Not built, despite being described in the design:** the second half of sign-in (the token exchange
-and id-token verification, for want of an HTTP client and a JOSE library), a second connection to one
+**Not built, despite being described in the design:** a second connection to one
 connector (the address has no instance dimension until upstream publishes one), per-connection
 configuration, `invoke`,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the

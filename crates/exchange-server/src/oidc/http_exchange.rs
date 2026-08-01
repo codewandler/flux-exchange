@@ -299,9 +299,10 @@ fn permitted_algorithms(key: &Jwk) -> Option<Vec<Algorithm>> {
 
 /// Verify the signature, and *only* the signature.
 ///
-/// Every claim check is off, because [`Oidc::admit`](super::Oidc::admit) owns them — including
+/// The claim checks are off because [`Oidc::admit`](super::Oidc::admit) owns them — including
 /// `exp`, so an expired token reaches `admit` and is refused as `Expired` rather than collapsing
-/// into the generic rejection here. An operator reading a log needs "the token was too old" to be
+/// into the generic rejection here. `nbf` is the exception: nothing checks it on either side, and
+/// it is disabled explicitly rather than left to a default that could change under us. An operator reading a log needs "the token was too old" to be
 /// distinguishable from "the provider refused the code", and enabling a duplicate `exp` check here
 /// would take that distinction away for no additional safety.
 fn verification(permitted: Vec<Algorithm>) -> Validation {

@@ -37,14 +37,20 @@ connector-spec = { package = "codewandler-connector-spec", version = "0.8" }
 # acquire a C toolchain dependency for one HTTPS call. `jsonwebtoken` picks the pure-Rust backend for
 # the same reason.
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
-# `rustls-native-certs` rather than bundled roots: an operator pointing this at a corporate IdP
-# behind a private CA expects the OS trust store to be what decides, not a copy of Mozilla's list
-# compiled into the binary months ago.
+# TLS: `rustls`, so OpenSSL is genuinely absent and there is only one TLS stack in the tree.
+#
+# It does NOT make this build C-free, and an earlier version of this comment wrongly said it did.
+# reqwest's `rustls` feature resolves to `__rustls-aws-lc-rs`, so `aws-lc-rs` / `aws-lc-sys` — C and
+# assembly — are compiled. **A container with no C toolchain that built this repository before will
+# now fail.** Recorded here because that is a deployment fact, not a preference.
+#
+# Trust anchors come from `rustls_platform_verifier`, which the `rustls` feature pulls in
+# unconditionally and which defers to the OS trust store — so a corporate IdP behind a private CA
+# works. `rustls-native-certs` is listed for intent only; reqwest 0.13 references it nowhere.
 reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "form",
     "rustls",
-    "rustls-native-certs",
     "http2",
     "charset",
 ] }

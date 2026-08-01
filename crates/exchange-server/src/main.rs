@@ -148,9 +148,9 @@ fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, Sta
 
 /// Bind the identity port this composition serves with.
 ///
-/// There is exactly one on offer and it is the development one, armed only by
-/// [`DEV_IDENTITY_ENV`] being set. Unset is the default and the default binds nothing, which is
-/// the state a reachable bind is already refused in. A real provider is X-04.
+/// Two on offer. The development one is armed only by [`DEV_IDENTITY_ENV`] being set and wins when
+/// it is; failing that, OIDC federates if it is configured and its token exchange could be built.
+/// Unset and unconfigured binds nothing, which is the state a reachable bind is already refused in.
 fn compose_identity() -> Result<AppState, StartupRefusal> {
     let Some(dev) = DevIdentity::armed()? else {
         return Ok(compose_oidc());

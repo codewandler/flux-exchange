@@ -31,9 +31,32 @@ into the sign-in scope means nobody ever agreed to it separately — the consent
 in", and the authority granted was something else. Connecting a provider is its own flow, with its
 own screen, and X-08's epic is where it belongs.
 
+## Addendum, 2026-08-01 — the dependency decision was taken, and this section is superseded
+
+**The owner authorized `reqwest` + `jsonwebtoken` + `sha2`, and the binary now binds a real token
+exchange.** Everything below this addendum records why the port was left unbound and is kept as the
+reasoning of the time, not as a description of the code. What changed:
+
+- `oidc/http_exchange.rs` binds `TokenExchange`: the code is redeemed with `client_secret_basic`,
+  and the id token is verified against the provider's JWKS. `/api/signin` redirects to a real
+  provider, and the composition reports `Bound`.
+- **The "write SHA-256 and pin it" judgment below is reversed.** `oidc/sha256.rs` is deleted and
+  `pkce.rs` calls `sha2`. RFC 7636 Appendix A's vector is unchanged and still passes, which is what
+  made the swap checkable rather than merely plausible.
+- **Two endpoints are now configured, not discovered** — `FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT` and
+  `_JWKS_URI`. Discovery stays rejected, but on a new argument: with an HTTP client available it is
+  no longer a limitation but a choice, so which keys can mint a session here is legible from the
+  environment rather than from a document re-fetched at runtime.
+- The algorithm allowlist is derived from the JWK's key type and never from the token header, which
+  is what closes `alg: none` and RSA/HMAC confusion. Both are tested.
+- **Still not done: session expiry.** The reason given below — that there is no id token to bind to
+  — no longer holds, since `SignedClaims::expires_at` now exists. This is genuine follow-on work and
+  has its own story rather than being smuggled in here.
+
 ## What this story could not build, and why that is the shape it is
 
 **Decision: the token exchange is a port. This binary binds none, and says so at startup.**
+*(Superseded — see the addendum above.)*
 
 Completing an authorization-code flow needs two things this workspace does not have:
 

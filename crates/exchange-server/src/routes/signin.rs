@@ -49,8 +49,8 @@ use tracing::{error, warn};
 
 use super::{Access, Module, Route};
 use crate::oidc::config::{
-    AUTHORIZATION_ENDPOINT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, ISSUER_ENV, REDIRECT_URI_ENV,
-    TENANT_ENV,
+    AUTHORIZATION_ENDPOINT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, ISSUER_ENV, JWKS_URI_ENV,
+    REDIRECT_URI_ENV, TENANT_ENV, TOKEN_ENDPOINT_ENV,
 };
 use crate::oidc::flow;
 use crate::oidc::SignInRefusal;
@@ -292,7 +292,7 @@ fn unconfigured_page() -> Response {
 /// The page an operator meets when OIDC is configured but nothing can redeem an authorization code.
 ///
 /// A separate message from [`unconfigured_page`] because the remedy is a different one, and telling
-/// an operator who *has* configured a provider that they have not would send them to re-check six
+/// an operator who *has* configured a provider that they have not would send them to re-check eight
 /// variables that are all correct.
 fn no_token_exchange_page() -> Response {
     page(
@@ -346,6 +346,8 @@ fn document(heading: &str, detail: &str, refresh_to: Option<&str>) -> String {
 const WITHHELD_FROM_THE_PAGE: &[&str] = &[
     ISSUER_ENV,
     AUTHORIZATION_ENDPOINT_ENV,
+    TOKEN_ENDPOINT_ENV,
+    JWKS_URI_ENV,
     CLIENT_ID_ENV,
     CLIENT_SECRET_ENV,
     REDIRECT_URI_ENV,
