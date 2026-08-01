@@ -1,7 +1,7 @@
 ---
 id: X-15
 title: "A sign-in a victim did not start cannot become a session in their browser"
-status: ready
+status: in-progress
 priority: 6
 epic: serve
 note: "found by X-04's implementor, 2026-08-01: server-side `state` does NOT close login-CSRF. An attacker who legitimately starts a sign-in here, authenticates as themselves, then walks a victim into the callback with that genuinely-bound state has the victim's browser holding the attacker's session"
