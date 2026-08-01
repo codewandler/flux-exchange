@@ -1,7 +1,7 @@
 ---
 id: X-04
 title: "OIDC sign-in"
-status: ready
+status: in-progress
 priority: 6
 epic: serve
 note: "signing in proves who the operator is; it mints no token for any vendor operation. Connecting a provider is a different flow with a different consent screen"

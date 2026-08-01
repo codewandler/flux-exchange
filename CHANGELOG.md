@@ -8,6 +8,26 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Identity, bound — with a dev principal that cannot open the door** (X-03). The `Identity` port is
+  wired: a request carries a session, the host resolves it to a `Principal`, and every tenant is read
+  from *that* and from nothing a caller controls — asserted three times, once each for a path
+  segment, a body field and a header, against a route that genuinely declares `/{tenant}` so the
+  claim is delivered and then ignored rather than never parsed.
+
+  The load-bearing decision is that a development identity is a **third** bind state, not "bound". It
+  resolves principals, so counting it as bound would have made `0.0.0.0` legal — but a roster handle
+  is a credential with no secret in it, which is worse than an unauthenticated port, because
+  everything downstream believes the principal. Arming it therefore confines the process to loopback,
+  and the refusal names the opposite remedy from the unbound one.
+
+  Sessions are a `__Host-` cookie with `Secure`/`HttpOnly`/`SameSite=Strict` and 32 bytes from
+  `/dev/urandom`, refusing rather than falling back if the CSPRNG is unavailable. **A session token is
+  returned in the body only to a caller that presented a readable credential**, so the route cannot
+  turn an unreadable credential into a readable one — without that rule `HttpOnly` was a control that
+  only appeared to exist, since script could POST with the ambient cookie and read an equally
+  powerful token out of the response. The store is bounded and **refuses at the bound rather than
+  evicting**, because evicting signs out a caller who did nothing wrong. No expiry yet, stated rather
+  than implied.
 - **The connector catalogue, served and read** (X-05, X-06, X-07). `GET /api/catalogue/connectors`
   and `/api/catalogue/connectors/{id}/operations` publish 53 connectors and 299 operations with the
   metadata a `Selector` is written over — `risk`, `effects`, `idempotency` — so the grant model stops
