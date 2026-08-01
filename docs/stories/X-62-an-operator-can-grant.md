@@ -1,8 +1,7 @@
 ---
 id: X-62
 title: "An operator can grant something without editing a file by hand"
-status: in-progress
-priority: 0
+status: done
 epic: agent-access
 areas: [exchange-server, console]
 note: "X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable"
@@ -174,3 +173,40 @@ is held — so the common case never reaches the status code. If it arrives anyw
 sentence is quoted whole, with the blocking grant listed beneath it. The `422` for two grants at one
 connector is unreachable by construction (the set is composed by *replacing* by connector) and is
 quoted whole if the service ever raises it.
+
+## Closed 2026-08-01 — the screen landed once its fence lifted
+
+Gate green: 378 Rust, **92** console (76 → 92), `vue-tsc` clean.
+
+**The unbuilt item was the one that mattered**: the screen shows what a proposed grant would admit
+*before* it is saved. `savable` requires a ready preview **for the draft's own connector**, and
+changing a bound asks again — so a stale answer cannot stand under a widened one. A form that saves
+and then reports what happened would have missed the story's own argument that a grant nobody can
+evaluate before saving is a grant somebody sets too wide.
+
+**It declined the `Agents.mts` precedent and said why**, which is the better answer. That exception
+exists so a minted token never reaches `App.vue`, which outlives every screen — *unmounting is the
+token being gone*. A grant carries no secret and is meant to be read back, so borrowing the exception
+would have copied a security workaround into a place with no secret in it, and cost the property that
+makes the claims testable: `Grants.mts` takes props and emits, so all sixteen assertions run against
+fixtures with **no transport stubbed at all**.
+
+**`RISK_LEVELS` is a written-out list, which this story is otherwise against, and the argument holds**:
+`max_risk` means *at or below*, and an order cannot be recovered from a set of strings the catalogue
+happens to publish. Rather than hope, it compares the list against what the catalogue actually
+published and **states any level it cannot offer** —
+`a_risk_level_this_console_cannot_offer_is_stated_rather_than_dropped` drives both directions.
+
+**It checked X-57's finding rather than copying the pattern**: the sign-in anchor is rendered
+unconditionally and nothing reads `sign_in_available`, now asserted here too.
+
+### Carried
+- **The preview fires on every edit.** A monotonic `asked` counter discards superseded answers and the
+  screen refuses a preview for another connector — but there is no debounce, so a slow service means a
+  visible *asking…* between every change.
+- **The whole-set `PUT` still has no read-modify-write guard.** Two operators editing different
+  connectors concurrently: the second's stated set wins entire.
+- `readGrants` defaults `editable` to `true` when absent. The safer default would freeze the screen
+  with no explanation, which is why it is this way — a decision, not an oversight.
+- The `409` on a grant carrying `allow_ids`/`deny_ids` still blocks exactly today's population:
+  anyone who hand-wrote a grants file with a deny.

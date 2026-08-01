@@ -8,6 +8,26 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **An operator can see and change what their tenant may run** (X-62). v0.9.0 gated invocation by
+  grant and shipped no way to write one, so a deployment ran nothing until somebody hand-wrote a
+  file. `GET/PUT /api/grants` and `POST /api/grants/preview` (signed-in humans only), plus a console
+  screen.
+
+  **A grant is a selector, never a list of operation ids** — this connector, at most this risk, these
+  effects — and an id is refused by two independent mechanisms: a recursive key scan that runs
+  *before* serde, and `deny_unknown_fields` on the selector. That is the property the gate was built
+  around: X-13 decides from what an operation declares, and a surface writing ids back would undo it.
+
+  **The preview is the point.** The screen will not offer to save until it has been told what the
+  draft would admit, and changing a bound asks again — a grant nobody can evaluate before saving is a
+  grant somebody sets too wide.
+
+  Two refusals beyond what was asked for, both deliberate: a `PUT` is refused when the tenant's
+  existing grant carries id exceptions this surface cannot express, rather than dropping them
+  silently; and two grants for one connector are refused rather than resolved by an unstated
+  precedence. ⚠ The first blocks exactly today's population — anyone who already hand-wrote a grants
+  file with a deny.
+
 - **A public documentation site** (X-63). VitePress in `web/`, published to GitHub Pages by a
   workflow that builds on every pull request and deploys only from `main` — so a broken site cannot
   reach the URL. A dead internal link fails the build.

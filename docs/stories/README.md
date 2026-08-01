@@ -31,7 +31,6 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 ## Now (in progress)
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
 - [X-49 — The branches X-46 opened are pinned](X-49-pin-the-branches-x46-opened.md) · found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes
-- [X-62 — An operator can grant something without editing a file by hand](X-62-an-operator-can-grant.md) · X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-67 — Move to the 0.47 engine line and the 0.10 connector catalogue](X-67-move-to-the-047-engine-line.md) · the blocker is gone: connector-pack 0.10.0 requires flux-runtime ^0.47 and flux-connectors v0.10.0 is released. This is not a version bump — the catalogue gained a 54th provider and a new way of saying why an operation names no credential, and several tests are designed to go red on exactly that
@@ -119,6 +118,7 @@ _None._
 - [X-53 — The explorer stops badging operations this service runs as \"not live yet\"](X-53-the-explorer-says-nothing-can-be-invoked.md) · found by X-42's review, 2026-08-01: the fourth rendering of the invoke falsehood. service.mts sets works: false for every operation with the comment \"nothing in flux-exchange can be invoked yet\"
 - [X-54 — Who may create a connection and rotate a credential is decided, not inherited](X-54-who-may-touch-a-connection.md) · the ring-fenced half of X-47: the settings write is now gated to humans, but POST /api/connections and PUT .../credentials/{credential} are still Access::Principal, so an agent can create a connection and replace a credential
 - [X-57 — \"Sign-in is available\" stops meaning \"OIDC is configured\"](X-57-signin-availability-means-what-it-says.md) · the shared prerequisite for every local-identity story: SignIn::available() returns true only for SignIn::Oidc, so a host with a working development identity tells the console it cannot sign anyone in
+- [X-62 — An operator can grant something without editing a file by hand](X-62-an-operator-can-grant.md) · X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable
 - [X-63 — A site exists, builds, and publishes](X-63-a-site-that-publishes.md) · the scaffold and the pipeline, matched to flux-connectors/web: VitePress in web/, pages.yml with SHA-pinned actions, building on PRs as a gate and deploying only from main
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
