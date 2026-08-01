@@ -25,6 +25,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **A delete that fails half way says what it destroyed** (X-18). `DELETE` looped over a
+  connection's credentials and returned a generic `503` on the first error, leaving some destroyed
+  and some live while telling the operator only "retrying may work" — so a *live* vendor credential
+  could survive a delete, which is the worst possible outcome for the case a delete exists for:
+  revoking a leaked secret. The refusal now names what was destroyed and what is still held.
+
+  **Rollback is not available in this direction** — a destroyed credential cannot be put back,
+  because this host never held the plaintext — so the answer is honest reporting rather than a copy
+  of create's rollback. The loop is best-effort rather than stopping at the first failure, since a
+  delete is a revocation and destroying two of three beats destroying one. The store failure's kind
+  survives into the refusal instead of being flattened, because answering a "denied" with "retrying
+  may work" would be a fresh instance of the same misinformation.
+
 - **A failing key set can no longer be hammered once per sign-in** (X-17). The refetch floor gated
   only unknown-`kid` refetches and was written after a *successful* parse, so while the JWKS endpoint
   was down every callback provoked a fresh outbound fetch. The floor now gates going out at all, and

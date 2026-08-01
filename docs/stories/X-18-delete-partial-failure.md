@@ -1,8 +1,7 @@
 ---
 id: X-18
 title: "A delete that fails half way says what it destroyed"
-status: ready
-priority: 2
+status: done
 epic: connections
 areas: [exchange-server]
 note: "found by a standing audit of the credential surface, 2026-08-01: DELETE has no rollback and no partial-failure report, so a failed delete can leave a live vendor credential on disk while the operator is told only 'retrying may work'"
@@ -62,16 +61,16 @@ A retry does converge — the second `DELETE` returned `204` and emptied the sto
 honesty and revocation-guarantee defect, not a lost-data one.
 
 ## Acceptance
-- [ ] **Failing-first test** — a `DELETE` whose *n*-th credential deletion fails answers with a
+- [x] **Failing-first test** — a `DELETE` whose *n*-th credential deletion fails answers with a
       refusal naming what was destroyed and what is still held. `TestStore` needs only a delete
       counter to drive it; no committed test currently drives `remove` through a mid-loop failure.
-- [ ] The refusal uses the **same shape `partly_written` already established** for create, rather
+- [x] The refusal uses the **same shape `partly_written` already established** for create, rather
       than a second vocabulary for the same idea.
-- [ ] A `DELETE` that succeeds entirely is unchanged — `204`, nothing held — asserted in the same
+- [x] A `DELETE` that succeeds entirely is unchanged — `204`, nothing held — asserted in the same
       run so the reporting cannot pass by breaking delete.
-- [ ] The module's stated rule ("a half-written connection is one an operator cannot tell from a
+- [x] The module's stated rule ("a half-written connection is one an operator cannot tell from a
       working one") is stated for the delete direction too, in the code, not only here.
-- [ ] Nothing in the refusal carries a credential **value**, and nothing names another tenant's
+- [x] Nothing in the refusal carries a credential **value**, and nothing names another tenant's
       address — the existing disclosure guarantees hold unchanged.
 
 ## Notes
@@ -84,3 +83,27 @@ honesty and revocation-guarantee defect, not a lost-data one.
 - Audit note: the same pass ruled out address derivation, tenant confinement and refusal disclosure
   with live evidence — 18 hostile connector ids × 3 methods and 11 hostile credential names, all
   refused with the store untouched. This was the one real defect found.
+
+## Progress
+- **Done 2026-08-01.** Gate green: 39 + 158 tests, clippy clean, fmt clean. Genuine merge-base
+  failure: the production code at the base was byte-identical, the four diff hunks were all inside
+  `mod tests`, and the named test failed there with the story's reproduction verbatim.
+- **The loop is now best-effort rather than stopping at the first failure.** The story asked for
+  honest reporting and did not ask for this; the implementor argued it and is right — a `DELETE` is
+  a revocation, so destroying two of three beats destroying one, and it is what makes the two lists
+  complete rather than "one destroyed, two unknown". `rollback` is already best-effort for the same
+  reason, so this is the module's existing posture.
+- **The store failure's kind survives into the partial-delete refusal** instead of being flattened
+  to 503, because answering a `Denied` with "retrying may work" would be a fresh instance of the
+  exact misinformation this story is about. `store_failed`'s match was factored into
+  `store_failure`; the three caller-facing sentences are unchanged and their guard tests untouched.
+- `destroyed` and `left_behind` are computed **asymmetrically** and deliberately: `destroyed` is
+  narrowed to addresses the pre-delete probe saw a value at, since calling an empty address
+  "destroyed" would overstate what happened to someone counting revoked secrets; `left_behind` lists
+  every failed delete regardless, because a failed delete is exactly the case where this host cannot
+  say the address is empty.
+- **Follow-on filed rather than folded in:** [X-20](X-20-create-failure-kinds.md), the same defect
+  on the create side, which `store_failure` is now factored to make cheap; and
+  [X-21](X-21-half-connection-visibility.md), whether `GET` can distinguish a damaged connection
+  from a deliberately partial one — which needs a record beside the store that this module
+  deliberately does not keep, so it is a design question and sits in `backlog`.

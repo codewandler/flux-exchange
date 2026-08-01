@@ -34,10 +34,11 @@ _None._
 ## Next (ready — take the top one unless the user named a story)
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-18 — A delete that fails half way says what it destroyed](X-18-delete-partial-failure.md) · found by a standing audit of the credential surface, 2026-08-01: DELETE has no rollback and no partial-failure report, so a failed delete can leave a live vendor credential on disk while the operator is told only 'retrying may work'
+- [X-20 — A create refused because the store denied us does not say 'retrying may work'](X-20-create-failure-kinds.md) · found by X-18's implementor, 2026-08-01: partly_written flattens every store-failure kind to 503, so a create refused because the store Denied this host's access tells the caller to retry — the same defect class X-18 fixed on the delete side
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
+- [X-19 — The cleartext check parses an authority the way the client that sends the secret does](X-19-authority-parser-divergence.md) · found by X-17's reviewer, 2026-08-01: `http://evil.example\\@127.0.0.1/token` passes `carries_a_secret_safely` as loopback, while the `url` crate reqwest actually uses resolves the host to `evil.example` — so the check clears a configuration that sends the client secret in cleartext to a remote host
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
@@ -46,7 +47,9 @@ _None._
 - [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
 
 ## Backlog
-_None._
+
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-21 — A half connection is distinguishable from a deliberately partial one](X-21-half-connection-visibility.md) · raised by X-18's implementor, 2026-08-01: GET answers 200 for a connection whose delete failed half way, which reads as 'connected' — but a connector may legitimately hold a subset of what it declares, so the two render identically and telling them apart needs a record this module deliberately does not keep
 
 ## Done
 - [X-02 — Serve HTTP, and refuse a reachable bind with no way to authenticate](X-02-serve-http-and-refuse-open-bind.md) · flux-server's precedent: a non-loopback bind without a token is refused AT STARTUP, because a daemon that auto-approves behind an open listener is RCE
@@ -61,6 +64,7 @@ _None._
 - [X-15 — A sign-in a victim did not start cannot become a session in their browser](X-15-login-csrf.md) · found by X-04's implementor, 2026-08-01: server-side `state` does NOT close login-CSRF. An attacker who legitimately starts a sign-in here, authenticates as themselves, then walks a victim into the callback with that genuinely-bound state has the victim's browser holding the attacker's session
 - [X-16 — A session ends when the identity behind it does](X-16-session-expiry.md) · deferred twice — X-03 left it to X-04 on the grounds that an id token has an `exp` to bind to, and X-04 deferred it again because no composition could produce an id token. X-04 now can, so the reason is gone
 - [X-17 — An operator can tell their own misconfiguration from a refused credential](X-17-exchange-failure-modes.md) · found by X-04's two reviewers, 2026-08-01: `ExchangeError::Rejected` collapses four causes, one of which is this host's own client secret being wrong — and it is logged as 'the provider refused the authorization code'
+- [X-18 — A delete that fails half way says what it destroyed](X-18-delete-partial-failure.md) · found by a standing audit of the credential surface, 2026-08-01: DELETE has no rollback and no partial-failure report, so a failed delete can leave a live vendor credential on disk while the operator is told only 'retrying may work'
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
