@@ -30,7 +30,6 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 
 ## Now (in progress)
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
-- [X-48 — The invoke composition's safety claims are as strong as its code](X-48-invoke-safety-claims.md) · found by X-12's independent review, 2026-08-01: the sandbox silently takes a permissive default in the one function that writes two other settings longhand to avoid exactly that; a comment claims processes cannot be spawned when they can; and deleting the runtime gate from invoke breaks no test
 - [X-49 — The branches X-46 opened are pinned](X-49-pin-the-branches-x46-opened.md) · found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes
 
 ## Next (ready — take the top one unless the user named a story)
@@ -52,6 +51,8 @@ _`docs/vision.md` says the thing this epic exists to act on:_
 
 ### `invoke` — the caller names an operation, and nothing else is theirs
 - [X-13 — Grants gate invocation](X-13-grants-gate-invoke.md) · Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect
+- [X-55 — Lock 2 sees the crate that composes, or says why it does not](X-55-lock-2-sees-the-crate-that-composes.md) · found by X-48 round 2: lock 2 scans crates/exchange-host/src only. exchange-server gets one rule and is otherwise unscanned — including execution.rs, which holds this composition's transport and sandbox posture
+- [X-56 — The invoke design says what the locks now do](X-56-the-invoke-design-catches-up.md) · found by X-48 round 2: docs/designs/invoke.md §3 still describes lock 2 as X-12 shipped it. The design and the test have drifted, and the test is the accurate one
 
 ## Blocked
 _None._
@@ -104,6 +105,7 @@ _None._
 - [X-45 — An operator can mint an agent and see its token once](X-45-mint-an-agent-from-the-console.md) · X-36 shipped POST /api/agents and nothing in the UI reaches it. The agent-onboarding page will tell an agent author to mint a token; this is where they do it
 - [X-46 — A connector's declared credentials are published, not discovered by provoking a refusal](X-46-catalogue-publishes-declarations.md) · found by X-44's implementor in the workaround it had to write, 2026-08-01: nothing publishes what a connector declares, so the console reads it out of the 422 that a deliberately-empty POST returns
 - [X-47 — A connector with a templated host can actually be invoked](X-47-per-connection-settings.md) · found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name
+- [X-48 — The invoke composition's safety claims are as strong as its code](X-48-invoke-safety-claims.md) · found by X-12's independent review, 2026-08-01: the sandbox silently takes a permissive default in the one function that writes two other settings longhand to avoid exactly that; a comment claims processes cannot be spawned when they can; and deleting the runtime gate from invoke breaks no test
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

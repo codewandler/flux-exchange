@@ -1,8 +1,7 @@
 ---
 id: X-48
 title: "The invoke composition's safety claims are as strong as its code"
-status: in-progress
-priority: 1
+status: done
 epic: invoke
 areas: [exchange-host, exchange-server]
 note: "found by X-12's independent review, 2026-08-01: the sandbox silently takes a permissive default in the one function that writes two other settings longhand to avoid exactly that; a comment claims processes cannot be spawned when they can; and deleting the runtime gate from invoke breaks no test"
@@ -220,3 +219,49 @@ whole of what ships. It is also narrower than "a spawn": the `Exempt` paths skip
 `invoker` to `System::new(workspace)` leaves `the_sandbox_posture_is_chosen_and_not_inherited`
 **green** and fails clippy with `function `guarded_system` is never used`. The doc now names
 `dead_code` as the mechanism instead of implying the test is.
+
+## Closed 2026-08-01 after rework round 2 — the gate is a type, not a string
+
+Gate green at **347 tests** (54 + 17 + 3 + 10 + 6 + 4 host, 253 server) plus 72 console.
+
+**Falsified at integration.** The mutation that defeated round 1 — a string literal that merely
+*mentions* the gate — now fails to **compile**:
+
+```
+$ # let _note = "the gate used to be admit_runtime(deployment, surface)";
+error[E0425]: cannot find value `admitted` in this scope
+error: could not compile `codewandler-flux-exchange-host` (lib)
+```
+
+`admit_runtime` returns `Admitted` — private field, no public constructor, no `Default`, no `Clone` —
+and `Admitted::resolve` is the only route from `invoke` to `connector_pack::resolve`. It is a **method
+on the witness** rather than an ignored `_admitted:` parameter precisely because an ignored parameter
+is what the next person deletes as dead weight.
+
+**Why lock 1 was overstated is the transferable finding**: its parser had **no self-test**, while
+lock 2's rules have had one since X-12. That asymmetry is why the claim drifted, and it is closed in
+both directions now — a fixture whose entries must all be found, and one whose entries must all be
+ignored.
+
+**Lock 2 stopped chasing accessor spellings.** The demonstrated hole was
+`ctx.workspace_context().active()`, reachable because `.system(` was never the only accessor and the
+cited `WorkspaceContext::system` does not exist at all. A file that cannot **name** `ToolContext` has
+nothing to call an accessor on, whatever upstream renames next — and both permitted files already
+named it, so the rule cost nothing to adopt.
+
+**Accepted: a breaking change to a published crate.** `admit_runtime` returns
+`Result<Admitted, RuntimeRefusal>` rather than `Result<(), RuntimeRefusal>`. The implementor stopped
+and asked, which was right. Accepted because it is the only mechanism that actually holds the gate —
+the alternative was demonstrated defeated three ways — because a `0.x` minor bump is where a breaking
+change is signalled, and because the realistic breakage is `let () = admit_runtime(…)`. `?;`,
+`.is_ok()` and `.expect_err()` all still compile, and `Deployment::admits` is untouched so the
+invariant `AGENTS.md` names is unmoved.
+
+**The link no mechanism covers, written on `Admitted` itself rather than left for a third review:**
+`Admitted::of(deployment, Runtime::Http)` with a hardcoded runtime would pass everything, because
+`Http` is the honest answer for all 53 shipped connectors — the same measured gap that makes the
+refusal undrivable in the first place.
+
+**Carried out as stories:** [[X-55]] (lock 2 scans `exchange-host/src` only, and the composition-level
+backstop sits outside it) and [[X-56]] (`docs/designs/invoke.md` §3 still describes lock 2 as X-12
+shipped it). Still open from round 1: the `Sent::Maybe` re-measure through a transport error.

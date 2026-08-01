@@ -6,6 +6,41 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- ⚠ **Breaking, `codewandler-flux-exchange-host`:** `admit_runtime` returns
+  `Result<Admitted, RuntimeRefusal>` rather than `Result<(), RuntimeRefusal>` (X-48). `?;`,
+  `.is_ok()` and `.expect_err()` all still compile; a caller binding the unit — `let () =
+  admit_runtime(…)?` — does not. `Deployment::admits` is unchanged.
+
+  **The type is the point.** The deployment gate is an invariant with deliberately no override, and
+  it was held by a test that read `Invoker::invoke`'s source for the substring `admit_runtime(`.
+  Three mutations defeated it with every test green: a discarded result, an `if false` branch, and a
+  **string literal that merely mentioned the gate**. `Admitted` has a private field, no public
+  constructor, no `Default` and no `Clone`, and `Admitted::resolve` is the only route from `invoke`
+  to the resolver — so all three are now compile errors. It is a method on the witness rather than an
+  ignored parameter because an ignored parameter is what the next person deletes as dead weight.
+
+### Fixed
+
+- **The invoke path's safety claims are as strong as its code** (X-48). Four findings from an
+  independent review of X-12, all one shape: *the code said something stronger than it did.* The
+  sandbox posture is written out field by field (`SandboxMode::Require`) instead of inheriting
+  `System::new`'s disabled default — in the same function that already wrote two other settings
+  longhand to avoid exactly that. A comment claiming no process could be spawned is replaced by what
+  is true.
+
+  **Lock 2 stopped chasing accessor spellings.** A first attempt refused `.system(`; the review then
+  demonstrated `ctx.workspace_context().active()` reaching process spawn while naming nothing
+  forbidden, and pointed out that the accessor the comment cited does not exist. The rule now bounds
+  where the capability *handle* may live: only the two files that may name `Egress` may name
+  `ToolContext`. A file that cannot name the handle has nothing to call an accessor on, whatever
+  upstream renames next.
+
+  **Lock 1's allow-list was overstated for a reason worth repeating:** it had no self-test, while
+  lock 2's rules have had one since X-12. Its parser matched the literal line `[dependencies]`, so a
+  `[dependencies.reqwest]` table escaped it entirely. Both directions are now self-tested.
+
 ### Added
 
 - **An agent can fetch what this service is instead of reading a page** (X-42). `GET /api/onboarding`
