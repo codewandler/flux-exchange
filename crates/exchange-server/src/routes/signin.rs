@@ -44,7 +44,9 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
+use axum::Json;
 use serde::Deserialize;
+use serde_json::{json, Value};
 use tracing::{error, warn};
 
 use super::{Access, Module, Route};
@@ -78,6 +80,13 @@ pub(super) const MODULE: Module = Module {
             access: Access::Anonymous,
             method_router: callback_route,
         },
+        Route {
+            // Beside the route it describes rather than folded into `/api/session`, which was the
+            // obvious home and is argued against on [`availability`].
+            path: "/api/signin/availability",
+            access: Access::Anonymous,
+            method_router: availability_route,
+        },
     ],
 };
 
@@ -87,6 +96,10 @@ fn signin_route() -> MethodRouter<AppState> {
 
 fn callback_route() -> MethodRouter<AppState> {
     get(callback)
+}
+
+fn availability_route() -> MethodRouter<AppState> {
+    get(availability)
 }
 
 /// Send the browser to the provider, or explain why it cannot be sent.
@@ -123,6 +136,41 @@ async fn signin(State(state): State<AppState>) -> Response {
             refused(&refusal)
         }
     }
+}
+
+/// Whether this deployment can sign anyone in — as a field, not as a sentence.
+///
+/// # Why this is a route and not a field on `/api/session`
+///
+/// One round trip for "who am I" and "can I sign in" is the shape the console wants, and it would
+/// avoid widening the anonymous surface a second time. It was not chosen, because `/api/session`
+/// answers a caller **only after the guard resolved a principal** — and the caller this exists for
+/// is by definition the one that has none. Reaching them there means declaring `/api/session`
+/// [`Access::Anonymous`], and [`Access`] is per route rather than per method: the same declaration
+/// covers the `POST` that mints a session and the `DELETE` that closes one. Their guard would have
+/// to move from the route table into the handlers, and `super`'s module documentation is explicit
+/// that this surface is enumerable precisely because a route is not guarded by its handler
+/// remembering to ask. Trading that for one round trip is a bad trade on a credential-holding
+/// service, and `routes::identity`'s own module documentation states as a decision that it adds
+/// nothing to the anonymous set.
+///
+/// So the fact lives beside the route it is about. A console asks this one anonymously and asks
+/// `/api/session` when it has a session; the extra request is the cost of leaving the guard where
+/// it can be enumerated.
+///
+/// # What it says, and what it deliberately does not
+///
+/// One boolean and nothing else. The three states of [`SignIn`] are what an operator needs and the
+/// two explanatory pages above are where they are said; a caller learns only whether sign-in
+/// works. See [`SignIn::available`] for why collapsing them is the decision rather than a loss, and
+/// `tests::the_availability_answer_discloses_nothing_about_the_configuration` for the adversarial
+/// half — the two unavailable compositions answer byte for byte identically, so this route cannot
+/// be asked whether the OIDC settings are set.
+///
+/// The name is `sign_in_available` rather than a bare `available` so that it still says what it
+/// means if a later story embeds it in a wider answer.
+async fn availability(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "sign_in_available": state.sign_in().available() }))
 }
 
 /// What the provider sends back.
@@ -1470,5 +1518,215 @@ mod tests {
             "probing a live state must not spend it: {body}",
         );
         assert!(planted_session(&headers).is_some());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // X-43: whether this deployment can sign anyone in, as a field rather than as prose.
+    // ---------------------------------------------------------------------------------------
+
+    /// The path under test. A literal rather than `super::MODULE.routes[2].path`, because the two
+    /// existing constants read an index that already exists — indexing one that does not yet
+    /// would be a compile error rather than a failing test, and this story's first item asks for
+    /// a test that *fails*. The declaration is asserted instead where it belongs: the route's
+    /// module and path appear in `super::super::tests::ANONYMOUS`, and that test walks the
+    /// assembled app rather than this table.
+    const AVAILABILITY: &str = "/api/signin/availability";
+
+    /// The field a caller reads, named so it still says what it means if a later story embeds it
+    /// in a wider answer.
+    const FIELD: &str = "sign_in_available";
+
+    /// The three compositions this host has, each with whether a human can sign in through it.
+    ///
+    /// Written out in one place because three tests below drive all three, and a composition
+    /// covered by two of them is the gap that matters. There is no fourth: [`SignIn`] has three
+    /// variants and [`SignIn::available`] matches them exhaustively, so a fourth cannot arrive
+    /// without a compile error pointing at the decision.
+    fn every_composition() -> Vec<(&'static str, AppState, bool)> {
+        vec![
+            (
+                "a bound OIDC provider",
+                AppState::with_oidc(Arc::new(Oidc::new(
+                    config(),
+                    Arc::new(StubExchange::returning(claims("nonce"))),
+                ))),
+                true,
+            ),
+            (
+                "OIDC configured with no token exchange",
+                AppState::oidc_without_a_token_exchange(),
+                false,
+            ),
+            (
+                "nothing configured at all",
+                AppState::without_identity(),
+                false,
+            ),
+        ]
+    }
+
+    /// **X-43's failing-first test.** A caller with no session learns whether this deployment can
+    /// sign anyone in, from a **field** rather than from a sentence.
+    ///
+    /// The console renders a *Sign in* link unconditionally, so on a host with no identity
+    /// provider that link leads to a `503`. The distinction existed only inside the explanatory
+    /// page's prose, and a console that branches on the wording of a refusal breaks the day
+    /// somebody improves the wording. This is the same fact, in the one shape a client can read
+    /// without guessing: a JSON boolean.
+    ///
+    /// Driven anonymously — no cookie, no `Authorization` — because the caller this exists for is
+    /// precisely the one that has nothing to present.
+    #[tokio::test]
+    async fn whether_this_deployment_can_sign_anyone_in_is_a_field() {
+        for (composition, state, expected) in every_composition() {
+            let (status, _, body) = call(super::super::app(state), get(AVAILABILITY)).await;
+
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "asking whether sign-in is available must be answerable by a caller with no \
+                 session, and {composition} answered {status}: {body}",
+            );
+
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|error| {
+                panic!("{composition} answered something that is not JSON ({error}): {body}")
+            });
+
+            assert_eq!(
+                answer[FIELD],
+                serde_json::Value::Bool(expected),
+                "`{FIELD}` must be the boolean {expected} for {composition}, so a console reads a \
+                 field rather than parsing prose: {body}",
+            );
+        }
+    }
+
+    /// The disclosure half, asserted adversarially rather than assumed.
+    ///
+    /// **Whether sign-in works is a fact about the service; what it is configured with is not.**
+    /// Two claims, and the first is the sharper one:
+    ///
+    /// 1. **The two unavailable compositions answer byte for byte identically.** "OIDC configured
+    ///    but no token exchange" and "nothing configured at all" are different mistakes with
+    ///    different remedies — `unconfigured_page` and `no_token_exchange_page` say so, to a human
+    ///    who asked for a login. But telling them apart *here* would tell an anonymous caller
+    ///    whether this host's eight OIDC variables are set, which is the shape of the deployment
+    ///    and none of their business. That is why the field is a boolean and not a three-valued
+    ///    enum: the third state is real, and it is not the caller's to know.
+    /// 2. **Nothing configured appears in any of the three answers.** Not a variable name — the
+    ///    startup log names unset ones deliberately, and that is the operator's channel, not this
+    ///    one — not the issuer, not the client id, not the tenant, not an endpoint.
+    #[tokio::test]
+    async fn the_availability_answer_discloses_nothing_about_the_configuration() {
+        let mut unavailable = Vec::new();
+
+        for (composition, state, expected) in every_composition() {
+            let (status, _, body) = call(super::super::app(state), get(AVAILABILITY)).await;
+
+            // Everything this host is configured with, and every name it could be named by.
+            let withheld: Vec<&str> = WITHHELD_FROM_THE_PAGE
+                .iter()
+                .copied()
+                .chain([
+                    ISSUER,
+                    CLIENT_ID,
+                    TENANT,
+                    "accounts.example.com",
+                    "authorize",
+                ])
+                .collect();
+
+            for secret in withheld {
+                assert!(
+                    !body.contains(secret),
+                    "{composition} disclosed `{secret}` to an anonymous caller: {body}",
+                );
+            }
+
+            let answer: serde_json::Value =
+                serde_json::from_str(&body).expect("an availability answer is JSON");
+            let object = answer
+                .as_object()
+                .expect("an availability answer is an object");
+
+            assert_eq!(
+                object.keys().collect::<Vec<_>>(),
+                vec![FIELD],
+                "the answer carries the capability fact and nothing else — an extra field is an \
+                 extra thing an anonymous caller learns: {body}",
+            );
+
+            if !expected {
+                unavailable.push((composition, status, body));
+            }
+        }
+
+        let [(first, first_status, first_body), (second, second_status, second_body)] =
+            unavailable.as_slice()
+        else {
+            panic!("exactly two compositions cannot sign anyone in: {unavailable:?}");
+        };
+
+        assert_eq!(
+            first_status, second_status,
+            "`{first}` and `{second}` must not differ in status",
+        );
+        assert_eq!(
+            first_body, second_body,
+            "nor in the body, byte for byte — otherwise this route reports whether this host's \
+             OIDC settings are configured, to a caller that presented nothing",
+        );
+    }
+
+    /// `/api/signin` answers exactly what it answered before. This story adds a way to ask
+    /// beforehand; it does not change the answer.
+    ///
+    /// The three compositions again, both routes in one run, so "the field says available" and
+    /// "the redirect happens" are pinned as the *same* fact rather than as two that could drift.
+    /// That is the regression worth naming: a field the console trusts and a route that disagrees
+    /// with it is worse than the prose it replaced.
+    #[tokio::test]
+    async fn asking_whether_sign_in_is_available_does_not_change_what_signin_answers() {
+        for (composition, state, expected) in every_composition() {
+            let app = super::super::app(state);
+
+            // Ask first, which is the whole point of the route.
+            let (_, _, asked) = call(app.clone(), get(AVAILABILITY)).await;
+            let (status, headers, body) = call(app, get(SIGNIN)).await;
+
+            if expected {
+                assert_eq!(
+                    status,
+                    StatusCode::SEE_OTHER,
+                    "{composition} reports sign-in available, so `{SIGNIN}` must still redirect: \
+                     {body}",
+                );
+                assert!(
+                    headers.get(header::LOCATION).is_some(),
+                    "{composition}: a redirect names where it goes",
+                );
+            } else {
+                assert_eq!(
+                    status,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "{composition} reports sign-in unavailable, so `{SIGNIN}` must still explain: \
+                     {body}",
+                );
+                assert!(
+                    body.contains("<html"),
+                    "{composition}: and still be a page: {body}"
+                );
+                assert!(
+                    headers.get(header::LOCATION).is_none(),
+                    "{composition}: it must not send the browser to a provider it cannot return \
+                     from",
+                );
+            }
+
+            assert!(
+                !carries_a_token(&asked),
+                "{composition}: asking about availability issues nothing: {asked}",
+            );
+        }
     }
 }

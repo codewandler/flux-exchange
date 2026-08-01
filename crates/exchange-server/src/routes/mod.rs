@@ -342,6 +342,15 @@ mod tests {
             // and `the_callback_issues_a_session_only_as_a_cookie` is what holds it.
             ("signin", "/api/signin"),
             ("signin", "/api/signin/callback"),
+            // Whether this host can sign anyone in. X-43's widening, and the same argument in a
+            // weaker form: a caller who has no principal is exactly who the answer is for, since
+            // the alternative is a console that renders a *Sign in* link and finds out by being
+            // refused. It reads no credential, it takes no input at all, and what it discloses is
+            // one boolean about this **service** — never anything about its configuration, which
+            // is why the two compositions that cannot sign anyone in answer byte for byte
+            // identically. `crate::routes::signin::availability` carries the long form, including
+            // why this is not a field on `/api/session`.
+            ("signin", "/api/signin/availability"),
         ];
 
         let mut reachable = Vec::new();
