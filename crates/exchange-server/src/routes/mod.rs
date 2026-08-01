@@ -19,6 +19,7 @@ mod catalogue;
 mod connections;
 mod health;
 mod identity;
+mod invoke;
 mod signin;
 
 use axum::extract::{Request, State};
@@ -43,6 +44,7 @@ const MODULES: &[Module] = &[
     signin::MODULE,
     connections::MODULE,
     agents::MODULE,
+    invoke::MODULE,
 ];
 
 /// A feature module's contribution to the surface.

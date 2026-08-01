@@ -2,10 +2,11 @@
 //!
 //! # What it serves
 //!
-//! An HTTP surface bound to loopback by default: a health route, and the connector catalogue —
-//! what this binary *could* run, never what a caller may run, which is why every operation it
-//! serves carries `admitted: null`. It holds no credential, binds no identity provider and runs no
-//! operation yet; the README carries the itemized inventory of what is not built.
+//! An HTTP surface bound to loopback by default: a health route, the connector catalogue — what
+//! this binary *could* run, never what a caller may run, which is why every operation it serves
+//! carries `admitted: null` — and, since X-12, `POST /api/operations/{operation}/invoke`, which
+//! runs one of them for the caller's tenant. The README carries the itemized inventory of what is
+//! still not built; grants are the large one, so `invoke` is gated by identity alone.
 //!
 //! What it does carry is the rule that makes the rest safe to add: **a reachable bind with no way to
 //! resolve a principal is refused at startup**, not warned about and served anyway. See
@@ -16,6 +17,7 @@ mod bind;
 mod connection_guard;
 mod dev_identity;
 mod entropy;
+mod execution;
 mod oidc;
 mod routes;
 mod session;
@@ -33,6 +35,7 @@ use tracing_subscriber::EnvFilter;
 use crate::agent::{AgentStore, AGENT_STORE_SETTING};
 use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
+use crate::execution::invoker;
 use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
 use crate::oidc::Oidc;
@@ -101,7 +104,17 @@ fn compose() -> Result<AppState, StartupRefusal> {
     let mut state = compose_identity()?;
 
     if let Some(store) = credential_store()? {
-        state = state.with_credentials(store);
+        // The invoker is built from the same store the connections surface writes to, and only
+        // when there is one. A composition with no store could still resolve a principal and look
+        // an operation up, and would then send every request unauthenticated — a fail-closed `401`
+        // from the vendor, but one an agent treating `401` as retryable loops on forever. Binding
+        // nothing means `POST /api/operations/{operation}/invoke` refuses with `503` and names the
+        // setting, which is the honest answer rather than a hole.
+        state = state
+            .with_invoker(Arc::new(
+                invoker(store.clone()).map_err(|reason| StartupRefusal::Invoker { reason })?,
+            ))
+            .with_credentials(store);
     }
     if let Some(store) = agent_store()? {
         state = state.with_agents(store);

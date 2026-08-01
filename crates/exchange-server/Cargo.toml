@@ -21,6 +21,15 @@ exchange-host.workspace = true
 
 axum.workspace = true
 connector-catalog.workspace = true
+# **The transport, and the only crate that holds one** (X-12, lock 1). `flux_web::http::
+# HttpRequestTool` is this composition's egress; it is handed to `exchange-host` as an
+# `exchange_host::Egress` and the host never learns what is behind it. `flux-system` builds the
+# `System` a `flux_runtime::ToolContext` is made over — see `crate::invoke`.
+#
+# This crate deliberately never names `connector_pack`: the crate that can build a request cannot
+# name the pack, and the crate that names the pack cannot build a request. A test asserts it.
+flux-system.workspace = true
+flux-web.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 serde.workspace = true
