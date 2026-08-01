@@ -31,7 +31,6 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 ## Now (in progress)
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
 - [X-49 — The branches X-46 opened are pinned](X-49-pin-the-branches-x46-opened.md) · found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes
-- [X-57 — \"Sign-in is available\" stops meaning \"OIDC is configured\"](X-57-signin-availability-means-what-it-says.md) · the shared prerequisite for every local-identity story: SignIn::available() returns true only for SignIn::Oidc, so a host with a working development identity tells the console it cannot sign anyone in
 - [X-62 — An operator can grant something without editing a file by hand](X-62-an-operator-can-grant.md) · X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable
 
 ## Next (ready — take the top one unless the user named a story)
@@ -54,6 +53,7 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 _**You cannot use this console without standing up an OIDC provider.** That is the whole problem, and_
 - [X-58 — An operator can define users in a config file and sign in on their own network](X-58-static-users-from-a-config-file.md) · the axis that actually unblocks the console: a local identity with a real secret, so it may bind a reachable address — unlike DevIdentity, whose roster handle is a name anybody can guess
 - [X-59 — A deployment can hold one tenant and stop asking which](X-59-single-tenant-deployment.md) · the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it
+- [X-68 — The sign-in callback is the oracle it says it is](X-68-the-callback-is-the-oracle-it-claims.md) · found by X-57's review, 2026-08-01: the callback's comment says it 'stays the oracle for nothing', but ?error=access_denied answers 401 on a federated host and 400 on a development one — and the withheld-variable guard does not list the dev roster's own variable
 
 ### a public documentation site
 _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
@@ -117,6 +117,7 @@ _None._
 - [X-52 — The descriptor's guard checks what its name claims](X-52-the-descriptors-guard-checks-what-it-claims.md) · found by X-42's review, 2026-08-01: two published fields are pinned by nothing — the method, and which route a live capability points at. Demonstrated: republishing be-minted at /api/session keeps all 251 Rust tests green
 - [X-53 — The explorer stops badging operations this service runs as \"not live yet\"](X-53-the-explorer-says-nothing-can-be-invoked.md) · found by X-42's review, 2026-08-01: the fourth rendering of the invoke falsehood. service.mts sets works: false for every operation with the comment \"nothing in flux-exchange can be invoked yet\"
 - [X-54 — Who may create a connection and rotate a credential is decided, not inherited](X-54-who-may-touch-a-connection.md) · the ring-fenced half of X-47: the settings write is now gated to humans, but POST /api/connections and PUT .../credentials/{credential} are still Access::Principal, so an agent can create a connection and replace a credential
+- [X-57 — \"Sign-in is available\" stops meaning \"OIDC is configured\"](X-57-signin-availability-means-what-it-says.md) · the shared prerequisite for every local-identity story: SignIn::available() returns true only for SignIn::Oidc, so a host with a working development identity tells the console it cannot sign anyone in
 - [X-63 — A site exists, builds, and publishes](X-63-a-site-that-publishes.md) · the scaffold and the pipeline, matched to flux-connectors/web: VitePress in web/, pages.yml with SHA-pinned actions, building on PRs as a gate and deploying only from main
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._

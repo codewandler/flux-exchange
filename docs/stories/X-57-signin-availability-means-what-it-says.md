@@ -1,8 +1,7 @@
 ---
 id: X-57
 title: "\"Sign-in is available\" stops meaning \"OIDC is configured\""
-status: in-progress
-priority: 0
+status: done
 epic: local-identity
 design: docs/designs/local-identity.md
 areas: [exchange-server, console]
@@ -142,3 +141,43 @@ federated host, so the route stays an oracle for nothing.
 reports `false` for it, so the console hides its sign-in affordance"). It was left alone deliberately —
 it reads like a ledger the integrator owns, and it is now wrong in two ways rather than one, since the
 console does not hide anything.
+
+## Closed 2026-08-01 — reviewed PASS, with the loopback bound driven rather than argued
+
+Gate green: 372 Rust, 76 console.
+
+**The review tested the bound instead of accepting it.** It ran the real binary with the dev roster
+**and a complete OIDC environment set simultaneously** — the composition-ordering attack — and showed
+every reachable bind refused:
+
+```
+BIND=0.0.0.0:8099       ERROR refusing to serve … the development identity is armed
+BIND=[::]:8099          ERROR refusing to serve …
+BIND=192.168.1.10:8099  ERROR refusing to serve …
+```
+
+`compose_identity` returns on the roster before `OidcConfig::from_env()` is read, so *both set*
+cannot produce `Development` + `Bound`. There is **no mutator** for `sign_in` or `identity` — five
+constructors are the only writers — so `SignIn::Development` implies `IdentityBinding::Development`
+implies a refused bind, at three independent levels.
+
+**The page leaks nothing.** Rendered against a three-entry roster across three tenants and grepped for
+every id, every tenant and the env var: `LEAKS=[]`. It is a `&'static str` and structurally cannot
+carry roster data.
+
+**Byte-identity holds under configurations the implementor did not use** — a federated host with a
+different issuer, client and tenant against the three-tenant local one, compared on status, full
+`HeaderMap` and body bytes across every anonymous route.
+
+**The changed X-43 assertion was not weakened**: `redirects` is computed from the enum rather than the
+fixture name, so every pre-existing composition gets the identical `303` + `Location` it got before —
+the split only *adds* an arm for a row that did not exist.
+
+### Carried out as [[X-68]]
+- The callback comment claims the route "stays the oracle for nothing". `?error=access_denied` answers
+  `401` on a federated host and `400` on a development one, so it does distinguish them. Not a
+  regression, loopback-only, and dominated by the page's deliberate disclosure — but the sentence is
+  false and no test covers that arm.
+- `WITHHELD_FROM_THE_PAGE` lists the eight OIDC variables and **not** `DEV_IDENTITY_ENV`. The page does
+  not name it today, verified — but the one variable most worth withholding from *this* page is the
+  one the guard would not catch.

@@ -42,16 +42,24 @@ tenant, per-connection settings gated to signed-in humans (X-47), and — since 
 do.** `cargo run` binds loopback and refuses to start on a reachable address with no identity
 provider configured. What exists beyond that is still the vocabulary and the rules as tested types.
 
-⚠ **You cannot sign in to the console without an OIDC provider.** The development identity
-(`FLUX_EXCHANGE_DEV_IDENTITY`) mints principals and is loopback-only, but `SignIn::available()`
-reports `false` for it, so the console hides its sign-in affordance. That is the `local-identity`
-epic (X-57, X-58, X-59) and X-57 is priority 0.
+**Signing in without an identity provider works on loopback** (X-57, v0.9.0+). Arm
+`FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme` and `GET /api/signin` tells you how — present the roster
+handle as a bearer token, `POST /api/session` exchanges it for a cookie. `sign_in_available` now means
+*this deployment can turn a caller into a principal*, not *OIDC is configured*.
 
-⚠ **Invocation is gated by identity *and by grant*** (X-13, v0.9.0). An operation runs only if a
+⚠ *This paragraph used to say the console hid its sign-in affordance. That was never true — it renders
+the anchor unconditionally and nothing reads `sign_in_available`. The link led nowhere useful; that is
+what X-57 fixed.* A **reachable** deployment still needs a real provider: the roster has no secret, so
+`admit_bind` refuses every non-loopback address while it is armed. Local users with an actual verifier
+are X-58.
+
+⚠ **Invocation is gated by identity *and by grant*** (X-13, v0.9.0), and since X-62
+`GET/PUT /api/grants` edits them (`User` only) with `POST /api/grants/preview` showing what a selector
+would admit before it is saved. **A console screen for it is still unbuilt.** An operation runs only if a
 grant the caller's tenant holds admits it, decided from what the operation declares — its risk, its
 effects, its idempotency — never from a list of names. **This is fail-closed and it will look like an
 outage**: a deployment runs nothing until `FLUX_EXCHANGE_GRANTS` names a file and grants are written
-into it, and **no surface writes one yet** (X-62, priority 0). Expect `503` with no store bound,
+into it. Expect `503` with no store bound,
 `403 not_granted` with one bound and the tenant empty. The [README](README.md) carries the
 itemized inventory of what is *not* built, and keeping it accurate is part of the job — a page that
 implies a working service costs more than an honest gap.

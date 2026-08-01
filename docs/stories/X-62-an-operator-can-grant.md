@@ -100,3 +100,40 @@ wave. Nothing was worked around: the *derivation* the Acceptance asks for is ser
 screen has an authoritative answer to render and no rule of its own to reimplement. The next agent
 adds `loadGrants`/`replaceGrants`/`previewGrant` to `service.mts`, a `grants` surface to
 `surfaces.mts`, and the screen.
+
+## Progress 2026-08-01 — the service surface is in; the screen is not
+
+Merged as `f29f3c2`. Gate green: 378 Rust, 76 console. **Story stays `in-progress`** — one Acceptance
+item is genuinely unbuilt.
+
+**Built:** `GET/PUT /api/grants` and `POST /api/grants/preview`, all
+`Access::PrincipalOfKind(MAY_GRANT)`, asserted against `connections::MAY_SUPPLY_A_CREDENTIAL` itself
+rather than against a copy of it. A grant naming an operation id is refused by a **recursive key scan
+that runs before serde**, plus `deny_unknown_fields` on the selector — two mechanisms, because the
+whole property is that ids cannot get in. The equivalence test calls `exchange_host::admit_grant` over
+every operation of a connector and is bracketed both ways, so it cannot pass on an empty set or on a
+grant that admits everything.
+
+**Not built: the console screen.** It needs a loader in `console/src/service.mts` — the only module in
+this console that knows a network exists, enforced by `descriptor.test.mjs` — which was fenced to
+X-57 in the same wave. The implementor **refused to work around it** by giving a new module its own
+`fetch`, which was the right call: the invariant is worth more than the story. `service.mts` is free
+now.
+
+**Two refusals the story did not ask for, both kept:**
+- A `PUT` is refused `409` when the tenant already holds a grant carrying `allow_ids`/`deny_ids` —
+  this surface cannot express one, and writing would drop it silently. The read shows it and marks
+  `expressible: false`. ⚠ This blocks the primary flow for *exactly today's population*: anyone who
+  already hand-wrote a grants file with a deny. Right refusal, first surprise.
+- Two grants for one connector in a set are refused `422` rather than resolved by an unstated
+  precedence.
+
+**The read is gated to `User` too**, narrower than the Acceptance required. `admit_grant` withholds
+the axis that refused, so an agent cannot enumerate a tenant's policy call by call — but an open read
+hands the whole policy over in one request. Cost stated rather than discovered: an agent cannot
+discover in advance what it may run.
+
+**Carried:** the whole-set `PUT` has no read-modify-write guard, so two concurrent writers race and
+the second's stated set wins entire. That is `Grants::set`'s documented whole-set semantics and the end
+state is always one caller's intent — but there is no `ConnectionGuard` equivalent. First thing to
+look at if a grant "reverts".
