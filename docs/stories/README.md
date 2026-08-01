@@ -38,7 +38,6 @@ _None._
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
-- [X-17 — An operator can tell their own misconfiguration from a refused credential](X-17-exchange-failure-modes.md) · found by X-04's two reviewers, 2026-08-01: `ExchangeError::Rejected` collapses four causes, one of which is this host's own client secret being wrong — and it is logged as 'the provider refused the authorization code'
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
@@ -61,6 +60,7 @@ _None._
 - [X-10 — Connections addressed by a tenant the caller cannot name](X-10-connections-are-tenant-addressed.md) · Tenant::new already refuses a traversing spelling at construction; this story is where that validated value becomes the ONLY way an address is built
 - [X-15 — A sign-in a victim did not start cannot become a session in their browser](X-15-login-csrf.md) · found by X-04's implementor, 2026-08-01: server-side `state` does NOT close login-CSRF. An attacker who legitimately starts a sign-in here, authenticates as themselves, then walks a victim into the callback with that genuinely-bound state has the victim's browser holding the attacker's session
 - [X-16 — A session ends when the identity behind it does](X-16-session-expiry.md) · deferred twice — X-03 left it to X-04 on the grounds that an id token has an `exp` to bind to, and X-04 deferred it again because no composition could produce an id token. X-04 now can, so the reason is gone
+- [X-17 — An operator can tell their own misconfiguration from a refused credential](X-17-exchange-failure-modes.md) · found by X-04's two reviewers, 2026-08-01: `ExchangeError::Rejected` collapses four causes, one of which is this host's own client secret being wrong — and it is logged as 'the provider refused the authorization code'
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

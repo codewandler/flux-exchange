@@ -8,6 +8,30 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **An operator can tell their own misconfiguration from a refused credential** (X-17).
+  `ExchangeError::Rejected` collapsed four causes, one of which was *this host's own client secret
+  being wrong* — logged as "the provider refused the authorization code", which sends an operator to
+  check a caller's credential instead of their own configuration. Four variants now, and **one**
+  caller-facing answer: the split is in the log only, and the guard that the caller learns nothing
+  about the provider stays green. Same shape X-15 established on the front channel.
+
+- **A cleartext back channel is refused at startup, naming the variable** (X-17). An
+  `http://` token endpoint sent this host's client secret as HTTP Basic credentials in the clear,
+  with no refusal at all. **Loopback is exempt** — a local test IdP is a real workflow, and
+  forbidding it pushes operators toward disabling verification or testing against production, while
+  loopback packets never reach an interface. **Private ranges are not exempt**: "it's only the
+  internal network" is exactly the assumption that makes a cleartext secret worth taking. An absent
+  or unrecognised scheme is refused rather than guessed.
+
+### Fixed
+
+- **A failing key set can no longer be hammered once per sign-in** (X-17). The refetch floor gated
+  only unknown-`kid` refetches and was written after a *successful* parse, so while the JWKS endpoint
+  was down every callback provoked a fresh outbound fetch. The floor now gates going out at all, and
+  the rate-limited branch answers "provider unreachable" rather than "unpublished key" when no
+  current key set is held — without which the fix would have made an outage read as a refused
+  credential.
+
 - **A session ends when the identity behind it does** (X-16). Deferred twice — X-03 left it to X-04
   on the grounds that an id token carries an `exp` worth binding to, and X-04 deferred it again
   because no composition could produce an id token. X-04 removed that reason, and the position was
