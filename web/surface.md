@@ -6,12 +6,12 @@ because most of the confusion in this problem space is two names for one concept
 > [!IMPORTANT]
 > **Every entry below is a definition, and none of them is a claim that the capability is available.**
 > This page says what a channel *is*; it does not say whether the build you are talking to serves
-> one. That answer is `GET /api/onboarding` — anonymous, machine-readable, and held to the service's
-> route table by a test in both directions.
+> one.
 >
-> Per-entry status here, derived from that same descriptor rather than written by an author, is a
-> tracked change (story X-64), and the pages that describe each entry in depth come after it (X-65).
-> Until then this page is deliberately silent about availability rather than usefully wrong about it.
+> Where a capability has a page of its own, that page carries the answer as a badge in its chrome,
+> derived from this build's `GET /api/onboarding` descriptor — anonymous, machine-readable, and held
+> to the service's route table by a test in both directions. Nobody writes those badges by hand and
+> nobody can forget to update one.
 
 ## The three lifetimes
 
@@ -52,11 +52,13 @@ A credential is addressed, never handed out. Nothing that reads a connection ret
 Run one catalogue operation for the caller's tenant. The caller names the operation; the request is
 built from that operation's own compiled Flux, and the credential is resolved by address from the
 caller's tenant. It is the outbound verb of a connector binding.
+[Its own page](/capabilities/invoke) carries the derived status.
 
 ### `subscribe` and channels
 
 The inbound verb of the same binding. A vendor's signed payload is verified at the boundary and the
 subscriber receives a typed, declared event, scoped to bindings that tenant already has.
+[Its own page](/capabilities/subscribe) carries the derived status.
 
 **A webhook is a Channel** — not a trigger, and not a session artifact. It belongs to the deployment
 and it outlives every conversation that reads from it, which is exactly the distinction the three
