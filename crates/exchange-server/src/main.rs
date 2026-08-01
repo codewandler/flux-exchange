@@ -13,6 +13,8 @@
 
 use exchange_host::{Deployment, Runtime};
 
+mod catalogue;
+
 fn main() {
     println!("flux-exchange {}", env!("CARGO_PKG_VERSION"));
     println!();
