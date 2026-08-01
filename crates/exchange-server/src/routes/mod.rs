@@ -698,24 +698,49 @@ mod tests {
     /// route that *starts* being kind-gated fails it too, so nobody narrows the surface without
     /// writing down why, which is how a `403` for a caller that should have worked gets shipped.
     ///
-    /// **The list is two entries, and the rest of the surface is deliberately not on it.** In
-    /// particular `DELETE /api/connections/{connector}` is not: it destroys tenant data inside the
-    /// tenant the caller already belongs to, an operator can see it (`GET /api/connections`) and
-    /// undo it by reconnecting, and **nothing about it outlives revocation of the token that did
-    /// it**. Whether an agent may reach a destructive route is a real question, but it is the
-    /// **grant-shaped** one — *what may this principal do* — which is X-13.
+    /// **The list is four entries, and the rest of the surface is deliberately not on it.** In
+    /// particular `DELETE /api/connections/{connector}` is not — and since X-54 that is visible
+    /// here rather than merely stated, because the *same path* appears above for its `POST`. The
+    /// `DELETE` destroys tenant data inside the tenant the caller already belongs to, an operator
+    /// can see it (`GET /api/connections`) and undo it by reconnecting, and **nothing about it
+    /// outlives revocation of the token that did it**. Whether an agent may reach a destructive
+    /// route is a real question, but it is the **grant-shaped** one — *what may this principal do*
+    /// — which is X-13. Neither are the reads, which answer addresses and booleans and no values.
     ///
-    /// That last clause is the test the two entries here pass and `DELETE` does not. Minting leaves
-    /// a principal behind, so revoking the token that minted it is not a remedy. Writing a
+    /// That last clause is the test the four entries here pass and `DELETE` does not. Minting
+    /// leaves a principal behind, so revoking the token that minted it is not a remedy. Writing a
     /// connection setting puts the tenant's credential on a request to an origin the writer chose,
     /// so by the time anybody revokes anything the credential is already on somebody else's server.
-    /// Neither is *what may this principal do*; both are *what does this outlive*.
-    /// `crate::routes::agents` and `crate::routes::connections::MAY_CONFIGURE` carry the long forms.
+    /// Supplying or rotating the credential itself decides which account every later operation
+    /// reaches, at an address nothing records the author of. None of them is *what may this
+    /// principal do*; all of them are *what does this outlive*.
+    /// `crate::routes::agents`, `crate::routes::connections::MAY_SUPPLY_A_CREDENTIAL` and
+    /// `crate::routes::connections::MAY_CONFIGURE` carry the long forms.
     #[test]
     fn the_kind_gated_surface_is_only_what_was_declared() {
         /// Every route that admits fewer than all kinds. Adding a line here is the decision; the
         /// assertion below is only the enforcement.
         const KIND_GATED: &[(&str, &str, &[PrincipalKind])] = &[
+            // Creating a connection. Only a signed-in human, because supplying the credential
+            // decides which account this tenant's operations run under — and **nothing records
+            // who supplied one**, so `GET /api/connections` reads identically either way and
+            // revoking the token that did it does not take the value back out. This is the same
+            // path as the two entries missing from this list: `GET` and `DELETE` on
+            // `/api/connections/{connector}` stay open to every kind, which is why the path is
+            // declared twice. See `connections::MAY_SUPPLY_A_CREDENTIAL`.
+            (
+                "connections",
+                "/api/connections/{connector}",
+                connections::MAY_SUPPLY_A_CREDENTIAL,
+            ),
+            // Rotating one credential. The same argument, and the more invisible half of it: a
+            // rotation replaces the value in place, with no observable state in which anything is
+            // missing, and it exists for revoking a leaked secret — an operator's act.
+            (
+                "connections",
+                "/api/connections/{connector}/credentials/{credential}",
+                connections::MAY_SUPPLY_A_CREDENTIAL,
+            ),
             // Writing a connection setting. Only a signed-in human, because the value is
             // substituted into the operation's own request — so whoever writes it chooses the
             // origin this host sends that tenant's credential to, and an agent's token grants

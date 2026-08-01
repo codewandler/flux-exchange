@@ -1,7 +1,7 @@
 ---
 id: X-54
 title: "Who may create a connection and rotate a credential is decided, not inherited"
-status: ready
+status: in-progress
 priority: 1
 epic: connections
 areas: [exchange-server]
@@ -50,13 +50,50 @@ Two things argue against just doing that:
   does, credential rotation is exactly what it would want.
 
 ## Acceptance
-- [ ] Every route under `/api/connections` declares a kind, or its `Access::Principal` carries a
+- [x] Every route under `/api/connections` declares a kind, or its `Access::Principal` carries a
       written argument for why every kind is right. **No route is left at the default by omission.**
-- [ ] **Failing-first test** — whichever kinds are refused, an attempt is refused and logged, the way
+- [x] **Failing-first test** — whichever kinds are refused, an attempt is refused and logged, the way
       `an_agent_may_not_write_a_connection_setting_and_the_refusal_is_logged` does.
-- [ ] `the_kind_gated_surface_is_only_what_was_declared` covers the new gates, so widening stays a
+- [x] `the_kind_gated_surface_is_only_what_was_declared` covers the new gates, so widening stays a
       deliberate, tested act.
-- [ ] The answer is written in `docs/designs/connections.md`, not only in the route table.
+- [x] The answer is written in `docs/designs/connections.md`, not only in the route table.
+
+## Progress
+
+**Landed.** `POST /api/connections/{connector}` and
+`PUT /api/connections/{connector}/credentials/{credential}` are
+`Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL)` — `PrincipalKind::User` only. The other four
+verbs on this surface stay open to every kind, each with the argument written where the route is
+declared (`routes/connections.rs`, `MODULE`).
+
+- **The invariant reading.** Neither route hands a value out, so *"never to a credential"* on its
+  literal reading is not what they break. The argument taken is that a caller deciding **which**
+  credential the tenant's operations run under has been granted the credential position — the
+  substitution in the other direction. Written up in `docs/designs/connections.md` § X-54.
+- **`DELETE` and the two reads stay open**, which is X-40's decision left standing rather than swept
+  up. `an_agent_may_still_read_a_connection_and_disconnect_one` is what holds that, and it is a real
+  risk rather than a formality: `POST` shares its path with them.
+- **The gate is per method**, so `/api/connections/{connector}` is declared twice in `MODULE` — once
+  for `get(show).delete(remove)` at `Access::Principal`, once for `post(create)` at the kind gate.
+  axum merges the two method routers and each verb carries its own guard. The alternative was a
+  check inside `create`, which `Access` exists to refuse.
+- **`Service` is refused now, not deferred**, on `agents::MAY_MINT`'s argument. The cost is named:
+  credential rotation is exactly what a service integration would want, and the story that wants it
+  is the story that gives `Service` a revocation path.
+
+### What a resuming agent should know is still open
+
+- **There is no operator kind, and inventing one was rejected.** `User` is every signed-in human of
+  the tenant, so a `User` who did not supply a credential can still replace it. Same gap X-47
+  recorded, and it is X-13's grant model rather than a wider kind list — a kind gate cannot express
+  *which humans of a tenant manage it*.
+- **The declared access is the only enforcement point**, X-47's residual carried forward. `create`
+  and `rotate` cannot mirror `AgentStore::mint`'s enforce-twice, because both write through
+  `SecretStore::put`, whose port takes a `CredentialRef` and a `Secret` and has no principal —
+  widening it is a change to a published crate this repository does not own.
+- **Nothing records who supplied a credential.** That absence is half of why this gate is needed;
+  it is also why an operator still cannot audit a connection after the fact. A record beside the
+  store is deliberately not kept (`docs/designs/connections.md`), so this wants its own story.
 
 ## Notes
 - **X-47's residual risk is worth carrying here**: `MAY_CONFIGURE` is the *only* enforcement point
