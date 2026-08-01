@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-01
+
 ### Added
 
 - **A connector can be connected from the console** (X-44). The console could show what was wired and
