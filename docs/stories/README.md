@@ -33,8 +33,16 @@ _None._
 
 ## Next (ready — take the top one unless the user named a story)
 
+### the primary caller can authenticate
+_Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
+- [X-35 — Agent access (epic)](X-35-agent-access-epic.md) · EPIC — the vision's primary caller cannot authenticate. PrincipalKind::Agent exists as a type and appears in the loopback dev roster; nothing mints or verifies an agent's token. Not blocked by X-11, unlike everything else downstream
+- [X-36 — An agent token is minted once, and this host keeps only a verifier](X-36-mint-agent-token.md) · the first half of closing the vision's largest unblocked gap — nothing today can create a principal an agent could present
+
 ### Catalogue
 - [X-34 — The console presents an execution platform, not a catalogue browser](X-34-console-shell.md) · owner-raised 2026-08-01: 'flux-exchange is the execution platform - not just a catalog explorer'. The console renders one reference view and no chrome, while the service behind it holds credentials for many tenants and runs operations for them
+
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-39 — A credential can be rotated without a window where the connection is gone](X-39-credential-rotation.md) · the surface can create and destroy a connection but not replace a credential: a second create is refused 409, so rotating a leaked secret today means DELETE then POST, and everything using it is broken in between
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
