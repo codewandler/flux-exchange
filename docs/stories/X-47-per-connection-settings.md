@@ -184,8 +184,19 @@ Merged as the rework of the reverted `90ee254`.
   part worth not losing.
 - **Carried forward:** `suffix_of` is the whole rule in twelve lines, and its two-label threshold
   approximates a public-suffix list. A vendor template shaped `{x}.co.uk` would pass it while pinning
-  a public suffix. Nothing shipped is in that shape, and the catalogue-wide test asserts the property
-  of every accepted suffix — but it is the assumption to re-examine first.
+  a public suffix. Nothing shipped is in that shape, and ~~the catalogue-wide test asserts the
+  property of every accepted suffix~~ — **that overstated the cover and is corrected here.** What
+  `no_shipped_connector_lets_a_tenant_supply_its_whole_authority` actually does:
+  - its `PinnedTo` arm (`connection_settings.rs:726-732`) asserts `suffix.starts_with('.')` and
+    `suffix.matches('.').count() >= 2`, which is **`suffix_of`'s own acceptance condition restated**.
+    It cannot fail for a suffix `suffix_of` produced, so it checks nothing independent — it is a
+    guard against `suffix_of` being changed to return something it never returns, and no more.
+  - its real cover is the arm beside it: the `assert_eq!` pinning the **exact set of four**
+    `WholeAuthority` connectors, over the whole catalogue. *That* goes red when a fifth unpinned
+    connector ships, or when one of the four gains a suffix upstream — which is the catalogue-change
+    property worth having, and the one the sentence above was reaching for.
+  - what nothing covers is whether a two-label suffix is a **public** suffix. That is the assumption
+    to re-examine first, and it is unheld by any test rather than weakly held by that one.
 
 ## REOPENED 2026-08-01 — the independent re-review found a second exfiltration path
 
@@ -265,3 +276,92 @@ it was applied to `host_pinning` and not to this.
   restates `suffix_of`'s own threshold rather than checking anything independent.
 - `host_pinning` keeps the **last** pinned suffix rather than requiring every template to agree
   (`settings.rs:428`). Unexercised — every shipped provider has one distinct host template.
+
+## Rework round 2 — the write route is a human's, and the `get` guard is held
+
+**Done 2026-08-01.** Gate green: 334 tests (52 + 17 + 3 + 10 + 5 + 4 host, 243 server), clippy clean,
+fmt clean, console 67 green and building. Three things, and nothing else.
+
+### 1. The invariant, closed with the mechanism that already existed
+
+`PUT`/`DELETE /api/connections/{connector}/settings/{service}/{field}` is now
+`Access::PrincipalOfKind(MAY_CONFIGURE)` with `MAY_CONFIGURE = &[PrincipalKind::User]`. No new
+mechanism: it is the one `/api/agents` has used since X-40, and `require_principal` was already
+enforcing it — the route was simply not asking.
+
+**The gate is the whole write surface, not only the `PinnedTo` fields, and the argument is written
+down** in `MAY_CONFIGURE`'s own doc comment and in the design's §4 § *Who may supply a value*:
+
+- `PrincipalKind`'s **own published doc** divides the labour already — `User` *"manages connections,
+  credentials and grants"*; for `Agent`, *"humans sign in to wire things up"* and *"agents are what
+  call operations all day"*. This reads that division rather than inventing one, which is the whole
+  of why it is not an authorization model.
+- A per-field rule would rest a **stated invariant** on `suffix_of`'s two-label approximation. That
+  approximation is the right basis for *may anyone supply this* (it errs closed, and costs four
+  connectors); it is the wrong basis for *is this the invariant's boundary*, where one template
+  misread as unpinned is a hole.
+- `Access` is declared as **data** so the surface is enumerable. A per-field rule could only live in
+  the handler, which is the *"guarded by its handler remembering to ask"* that `Access` exists to
+  refuse.
+
+**The cost is named rather than discovered:** an agent also cannot supply bitbucket's `workspace` or
+contentful's `space_id`, which move no request anywhere. Nothing shipped configures a connection from
+an agent — there is no client for these routes at all — so it is paid by nobody today, and widening
+a kind list later is cheap where narrowing one is not.
+
+The **`GET` collection stays open to every kind**, deliberately: it answers targets and a `set`
+boolean and no values, and an agent that can read *"this connection is missing `endpoint.subdomain`"*
+is one that can tell the human who can supply it.
+
+### 2. The `get`-side guard is held by a test that goes red without it
+
+`a_planted_whole_authority_value_is_refused_on_the_way_out` never calls `set`. The value reaches the
+file **the way the three scenarios §4 names reach it** — written straight into the store file — and
+four things are then measured: the plant landed, `ConfigStore::get` answers `None`, nothing
+dispatched and the credential stayed off the wire, and the file is byte-identical afterwards
+(*refuse; never repair*).
+
+Falsified rather than reported. With the branch deleted it fails twice over: `get` answers
+`Some("evil.example")`, and with that assertion suppressed the invocation **succeeds**, dispatching
+to `https://evil.example` with the tenant's `X-Api-Key` on the request — the original defect,
+reproduced from a file `set` never saw.
+
+### 3. Two overstatements corrected in place
+
+- **The design's §4** now carries its second correction beside its first, in the same form. *"The
+  composed authority is always inside the vendor's own domain"* is true and is **not a safety
+  argument**: `*.zendesk.com`, `*.atlassian.net`, `*.myshopify.com`, `*.supabase.co` and
+  `*.my.salesforce.com` are self-service registrable namespaces. The sentence kept is **a suffix pin
+  constrains which vendor a request reaches, not whose account at that vendor.** The same correction
+  is on `HostPinning::PinnedTo` and `host_pinning`, where the code made the same claim.
+- **This story's own "the catalogue-wide test asserts the property of every accepted suffix"** is
+  corrected above, in place: that assertion restates `suffix_of`'s threshold and checks nothing
+  independent. The test's real cover is the exact-set assertion on the four `WholeAuthority`
+  connectors.
+
+### What remains open, stated rather than left to be inferred
+
+**A `User` of the tenant who did not supply the credential can still read it out this way** — write
+`endpoint.subdomain`, invoke, and the credential arrives at an origin inside the vendor's namespace
+that they control. Credential values are write-only on this surface by design, and this makes one
+readable. The kind gate does not touch it and does not pretend to.
+
+Closing it needs somewhere an **operator** can pin an allowed host per tenant: the same surface the
+four refused connectors already need, with the same authorization question attached, and it does not
+exist. It is now written into the design (§4 § *What this does not close*, §7) as an accepted
+exposure rather than an absence of a test.
+
+**Not attempted, on purpose:** making the pinned connectors safe by validating the value. That is a
+blocklist of subdomains, and this story already records why value rules fail here — a blocklist
+catches only what somebody enumerated.
+
+### Carried forward
+
+- `MAY_CONFIGURE` refuses `PrincipalKind::Service` on `agents::MAY_MINT`'s reasoning rather than a
+  measured one. No service integration exists to be broken by it; if one arrives, that list is where
+  the argument goes.
+- The end-to-end test measures *nothing dispatched* with `sent`, not with a recording egress:
+  `exchange-server` holds no `flux-runtime` dependency to build a fake `Tool` with, and adding one
+  is a manifest change. `sent` is the host's own answer and the same measurement
+  `routes::invoke`'s tests already use, but it is an inference about the wire rather than a count of
+  it. The wire count lives one crate down, in `connection_settings.rs`.

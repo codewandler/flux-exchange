@@ -158,6 +158,14 @@ pub fn app(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// What [`require_principal`] logs when it identifies a caller and refuses it for its kind.
+///
+/// Stated once because two things read it: the guard emits it, and
+/// `connections::tests::an_agent_may_not_write_a_connection_setting_and_the_refusal_is_logged`
+/// asserts an operator would see it. A test that spelled the sentence a second time would go on
+/// passing after the guard stopped emitting anything at all.
+pub(super) const KIND_REFUSED: &str = "a principal of a kind this route does not admit was refused";
+
 /// Refuse anything this host cannot attribute to a principal — or attributes to the wrong kind of
 /// one.
 async fn require_principal(
@@ -186,7 +194,7 @@ async fn require_principal(
                 // route only a human may call is the shape of a leaked token being used — and an
                 // operator who cannot see it happening has nothing to revoke. The caller's own id
                 // and tenant belong here and not in the answer.
-                warn!(%principal, "a principal of a kind this route does not admit was refused");
+                warn!(%principal, "{KIND_REFUSED}");
                 refuse_kind(kinds)
             }
             _ => {
@@ -579,19 +587,34 @@ mod tests {
     /// route that *starts* being kind-gated fails it too, so nobody narrows the surface without
     /// writing down why, which is how a `403` for a caller that should have worked gets shipped.
     ///
-    /// **The whole list is one entry, and the rest of the surface is deliberately not on it.** In
+    /// **The list is two entries, and the rest of the surface is deliberately not on it.** In
     /// particular `DELETE /api/connections/{connector}` is not: it destroys tenant data inside the
     /// tenant the caller already belongs to, an operator can see it (`GET /api/connections`) and
-    /// undo it by reconnecting, and nothing about it outlives revocation of the token that did it.
-    /// Whether an agent may reach a destructive route is a real question, but it is the
-    /// **grant-shaped** one — *what may this principal do* — which is X-13. Minting is the
-    /// authentication-shaped one — *what kind of principal is this, and may it create another* —
-    /// and that is the whole of what this decides. `crate::routes::agents` carries the long form.
+    /// undo it by reconnecting, and **nothing about it outlives revocation of the token that did
+    /// it**. Whether an agent may reach a destructive route is a real question, but it is the
+    /// **grant-shaped** one — *what may this principal do* — which is X-13.
+    ///
+    /// That last clause is the test the two entries here pass and `DELETE` does not. Minting leaves
+    /// a principal behind, so revoking the token that minted it is not a remedy. Writing a
+    /// connection setting puts the tenant's credential on a request to an origin the writer chose,
+    /// so by the time anybody revokes anything the credential is already on somebody else's server.
+    /// Neither is *what may this principal do*; both are *what does this outlive*.
+    /// `crate::routes::agents` and `crate::routes::connections::MAY_CONFIGURE` carry the long forms.
     #[test]
     fn the_kind_gated_surface_is_only_what_was_declared() {
         /// Every route that admits fewer than all kinds. Adding a line here is the decision; the
         /// assertion below is only the enforcement.
         const KIND_GATED: &[(&str, &str, &[PrincipalKind])] = &[
+            // Writing a connection setting. Only a signed-in human, because the value is
+            // substituted into the operation's own request — so whoever writes it chooses the
+            // origin this host sends that tenant's credential to, and an agent's token grants
+            // access to an operation and never to a credential. The `GET` collection beside it is
+            // deliberately **not** here: it answers targets and a `set` boolean and no values.
+            (
+                "connections",
+                "/api/connections/{connector}/settings/{service}/{field}",
+                connections::MAY_CONFIGURE,
+            ),
             // Minting an agent principal. Only a signed-in human, because a principal that can
             // create principals makes revocation (X-38) an incomplete remedy that an operator
             // cannot see — and `Service` is refused for the same reason one level up, since this

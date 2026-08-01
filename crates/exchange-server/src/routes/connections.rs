@@ -52,9 +52,24 @@
 //! connector declares. `super::tests::no_published_route_takes_a_tenant_in_its_path` walks the whole
 //! surface for the first of those, and X-03 wrote it saying this story would inherit it.
 //!
-//! Both routes are [`Access::Principal`]. A connection is tenant data and there is no version of it
+//! Every route here requires a principal. A connection is tenant data and there is no version of it
 //! that answers a caller this host has not identified, so this module adds nothing to the anonymous
 //! set that `super::tests::the_anonymous_surface_is_only_what_was_declared_anonymous` enumerates.
+//!
+//! # Writing a setting is a `User`'s, and reading the surface is anyone's
+//!
+//! One route here is narrower than [`Access::Principal`]:
+//! `PUT`/`DELETE /api/connections/{connector}/settings/{service}/{field}` is
+//! [`Access::PrincipalOfKind`]`(`[`MAY_CONFIGURE`]`)`. A tenant's value is substituted into the
+//! operation's own request, so a caller that can write one chooses the origin this host then sends
+//! that tenant's credential to — and `AGENTS.md` says an agent's token grants access to an
+//! operation, never to a credential. [`MAY_CONFIGURE`] carries the whole argument, including the
+//! part this **does not** close.
+//!
+//! The `GET` collection stays open to every kind, deliberately. It answers `binds` targets and a
+//! `set` boolean and no values at all, and an agent that can read *"this connection is missing
+//! `endpoint.subdomain`"* is one that can say so to the human who can supply it. Reading what a
+//! connection needs is any principal's business; writing a value into it is not.
 //!
 //! # A value goes in and never comes back
 //!
@@ -172,7 +187,8 @@ use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
     address_path, admit_tenant_occupancy, declared_settings, host_pinning, stored_bytes,
     ConnectionRefusal, ConnectorDeclaration, CredentialRef, DeclaredCredential, DeclaredSetting,
-    HostPinning, Principal, Secret, SecretStore, SettingsRefusal, StoreError, Tenant,
+    HostPinning, Principal, PrincipalKind, Secret, SecretStore, SettingsRefusal, StoreError,
+    Tenant,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -206,6 +222,69 @@ pub(super) const SETTINGS_SETTING: &str = exchange_host::CONNECTION_SETTINGS_SET
 /// is not, so a composition on another platform binds its own store rather than this one.
 #[cfg(not(unix))]
 pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
+
+/// **Who may write a connection setting: a `User`, and nothing else.**
+///
+/// The one kind gate on this module, and the narrowest mechanism that closes `AGENTS.md`'s
+/// *"an agent's token grants access to an operation, never to a credential"* — which the settings
+/// write route broke, measured end to end, while it was [`Access::Principal`].
+///
+/// # The path this closes
+///
+/// A tenant's value is substituted into the operation's own request. Where the connector's host
+/// template pins a suffix, the composed authority is `{value}.zendesk.com` — so a caller that can
+/// write the value chooses the origin this host then sends that tenant's credential to. An agent
+/// holding nothing but an operation grant could do it, because `require_principal` admits every
+/// kind for [`Access::Principal`], and it converted a grant over an *operation* into delivery of a
+/// *credential* to a server the agent controls.
+///
+/// The suffix pin does not save it. `*.zendesk.com`, `*.atlassian.net`, `*.myshopify.com`,
+/// `*.supabase.co` and `*.my.salesforce.com` are **self-service registrable namespaces**: a suffix
+/// pin constrains which *vendor* a request reaches, never *whose account* at that vendor.
+///
+/// # Why the whole write surface, rather than the host-shaped fields alone
+///
+/// The narrower rule is available: [`host_pinning`] already says, per field, whether a value can
+/// reach the authority, and only [`HostPinning::PinnedTo`] can — a value that lands in a path or a
+/// query moves no request anywhere. Gating those alone would be the smallest change that closes the
+/// measured path. It is not the one taken, for three reasons in the order they bite:
+///
+/// - **`PrincipalKind` already publishes this division of labour, and this reads it rather than
+///   inventing one.** `User` is documented as the kind that *"manages connections, credentials and
+///   grants"*; `Agent` as the kind for which *"humans sign in to wire things up"* while *"agents are
+///   what call operations all day"*. Supplying a connector's per-connection value is wiring up, on
+///   that published reading. Nothing here decides what an agent may *do* with a connection — that is
+///   the grant model, and it is still X-13's.
+/// - **A per-field rule would make a stated invariant depend on an approximation.**
+///   `host_pinning`'s notion of "pins a suffix" is `suffix_of`'s two-label threshold, which
+///   `exchange_host::settings` documents as a stand-in for a public-suffix list. It is the right
+///   basis for *"may a tenant supply this at all"*, where it errs closed and its cost is four
+///   refused connectors. It is the wrong basis for *"is this the invariant's boundary"*: one
+///   template read as unpinned that is not, and the gate silently has a hole in it.
+/// - **The gate has to be visible.** [`Access`] is declared as data so the whole surface is
+///   enumerable — `super::tests::the_kind_gated_surface_is_only_what_was_declared` walks it, and
+///   `a_declared_kind_is_what_decides_the_answer` proves the declaration is what the guard consults.
+///   A rule that could only be applied inside the handler, once the field is known, is exactly the
+///   "a route is guarded by its handler remembering to ask" that [`Access`] exists to refuse.
+///
+/// **What it costs, stated rather than discovered:** an agent cannot supply bitbucket's workspace
+/// or contentful's space id either, and those move no request anywhere. Nothing shipped configures
+/// a connection from an agent — there is no client for these routes at all yet — so the bound is
+/// paid by nobody today, and widening it later is one kind added to this list with an argument
+/// beside it. Narrowing it later, after something depends on it, is not.
+///
+/// `Service` is excluded on `agents::MAY_MINT`'s reasoning rather than a new one: it is a backend
+/// acting for its own accounts, not a human of this tenant wiring one up, and the exfiltration is
+/// identical whichever non-human kind writes the value.
+///
+/// # What it does *not* close
+///
+/// A **`User` of this tenant who did not supply the credential** can still do all of it. Credential
+/// values are write-only on this surface by design, and this path makes one readable to anyone who
+/// can name an origin. Closing that needs a place for an **operator** to pin an allowed host per
+/// tenant — a surface that does not exist, with its own authorization question. See
+/// `docs/designs/connection-settings.md` § 4.
+pub(super) const MAY_CONFIGURE: &[PrincipalKind] = &[PrincipalKind::User];
 
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
@@ -254,7 +333,12 @@ pub(super) const MODULE: Module = Module {
             // never a segment of an address. The tenant — the only part a caller could want to move
             // — comes from the guard.
             path: "/api/connections/{connector}/settings/{service}/{field}",
-            access: Access::Principal,
+            // **Only a `User`.** A tenant's value is substituted into the operation's own request,
+            // so a caller that can write one chooses the origin this host sends that tenant's
+            // credential to — and an agent's token grants access to an operation, never to a
+            // credential. [`MAY_CONFIGURE`] carries the argument, including why the gate is the
+            // whole write surface rather than the host-shaped fields alone.
+            access: Access::PrincipalOfKind(MAY_CONFIGURE),
             method_router: setting_route,
         },
     ],
@@ -1785,8 +1869,13 @@ mod tests {
 
     use crate::dev_identity::DevIdentity;
 
-    /// Two tenants, one principal each. `alice` is `acme`; `bob` is `globex`.
-    const ROSTER: &str = "user:alice@acme,user:bob@globex";
+    /// Two tenants, and a third principal that is not a human.
+    ///
+    /// `alice` is `acme`; `bob` is `globex`. `triage-bot` is an **agent** of `acme`, and it is here
+    /// because a kind gate cannot be tested against a roster with only one kind in it: every
+    /// assertion that an agent is refused is worth nothing unless a caller of another kind reaches
+    /// the same address and is admitted.
+    const ROSTER: &str = "user:alice@acme,user:bob@globex,agent:triage-bot@acme";
 
     /// The value a test stores. Never a real secret, and asserted absent from every answer a
     /// different tenant receives — and from every refusal anyone receives.
@@ -2149,6 +2238,91 @@ mod tests {
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An app with both stores bound **and an invoker**, so a refusal can be told from a dispatch.
+    ///
+    /// The invoker is this composition's real one — the same `crate::execution::invoker` the binary
+    /// builds, holding the real transport. Nothing here fakes the egress, and that is deliberate:
+    /// the claim is that no request is *made*, and a test that could only observe a fake transport
+    /// staying quiet would be a weaker statement than the one this host answers with. What says a
+    /// request was never sent is `sent`, which `exchange_host::Sent` decides from where the failure
+    /// happened rather than from anything a test arranged.
+    fn dispatching_app() -> (
+        Router,
+        Arc<TestStore>,
+        Arc<exchange_host::SettingsStore>,
+        Scratch,
+    ) {
+        let store = Arc::new(TestStore::default());
+        let scratch = Scratch::new();
+        let settings = Arc::new(
+            exchange_host::SettingsStore::bind(scratch.join("settings"))
+                .expect("a fresh settings store"),
+        );
+        let invoker = Arc::new(
+            crate::execution::invoker(store.clone(), settings.clone())
+                .expect("a usable workspace root"),
+        );
+
+        let app = super::super::app(
+            AppState::with_development_identity(Arc::new(
+                DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+            ))
+            .with_credentials(store.clone())
+            .with_settings(settings.clone())
+            .with_invoker(invoker),
+        );
+
+        (app, store, settings, scratch)
+    }
+
+    /// Every kind-refusal this host logged while a test ran.
+    ///
+    /// Hand-rolled rather than pulled in, for [`Scratch`]'s reason: a capturing layer is thirty
+    /// lines and a test dependency is forever. It records `WARN` and above only, which is the level
+    /// the guard refuses at, and it records the event's **fields** — so what a test asserts is the
+    /// line an operator would actually read, including which principal it names.
+    #[derive(Clone, Default)]
+    struct Warnings(Arc<Mutex<Vec<String>>>);
+
+    impl Warnings {
+        /// The recorded lines that are the guard's kind-refusal, in the order they were emitted.
+        fn kind_refusals(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .expect("no test poisons this")
+                .iter()
+                .filter(|line| line.contains(super::super::KIND_REFUSED))
+                .cloned()
+                .collect()
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warnings {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() > tracing::Level::WARN {
+                return;
+            }
+
+            let mut line = String::new();
+            event.record(&mut FieldsAsText(&mut line));
+            self.0.lock().expect("no test poisons this").push(line);
+        }
+    }
+
+    /// Every field of one event, rendered the way a subscriber would render it.
+    struct FieldsAsText<'a>(&'a mut String);
+
+    impl tracing::field::Visit for FieldsAsText<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={value:?} ", field.name());
         }
     }
 
@@ -5009,6 +5183,207 @@ mod tests {
         ));
     }
 
+    /// **The reopened story's failing-first test.** An agent may not write a connection setting, and
+    /// the refusal reaches an operator's log.
+    ///
+    /// `AGENTS.md` § Invariants, verbatim: *"An agent's token grants access to an operation, never
+    /// to a credential."* The settings write route was [`Access::Principal`], which admits every
+    /// kind, so an agent holding nothing but an operation grant could store the `{subdomain}` that
+    /// composes zendesk's destination origin — and the tenant's credential was then dispatched to
+    /// an origin the agent had chosen. A suffix pin keeps that origin inside `*.zendesk.com`, which
+    /// is a **registrable namespace**: it constrains which vendor the request reaches, not whose
+    /// account at that vendor.
+    ///
+    /// Three things are asserted, and the second is what makes the first mean anything:
+    ///
+    /// - every write verb at every field is refused for an agent — see [`MAY_CONFIGURE`] for why
+    ///   the gate is the whole write surface rather than the host-shaped fields alone;
+    /// - **a `User` reaches the same address and is admitted**, so what refused the agent is its
+    ///   kind and not a route that refuses everyone;
+    /// - the refusal is **logged**, by the guard's own `warn!` rather than by anything this module
+    ///   added. An agent reaching for a route only a human may call is the shape of a leaked token
+    ///   being used, and an operator who cannot see it happening has nothing to revoke.
+    #[tokio::test]
+    async fn an_agent_may_not_write_a_connection_setting_and_the_refusal_is_logged() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let (app, store, settings, _scratch) = configurable_app();
+        let acme = Tenant::new("acme").expect("a plain tenant id");
+
+        let warnings = Warnings::default();
+        let _log =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(warnings.clone()));
+
+        // Both kinds of field, and both verbs. `endpoint.subdomain` is the one that moves the
+        // origin; `username.zendesk.api_token` moves nothing and is refused anyway, which is the
+        // decision [`MAY_CONFIGURE`] records.
+        let attempts = [
+            (
+                Method::PUT,
+                "endpoint.subdomain",
+                Some(json!({ "value": "attacker-controlled" })),
+            ),
+            (
+                Method::PUT,
+                "username.zendesk.api_token",
+                Some(json!({ "value": "ops@acme.test" })),
+            ),
+            (Method::DELETE, "endpoint.subdomain", None),
+        ];
+
+        for (method, field, body) in attempts {
+            let (status, answered) = call(
+                &app,
+                "triage-bot",
+                method.clone(),
+                &format!("/api/connections/zendesk/settings/default/{field}"),
+                body,
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "an agent reached `{method} {field}`, which is how a token for an operation becomes \
+                 delivery of this tenant's credential to an origin the caller chose: {answered}",
+            );
+            assert!(
+                answered["error"]
+                    .as_str()
+                    .is_some_and(|error| error.contains("user")),
+                "the refusal must name the kind that would have worked: {answered}",
+            );
+            assert!(
+                !answered.to_string().contains("attacker-controlled"),
+                "and must never repeat the value it refused: {answered}",
+            );
+        }
+
+        // Nothing reached either store, whatever the refusals said.
+        assert!(store.addresses().is_empty(), "{:?}", store.addresses());
+        assert_eq!(settings.held_bytes(&acme), 0);
+
+        // **The control.** A `User` of the same tenant writes the same field at the same address.
+        // Without this the three refusals above are satisfied by a route that refuses everybody.
+        let (status, supplied) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/settings/default/endpoint.subdomain",
+            Some(json!({ "value": "acme" })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "only the caller's kind may explain the difference: {supplied}",
+        );
+
+        // And the log an operator watches.
+        let logged = warnings.kind_refusals();
+        assert_eq!(
+            logged.len(),
+            3,
+            "each refusal must be visible to an operator, not only to the caller: {logged:?}",
+        );
+        for line in &logged {
+            assert!(
+                line.contains("triage-bot") && line.contains("acme"),
+                "the line must name the caller and its tenant, so there is something to revoke: \
+                 {line}",
+            );
+            assert!(
+                !line.contains("attacker-controlled"),
+                "the caller's own id and tenant belong in the log; the value it offered does not: \
+                 {line}",
+            );
+        }
+    }
+
+    /// **The end to end.** An agent cannot cause a dispatch to an origin it named.
+    ///
+    /// This is the re-review's measured path, re-driven: an agent principal stores
+    /// `endpoint.subdomain` and invokes zendesk, and the credential that was on the wire —
+    /// `Basic …ops@acme.test/token:…` at `https://attacker-controlled.zendesk.com` — is what this
+    /// asserts cannot happen.
+    ///
+    /// The whole chain runs against **one** composition, so nothing here is arranged: the credential
+    /// a human connected, the store the write would have landed in, and the invoker that reads it
+    /// are the same three objects. `sent` is the measurement rather than a fake transport's call
+    /// count — it is `exchange_host::Sent`, decided from where the failure happened, and `"no"` is
+    /// this host's own answer to *did anything go on the wire*.
+    ///
+    /// The write is asserted **before** the invocation on purpose. A run against code without the
+    /// gate stops at the first assertion, having stored nothing and dispatched nothing — which is
+    /// what keeps a red run of this test from sending a request to a host somebody could register.
+    #[tokio::test]
+    async fn an_agent_cannot_cause_a_dispatch_to_an_origin_it_named() {
+        let (app, store, settings, _scratch) = dispatching_app();
+        let acme = Tenant::new("acme").expect("a plain tenant id");
+
+        // A human wires the connection up. This is the credential the path was after.
+        let (status, created) = connect_zendesk(&app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+
+        // The agent names the origin. Zendesk's template pins `.zendesk.com`, so the composed
+        // authority stays at the vendor — and `attacker-controlled.zendesk.com` is a subdomain
+        // anybody can sign up for, which is the whole reason a suffix pin is not a safety argument.
+        let (status, refused) = call(
+            &app,
+            "triage-bot",
+            Method::PUT,
+            "/api/connections/zendesk/settings/default/endpoint.subdomain",
+            Some(json!({ "value": "attacker-controlled" })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an agent stored the origin this host will send a credential to: {refused}",
+        );
+        assert_eq!(
+            settings.held_bytes(&acme),
+            0,
+            "the value must not be in the store the invoker reads",
+        );
+
+        // And the invocation the agent *is* entitled to make reaches no origin at all. It refuses
+        // by name, terminally, with nothing sent — X-12's behaviour, unchanged by any of this.
+        let (status, answered) = call(
+            &app,
+            "triage-bot",
+            Method::POST,
+            "/api/operations/zendesk-ticket-show/invoke",
+            Some(json!({ "ticket_id": "1" })),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answered}");
+        assert_eq!(
+            answered["sent"], "no",
+            "a request went out for an unconfigured connection: {answered}",
+        );
+        assert_eq!(answered["retryable"], false, "{answered}");
+        assert!(
+            answered["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("zendesk")),
+            "the refusal must still name what an operator has to go and supply: {answered}",
+        );
+        assert!(
+            !answered.to_string().contains(SENTINEL),
+            "and must never repeat a credential: {answered}",
+        );
+
+        // The credential is exactly where the human put it, and nowhere else.
+        assert_eq!(
+            store.addresses(),
+            vec!["tenants/acme/com.zendesk.api/api_token".to_owned()],
+            "{:?}",
+            store.addresses(),
+        );
+    }
+
     /// A composition that bound no settings store refuses and names the setting that would have
     /// given it one — it does not accept the value and drop it.
     ///
@@ -5205,18 +5580,36 @@ mod tests {
         );
     }
 
-    /// Both routes require a principal. Asserted here as well as in the surface-wide enumeration,
-    /// because that one compares against a list somebody edits and this one cannot be satisfied by
-    /// editing a list.
+    /// Every route requires a principal, and exactly one of them requires a particular kind.
+    ///
+    /// Asserted here as well as in the surface-wide enumeration, because that one compares against a
+    /// list somebody edits and this one cannot be satisfied by editing a list: [`Access::Anonymous`]
+    /// has no arm here at all, so a connection route that stopped requiring a principal is a failure
+    /// rather than a new line somewhere.
+    ///
+    /// The kind-gated route is named rather than counted. A second one appearing is a decision about
+    /// who may reach a tenant's connections, and it should cost whoever makes it a line here with a
+    /// reason — see [`MAY_CONFIGURE`] for the one that exists.
     #[test]
-    fn every_route_here_requires_a_principal() {
+    fn every_route_here_requires_a_principal_and_only_the_setting_write_requires_a_kind() {
         for route in MODULE.routes {
-            assert_eq!(
-                route.access,
-                Access::Principal,
-                "a connection is tenant data: {}",
-                route.path,
-            );
+            match route.access {
+                Access::Principal => {}
+                Access::PrincipalOfKind(kinds) => {
+                    assert_eq!(
+                        route.path, "/api/connections/{connector}/settings/{service}/{field}",
+                        "a second route here narrowed who may reach it; that is a decision, and it \
+                         belongs beside `MAY_CONFIGURE`'s argument rather than only in a route \
+                         table",
+                    );
+                    assert_eq!(kinds, MAY_CONFIGURE);
+                }
+                Access::Anonymous => panic!(
+                    "a connection is tenant data and answers no caller this host cannot identify: \
+                     {}",
+                    route.path,
+                ),
+            }
         }
     }
 

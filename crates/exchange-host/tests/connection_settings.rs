@@ -704,6 +704,115 @@ async fn a_setting_cannot_become_the_destination_authority() {
     }
 }
 
+/// **The `get`-side guard, which until now was held by nothing.**
+///
+/// The rule is enforced twice — `ConnectionSettings::set` refuses on the way in, and
+/// `ConfigStore::get` refuses again on the way out — and the design calls the second one *"the one
+/// that matters"*. That is because `set` is not the only way bytes reach the file: an **edited
+/// store**, a **backup restored from before the rule existed**, and a **value written by an older
+/// build** all arrive without passing it, which is what makes the property belong to the port rather
+/// than to one write path.
+///
+/// Deleting that branch used to leave the whole gate green. Every other test on this axis drives
+/// `set`, so all of them were satisfied by the first enforcement point alone and the second could
+/// be removed by a refactor with a clean CI. This one therefore never calls `set`: the value reaches
+/// the file **the way those three scenarios reach it**, written straight into it by something that
+/// is not this store.
+///
+/// Four things are measured, in the order a failing run should report them: the plant landed, the
+/// port refuses it, nothing dispatched, and the file is byte-identical afterwards. The last is
+/// *refuse; never repair* — a store that quietly rewrote a file it found suspicious would destroy
+/// the evidence of how the value got there, on the one path where somebody has to find that out.
+#[tokio::test]
+async fn a_planted_whole_authority_value_is_refused_on_the_way_out() {
+    use exchange_host::ConfigStore as _;
+
+    let scratch = Scratch::new("planted");
+    let path = scratch.join("state").join("settings");
+    let newrelic = provider("newrelic");
+    let unpinned = setting_of(newrelic, "endpoint.host");
+
+    // The whole of newrelic's declared surface, written into the store file directly — no `set`, no
+    // bound, no rule. Every *other* value is supplied too, so that a build without the guard is
+    // refused by the guard or by nothing: a connection still missing a field would dispatch nothing
+    // for an unrelated reason, and this test would pass while asserting it.
+    let mut planted = json!({ TENANT: { "newrelic": {} } });
+    for declared in declared_settings(newrelic).expect("newrelic's operations rehearse") {
+        let value = if declared == unpinned {
+            "evil.example"
+        } else {
+            "supplied"
+        };
+        planted[TENANT]["newrelic"][&declared.service][declared.binds()] = json!(value);
+    }
+
+    fs::create_dir_all(path.parent().expect("the store path has a parent"))
+        .expect("a scratch directory");
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&planted).expect("a serialisable store"),
+    )
+    .expect("a planted store file");
+    let on_disk = fs::read(&path).expect("the planted file is readable");
+
+    let settings = Arc::new(
+        SettingsStore::bind(&path).expect("the store reopens over a file it did not write"),
+    );
+
+    // The bytes really are in the store. Without this, a plant that silently failed would make
+    // every assertion below pass for the wrong reason.
+    assert!(
+        settings.held_bytes(&tenant()) >= "evil.example".len(),
+        "nothing was planted, so nothing below is a test of the guard",
+    );
+
+    // **The guard.** The port answers the invoker with nothing, for a value that never met `set`.
+    assert_eq!(
+        settings.get(TENANT, "newrelic", &unpinned.service, unpinned.field()),
+        None,
+        "a value that is the whole destination authority reached the invoker out of a file `set` \
+         never saw — an edited store, a restored backup and an older build all arrive this way",
+    );
+
+    // And the same claim as a dispatch, which is the part that costs a tenant its credential.
+    let credentials =
+        credential_store("com.newrelic.api", Some(("newrelic.api_key", "api_key"))).await;
+    let (wire, egress) = echoing_egress();
+    let outcome = invoker(credentials, settings, egress)
+        .invoke(&caller(), "newrelic-application-list", json!({}))
+        .await;
+
+    let wire = wire.lock().expect("the wire lock");
+    for n in 0..wire.count() {
+        assert_ne!(
+            wire.origin(n),
+            "https://evil.example",
+            "a planted value became the origin this host sent a request to (outcome: {outcome:?})",
+        );
+    }
+    assert!(
+        !format!("{:?}", wire.calls).contains(SENTINEL),
+        "this tenant's credential went onto a request whose host it did not choose",
+    );
+    assert_eq!(
+        wire.count(),
+        0,
+        "the connector is unconfigured as far as the port is concerned, so it must refuse by name \
+         and dispatch nothing",
+    );
+
+    let refusal = outcome.expect_err("a refused value leaves the connection unconfigured");
+    assert_eq!(refusal.sent(), Sent::No);
+
+    // Refuse; never repair. The file is exactly what was found.
+    assert_eq!(
+        fs::read(&path).expect("the file is still readable"),
+        on_disk,
+        "the store rewrote a file it found a refused value in, destroying the evidence of how the \
+         value got there",
+    );
+}
+
 /// The rule is decided from the catalogue, over the **whole** catalogue — so a connector shipped
 /// tomorrow whose host is a bare placeholder is refused without anybody adding it to a list.
 ///
