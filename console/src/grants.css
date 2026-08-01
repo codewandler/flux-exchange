@@ -1,0 +1,319 @@
+/*
+ * The grants screen: what this tenant may run, and where it is changed.
+ *
+ * These rules belong to `src/Grants.mts`, which is a render function rather than a single-file
+ * component — so it carries no `<style scoped>` and its rules live here, the arrangement `shell.css`
+ * describes and `agents.css` and `onboarding.css` follow.
+ *
+ * IT IS ITS OWN FILE for the reason those three are: **every colour here goes through a token from
+ * `tokens.css`**, and `the_grants_screen_names_no_colour_of_its_own` in `test/grants.test.mjs` scans
+ * this file to hold that. No hex, no rgb(), no named colours. Light and dark come for free.
+ *
+ * THE ONE VISUAL DECISION WORTH ARGUING. The preview — *what this grant would admit* — sits inside
+ * the form, above the button, and is not collapsible. The failure this layout exists to prevent is
+ * an operator choosing `destructive`, reading the word rather than the consequence, and saving. So
+ * the list of operations and the count against what the connector declares are between the choosing
+ * and the saving, in reading order, and the button says why it is disabled until they have been
+ * answered.
+ */
+
+.grants {
+  max-width: 82ch;
+  margin: 40px 0 0;
+}
+
+.grants h1 {
+  margin-bottom: 8px;
+}
+
+.grants__lead {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--vp-c-text-2);
+  margin-bottom: 28px;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * What is held today.
+ * ------------------------------------------------------------------------------------------- */
+
+.grants__held,
+.grants__empty {
+  margin: 24px 0 32px;
+}
+
+.grants__empty {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  padding: 16px 20px;
+  background: var(--vp-c-bg-soft);
+}
+
+.grants__empty h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.grants__empty p {
+  margin: 0;
+  color: var(--vp-c-text-2);
+  line-height: 1.6;
+}
+
+.grants__card {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+/* A grant this screen cannot write back reads as a statement rather than as an error. */
+.grants__card[data-expressible='false'] {
+  border-color: var(--vp-c-warning-1);
+}
+
+.grants__card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.grants__connector {
+  margin: 0;
+  font-size: 16px;
+}
+
+.grants__revoke {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.grants__revoke:hover {
+  border-color: var(--vp-c-danger-1);
+  color: var(--vp-c-danger-1);
+}
+
+.grants__selector {
+  margin: 8px 0 12px;
+  font-size: 14px;
+  color: var(--vp-c-text-2);
+}
+
+.grants__inexpressible {
+  border-left: 3px solid var(--vp-c-warning-1);
+  padding-left: 14px;
+  margin: 12px 0;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.grants__inexpressible-reason {
+  margin: 0 0 8px;
+  color: var(--vp-c-text-1);
+}
+
+.grants__exempt-line {
+  margin: 4px 0;
+  color: var(--vp-c-text-2);
+}
+
+.grants__aside {
+  margin: 8px 0 0;
+  color: var(--vp-c-text-3);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * What a grant admits — the panel the whole screen is arranged around.
+ * ------------------------------------------------------------------------------------------- */
+
+.grants__admitted {
+  margin-top: 12px;
+}
+
+.grants__count {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.grants__none {
+  margin: 0;
+  font-size: 14px;
+  color: var(--vp-c-text-2);
+  line-height: 1.6;
+}
+
+.grants__admitted-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.grants__admitted-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--vp-c-divider);
+  font-size: 13px;
+}
+
+.grants__admitted-id {
+  flex: 1 1 auto;
+}
+
+.grants__tag {
+  flex: 0 0 auto;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 11px;
+  color: var(--vp-c-text-2);
+}
+
+.grants__tag--quiet {
+  color: var(--vp-c-text-3);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * The editor.
+ * ------------------------------------------------------------------------------------------- */
+
+.grants__gate {
+  margin-top: 24px;
+}
+
+.grants__form {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  padding: 20px;
+}
+
+.grants__form h2 {
+  margin: 0 0 16px;
+  font-size: 17px;
+}
+
+.grants__field {
+  display: block;
+  margin-bottom: 16px;
+  border: 0;
+  padding: 0;
+}
+
+.grants__field--effects {
+  margin-bottom: 20px;
+}
+
+.grants__label {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  padding: 0;
+}
+
+.grants__select {
+  width: 100%;
+  max-width: 32ch;
+  padding: 6px 8px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-size: 14px;
+}
+
+.grants__hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vp-c-text-3);
+}
+
+.grants__check {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 14px;
+  margin: 4px 0;
+}
+
+.grants__effects {
+  margin: 8px 0 4px 20px;
+}
+
+.grants__preview {
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background: var(--vp-c-bg-soft);
+  padding: 14px 16px;
+  margin: 20px 0;
+}
+
+.grants__preview h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.grants__derived {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--vp-c-text-3);
+}
+
+.grants__note {
+  margin: 16px 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--vp-c-text-2);
+}
+
+.grants__stale {
+  margin: 16px 0;
+  padding: 10px 14px;
+  border-left: 3px solid var(--vp-c-warning-1);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--vp-c-text-1);
+}
+
+.grants__submit {
+  border: 1px solid var(--vp-c-brand-1);
+  border-radius: 6px;
+  background: var(--vp-c-brand-1);
+  color: var(--vp-c-bg);
+  padding: 8px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.grants__submit:disabled {
+  border-color: var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-text-3);
+  cursor: not-allowed;
+}
+
+.grants__saved {
+  margin: 20px 0;
+  font-size: 14px;
+  color: var(--vp-c-text-2);
+}
+
+.grants__blocked {
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.6;
+}

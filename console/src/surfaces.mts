@@ -127,6 +127,19 @@ export const SURFACES: readonly Surface[] = [
     absent: '',
   },
   {
+    id: 'grants',
+    label: 'Grants',
+    summary: 'What this tenant may run: a connector, at most a risk level, and the effects allowed.',
+    // Directly after Connections, because the two are one job in two steps rather than two jobs. A
+    // tenant with a connection and no grant runs **nothing** — X-13 closed the gate fail-closed —
+    // so an operator who has just wired a connector up and stopped has not finished, and the entry
+    // that tells them so belongs where they will read it next.
+    path: '/grants',
+    built: true,
+    served: true,
+    absent: '',
+  },
+  {
     id: 'activity',
     label: 'Activity',
     summary: 'Who asked, which grant admitted it, what was called and what came back.',
@@ -204,6 +217,8 @@ export function surfaceOfRoute(name: string): string | null {
   switch (name) {
     case 'connections':
       return 'connections'
+    case 'grants':
+      return 'grants'
     case 'explorer':
     case 'operation':
     case 'core':
