@@ -39,7 +39,6 @@ _None._
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
 - [X-23 — A browser-facing endpoint is refused in cleartext too](X-23-browser-facing-endpoint-scheme.md) · raised by X-17's implementor and again by X-19's, 2026-08-01: BACK_CHANNEL covers only the token endpoint and the key set, so FLUX_EXCHANGE_OIDC_AUTHORIZATION_ENDPOINT and _REDIRECT_URI take any scheme without a word
-- [X-24 — A sign-in reads the clock once](X-24-one-clock-reading.md) · found by X-16's reviewer, 2026-08-01: `complete` reads now() for `admit` and `open` reads it again, so a token whose exp falls between the two readings is admitted and then refused — the caller gets NoSession's 503 rather than the 401 Expired would give
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
@@ -68,6 +67,7 @@ _None._
 - [X-18 — A delete that fails half way says what it destroyed](X-18-delete-partial-failure.md) · found by a standing audit of the credential surface, 2026-08-01: DELETE has no rollback and no partial-failure report, so a failed delete can leave a live vendor credential on disk while the operator is told only 'retrying may work'
 - [X-19 — The cleartext check parses an authority the way the client that sends the secret does](X-19-authority-parser-divergence.md) · found by X-17's reviewer, 2026-08-01: `http://evil.example\\@127.0.0.1/token` passes `carries_a_secret_safely` as loopback, while the `url` crate reqwest actually uses resolves the host to `evil.example` — so the check clears a configuration that sends the client secret in cleartext to a remote host
 - [X-20 — A create refused because the store denied us does not say 'retrying may work'](X-20-create-failure-kinds.md) · found by X-18's implementor, 2026-08-01: partly_written flattens every store-failure kind to 503, so a create refused because the store Denied this host's access tells the caller to retry — the same defect class X-18 fixed on the delete side
+- [X-24 — A sign-in reads the clock once](X-24-one-clock-reading.md) · found by X-16's reviewer, 2026-08-01: `complete` reads now() for `admit` and `open` reads it again, so a token whose exp falls between the two readings is admitted and then refused — the caller gets NoSession's 503 rather than the 401 Expired would give
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

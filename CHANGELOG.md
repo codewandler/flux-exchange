@@ -27,6 +27,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **A sign-in reads the clock once** (X-24). X-16 consolidated the wall clock to one function, but
+  one function is not one reading: `complete` read it for `admit` and the session store read it
+  again, so a token expiring between the two was admitted and then refused — the caller seeing a
+  `503` "cannot open a session" for what was really an expired credential, and the log saying the
+  same. The reading is now taken once and spent on both decisions.
+
+  It is still taken **after** the token exchange rather than at the top of the call. Moving it
+  earlier reads plainer and fails open: the deadline is measured from it, so a reading taken before
+  a slow token endpoint would let the session outlive the token by the round-trip.
+
 - **A create the store refuses keeps its kind** (X-20). `partly_written` flattened every
   store-failure kind to `503` "retrying may work", so a create refused because the store *denied this
   host access* sent the operator to retry instead of to fix the permission — the same defect X-18
