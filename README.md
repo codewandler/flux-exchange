@@ -77,7 +77,7 @@ against one tenant's connections, not a vendor secret.
 | | |
 |---|---|
 | `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path. **Real and tested (39 tests).** |
-| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port — one that **ends when the id token behind it does** — **complete OIDC sign-in**, and a per-tenant connection surface. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (149 tests).** |
+| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port — one that **ends when the id token behind it does** — **complete OIDC sign-in**, a per-tenant connection surface, and `POST /api/agents`, which **mints an agent principal for the caller's tenant and shows its token once**. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (207 tests).** |
 | `console/` | A Vue 3 console reading the **live catalogue** from this service, reusing the framework-free explorer components from flux-connectors. An unreachable service renders an error naming the endpoint — never an empty catalogue. |
 
 **Not built, despite being described in the design:** a second connection to one
@@ -86,6 +86,19 @@ configuration, `invoke`,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
 catalogue loader. The credential store has moved off this list and is described below. The design is ahead of the code on purpose; the gap is
 stated here so nobody has to discover it.
+
+### An agent token is minted, and nothing yet verifies one
+
+`POST /api/agents` mints an agent principal for the authenticated caller's tenant and returns its
+token **once**; this host keeps `SHA-256(token)` and never the token, in a store of its own bound by
+`FLUX_EXCHANGE_AGENTS`. Reading that store end to end yields the roster — which agents exist, in
+which tenants, until when — and no value anybody can present.
+
+**Presenting such a token authenticates nothing yet.** Nothing binds the agent store to the
+`Identity` port, so a minted token is refused by every guarded route exactly as an unknown value is;
+and there is no way to list or revoke one, so minting is currently a one-way door until the token's
+own expiry passes. Both are the next two stories of the same epic, and the gap is stated here rather
+than left to be discovered by an operator who has just handed a token to an agent.
 
 ### The credential store, and what does not protect it
 

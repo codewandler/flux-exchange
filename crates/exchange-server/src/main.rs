@@ -11,6 +11,7 @@
 //! resolve a principal is refused at startup**, not warned about and served anyway. See
 //! [`bind::admit_bind`] and `docs/designs/http-surface.md`.
 
+mod agent;
 mod bind;
 mod connection_guard;
 mod dev_identity;
@@ -29,6 +30,7 @@ use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use crate::agent::{AgentStore, AGENT_STORE_SETTING};
 use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
 use crate::oidc::config::{ConfigRefusal, OidcConfig};
@@ -81,26 +83,68 @@ async fn serve() -> Result<(), StartupRefusal> {
         .map_err(|source| StartupRefusal::Serving { source })
 }
 
-/// Bind the ports this composition serves with: an identity provider, and a credential store.
+/// Bind the ports this composition serves with: an identity provider, a credential store, and an
+/// agent store.
 ///
-/// Three ports, all independent, and every one of them defaults to *bound to nothing* with no
+/// Four ports, all independent, and every one of them defaults to *bound to nothing* with no
 /// fallback. The argument is the same in each case and it is the one that decides the shape: a
 /// safety property that depends on a setting staying at its default is one setting away from gone,
 /// so nothing here has to be turned *off* to be safe — only turned on to be useful.
 ///
 /// The development identity is armed by [`DEV_IDENTITY_ENV`]; failing that, OIDC sign-in is offered
-/// if it was configured; the credential store is bound by its own setting. Unset and unconfigured
-/// binds nothing, which is the state a reachable bind is already refused in.
+/// if it was configured; the credential store and the agent store are bound by their own settings.
+/// Unset and unconfigured binds nothing, which is the state a reachable bind is already refused in.
 ///
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
 fn compose() -> Result<AppState, StartupRefusal> {
-    let state = compose_identity()?;
+    let mut state = compose_identity()?;
 
-    match credential_store()? {
-        Some(store) => Ok(state.with_credentials(store)),
-        None => Ok(state),
+    if let Some(store) = credential_store()? {
+        state = state.with_credentials(store);
     }
+    if let Some(store) = agent_store()? {
+        state = state.with_agents(store);
+    }
+
+    Ok(state)
+}
+
+/// Bind the agent store the environment names, or bind none.
+///
+/// The same three states as the credential store, for the same reason and with one difference worth
+/// naming. **Unset binds nothing**, and `POST /api/agents` then refuses with `503` quoting this
+/// setting — which is not the in-memory fallback X-09 refuses, because nothing is served from
+/// somewhere else: the host says it cannot hold the record, and a token it could not record is one
+/// nobody could ever revoke. **Set and unusable refuses to start**, since a store the operator named
+/// and this process could not open is a mistake with no later moment at which it announces itself —
+/// and, here, one of the ways it can be unusable is a mode that would let somebody else plant a
+/// verifier, which is an authentication bypass rather than an inconvenience. See `crate::agent`.
+///
+/// Not `#[cfg(unix)]`, unlike the credential store. What protects a *credential* in that file is the
+/// mode and nothing else, so a platform that cannot spell one gets no store at all; what protects an
+/// agent token here is that the store holds a digest rather than the token, which holds on every
+/// platform. The mode still matters — it is what stops a planted verifier — and `crate::agent`
+/// states plainly what is lost where it cannot be checked.
+fn agent_store() -> Result<Option<Arc<AgentStore>>, StartupRefusal> {
+    let Ok(configured) = std::env::var(AGENT_STORE_SETTING) else {
+        warn!(
+            "no agent store is bound ({AGENT_STORE_SETTING} is unset), so minting an agent token \
+             will refuse. Set it to a path to let this host mint tokens for the agents that call \
+             it",
+        );
+        return Ok(None);
+    };
+
+    let store =
+        AgentStore::open(configured.trim()).map_err(|source| StartupRefusal::AgentStore {
+            reason: source.to_string(),
+        })?;
+
+    // Read back off the bound store, so this line cannot name a file this process did not open.
+    info!("{}", store.banner());
+
+    Ok(Some(Arc::new(store)))
 }
 
 /// Bind the credential store the environment names, or bind none.

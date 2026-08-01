@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use exchange_host::{Identity, SecretStore};
 
+use crate::agent::AgentStore;
 use crate::bind::IdentityBinding;
 use crate::connection_guard::ConnectionGuard;
 use crate::dev_identity::DevIdentity;
@@ -34,6 +35,14 @@ pub struct AppState {
     /// not an `Option` — a guard with no store behind it costs nothing and guards nothing, and
     /// making it absent would give the routes a second thing to branch on.
     connections: Arc<ConnectionGuard>,
+    /// The agents this host has minted tokens for, if this composition bound a store for them.
+    ///
+    /// A separate binding from [`credentials`](Self::credentials) and deliberately so: an agent
+    /// verifier is this host's own record and a credential is a tenant's vendor secret, and
+    /// `crate::agent`'s module documentation carries the argument for why they are two stores. Every
+    /// combination of the two is a real composition, so neither implies the other. `None` is a
+    /// composition that bound none, and the mint route refuses rather than pretending.
+    agents: Option<Arc<AgentStore>>,
 }
 
 /// What this composition can offer a human who wants to sign in.
@@ -87,6 +96,7 @@ impl AppState {
             sign_in: SignIn::Unconfigured,
             credentials: None,
             connections: Arc::default(),
+            agents: None,
         }
     }
 
@@ -105,6 +115,7 @@ impl AppState {
             sign_in: SignIn::Unconfigured,
             credentials: None,
             connections: Arc::default(),
+            agents: None,
         }
     }
 
@@ -115,6 +126,7 @@ impl AppState {
             sign_in: SignIn::Unconfigured,
             credentials: None,
             connections: Arc::default(),
+            agents: None,
         }
     }
 
@@ -133,6 +145,7 @@ impl AppState {
             sign_in: SignIn::Oidc(oidc),
             credentials: None,
             connections: Arc::default(),
+            agents: None,
         }
     }
 
@@ -148,6 +161,7 @@ impl AppState {
             sign_in: SignIn::NoTokenExchange,
             credentials: None,
             connections: Arc::default(),
+            agents: None,
         }
     }
 
@@ -174,6 +188,30 @@ impl AppState {
     /// caller supplied.
     pub fn credentials(&self) -> Option<&Arc<dyn SecretStore>> {
         self.credentials.as_ref()
+    }
+
+    /// Bind the agent store this composition holds.
+    ///
+    /// An additive builder method for [`with_credentials`](Self::with_credentials)' reason, and the
+    /// reason matters more with every one of these: the identity binding, the credential store and
+    /// the agent store are independent, every combination of them is a real composition, and five
+    /// constructors times two ports times two would be twenty. An additive method also leaves the
+    /// existing spellings untouched, which is what lets two stories that each add a port land
+    /// without colliding.
+    ///
+    /// **Binding one does not make a caller resolvable**, so it must never influence
+    /// [`identity_binding`](Self::identity_binding) — X-36 mints agent tokens and nothing yet
+    /// verifies one, and even once X-37 does, an agent store is not an identity provider a *human*
+    /// can sign in through. `binding_an_agent_store_does_not_admit_a_reachable_bind` is that claim,
+    /// and it is here rather than in `bind` because pinning the enum is not pinning the wiring.
+    pub fn with_agents(mut self, agents: Arc<AgentStore>) -> Self {
+        self.agents = Some(agents);
+        self
+    }
+
+    /// The agent store this composition bound, if it bound one.
+    pub fn agents(&self) -> Option<&Arc<AgentStore>> {
+        self.agents.as_ref()
     }
 
     /// The claims on connection changes in flight.
@@ -355,6 +393,45 @@ mod tests {
             admit_bind(addr("127.0.0.1:8080"), state.identity_binding()).is_ok(),
             "and loopback must still be admitted, or the safe configuration is the unusable one",
         );
+    }
+
+    /// **X-36.** Binding an agent store does not legalise a reachable bind.
+    ///
+    /// The same shape as the two above, and here for the reason they are here: pinning the enum is
+    /// not pinning the wiring. An agent store is a place to keep verifiers, not a thing that can
+    /// resolve a caller — nothing in this build verifies an agent token at all yet, and even once
+    /// X-37 does, a host on `0.0.0.0` whose only identity is the development roster is exactly the
+    /// composition `admit_bind` exists to refuse. The mistake this catches is somebody reasoning
+    /// "agents can authenticate now, so this host has an identity provider" and teaching
+    /// `identity_binding` to say so.
+    #[test]
+    fn binding_an_agent_store_does_not_admit_a_reachable_bind() {
+        let directory =
+            std::env::temp_dir().join(format!("flux-exchange-state-agents-{}", std::process::id()));
+        let store = Arc::new(
+            crate::agent::AgentStore::open(directory.join("agents.json")).expect("a fresh store"),
+        );
+
+        for state in [
+            AppState::without_identity().with_agents(store.clone()),
+            AppState::with_development_identity(dev()).with_agents(store.clone()),
+            AppState::oidc_without_a_token_exchange().with_agents(store.clone()),
+        ] {
+            assert!(
+                admit_bind(addr("0.0.0.0:8080"), state.identity_binding()).is_err(),
+                "binding an agent store must not make a reachable bind legal",
+            );
+        }
+
+        assert_eq!(
+            AppState::with_development_identity(dev())
+                .with_agents(store)
+                .identity_binding(),
+            IdentityBinding::Development,
+            "and it must not change the binding a composition reports either",
+        );
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The concrete port is reachable only when it is the development one, because that is what
