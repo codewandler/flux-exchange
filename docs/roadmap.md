@@ -81,15 +81,44 @@ Flux. Not the credential — the address is derived. Not the tenant — it comes
 request-building path ever appears. This host constructs no request of its own, and that is the
 property that keeps it from becoming the credential-injecting proxy the family already rejected.
 
+## Transport, decided upstream
+
+Recorded here because it is an architectural commitment this repository will be held to, not a
+preference to be re-litigated per story:
+
+- **HTTP for everything one-shot** — catalogue reads, connection and credential management,
+  stateless `invoke`, the whole management surface. That is what exists today.
+- **One websocket per connected agent** for the three things that do not fit request/response, which
+  are all the same shape — a long-lived authenticated bidirectional frame stream: inbound events
+  (`subscribe`), streamed operation output (`logs -f`, process stdout, a socket read loop), and
+  **lease liveness**, because this host must learn that a holder died in order to release what it is
+  holding for them.
+
+flux needs no new concept to consume this: `flux-channels` already has a generic `connector` channel
+kind, and a `mode = "remote"` setting opens a stream instead of binding a listener. The event names
+come from the same manifest either way, so `trigger { on = … }` is unchanged.
+
 ## Not yet filed
 
 Deliberately, because filing a story that cannot be started manufactures work rather than scoping it:
 
-- **`subscribe`** — inbound events. It needs the confused-deputy argument made for the *inbound*
-  direction first ("a subscriber cannot name a binding it has not been granted"), and that argument
-  is only sound once an authenticated principal exists. After X-03.
+- **`subscribe`** — inbound events, and the other verb of the same remote connector binding as
+  `invoke`. **Its stated blocker is gone**: the inbound confused-deputy argument is now written down
+  (flux's ecosystem design, and restated in [`vision.md`](vision.md#north-star) — *a subscriber
+  cannot name a binding it has not been granted; a subscription is a projection of the connections
+  that tenant already has*), and it needed an authenticated principal, which shipped in v0.1.0.
+  What it still waits on is a **grant model to scope a subscription with**, i.e. X-13 — which is
+  blocked upstream. Filing it now would produce a story nobody can start.
 - **Leases** — the type is tested and nothing holds one. It needs a runtime that keeps state open,
   which means the runtime axis beyond `http`.
-- **Workflows** — stored `flux-app` programs. Furthest out, and dependent on the composition path
-  in flux-connectors, which is itself waiting on a flux-web bump.
+- **Workflows** — stored, versioned, per-tenant `flux-app` Programs, never a second execution model
+  and never an interpreter here (see [`vision.md`](vision.md) principle 8). Furthest out, and
+  dependent on the composition path in flux-connectors.
+
+  **Check the pin, not flux's HEAD.** The prerequisite was `http.request` returning a record rather
+  than a flat string, so a composite operation can read a field out of a previous step's response.
+  That landed in flux **v0.43.0** — but flux-connectors pins `codewandler-flux-web` **0.41.0**, where
+  it is still flat, so its `Graph` lowering still refuses composites *correctly for the version in
+  its lockfile*. The unblock is real, it is upstream, and it reaches the connector compiler on a
+  flux-web bump and not before.
 - **Execution records** — after X-12, since there is nothing to record until something executes.
