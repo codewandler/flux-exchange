@@ -2,7 +2,6 @@
 id: X-49
 title: "The branches X-46 opened are pinned"
 status: in-progress
-priority: 3
 epic: catalogue
 areas: [console, exchange-server]
 note: "found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes"

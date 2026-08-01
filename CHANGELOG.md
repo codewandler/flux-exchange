@@ -8,6 +8,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **The two branches X-46 opened are pinned** (X-49). Publishing declarations changed how a connector
+  that declares nothing renders — it used to arrive as `refused` and now arrives as `ready` with an
+  empty list — and nothing exercised the branch it took. Both are held by tests now, and each was
+  proved by removing the thing it pins.
+
+  The catalogue guard is the one worth reading: `the_existing_catalogue_answers_gained_no_field`
+  asserted key sets inside a loop over the catalogue with **no non-vacuity check**, so an empty
+  catalogue would have passed it without comparing a single set. It was non-vacuous in fact, which is
+  exactly why it could stop being so silently. The proof runs the counterfactual — the same emptied
+  walk with the counter removed reports `ok`.
+
 - **A connector with a templated host can be invoked** (X-47). Invoke landed and immediately showed
   that a large minority of connectors could not run at all: their `base_url` is templated on a
   per-connection value and there was nowhere for a tenant to supply it. **Seventeen connectors** —
