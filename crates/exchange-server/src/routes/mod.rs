@@ -319,7 +319,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{Method, Request as HttpRequest};
-    use axum::routing::get;
+    use axum::routing::{get, post};
     use exchange_host::{
         address_path, admit_grant, admit_runtime, async_trait, ConnectorSurface, CredentialRef,
         Deployment, Grant, GrantRefusal, Grants, OperationFacts, Principal, Secret, SecretStore,
@@ -456,6 +456,100 @@ mod tests {
         probe
     }
 
+    /// The app `modules` assemble into, with no identity provider bound.
+    ///
+    /// [`app`] for an arbitrary set of modules, so a spy module written to defeat the enumeration
+    /// is walked through a *merged* router rather than a hand-built one — which is the only place
+    /// a path declared twice behaves the way it does in production.
+    fn assembled(modules: &'static [Module]) -> Router {
+        let state = AppState::without_identity();
+
+        modules
+            .iter()
+            .fold(Router::new(), |app, module| app.merge(module.router(&state)))
+            .with_state(state)
+    }
+
+    /// Every declaration in `modules` that answers a caller this host cannot identify, named by the
+    /// module that published it.
+    ///
+    /// Extracted from [`the_anonymous_surface_is_only_what_was_declared_anonymous`] so that
+    /// [`a_second_declaration_at_one_path_cannot_hide_from_the_enumeration`] can drive the same
+    /// code against a surface built to defeat it — the guard's own guard, in the shape
+    /// [`the_declared_access_is_what_decides_the_answer`] uses.
+    async fn anonymously_reachable(
+        modules: &'static [Module],
+        assemble: fn() -> Router,
+    ) -> Vec<(&'static str, &'static str)> {
+        let mut reachable = Vec::new();
+
+        for module in modules {
+            for route in module.routes {
+                let status = anonymous_get(assemble(), &probe_path(route.path)).await;
+
+                if status != StatusCode::UNAUTHORIZED {
+                    reachable.push((module.name, route.path));
+                }
+            }
+        }
+
+        reachable
+    }
+
+    /// **X-61's failing-first test.** A second declaration at an already-declared path is visible
+    /// to the enumeration that exists to see it.
+    ///
+    /// X-54 gated `POST /api/connections/{connector}` by declaring that path **twice** — the open
+    /// verbs at [`Access::Principal`], the `POST` at [`Access::PrincipalOfKind`] — because
+    /// [`Access`] is per [`Route`] and a check inside the handler is what [`Access`] exists to
+    /// refuse. That is sound, and it is not what this test is about.
+    ///
+    /// What it is about is that
+    /// [`the_anonymous_surface_is_only_what_was_declared_anonymous`] probed every declaration with
+    /// a `GET`. Both declarations at one path answer the same `GET` — served by whichever of them
+    /// declares it — so the other one's access was **unobservable to the test whose entire job is
+    /// to notice it**: setting the `POST` entry to [`Access::Anonymous`] left the guard green.
+    ///
+    /// The spy below is that shape with nothing else in it: one path, two declarations, the second
+    /// anonymous and reachable only by `POST`. A guard that probes paths rather than declarations
+    /// reports an empty set here.
+    #[tokio::test]
+    async fn a_second_declaration_at_one_path_cannot_hide_from_the_enumeration() {
+        fn guarded() -> MethodRouter<AppState> {
+            get(|| async { "reached" })
+        }
+
+        fn widening() -> MethodRouter<AppState> {
+            post(|| async { "reached" })
+        }
+
+        const SPIES: &[Module] = &[Module {
+            name: "spy",
+            routes: &[
+                Route {
+                    path: "/spy-shared",
+                    access: Access::Principal,
+                    method_router: guarded,
+                },
+                // The widening. Same path, different verb, and the only thing that distinguishes
+                // it from the entry above is the declared access.
+                Route {
+                    path: "/spy-shared",
+                    access: Access::Anonymous,
+                    method_router: widening,
+                },
+            ],
+        }];
+
+        assert_eq!(
+            anonymously_reachable(SPIES, || assembled(SPIES)).await,
+            vec![("spy", "/spy-shared")],
+            "a declaration that answers a caller with no principal did not appear in the \
+             enumeration, because a sibling declaration at the same path answers the verb the \
+             probe sent; widening the anonymous surface is supposed to be something somebody sees",
+        );
+    }
+
     /// Every route that answers a caller this host cannot identify, and the argument for each one
     /// being on the list.
     ///
@@ -535,16 +629,7 @@ mod tests {
             ("onboarding", "/api/onboarding"),
         ];
 
-        let mut reachable = Vec::new();
-
-        for (module, route) in published() {
-            let status =
-                anonymous_get(app(AppState::without_identity()), &probe_path(route.path)).await;
-
-            if status != StatusCode::UNAUTHORIZED {
-                reachable.push((module.name, route.path));
-            }
-        }
+        let reachable = anonymously_reachable(MODULES, || app(AppState::without_identity())).await;
 
         assert_eq!(
             reachable, ANONYMOUS,
