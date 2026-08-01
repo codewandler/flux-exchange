@@ -15,6 +15,7 @@
 //! construction. The seam is the same; only the direction of the dependency changed.
 
 mod health;
+mod identity;
 
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
@@ -27,10 +28,11 @@ use serde_json::json;
 use tower_http::trace::TraceLayer;
 use tracing::warn;
 
+use crate::session;
 use crate::state::AppState;
 
 /// The feature modules this app is assembled from. **This is the merge site.**
-const MODULES: &[Module] = &[health::MODULE];
+const MODULES: &[Module] = &[health::MODULE, identity::MODULE];
 
 /// A feature module's contribution to the surface.
 pub struct Module {
@@ -83,10 +85,9 @@ pub enum Access {
     Anonymous,
     /// Refused unless the identity port resolves a principal.
     ///
-    /// No route in this binary needs a principal yet — X-03 adds the first. The variant exists
-    /// already because the enumeration test that keeps health the *only* anonymous route has to be
-    /// able to express the other case, and inventing a route to satisfy a lint would be worse.
-    #[allow(dead_code)]
+    /// Everything but health. `identity::MODULE` is the first route declared this way, and
+    /// `tests::the_surface_publishes_a_route_that_requires_a_principal` keeps at least one so the
+    /// enumeration above never becomes a comparison against an empty set.
     Principal,
 }
 
@@ -126,7 +127,7 @@ async fn require_principal(
         );
     };
 
-    let presented = bearer(&request).unwrap_or_default();
+    let presented = presented(&request).unwrap_or_default();
     // Bound before the match so the borrow of `request` ends here and the resolved principal can be
     // attached below.
     let resolved = identity.resolve(presented).await;
@@ -155,14 +156,34 @@ async fn require_principal(
     }
 }
 
-/// The bearer token a request presents, if it presents one at all.
-fn bearer(request: &Request) -> Option<&str> {
-    request
-        .headers()
-        .get(header::AUTHORIZATION)?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
+/// The credential material a request presents, if it presents any at all.
+///
+/// Two ways to carry one session, because the two callers this host serves carry things
+/// differently: an **agent** sets an `Authorization` header, and a **browser** sends the cookie it
+/// was given. Both arrive here as an opaque string, which is the only thing the identity port sees
+/// — this function decides *where* a credential was found, never what it means.
+///
+/// The header wins when both are present. An `Authorization` header is something the caller
+/// deliberately attached; a cookie is ambient, attached by the browser on the caller's behalf. When
+/// they disagree, the deliberate one is the one that was meant.
+///
+/// **Nothing about the tenant is read here, from either.** The credential resolves to a principal
+/// and the tenant comes from that principal — which is why this returns the material and not a
+/// caller identity.
+fn presented(request: &Request) -> Option<&str> {
+    let headers = request.headers();
+
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    bearer.or_else(|| {
+        headers
+            .get(header::COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| session::from_cookie_header(value, session::SESSION_COOKIE))
+    })
 }
 
 /// A refusal as the caller sees it: a status and a reason, never a value.
@@ -243,6 +264,52 @@ mod tests {
             [("health", "/health")],
             "every route but /health must refuse a caller with no principal; \
              these answered one: {reachable:?}",
+        );
+    }
+
+    /// X-03's deliverable, stated as an enumeration rather than as a route name: this host
+    /// publishes at least one route that actually requires a principal.
+    ///
+    /// Without it, the anonymous-surface test above is vacuously green — a surface on which
+    /// *every* route is anonymous satisfies "the anonymous set is what was declared" as happily as
+    /// one where the guard works. This is the assertion that stops the guard from being mechanism
+    /// with no user.
+    #[test]
+    fn the_surface_publishes_a_route_that_requires_a_principal() {
+        let guarded: Vec<_> = published()
+            .filter(|(_, route)| route.access == Access::Principal)
+            .map(|(module, route)| (module.name, route.path))
+            .collect();
+
+        assert!(
+            !guarded.is_empty(),
+            "no published route requires a principal, so the guard protects nothing and the \
+             enumeration test above compares health against an empty set",
+        );
+    }
+
+    /// The tenant comes from the resolved principal and from **nothing a caller controls** — so no
+    /// published route may take a tenant in its path. Stated over the whole surface rather than
+    /// over the routes that exist today, so a module added by a later story is covered on the day
+    /// it lands. X-10 ("no route accepts an address") inherits this.
+    #[test]
+    fn no_published_route_takes_a_tenant_in_its_path() {
+        let tenant_addressed: Vec<_> = published()
+            .filter(|(_, route)| {
+                route
+                    .path
+                    .split('/')
+                    .filter_map(|segment| segment.strip_prefix('{'))
+                    .filter_map(|segment| segment.strip_suffix('}'))
+                    .any(|parameter| parameter.to_ascii_lowercase().contains("tenant"))
+            })
+            .map(|(module, route)| (module.name, route.path))
+            .collect();
+
+        assert!(
+            tenant_addressed.is_empty(),
+            "these routes take a tenant in the path, which is a vector a caller controls; the \
+             tenant must come from the resolved principal: {tenant_addressed:?}",
         );
     }
 

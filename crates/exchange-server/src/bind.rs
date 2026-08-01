@@ -7,6 +7,8 @@
 use std::fmt;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr};
 
+use crate::dev_identity::{DevIdentityRefusal, DEV_IDENTITY_ENV};
+
 /// Where the server listens when nothing says otherwise.
 ///
 /// Loopback, because a service that holds other people's credentials and is reachable *by default*
@@ -26,6 +28,14 @@ pub enum IdentityBinding {
     Bound,
     /// None is configured, so every caller is anonymous whatever it presents.
     Unbound,
+    /// The **development** identity is armed: it mints principals from a roster the operator wrote
+    /// at startup, and a roster handle is a credential with no secret in it.
+    ///
+    /// Deliberately not [`IdentityBinding::Bound`]. It *can* turn a request into a principal, so
+    /// collapsing the two would be easy and would be exactly the hole the story warns about: a
+    /// reachable bind whose authentication is a name anybody can guess is worse than no
+    /// authentication, because the surface in front of it believes every caller.
+    Development,
 }
 
 /// Decide whether the server may listen on `bind`.
@@ -40,11 +50,19 @@ pub enum IdentityBinding {
 pub fn admit_bind(bind: SocketAddr, identity: IdentityBinding) -> Result<(), StartupRefusal> {
     // Only loopback is unreachable from elsewhere. In particular the unspecified addresses
     // (`0.0.0.0`, `::`) are *not* loopback, which is the case an operator most often reaches for.
-    if bind.ip().is_loopback() || identity == IdentityBinding::Bound {
+    if bind.ip().is_loopback() {
         return Ok(());
     }
 
-    Err(StartupRefusal::ReachableBindWithoutIdentity { bind })
+    match identity {
+        IdentityBinding::Bound => Ok(()),
+        IdentityBinding::Unbound => Err(StartupRefusal::ReachableBindWithoutIdentity { bind }),
+        // The development identity is the one binding that can resolve a principal and still must
+        // not be exposed. This is the refusal the story asks for in place of a default.
+        IdentityBinding::Development => {
+            Err(StartupRefusal::ReachableBindWithDevelopmentIdentity { bind })
+        }
+    }
 }
 
 /// Why the server would not start. Every variant refuses; none repairs.
@@ -56,6 +74,17 @@ pub fn admit_bind(bind: SocketAddr, identity: IdentityBinding) -> Result<(), Sta
 pub enum StartupRefusal {
     /// The bind is reachable from outside this machine and nothing could authenticate a caller.
     ReachableBindWithoutIdentity {
+        /// The address that was asked for.
+        bind: SocketAddr,
+    },
+
+    /// The bind is reachable from outside this machine and the development identity is armed.
+    ///
+    /// Distinct from [`StartupRefusal::ReachableBindWithoutIdentity`] because the remedy is the
+    /// opposite one: there, the operator adds an identity provider; here, the operator *removes*
+    /// the one they have. A single refusal covering both would tell half of its readers to do the
+    /// wrong thing.
+    ReachableBindWithDevelopmentIdentity {
         /// The address that was asked for.
         bind: SocketAddr,
     },
@@ -85,6 +114,18 @@ pub enum StartupRefusal {
         /// The transport's reason.
         source: std::io::Error,
     },
+
+    /// The development identity was armed and could not be read.
+    DevIdentity {
+        /// Which part of the roster was unreadable.
+        source: DevIdentityRefusal,
+    },
+}
+
+impl From<DevIdentityRefusal> for StartupRefusal {
+    fn from(source: DevIdentityRefusal) -> Self {
+        Self::DevIdentity { source }
+    }
 }
 
 impl fmt::Display for StartupRefusal {
@@ -99,6 +140,14 @@ impl fmt::Display for StartupRefusal {
                  loopback ({BIND_ENV}={DEFAULT_BIND}), or configure an identity provider and start \
                  again",
             ),
+            Self::ReachableBindWithDevelopmentIdentity { bind } => write!(
+                f,
+                "refusing to serve on {bind}: it is reachable from outside this machine and the \
+                 development identity is armed, so anyone who can reach it becomes any principal \
+                 on the roster by naming it. Either bind loopback \
+                 ({BIND_ENV}={DEFAULT_BIND}), or unset {DEV_IDENTITY_ENV} and configure a real \
+                 identity provider",
+            ),
             Self::UnreadableBind { value, .. } => write!(
                 f,
                 "{BIND_ENV} is not a socket address: {value:?}. Expected `host:port`, \
@@ -108,6 +157,7 @@ impl fmt::Display for StartupRefusal {
                 write!(f, "cannot listen on {bind}: {source}")
             }
             Self::Serving { source } => write!(f, "stopped serving: {source}"),
+            Self::DevIdentity { source } => write!(f, "{source}"),
         }
     }
 }
@@ -115,7 +165,9 @@ impl fmt::Display for StartupRefusal {
 impl std::error::Error for StartupRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::ReachableBindWithoutIdentity { .. } => None,
+            Self::ReachableBindWithoutIdentity { .. }
+            | Self::ReachableBindWithDevelopmentIdentity { .. } => None,
+            Self::DevIdentity { source } => Some(source),
             Self::UnreadableBind { source, .. } => Some(source),
             Self::BindUnavailable { source, .. } => Some(source),
             Self::Serving { source } => Some(source),
@@ -184,6 +236,59 @@ mod tests {
     #[test]
     fn a_reachable_bind_is_admitted_once_an_identity_is_bound() {
         assert!(admit_bind(addr("0.0.0.0:8080"), IdentityBinding::Bound).is_ok());
+    }
+
+    /// The hole X-03 must not open: arming a development identity resolves principals, so it would
+    /// satisfy a rule that only asked "can anything authenticate a caller". It must not satisfy
+    /// this one — a roster handle is a credential with no secret in it, and a network-reachable
+    /// port that accepts one is worse than an unauthenticated port, because everything downstream
+    /// believes the principal.
+    #[test]
+    fn a_reachable_bind_with_the_development_identity_is_refused() {
+        for open in ["0.0.0.0:8080", "[::]:8080", "192.168.1.10:8080"] {
+            let refusal = admit_bind(addr(open), IdentityBinding::Development)
+                .expect_err("the development identity must never be reachable");
+
+            assert!(
+                matches!(
+                    refusal,
+                    StartupRefusal::ReachableBindWithDevelopmentIdentity { .. }
+                ),
+                "`{open}` was refused as {refusal:?} rather than for the development identity",
+            );
+        }
+    }
+
+    /// The development identity is for local work, so loopback must still be admitted — otherwise
+    /// the safe configuration is also the unusable one, and the rule gets worked around.
+    #[test]
+    fn loopback_is_admitted_with_the_development_identity() {
+        for local in ["127.0.0.1:8080", "[::1]:8080"] {
+            assert!(admit_bind(addr(local), IdentityBinding::Development).is_ok());
+        }
+    }
+
+    /// The two reachable-bind refusals have opposite remedies — add a provider, or remove the one
+    /// you have — so each must name its own.
+    #[test]
+    fn the_development_refusal_names_the_opposite_remedy() {
+        let message = admit_bind(addr("0.0.0.0:8080"), IdentityBinding::Development)
+            .expect_err("a reachable development bind is refused")
+            .to_string();
+
+        assert!(message.contains("0.0.0.0:8080"), "{message}");
+        assert!(message.contains(DEV_IDENTITY_ENV), "{message}");
+        assert!(message.contains("unset"), "{message}");
+
+        let unbound = admit_bind(addr("0.0.0.0:8080"), IdentityBinding::Unbound)
+            .expect_err("a reachable unbound bind is refused")
+            .to_string();
+
+        assert_ne!(
+            message, unbound,
+            "an operator who armed a dev identity and one who armed nothing must not be told the \
+             same thing",
+        );
     }
 
     #[test]

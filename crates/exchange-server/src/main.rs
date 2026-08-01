@@ -11,18 +11,22 @@
 //! [`bind::admit_bind`] and `docs/designs/http-surface.md`.
 
 mod bind;
+mod dev_identity;
 mod routes;
+mod session;
 mod state;
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use exchange_host::{Deployment, Runtime};
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
+use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
 use crate::state::AppState;
 
 #[tokio::main]
@@ -46,7 +50,7 @@ async fn main() -> ExitCode {
 
 /// Start the server, or refuse and say why.
 async fn serve() -> Result<(), StartupRefusal> {
-    let state = AppState::without_identity();
+    let state = compose()?;
     let bind = configured_bind()?;
 
     // Before the socket, not after: a listener that opens and then closes has still been open.
@@ -68,6 +72,35 @@ async fn serve() -> Result<(), StartupRefusal> {
         .with_graceful_shutdown(stop_requested())
         .await
         .map_err(|source| StartupRefusal::Serving { source })
+}
+
+/// Bind the ports this composition serves with.
+///
+/// There is exactly one identity port on offer and it is the development one, armed only by
+/// [`DEV_IDENTITY_ENV`] being set. Unset is the default and the default binds nothing, which is
+/// the state a reachable bind is already refused in — so no configuration has to be *turned off*
+/// to be safe, only turned on to be convenient. A real provider is X-04.
+fn compose() -> Result<AppState, StartupRefusal> {
+    let Some(dev) = DevIdentity::armed()? else {
+        return Ok(AppState::without_identity());
+    };
+
+    // Named as such at startup, and at `warn` rather than `info`: this line is the difference
+    // between a host whose principals are authenticated and one whose principals are asserted, and
+    // an operator who scrolls past it should still have seen it.
+    let roster: Vec<String> = dev
+        .roster()
+        .map(|(handle, principal)| format!("{handle} -> {principal}"))
+        .collect();
+
+    warn!(
+        roster = %roster.join(", "),
+        "DEVELOPMENT identity armed by {DEV_IDENTITY_ENV}. Any caller presenting one of these \
+         handles becomes that principal, with no secret required. This host will refuse to serve \
+         on any address but loopback while it is armed",
+    );
+
+    Ok(AppState::with_development_identity(Arc::new(dev)))
 }
 
 /// Where to listen, from the environment or from the loopback default.

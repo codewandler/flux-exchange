@@ -48,6 +48,15 @@ mod lease;
 mod principal;
 mod runtime;
 
+/// Re-exported so a composing binary can implement [`Identity`] without taking its own dependency
+/// on `async-trait`.
+///
+/// The version matters as much as the convenience: `#[async_trait]` desugars to a signature that
+/// both sides must agree on, so an implementor resolving a *different* version of the macro gets a
+/// mismatched `resolve` and an error that names lifetimes rather than the actual problem. A port
+/// that cannot be implemented without guessing a dependency version is not much of a port.
+pub use async_trait::async_trait;
+
 #[cfg(unix)]
 pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
 pub use grant::{Effect, Grant, Idempotency, OperationFacts, Risk, Selector};
