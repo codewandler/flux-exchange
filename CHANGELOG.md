@@ -8,6 +8,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A credential store, honest about what protects it** (X-09). `exchange_host::CredentialStore`
+  binds `connector-secrets`' file-backed store — `0600` in a `0700` directory, modes set in the
+  create call and re-checked at open, a widened mode **refused rather than tightened**, and atomic
+  writes through temp + `fsync` + `rename(2)`. What this host adds is startup honesty: a path inside
+  a working tree is refused (one `git add -A` from a committed credential), a configuration naming
+  no path is a startup error naming what would have worked with **no fallback to memory**, and the
+  banner reads its path back off the store that was actually bound. The README states what does
+  *not* protect a value there: the file mode and nothing else. Not yet wired into a binary.
 - **An HTTP surface that refuses an open bind** (X-02). `cargo run` binds `127.0.0.1:8080` and
   answers `GET /health`. Startup on a reachable address with no identity provider configured is
   **refused before the socket opens**, and the refusal names what would have worked — a daemon

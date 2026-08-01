@@ -75,10 +75,10 @@ against one tenant's connections, not a vendor secret.
 | | |
 |---|---|
 | `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound but not yet wired into a binary. **Real and tested (32 tests).** |
-| `crates/exchange-server` | A binary that reports what it would serve and exits. **Not a service.** |
+| `crates/exchange-server` | A service with exactly one route: `GET /health` on loopback. It refuses to start on a reachable address with no identity provider. **Tested (13 tests).** |
 | `console/` | A Vue 3 console rendering **fixture data**, reusing the framework-free explorer components from flux-connectors. **No backend.** |
 
-**Not built, despite being described in the design:** sign-in, any HTTP route, `invoke`,
+**Not built, despite being described in the design:** sign-in, every route but `/health`, `invoke`,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
 catalogue loader. The credential store has moved off this list and is described below — with the
 caveat that it is a library binding no binary holds yet, which is a shorter distance from "not
@@ -111,13 +111,13 @@ To decommission a store, remove the **directory**, not the file — a write inte
 `fsync` and the `rename(2)` can leave a complete copy of every credential in a sibling temporary
 that `rm` on the store file alone does not touch.
 
-No binary binds it yet; the server still starts, prints the matrix above, and exits.
+No binary binds it yet: the server serves `/health` without ever opening a store.
 
 ## Try it
 
 ```bash
-cargo run                       # prints the deployment matrix above
-cargo test --workspace          # 32 tests
+cargo run                       # binds 127.0.0.1:8080, answers GET /health
+cargo test --workspace          # 45 tests
 cd console && npm install && npm run dev
 ```
 

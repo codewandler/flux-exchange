@@ -5,9 +5,10 @@ the [board](stories/README.md); this document is the narrative around it.
 
 ## Status
 
-_As of 2026-08-01:_ **v0.0.1 — a charter and a type system.** There is no service.
+_As of 2026-08-01:_ **v0.0.1 — a charter, a type system, and an HTTP surface with one route.**
+`cargo run` binds loopback and answers `GET /health`; everything past that is unbuilt.
 
-`crates/exchange-host` carries the vocabulary and the rules as tested types (19 tests):
+`crates/exchange-host` carries the vocabulary and the rules as tested types (32 tests):
 `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, and the `Identity` port.
 Four rules are executed rather than described — a traversing tenant id refused at construction, a
 multi-tenant deployment refusing every locally-executing runtime, deny beating allow in a selector,

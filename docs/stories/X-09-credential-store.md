@@ -1,7 +1,7 @@
 ---
 id: X-09
 title: "A credential store, honest about what protects it"
-status: in-progress
+status: done
 priority: 4
 epic: connections
 note: "no fallback to memory on a bad store value — a host that fell back would start, serve every route correctly, look exactly like a working one, and lose everything on restart"
@@ -14,24 +14,40 @@ Persist credentials behind `SecretStore`, so a restart signs everyone out but le
 still wired.
 
 ## Acceptance
-- [ ] A file-backed store: `0600` on the file and `0700` on the directory, set in the `open`/`mkdir`
+- [x] A file-backed store: `0600` on the file and `0700` on the directory, set in the `open`/`mkdir`
       call rather than `chmod`-ed afterwards, and **re-checked at startup**.
-- [ ] **Failing-first test** — a store whose mode has been widened is **refused, not repaired**. It
+- [x] **Failing-first test** — a store whose mode has been widened is **refused, not repaired**. It
       was already exposed; quietly tightening it hides that.
-- [ ] Writes are atomic — write a sibling temporary, `fsync`, `rename` — so a crash mid-write leaves
+- [x] Writes are atomic — write a sibling temporary, `fsync`, `rename` — so a crash mid-write leaves
       the previous file whole rather than truncated.
-- [ ] **Failing-first test** — a store path inside the repository working directory is refused. One
+- [x] **Failing-first test** — a store path inside the repository working directory is refused. One
       `git add -A` from a committed credential is not a risk to leave to attention.
-- [ ] A bad store configuration is a **startup error naming what would have worked**. There is no
+- [x] A bad store configuration is a **startup error naming what would have worked**. There is no
       fallback to in-memory.
-- [ ] `StoreError::NotFound` and `StoreError::Unreachable` never collapse into each other.
-- [ ] The startup banner prints the exact path in use, assembled from the store that was actually
+- [x] `StoreError::NotFound` and `StoreError::Unreachable` never collapse into each other.
+- [x] The startup banner prints the exact path in use, assembled from the store that was actually
       bound so it cannot describe a different one.
-- [ ] Whatever protection is *absent* (encryption, a keychain) is stated in the README in the same
+- [x] Whatever protection is *absent* (encryption, a keychain) is stated in the README in the same
       change, not left for a reader to infer.
 
 ## Progress
-- (not started)
+- **Done.** Merged from `impl/X-09`; gate green on the integration branch after merge.
+- **Composed, not reimplemented.** `connector-secrets` 0.8.0 already ships a `FileStore` that sets
+  `0600`/`0700` in the create call, refuses a widened mode rather than tightening it, and writes
+  through temp + `fsync` + `rename(2)`. This story binds that store; it does not build a second one.
+- **Consequence worth stating: two Acceptance items were not proven failing-first.** The mode-refusal
+  tests pass at the merge base, because the behaviour is upstream's. They were kept as regression
+  guards, and a review confirmed they are live — inserting a `set_permissions` repair before
+  `FileStore::open` makes both fail. The genuinely new safety logic here is the working-tree refusal,
+  and that is what the base proof targets.
+- **A review broke the first attempt.** `resolve` returned an un-canonicalised path when the walk-up
+  hit a `..` after a missing directory, so a symlink + `..` spelling bypassed the working-tree guard
+  and `FileStore` then created the credential file *inside the checkout*. Fixed by resolving
+  downward from the root — `..` is only ever applied to an already-resolved prefix, which is what the
+  kernel does — and lexical normalisation was rejected because it is wrong under a symlink.
+- **Not wired into a binary.** `bind_configured` + `banner()` exist and are tested; `exchange-server`
+  calls neither. That is deliberate — wiring it would make `cargo run` refuse without
+  `FLUX_EXCHANGE_CREDENTIALS`, which the binary's documented posture does not yet claim.
 
 ## Notes
 - Deleting a credential must rewrite immediately, so a revoked credential does not return on restart.
