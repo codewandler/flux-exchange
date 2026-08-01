@@ -52,8 +52,13 @@ cargo fmt --all
 cd console && npm install && npm test && npm run build
 ```
 
-Rust 1.88 or newer — that is the floor `jsonwebtoken` and `time` impose, not a number we chose. The console is a separate Node build and does not participate in the Cargo
-workspace.
+Rust 1.88 or newer — that is the floor `jsonwebtoken` and `time` impose, not a number we chose. It
+lives in `Cargo.toml` as `rust-version`, and since X-33 CI's `msrv` job builds the workspace on
+whatever that says, reading the number out of the manifest rather than restating it. **Do not raise
+`rust-version` to make that job green.** It said 1.87 through `v0.1.0`, `v0.2.0` and `v0.3.0` while
+the tree had not built on 1.87 since X-04; correcting it was a repair, and raising it again is a
+compatibility break for consumers that belongs in the CHANGELOG as a decision. The console is a
+separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
