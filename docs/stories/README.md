@@ -40,6 +40,7 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 ### Connections
 - [X-08 — Connections and credentials (epic)](X-08-connections-epic.md) · connector-secrets and connector-spec carry NO flux dependency, so this epic is unblocked too — only invoke waits on the engine line
 - [X-10 — Connections addressed by a tenant the caller cannot name](X-10-connections-are-tenant-addressed.md) · Tenant::new already refuses a traversing spelling at construction; this story is where that validated value becomes the ONLY way an address is built
+- [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
