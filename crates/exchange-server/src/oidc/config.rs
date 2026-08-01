@@ -25,7 +25,7 @@
 //! # Cleartext is refused, and that is a claim about the channel only
 //!
 //! Every configured URL must be `https`, or `http` on loopback for a local test provider. See
-//! [`TRANSPORT_CHECKED`] for which variables and why each is on the list, and
+//! [`transport_checked`] for which variables and why each is on the list, and
 //! [`on_a_channel_this_host_will_use`] for the rule and — the part worth reading — for what
 //! satisfying it does **not** say. It does not say the operator named the right provider.
 
@@ -41,13 +41,13 @@ pub const ISSUER_ENV: &str = "FLUX_EXCHANGE_OIDC_ISSUER";
 
 /// Where `/api/signin` sends the browser.
 ///
-/// **Must be `https`, or `http` on loopback.** See [`TRANSPORT_CHECKED`]: the URL this host builds
+/// **Must be `https`, or `http` on loopback.** See [`transport_checked`]: the URL this host builds
 /// on top of it carries `state`, the `nonce` and the PKCE challenge.
 pub const AUTHORIZATION_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_AUTHORIZATION_ENDPOINT";
 
 /// Where the authorization code is redeemed, back-channel.
 ///
-/// **Must be `https`, or `http` on loopback.** See [`TRANSPORT_CHECKED`]: this is the request that
+/// **Must be `https`, or `http` on loopback.** See [`transport_checked`]: this is the request that
 /// carries [`CLIENT_SECRET_ENV`] as HTTP Basic credentials.
 pub const TOKEN_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT";
 
@@ -61,7 +61,7 @@ pub const TOKEN_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT";
 /// this host re-fetches at runtime, so an operator reading the configuration could not tell which
 /// keys those are. One more variable buys a deployment whose trust is legible from its environment.
 ///
-/// **Must be `https`, or `http` on loopback.** See [`TRANSPORT_CHECKED`]: this decides which keys
+/// **Must be `https`, or `http` on loopback.** See [`transport_checked`]: this decides which keys
 /// can mint a session here.
 pub const JWKS_URI_ENV: &str = "FLUX_EXCHANGE_OIDC_JWKS_URI";
 
@@ -73,14 +73,25 @@ pub const CLIENT_SECRET_ENV: &str = "FLUX_EXCHANGE_OIDC_CLIENT_SECRET";
 
 /// Where the provider sends the browser back, exactly as registered with the provider.
 ///
-/// **Must be `https`, or `http` on loopback.** See [`TRANSPORT_CHECKED`]: this is the address the
+/// **Must be `https`, or `http` on loopback.** See [`transport_checked`]: this is the address the
 /// authorization code comes back to.
 pub const REDIRECT_URI_ENV: &str = "FLUX_EXCHANGE_OIDC_REDIRECT_URI";
 
 /// The tenant every principal this provider authenticates belongs to. See [`OidcConfig::tenant`].
 pub const TENANT_ENV: &str = "FLUX_EXCHANGE_OIDC_TENANT";
 
-/// Every variable naming a URL this host will not accept in cleartext, in [`REQUIRED`]'s order.
+/// Every variable naming a URL this host will not accept in cleartext, in the order the read
+/// visits them.
+///
+/// # Why this is a read and not a list
+///
+/// **X-27.** It *is* the read: [`recorded`] performs [`Supplied::read`] against an empty
+/// environment and this reports which variables that read took through [`Reader::channel`]. So the
+/// list quoted at an operator cannot name a variable this host does not check, or miss one it does.
+///
+/// It was a constant until X-27, sitting beside [`required`] and beside a sequence of positional
+/// reads — three lists describing one set of variables, kept in step by convention. This module had
+/// already shipped one drift out of that arrangement.
 ///
 /// # Why the name changed
 ///
@@ -119,24 +130,35 @@ pub const TENANT_ENV: &str = "FLUX_EXCHANGE_OIDC_TENANT";
 ///
 /// See [`on_a_channel_this_host_will_use`]. `https` short-circuits before the host is even
 /// examined, so this vouches for the **channel** and never for who is on the other end of it.
-const TRANSPORT_CHECKED: &[&str] = &[
-    AUTHORIZATION_ENDPOINT_ENV,
-    TOKEN_ENDPOINT_ENV,
-    JWKS_URI_ENV,
-    REDIRECT_URI_ENV,
-];
+fn transport_checked() -> Vec<&'static str> {
+    recorded().checked
+}
 
 /// Every variable this module reads, in the order a refusal lists them.
-const REQUIRED: &[&str] = &[
-    ISSUER_ENV,
-    AUTHORIZATION_ENDPOINT_ENV,
-    TOKEN_ENDPOINT_ENV,
-    JWKS_URI_ENV,
-    CLIENT_ID_ENV,
-    CLIENT_SECRET_ENV,
-    REDIRECT_URI_ENV,
-    TENANT_ENV,
-];
+///
+/// **X-27.** Derived by performing the read itself — see [`recorded`] — rather than written out a
+/// second time. Until then this was a constant that the positional reads in [`OidcConfig::read`]
+/// had to match entry for entry: a variable added to one and not the other shifted every value
+/// after it into the wrong field, and a variable read but never listed here was one an operator
+/// could set and this host would silently ignore.
+fn required() -> Vec<&'static str> {
+    recorded().visited
+}
+
+/// One read of an empty environment, which is where both of the lists above come from.
+///
+/// Nothing is looked up, so this touches no environment and yields no value. What it yields is what
+/// [`Supplied::read`] *did*: which variables it visited, and which of those it read as channels.
+/// Both lists are therefore reports of the read rather than descriptions of it, and a description
+/// is the thing that can be wrong.
+fn recorded() -> Reader<impl Fn(&str) -> Option<String>> {
+    let mut reader = Reader::of(|_: &str| None::<String>);
+
+    // Every value comes back absent and every one of them is discarded; only the reader is wanted.
+    drop(Supplied::read(&mut reader));
+
+    reader
+}
 
 /// The scopes this host asks for, and the whole of what it asks for.
 ///
@@ -214,46 +236,37 @@ impl OidcConfig {
     /// stays true of every build: outside this module there is no way to supply a secret. It exists
     /// so those tests do not mutate the process environment out from under their neighbours — the
     /// same reason `DevIdentity::from_roster` is separate from `DevIdentity::armed`.
+    ///
+    /// **Every value is read by name and bound by name.** [`Supplied::read`] is the one place a
+    /// variable is paired with the field it lands in, and [`Reader`] is why the lists this
+    /// function's refusals quote are produced by that read rather than written down beside it.
     fn read(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigRefusal> {
-        // A variable that is set but empty is unset. Naming one and leaving it blank is a mistake
-        // with a silent success mode: the operator believes they configured a client secret, and
-        // what they have is a host that authenticates as nobody.
-        let read = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
+        let mut reader = Reader::of(lookup);
 
-        let supplied: Vec<Option<String>> = REQUIRED.iter().map(|name| read(name)).collect();
+        // Destructured rather than kept whole, so every field below travels under its own name and
+        // reaches the constructor by field-init shorthand. A field added to `Supplied` and not
+        // mentioned in this pattern does not compile; see `Supplied::read` for the other half.
+        let Supplied {
+            issuer,
+            authorization_endpoint,
+            token_endpoint,
+            jwks_uri,
+            client_id,
+            client_secret,
+            redirect_uri,
+            tenant,
+        } = Supplied::read(&mut reader);
 
-        if supplied.iter().any(Option::is_none) {
-            let unset: Vec<&'static str> = REQUIRED
-                .iter()
-                .zip(&supplied)
-                .filter(|(_, value)| value.is_none())
-                .map(|(name, _)| *name)
-                .collect();
-
+        if !reader.unset.is_empty() {
             return Err(ConfigRefusal::Unset {
                 // Whether *anything* was supplied is what separates "this operator has not set up
                 // sign-in" from "this operator set it up wrong", and those deserve different
-                // volumes at startup.
-                partial: unset.len() != REQUIRED.len(),
-                unset,
+                // volumes at startup. Counted against what the read visited rather than against a
+                // constant, so the two cannot disagree about how many variables there are.
+                partial: reader.unset.len() != reader.visited.len(),
+                unset: reader.unset,
             });
         }
-
-        let mut supplied = supplied.into_iter().map(|value| value.unwrap_or_default());
-        let mut next = || supplied.next().unwrap_or_default();
-
-        // Positional, and in `REQUIRED`'s order — the two lists must be read together. A field added
-        // to one and not the other silently shifts every value after it, which is why
-        // `every_configured_value_lands_in_its_own_field` gives each variable a distinguishable
-        // value and checks where it came out.
-        let issuer = next();
-        let authorization_endpoint = next();
-        let token_endpoint = next();
-        let jwks_uri = next();
-        let client_id = next();
-        let client_secret = ClientSecret(next());
-        let redirect_uri = next();
-        let tenant = next();
 
         // `Tenant::new` is the authority on what a tenant may be spelled; do not re-validate here.
         // Refused at startup rather than at sign-in, so a tenant that could walk out of its own
@@ -267,26 +280,16 @@ impl OidcConfig {
         // moment serves the browser-facing two for a different reason: the operator is present at
         // startup, and a mistyped scheme is something they can still fix cheaply.
         //
-        // Named in `TRANSPORT_CHECKED`'s order and all at once, following `Unset`: an operator who
+        // Named in `transport_checked`'s order and all at once, following `Unset`: an operator who
         // got one of these wrong very likely got all of them wrong the same way, and fixing them one
         // restart at a time is a thing we would be doing to them.
         //
-        // Paired by name rather than positionally: the positional read above already has
-        // `every_configured_value_lands_in_its_own_field` holding it in step with `REQUIRED`, and
-        // one such list is enough for this module to be carrying.
-        let insecure: Vec<&'static str> = [
-            (AUTHORIZATION_ENDPOINT_ENV, authorization_endpoint.as_str()),
-            (TOKEN_ENDPOINT_ENV, token_endpoint.as_str()),
-            (JWKS_URI_ENV, jwks_uri.as_str()),
-            (REDIRECT_URI_ENV, redirect_uri.as_str()),
-        ]
-        .into_iter()
-        .filter(|(_, endpoint)| !on_a_channel_this_host_will_use(endpoint))
-        .map(|(name, _)| name)
-        .collect();
-
-        if !insecure.is_empty() {
-            return Err(ConfigRefusal::InsecureEndpoint { insecure });
+        // The rule was applied at the read — `Reader::channel` — rather than against a list of
+        // pairs written out here, which is what made the list and the read able to disagree.
+        if !reader.insecure.is_empty() {
+            return Err(ConfigRefusal::InsecureEndpoint {
+                insecure: reader.insecure,
+            });
         }
 
         Ok(Self {
@@ -392,6 +395,130 @@ impl OidcConfig {
     /// and it deserves its own story rather than a default chosen here.
     pub fn tenant(&self) -> &Tenant {
         &self.tenant
+    }
+}
+
+/// Every variable this module reads, each in its own named field.
+///
+/// **X-27**, and the whole of it. A value gets here by being named on the same line as the field it
+/// lands in, so there is no order for it to be out of and no position for it to shift by. The three
+/// things a variable needs — a field, an environment variable, a transport rule — are stated once,
+/// together, in [`Supplied::read`].
+///
+/// The secret is wrapped in [`ClientSecret`] on the line it is read, so the bare `String` does not
+/// outlive that expression and this struct carries no unredacted secret at any point. There is
+/// deliberately no `Debug` here either: nothing needs one, and a type this close to the environment
+/// is not where to start printing it.
+struct Supplied {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
+    client_id: String,
+    client_secret: ClientSecret,
+    redirect_uri: String,
+    tenant: String,
+}
+
+impl Supplied {
+    /// One line per variable: the field it lands in, the environment variable it is read from, and
+    /// — by which method reads it — whether this host checks its transport.
+    ///
+    /// This is the only place those three are paired, and each pairing is a single line the
+    /// compiler holds together. Adding a variable is adding one line and one field:
+    ///
+    /// - a line naming a field this struct does not have does not compile;
+    /// - a field this function does not fill does not compile;
+    /// - a field [`OidcConfig::read`]'s pattern does not mention does not compile;
+    /// - and there is no list anywhere else to add it to, because [`required`] and
+    ///   [`transport_checked`] are reports of what this function did.
+    ///
+    /// The order is the order a refusal names them in: a struct literal evaluates its fields in
+    /// written order, so this order is the one an operator reads at startup.
+    fn read<L: Fn(&str) -> Option<String>>(reader: &mut Reader<L>) -> Self {
+        Self {
+            issuer: reader.value(ISSUER_ENV),
+            authorization_endpoint: reader.channel(AUTHORIZATION_ENDPOINT_ENV),
+            token_endpoint: reader.channel(TOKEN_ENDPOINT_ENV),
+            jwks_uri: reader.channel(JWKS_URI_ENV),
+            client_id: reader.value(CLIENT_ID_ENV),
+            client_secret: ClientSecret(reader.value(CLIENT_SECRET_ENV)),
+            redirect_uri: reader.channel(REDIRECT_URI_ENV),
+            tenant: reader.value(TENANT_ENV),
+        }
+    }
+}
+
+/// Reads each variable by name, and remembers what it read.
+///
+/// Every list this module's refusals need — which variables an operator must set, which of those
+/// are unset, which name a URL whose transport is checked, and which of *those* broke the rule — is
+/// accumulated here, by the call that reads the variable. None of them is written down anywhere
+/// else, so none of them can describe a read that does not happen or miss one that does.
+///
+/// That is what X-27 changed. Before it, `REQUIRED` and `TRANSPORT_CHECKED` were two lists standing
+/// beside a third — the sequence of positional reads in [`OidcConfig::read`] — and all three had to
+/// be edited together, correctly, with nothing but a hand-written test watching.
+struct Reader<L> {
+    /// The environment, injected. See [`OidcConfig::read`].
+    lookup: L,
+    /// Every variable read, in the order it was read: the list [`required`] reports.
+    visited: Vec<&'static str>,
+    /// Those of them the environment did not supply.
+    unset: Vec<&'static str>,
+    /// Those read through [`Reader::channel`], whatever their value: the list
+    /// [`transport_checked`] reports.
+    checked: Vec<&'static str>,
+    /// Those of *those* not on a channel this host will use.
+    insecure: Vec<&'static str>,
+}
+
+impl<L: Fn(&str) -> Option<String>> Reader<L> {
+    fn of(lookup: L) -> Self {
+        Self {
+            lookup,
+            visited: Vec::new(),
+            unset: Vec::new(),
+            checked: Vec::new(),
+            insecure: Vec::new(),
+        }
+    }
+
+    /// A variable this host neither dials nor navigates to: an issuer it compares as a string, an
+    /// identifier, a secret, a tenant. No transport rule applies — see [`transport_checked`] for
+    /// what is deliberately not on that list, and why [`ISSUER_ENV`] is the interesting case.
+    fn value(&mut self, name: &'static str) -> String {
+        self.visited.push(name);
+
+        // A variable that is set but empty is unset. Naming one and leaving it blank is a mistake
+        // with a silent success mode: the operator believes they configured a client secret, and
+        // what they have is a host that authenticates as nobody.
+        match (self.lookup)(name).filter(|value| !value.trim().is_empty()) {
+            Some(value) => value,
+            None => {
+                self.unset.push(name);
+                String::new()
+            }
+        }
+    }
+
+    /// A variable naming a URL this host will put an OIDC value on.
+    ///
+    /// The transport rule is applied here, at the read, which is what makes [`transport_checked`] a
+    /// report of these calls rather than a list beside them.
+    ///
+    /// An unset variable is not a channel either, so it lands in `insecure` as well.
+    /// [`OidcConfig::read`] refuses for the unset first: "set this" is the refusal an operator can
+    /// act on, and "this is not https" about a variable they never set would be noise.
+    fn channel(&mut self, name: &'static str) -> String {
+        let value = self.value(name);
+        self.checked.push(name);
+
+        if !on_a_channel_this_host_will_use(&value) {
+            self.insecure.push(name);
+        }
+
+        value
     }
 }
 
@@ -558,11 +685,11 @@ pub enum ConfigRefusal {
     /// A configured URL is not on a channel this host will use.
     ///
     /// See [`on_a_channel_this_host_will_use`] for what is permitted and why, and
-    /// [`TRANSPORT_CHECKED`] for which variables this applies to. Refused at startup rather than at
+    /// [`transport_checked`] for which variables this applies to. Refused at startup rather than at
     /// the first sign-in, because by the time a sign-in has failed the client secret has already
     /// crossed the network in cleartext and a `state` has already been offered to the path.
     InsecureEndpoint {
-        /// Every offending variable, in [`TRANSPORT_CHECKED`]'s order. Names only the variables —
+        /// Every offending variable, in [`transport_checked`]'s order. Names only the variables —
         /// the value is the operator's own and does not need repeating back at them.
         insecure: Vec<&'static str>,
     },
@@ -583,7 +710,7 @@ impl fmt::Display for ConfigRefusal {
                          {} unset. Set {} to enable it, or unset all of them to turn sign-in off \
                          deliberately. /health and the catalogue are unaffected",
                         if unset.contains(", ") { "are" } else { "is" },
-                        REQUIRED.join(", "),
+                        required().join(", "),
                     )
                 } else {
                     write!(
@@ -602,7 +729,7 @@ impl fmt::Display for ConfigRefusal {
             //
             // What is at stake is said as well as what the rule is, because an operator who reads
             // "must be https" about a URL a *browser* navigates to is entitled to ask why. The
-            // clauses are in `TRANSPORT_CHECKED`'s order, one per variable, so the list above and
+            // clauses are in `transport_checked`'s order, one per variable, so the list above and
             // the reasons below can be read against each other.
             Self::InsecureEndpoint { insecure } => write!(
                 f,
@@ -614,7 +741,7 @@ impl fmt::Display for ConfigRefusal {
                  sign-in will not be offered. /health and the catalogue are unaffected",
                 insecure.join(", "),
                 if insecure.len() > 1 { "are" } else { "is" },
-                TRANSPORT_CHECKED.join(", "),
+                transport_checked().join(", "),
             ),
         }
     }
@@ -639,7 +766,7 @@ mod tests {
     ///
     /// Every value is distinguishable from every other, so a test asserting where one landed cannot
     /// pass on a coincidence. `every_configured_value_lands_in_its_own_field` is what depends on
-    /// that; the rest only need this map to satisfy `REQUIRED`.
+    /// that; the rest only need this map to satisfy every variable the read consumes.
     fn complete() -> HashMap<&'static str, String> {
         HashMap::from([
             (ISSUER_ENV, "https://accounts.example.com".to_string()),
@@ -793,16 +920,18 @@ mod tests {
         );
     }
 
-    /// [`REQUIRED`] and the positional reads in [`OidcConfig::read`] are one list written twice, and
-    /// this is what keeps the two spellings in step.
+    /// Every variable lands in the field that names it, asserted through the accessors the flow
+    /// uses.
     ///
-    /// `read` consumes the supplied values **in `REQUIRED`'s order**, so a variable added to one
-    /// list and not the other shifts every value after it — silently, into a config that is
-    /// well-formed and wrong. A host whose token endpoint holds its JWKS URI does not fail at
-    /// startup; it fails at somebody's first sign-in.
+    /// **X-27 changed what this test is for, and left the assertions alone.** `read` used to consume
+    /// the supplied values positionally, in `REQUIRED`'s order, so a variable added to one list and
+    /// not the other shifted every value after it — silently, into a config that was well-formed
+    /// and wrong, and this test was the only thing watching. Values are bound by name now and that
+    /// shift cannot be expressed. What this still holds is [`Supplied::read`]'s pairing of a field
+    /// to a variable, which is the one pairing a person can still get wrong.
     ///
-    /// Every value here is distinguishable, so this fails on any shift rather than only on a shift
-    /// between two fields that happened to differ.
+    /// Every value here is distinguishable, so this fails on any misplacement rather than only on
+    /// one between two fields that happened to differ.
     #[test]
     fn every_configured_value_lands_in_its_own_field() {
         let environment = complete();
@@ -827,11 +956,93 @@ mod tests {
 
         // The other half of "in step": a variable this test does not account for is one whose value
         // nothing above would notice going astray.
+        let required = required();
         assert_eq!(
-            REQUIRED.len(),
+            required.len(),
             environment.len(),
-            "every variable in REQUIRED must have a distinguishable value here: {REQUIRED:?}",
+            "every variable the read consumes must have a distinguishable value here: {required:?}",
         );
+    }
+
+    /// **X-27.** The variables the read consumes and the variables this module documents are one
+    /// set, and the read is the only place either is written down.
+    ///
+    /// [`required`] and [`transport_checked`] are reports of [`Supplied::read`], so they cannot
+    /// drift from it — there is no second list to disagree with. What they *can* drift from is this
+    /// module's public constants, in either direction: a variable read from a bare literal would be
+    /// one an operator is never told about, and a documented constant nothing reads is one an
+    /// operator is told to set and this host then ignores. That second one is the shape X-27 exists
+    /// for, and it is the one that used to leave a green gate behind it.
+    ///
+    /// The list below is a deliberate restatement — the only one left in this module — and each
+    /// assertion names the variable rather than reporting a count.
+    #[test]
+    fn every_variable_read_is_one_this_module_documents_and_no_other() {
+        let documented = [
+            ISSUER_ENV,
+            AUTHORIZATION_ENDPOINT_ENV,
+            TOKEN_ENDPOINT_ENV,
+            JWKS_URI_ENV,
+            CLIENT_ID_ENV,
+            CLIENT_SECRET_ENV,
+            REDIRECT_URI_ENV,
+            TENANT_ENV,
+        ];
+
+        for variable in required() {
+            assert!(
+                documented.contains(&variable),
+                "{variable} is read, and is not one of this module's documented constants",
+            );
+        }
+
+        for variable in documented {
+            assert!(
+                required().contains(&variable),
+                "{variable} is documented as required, and no read consumes it",
+            );
+        }
+
+        // And the transport rule applies only to variables an operator is actually asked for: a
+        // checked variable nothing requires would be a rule about a value that is never read.
+        for variable in transport_checked() {
+            assert!(
+                required().contains(&variable),
+                "{variable} has a transport rule, and is not a variable this host reads",
+            );
+        }
+    }
+
+    /// **X-27.** An empty environment names every variable the read consumes, in the read's own
+    /// order, and reads as "not configured" rather than as "configured wrong".
+    ///
+    /// Both halves of that refusal now come out of the read itself: the list from what it visited,
+    /// and `partial` from how much of that same visit came back unset. The coupling is what this
+    /// pins — a refusal naming fewer variables than the read consumes is one an operator cannot fix
+    /// in a single pass, which is what this module's documentation promises them.
+    ///
+    /// That the read consumes the right *set* in the first place is
+    /// `every_variable_read_is_one_this_module_documents_and_no_other`'s claim, not this one's.
+    #[test]
+    fn an_empty_environment_names_every_variable_the_read_consumes() {
+        let refusal = read(&HashMap::new()).expect_err("an empty environment is refused");
+
+        assert_eq!(
+            refusal,
+            ConfigRefusal::Unset {
+                unset: required(),
+                partial: false,
+            },
+        );
+
+        // In one message, in one pass, in a stable order — the whole point of naming all of them.
+        let message = refusal.to_string();
+        for variable in required() {
+            assert!(
+                message.contains(variable),
+                "{variable} is missing: {message}"
+            );
+        }
     }
 
     /// **X-17.** A cleartext back channel is refused **at startup**, naming the variable.
@@ -899,7 +1110,7 @@ mod tests {
         assert_eq!(
             refusal,
             ConfigRefusal::InsecureEndpoint {
-                insecure: TRANSPORT_CHECKED.to_vec(),
+                insecure: transport_checked(),
             },
             "one restart, not four",
         );
@@ -907,7 +1118,7 @@ mod tests {
         // Named in one message, and every one of them named. An operator who has to discover the
         // fourth by restarting three times has been made to do our bookkeeping.
         let message = refusal.to_string();
-        for variable in TRANSPORT_CHECKED {
+        for variable in transport_checked() {
             assert!(
                 message.contains(variable),
                 "{variable} is missing: {message}"
@@ -1048,7 +1259,7 @@ mod tests {
         }
     }
 
-    /// Every variable [`TRANSPORT_CHECKED`] claims is checked is actually checked, and every
+    /// Every variable [`transport_checked`] claims is checked is actually checked, and every
     /// variable that is checked is claimed.
     ///
     /// The constant is what the refusal message tells an operator the rule applies to, so a variable
@@ -1058,7 +1269,7 @@ mod tests {
     /// under a rule the message never stated.
     #[test]
     fn every_transport_checked_variable_is_actually_enforced_and_no_other() {
-        for variable in TRANSPORT_CHECKED {
+        for variable in transport_checked() {
             let mut environment = complete();
             environment.insert(variable, "http://not-loopback.example/x".to_string());
 
@@ -1075,7 +1286,7 @@ mod tests {
         // the constant cannot see. `ISSUER_ENV` is the live case: it is a URL, it is deliberately
         // not transport-checked, and this is what says so mechanically rather than in prose.
         let mut environment = complete();
-        for variable in REQUIRED {
+        for variable in required() {
             environment.insert(variable, "http://not-loopback.example/x".to_string());
         }
         // `Tenant::new` runs before the transport check and would refuse that value first, which
@@ -1085,7 +1296,7 @@ mod tests {
         assert_eq!(
             read(&environment).expect_err("a wholly cleartext environment is refused"),
             ConfigRefusal::InsecureEndpoint {
-                insecure: TRANSPORT_CHECKED.to_vec(),
+                insecure: transport_checked(),
             },
             "exactly the listed variables are enforced, and in the listed order",
         );
