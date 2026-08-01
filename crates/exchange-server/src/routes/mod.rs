@@ -330,12 +330,24 @@ mod tests {
 
     /// Drive one anonymous `GET` through a fully assembled app and report what it answered.
     async fn anonymous_get(app: Router, path: &str) -> StatusCode {
+        anonymous_request(app, Method::GET, path).await
+    }
+
+    /// Drive one anonymous request of `method` through a fully assembled app and report what it
+    /// answered.
+    ///
+    /// [`anonymous_get`]'s general form, and the method is the whole of the difference: a path
+    /// declared twice serves a different **declaration** on each verb, so a probe that always sent
+    /// `GET` reported on whichever declaration happened to serve `GET` and on no other. See
+    /// [`a_second_declaration_at_one_path_cannot_hide_from_the_enumeration`].
+    async fn anonymous_request(app: Router, method: Method, path: &str) -> StatusCode {
         let mut service = app.into_service::<Body>();
         std::future::poll_fn(|cx| service.poll_ready(cx))
             .await
             .expect("a router is always ready");
 
         let request = HttpRequest::builder()
+            .method(method)
             .uri(path)
             .body(Body::empty())
             .expect("a well-formed request");
@@ -466,12 +478,107 @@ mod tests {
 
         modules
             .iter()
-            .fold(Router::new(), |app, module| app.merge(module.router(&state)))
+            .fold(Router::new(), |app, module| {
+                app.merge(module.router(&state))
+            })
             .with_state(state)
+    }
+
+    /// A method nothing on this surface serves, used to ask a method router what it *does* serve
+    /// without running any of it.
+    ///
+    /// `TRACE` echoes a request back by definition, so a route that answered one would be
+    /// disclosing rather than doing — nothing here has any business serving it, and
+    /// [`methods_served`] asserts that rather than assuming it.
+    const UNSERVED: Method = Method::TRACE;
+
+    /// Which HTTP methods **this declaration** answers.
+    ///
+    /// Read out of the `Allow` header axum puts on the refusal, against a router built from this
+    /// one declaration and nothing else — which is the point. Asking the assembled app is what
+    /// [`the_anonymous_surface_is_only_what_was_declared_anonymous`] used to do, and there a
+    /// duplicated path answers whichever declaration serves the verb that was sent.
+    ///
+    /// It is deliberately the declaration's own [`Route::method_router`] and **not** its guarded
+    /// router: `route_layer` wraps the method router's `405` fallback too, so a guarded route
+    /// refuses an unserved method with `401` before the fallback can name what it serves. That is
+    /// the same fallback-ownership the note on X-61 records.
+    ///
+    /// Sending [`UNSERVED`] means discovery executes no handler — the method router refuses it
+    /// before dispatch, and the refusal still carries `Allow`. One request per declaration, and
+    /// nothing runs.
+    async fn methods_served(route: &Route) -> Vec<Method> {
+        let state = AppState::without_identity();
+        let router: Router = Router::new()
+            .route(route.path, (route.method_router)())
+            .with_state(state);
+
+        let mut service = router.into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("a router is always ready");
+
+        let request = HttpRequest::builder()
+            .method(UNSERVED)
+            .uri(probe_path(route.path))
+            .body(Body::empty())
+            .expect("a well-formed request");
+
+        let response = service.call(request).await.expect("a router is infallible");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "`{}` answers {UNSERVED}, so it is no longer the method nothing serves — this \
+             discovery has just run a handler instead of asking one, and `Allow` may be missing; \
+             pick a sentinel nothing serves",
+            route.path,
+        );
+
+        let allow = response
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| {
+                panic!(
+                    "`{}` refused a method without naming what it does serve, so this enumeration \
+                     would probe it with nothing at all and report it guarded for free — a method \
+                     router built from `any` or from a bare fallback skips the `Allow` header",
+                    route.path,
+                )
+            });
+
+        let served: Vec<Method> = allow
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                Method::from_bytes(name.as_bytes())
+                    .expect("axum names real HTTP methods in `Allow`")
+            })
+            .collect();
+
+        assert!(
+            !served.is_empty(),
+            "`{}` serves no method at all, so probing it proves nothing",
+            route.path,
+        );
+
+        served
     }
 
     /// Every declaration in `modules` that answers a caller this host cannot identify, named by the
     /// module that published it.
+    ///
+    /// **Per declaration, and probed with a method that declaration actually serves** — which is
+    /// X-61, and the difference between a guard that enumerates declarations and one that
+    /// enumerates paths. [`methods_served`] asks each declaration's own method router what it
+    /// answers; the probe then drives those methods through the **assembled** app, so what is
+    /// measured is what a caller would actually get from the merged router rather than what a
+    /// declaration would have answered alone.
+    ///
+    /// One reachable method is enough to report the declaration, so the result carries one entry
+    /// per declaration exactly as it did when the probe was a single `GET`.
     ///
     /// Extracted from [`the_anonymous_surface_is_only_what_was_declared_anonymous`] so that
     /// [`a_second_declaration_at_one_path_cannot_hide_from_the_enumeration`] can drive the same
@@ -485,10 +592,15 @@ mod tests {
 
         for module in modules {
             for route in module.routes {
-                let status = anonymous_get(assemble(), &probe_path(route.path)).await;
+                let probe = probe_path(route.path);
 
-                if status != StatusCode::UNAUTHORIZED {
-                    reachable.push((module.name, route.path));
+                for method in methods_served(route).await {
+                    let status = anonymous_request(assemble(), method, &probe).await;
+
+                    if status != StatusCode::UNAUTHORIZED {
+                        reachable.push((module.name, route.path));
+                        break;
+                    }
                 }
             }
         }
@@ -565,6 +677,29 @@ mod tests {
     /// The test keeps its teeth either way: it walks [`published`] and compares against a set
     /// written out **here**, so a route that becomes anonymous without anyone arguing for it in
     /// this list still fails.
+    ///
+    /// # What it probes, and what it therefore does not (X-61)
+    ///
+    /// It enumerates **declarations, not paths**, and drives each one with a method that
+    /// declaration actually serves — [`methods_served`] asks the declaration's own method router,
+    /// and [`anonymously_reachable`] sends the answer through the assembled app. Until X-61 the
+    /// probe was a single `GET`, and a path declared twice answers one `GET` served by one of the
+    /// two: setting X-54's `POST` entry to [`Access::Anonymous`] left this green. It no longer
+    /// does, and [`a_second_declaration_at_one_path_cannot_hide_from_the_enumeration`] is what
+    /// keeps that true rather than this paragraph.
+    ///
+    /// Two things this still does not reach, stated rather than left to be discovered:
+    ///
+    /// - **A method no declaration serves.** On a duplicated path the merged router's `405`
+    ///   fallback belongs to whichever declaration was merged second, so `PATCH` and `OPTIONS` on
+    ///   `/api/connections/{connector}` are decided by the `POST` entry's guard today and by the
+    ///   open one if the two were reordered. Nothing pins that order. It is not a hole in either
+    ///   order — a caller this host cannot resolve gets `401` and no handler runs, whichever guard
+    ///   answers — but it is unpinned, and X-61 records it rather than fixing it here.
+    /// - **What a route answers once a principal exists.** This axis is *anonymous or not*;
+    ///   [`the_kind_gated_surface_is_only_what_was_declared`] is the other one, and it reads
+    ///   [`published`] directly rather than probing, so it already sees every declaration —
+    ///   confirmed by mutation, in the note on that test.
     #[tokio::test]
     async fn the_anonymous_surface_is_only_what_was_declared_anonymous() {
         /// Every route allowed to answer without a principal. Adding a line here is the decision;
@@ -812,6 +947,26 @@ mod tests {
     /// principal do*; all of them are *what does this outlive*.
     /// `crate::routes::agents`, `crate::routes::connections::MAY_SUPPLY_A_CREDENTIAL` and
     /// `crate::routes::connections::MAY_CONFIGURE` carry the long forms.
+    ///
+    /// # This one sees both declarations, and that was checked rather than reasoned (X-61)
+    ///
+    /// X-61 found the anonymous guard next door blind to the second declaration at a duplicated
+    /// path, so this one was asked the same question — by mutation, because *it reads
+    /// [`published`] so it must be fine* is exactly the reasoning that left the other guard green
+    /// for a story and a half. It compares a `Vec` built from [`published`], one entry per
+    /// **declaration**, so both entries at `/api/connections/{connector}` are in it independently.
+    /// Both directions were driven and both turned it red:
+    ///
+    /// - the `POST` declaration set to [`Access::Anonymous`] — the mutation the anonymous guard
+    ///   could not see — drops its entry, and the assertion names the missing line;
+    /// - the `GET`/`DELETE` declaration at the same path widened to
+    ///   [`Access::PrincipalOfKind`] adds one.
+    ///
+    /// What the second run also showed is worth knowing before reading a failure here: two
+    /// declarations at one path produce two `(module, path, kinds)` tuples that can be **byte
+    /// identical**, so the diff says which entry count is wrong without saying which declaration
+    /// caused it. The assertion still fails — a `Vec` keeps count and order — but the message is
+    /// read alongside the table, not on its own.
     #[test]
     fn the_kind_gated_surface_is_only_what_was_declared() {
         /// Every route that admits fewer than all kinds. Adding a line here is the decision; the

@@ -1,7 +1,7 @@
 ---
 id: X-61
 title: "A second declaration at one path cannot hide from the anonymous enumeration"
-status: ready
+status: in-progress
 priority: 1
 epic: invoke
 areas: [exchange-server]
@@ -46,12 +46,12 @@ This repository has corrected the same class four times this week: **a guard who
 than its name.**
 
 ## Acceptance
-- [ ] **Failing-first test** — an `Access::Anonymous` on the *second* declaration at a duplicated
+- [x] **Failing-first test** — an `Access::Anonymous` on the *second* declaration at a duplicated
       path is caught by the surface-wide guard. Demonstrate with the exact mutation above, green
       today.
-- [ ] The guard probes each declaration with **a method that declaration actually serves**, or it
+- [x] The guard probes each declaration with **a method that declaration actually serves**, or it
       states plainly that it probes paths and not declarations and names what covers the rest.
-- [ ] `KIND_GATED`'s check is examined the same way — it compares a `Vec` built from `published()`,
+- [x] `KIND_GATED`'s check is examined the same way — it compares a `Vec` built from `published()`,
       which does see both entries, but confirm that by mutation rather than by reading.
 
 ## Notes
@@ -64,3 +64,64 @@ than its name.**
   `OPTIONS` (403 in the current order, 405 if swapped). Not a hole in either order — an unresolvable
   caller still gets 401 and no handler is reached — but nothing pins the order and nothing documents
   that it matters.
+
+## Progress
+
+**Done, in `crates/exchange-server/src/routes/mod.rs` only.** No production code changed — the
+declared surface is byte-identical, and the whole diff is in `mod tests`. The guard was the thing
+that was wrong, not the routes.
+
+### What changed
+
+The probe stopped being a path probe and became a declaration probe.
+
+- `methods_served(route)` asks **one declaration's own method router** which verbs it answers, by
+  sending it `TRACE` (the `UNSERVED` sentinel) and reading the `Allow` header off the `405`. No
+  handler runs during discovery — one request per declaration, refused before dispatch. It is
+  deliberately the *unguarded* method router: `route_layer` wraps the `405` fallback too, so a
+  guarded route answers `401` before the fallback could name anything.
+- `anonymously_reachable(modules, assemble)` walks each declaration, drives every method that
+  declaration serves through the **assembled** app, and reports the declaration if any answer is
+  not `401`. Driving the assembled app rather than the isolated route is deliberate: what is
+  measured is what the merged router really hands a caller.
+- `assembled(modules)` is `app` for an arbitrary module set, so a spy module goes through a real
+  merge — the only place a duplicated path behaves as it does in production.
+- `anonymous_get` is now `anonymous_request`'s `GET` case; every other caller is unchanged.
+
+`ANONYMOUS` is unchanged: nine entries, same order. The surface did not move, only what can see it.
+
+### Failing-first
+
+`a_second_declaration_at_one_path_cannot_hide_from_the_enumeration` — one spy path declared twice,
+`get` at `Access::Principal` and `post` at `Access::Anonymous`, walked by the same
+`anonymously_reachable` the real surface is. Committed red first (`f2d7793`) with the probe still
+`GET`-only, where it reported `left: []`.
+
+And the story's own mutation, both ways round:
+
+| tree | `Access::Anonymous` on `connections.rs:431` | `the_anonymous_surface_…` |
+| --- | --- | --- |
+| merge base `195a6bc` | applied | `test result: ok. 1 passed` — blind |
+| this branch | applied | FAILED, naming `("connections", "/api/connections/{connector}")` |
+
+### `KIND_GATED`, examined by mutation and not by reading
+
+Both directions were driven against the pristine base and both turned
+`the_kind_gated_surface_is_only_what_was_declared` red, so it genuinely sees both declarations:
+
+- `POST` entry → `Access::Anonymous` (the mutation the anonymous guard could not see): its
+  `("connections", "/api/connections/{connector}", [User])` line disappears from the built `Vec`.
+- `GET`/`DELETE` entry at the same path → `Access::PrincipalOfKind(MAY_CONFIGURE)`: a line appears.
+
+Worth knowing before reading a failure there, and now written on the test: two declarations at one
+path produce **byte-identical** `(module, path, kinds)` tuples, so the failure message tells you the
+count is wrong without telling you which declaration did it. The assertion still fails — a `Vec`
+keeps count and order — but the message has to be read next to the table.
+
+### What is still not covered, stated rather than left to be found
+
+A method **no** declaration serves. On a duplicated path the merged router's `405` fallback belongs
+to whichever declaration merged second, which is the note above — confirmed by reading
+`axum-0.8.9`'s `Fallback::merge`, which picks `other` when both sides are defaults. Still not a hole
+in either order, and still unpinned; this story records it on the guard's doc comment and does not
+fix it.
