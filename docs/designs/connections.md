@@ -129,6 +129,66 @@ today.
 The single-instance tenant — the case that works today — works fully: create, list, read and delete
 are all unaffected by the refusal, and the tests cover them end to end.
 
+### The refusal has to survive two callers at once
+
+**Decision: one in-process claim per `(tenant, connector)` is held across the whole read-decide-write
+of every mutating connection route, and a caller that cannot take it is refused rather than queued.**
+
+The `409` above is a **check-then-write**: probe the address, refuse if occupied, otherwise write.
+With nothing between the halves it does not survive concurrency, and not in a subtle way — two
+concurrent `POST /api/connections/zendesk` from one tenant both probe an empty address, both write,
+and both answer `201`. One value is gone and the caller that lost was told it succeeded. That is the
+silent overwrite this entire story exists to prevent, reintroduced by the mechanism meant to prevent
+it, and a double-clicked button in the console is enough to trigger it. Left open, the refusal would
+have been decorative — and the whole case for landing this address scheme before X-14 rests on the
+refusal being real.
+
+The port cannot close it: `SecretStore` has no compare-and-swap and adding one is not this
+repository's to do. What is available is that the decision happens in one process, so
+[`ConnectionGuard`](../../crates/exchange-server/src/connection_guard.rs) is an in-process claim on
+the thing being changed.
+
+- **Per `(tenant, connector)`, not one lock over the surface.** A global lock would make one tenant's
+  connection writes wait on another's — shared fate between tenants, in the repository whose entire
+  point is that they share nothing.
+- **`DELETE` takes the same claim**, so a delete cannot decide against a value a create is in the
+  middle of writing and destroy half of it.
+- **Refuses rather than waits.** Waiting would need a lock held across an `await`, and it produces a
+  worse shape anyway: the queued second `POST` wakes, finds the first caller's value and answers
+  `409` regardless. Two racing creates *are* a tenant trying to have two connections to one
+  connector, which is exactly what this surface refuses; saying so immediately is more honest than
+  making the caller wait to be told the same thing.
+- **Released on drop, including while a panic unwinds**, so no failure path leaves a connection
+  permanently unchangeable.
+
+**What it does not cover: more than one process.** `FileStore` is a single in-process map written
+through to disk on every mutation, so within this process the claim is sufficient — but **two
+replicas sharing one store would race again, and nothing here would notice.** That is the same limit
+`identity-and-session.md` already records for sessions ("sessions do not survive a restart… a shared
+store is a real design question"), and it is the same answer: it should be settled when there is a
+deployment asking for it, and the honest thing meanwhile is to write it down. A multi-replica
+deployment of this host needs a store with a compare-and-swap, or a lock outside the process, before
+this refusal means anything.
+
+Proved by `tests::two_concurrent_creates_cannot_both_succeed`, looped 500 times with the window
+between probe and write held open by the test store, plus the same race at 50 attempts against a
+real `CredentialStore`, and `a_delete_racing_a_create_leaves_the_connection_whole_or_absent`. Before
+the claim, the first of those reproduced on attempt 0.
+
+### Writing a connection is all or nothing
+
+**Decision: a store failure part way through a multi-credential write takes back what it already
+wrote, and says so.**
+
+A connector may declare several credentials, so `create` can fail after storing one and before
+storing the next. Returning there leaves a connection that is neither present nor absent: the caller
+saw a failure, while the `409` above now refuses every retry until somebody works out that a `DELETE`
+is needed first. So the values already written are deleted, and the caller is told which of two
+things happened — the rollback worked and retrying is safe, or the rollback failed too and some
+credentials may remain at the addresses named. Best effort by necessity, since the store has just
+failed; what is not optional is admitting which. A refusal claiming nothing was written while
+something was is the answer that costs somebody an afternoon.
+
 ### What a refusal names
 
 The address, never the value. Every refusal in this module quotes the rendered path and never the
@@ -151,13 +211,25 @@ lists. `DELETE` destroying the credential is then not a step that could be forgo
 whole of what deleting means. That is the Acceptance item "deleting a connection destroys its
 credential", satisfied by construction rather than by remembering.
 
-The cost is stated rather than hidden. `SecretStore` is `get`/`put`/`delete` and has no listing
-operation — deliberately, since Vault's does not either — so `GET /api/connections` derives an
-address for every connector in the compiled-in catalogue and probes it. That is ~50 `get` calls per
-listing against the file store, each of which reads the store file. It is fine at this size and it
-is the first thing to change if the catalogue grows an order of magnitude; the answer then is an
-index *derived from* the store, not a second source of truth beside it. A probe reads the value and
-drops it without exposing it, because `SecretStore` has no `exists`.
+The cost is stated rather than hidden, and it is smaller than it looks. `SecretStore` is
+`get`/`put`/`delete` with no listing operation — deliberately, since Vault's does not either — so
+`GET /api/connections` derives an address for every addressable connector in the compiled-in
+catalogue and probes it. Measured by
+`tests::a_listing_probes_one_address_per_declared_credential_and_none_collide`: **60 addresses across
+52 addressable connectors** (53 in catalogue 0.8.0; `freshdesk` declares no credential). One `get`
+per *address*, not per provider, since a connector may declare several.
+
+Against the file store those are **60 lookups in an in-memory `BTreeMap`** — `FileStore` reads the
+file once when it opens and writes through on mutation, so a listing does no file IO at all. A probe
+reads the value and drops it without exposing it, because `SecretStore` has no `exists`; that is a
+copy in memory, not a read from disk. At this size an index would be a second thing to keep in step
+with the store in exchange for nothing measurable, so there is not one. The number to watch is the
+address count rather than the provider count, and the test fails loudly if it ever reaches 500.
+
+The test's other assertion is the one that is actually load-bearing: **no two connectors render the
+same address for one tenant.** Nothing upstream promises that — it falls out of the authority being
+per vendor — and if two ever collided, connecting one would read as having connected the other and
+deleting one would destroy the other's credential.
 
 ### Which credentials a connection carries
 
