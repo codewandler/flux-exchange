@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-01
+
 ### Changed
 
 - ⚠ **Breaking, `codewandler-flux-exchange-host`:** `admit_runtime` returns
