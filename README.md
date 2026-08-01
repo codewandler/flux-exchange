@@ -22,8 +22,11 @@ everything below.
 > connectors whose base URL needs no per-tenant configuration. An operation runs only if one of the
 > caller's tenant's grants admits it, decided from the operation's declared `risk`, `effects` and
 > `idempotency` rather than from a list of ids; a host with no grant store bound
-> (`FLUX_EXCHANGE_GRANTS`) runs nothing at all, and there is no HTTP surface for editing grants yet —
-> they are a file an operator writes. See
+> (`FLUX_EXCHANGE_GRANTS`) runs nothing at all. Since X-62 a **signed-in human of the tenant reads
+> and edits those grants over HTTP** — `GET`/`PUT /api/grants`, with `POST /api/grants/preview`
+> answering which operations a proposed grant *would* admit before it is saved — stating a connector
+> and at most a risk level, never a list of operation ids, which the route refuses. There is still no
+> console screen for it. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 
@@ -90,9 +93,11 @@ against one tenant's connections, not a vendor secret.
 
 **Not built, despite being described in the design:** a second connection to one
 connector (the address has no instance dimension until upstream publishes one),
-**any surface for editing a grant** — X-13 gates `invoke` on one and gives it a file-backed store per
-tenant, and writing that file is currently an operator's job with no route and no console screen —
-`subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
+**a console screen for editing a grant** — this used to read *"any surface for editing a grant"*, and
+X-62 landed the HTTP half: `GET`/`PUT /api/grants` read and replace a tenant's grants and
+`POST /api/grants/preview` evaluates a proposed one, all three admitting a signed-in human of the
+tenant and nothing else. So a grant is no longer a file only an operator can write; what is missing
+is the page, so today it is an HTTP call rather than a screen — `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
 catalogue loader. The credential store has moved off this list and is described below, and X-47 moved
 per-connection configuration off it too — but the honest replacement claim is narrower than "done":
 a tenant can now **supply**, over HTTP, the values thirteen of the seventeen connectors that need

@@ -1,7 +1,7 @@
 ---
 id: X-62
 title: "An operator can grant something without editing a file by hand"
-status: ready
+status: in-progress
 priority: 0
 epic: agent-access
 areas: [exchange-server, console]
@@ -44,17 +44,17 @@ strictly more authority than supplying a credential. That is the same kind-shape
 answered for credentials, and the answer here should not be weaker.
 
 ## Acceptance
-- [ ] A route reads the grants a tenant holds, and a route edits them. Both declare an access, and
+- [x] A route reads the grants a tenant holds, and a route edits them. Both declare an access, and
       the write is at least as narrow as [[X-54]]'s `MAY_SUPPLY_A_CREDENTIAL`.
-- [ ] **Failing-first test** — a grant written through the surface admits exactly what the gate
+- [x] **Failing-first test** — a grant written through the surface admits exactly what the gate
       admits. Assert it against `admit_grant`, not against a copy of its rules.
-- [ ] The surface expresses selectors, never operation ids. **Failing-first test** — a request naming
+- [x] The surface expresses selectors, never operation ids. **Failing-first test** — a request naming
       an operation id is refused.
 - [ ] The console shows which operations a proposed grant would admit, derived from the same facts
       the gate uses, before it is saved.
-- [ ] **Nothing tenant-specific leaks anonymously.** What a tenant is granted is tenant data; the
+- [x] **Nothing tenant-specific leaks anonymously.** What a tenant is granted is tenant data; the
       catalogue and the descriptor must not learn it.
-- [ ] A deployment with no grants file bound still serves everything else, and says which setting is
+- [x] A deployment with no grants file bound still serves everything else, and says which setting is
       missing — X-13 already answers `503` naming both stores; keep that true.
 
 ## Notes
@@ -67,3 +67,36 @@ answered for credentials, and the answer here should not be weaker.
 - The grant file is created `0600` and an existing file's mode is **not** verified — X-13 states this
   rather than implying it. Somebody who can write that file decides what this host runs. If this
   story adds a second writer, the mode question gets sharper.
+
+## Progress
+
+**The service half is done; the console screen is not.** Five of six Acceptance items are satisfied
+and committed on `impl/X-62`.
+
+What landed:
+
+- `crates/exchange-server/src/routes/grants.rs` — `GET`/`PUT /api/grants` (one path, one `Route`,
+  one declaration: X-61's duplicated-path blindness is avoided rather than inherited) and
+  `POST /api/grants/preview`. All three are `Access::PrincipalOfKind(MAY_GRANT)`, and `MAY_GRANT`
+  is `&[PrincipalKind::User]` — the same kinds as X-54's `MAY_SUPPLY_A_CREDENTIAL`, pinned to that
+  constant by the enumeration test rather than written out twice.
+- **The read is gated too**, which was not obvious going in and is the one decision worth arguing
+  with. `admit_grant` deliberately withholds a tenant's policy from a refused caller so an agent
+  cannot enumerate it one call at a time; a read open to every kind would hand it over in one
+  request. Cost, stated: an agent cannot discover in advance what it may run.
+- `exchange_host::Invoker::grants()` — a new public accessor, which is how the surface reaches the
+  store without a second port on `AppState` (fenced this wave, and the wrong shape anyway):
+  `Grants`' own documentation says two stores that disagree is the failure to avoid, and one `Arc`
+  makes that structural.
+- The wire body expresses three axes and nothing else. `Selector`'s `allow_ids`/`deny_ids` stay for
+  the hand-edited file: a stored grant carrying one is **shown** by the read, marked
+  `expressible: false`, and a `PUT` that would replace it is refused `409` rather than dropping it.
+- The descriptor's `invoke` warn no longer says nothing edits a grant; artifact regenerated.
+
+**What is not done, and why.** The console screen. It needs a loader in `console/src/service.mts` —
+the only module in this console that knows a network exists — which is another agent's file this
+wave. Nothing was worked around: the *derivation* the Acceptance asks for is served by
+`POST /api/grants/preview`, from `OperationFacts::of` through `ConnectorSurface::admitted`, so the
+screen has an authoritative answer to render and no rule of its own to reimplement. The next agent
+adds `loadGrants`/`replaceGrants`/`previewGrant` to `service.mts`, a `grants` surface to
+`surfaces.mts`, and the screen.

@@ -17,6 +17,7 @@
 mod agents;
 mod catalogue;
 mod connections;
+mod grants;
 mod health;
 mod identity;
 mod invoke;
@@ -46,6 +47,7 @@ const MODULES: &[Module] = &[
     connections::MODULE,
     agents::MODULE,
     invoke::MODULE,
+    grants::MODULE,
     onboarding::MODULE,
 ];
 
@@ -312,9 +314,18 @@ pub(super) fn refuse_kind(admitted: &'static [PrincipalKind]) -> Response {
 mod tests {
     use super::*;
 
+    use std::collections::{BTreeSet, HashMap};
+    use std::sync::{Arc, Mutex};
+
     use axum::body::Body;
-    use axum::http::Request as HttpRequest;
+    use axum::http::{Method, Request as HttpRequest};
     use axum::routing::get;
+    use exchange_host::{
+        address_path, admit_grant, admit_runtime, async_trait, ConnectorSurface, CredentialRef,
+        Deployment, Grant, GrantRefusal, Grants, OperationFacts, Principal, Secret, SecretStore,
+        StoreError, Tenant,
+    };
+    use serde_json::Value;
     use tower::Service;
 
     /// Drive one anonymous `GET` through a fully assembled app and report what it answered.
@@ -756,6 +767,28 @@ mod tests {
             // cannot see — and `Service` is refused for the same reason one level up, since this
             // host mints, verifies and revokes nothing for a service.
             ("agents", "/api/agents", agents::MAY_MINT),
+            // Reading and editing what a tenant may run (X-62). Only a signed-in human, and this
+            // is the entry that makes the four above worth having: whoever may edit a grant
+            // decides which operations run at all, for every principal of the tenant and across
+            // every connection it holds, so an agent that could write here would grant itself the
+            // rest of the catalogue and every other gate on this list would be advisory.
+            //
+            // **The read is on this list too**, which is the half that is easy to miss. The
+            // `GET /api/connections` collection is open to every kind because it answers addresses
+            // and a boolean; this answers a tenant's whole *policy*, and `exchange_host::admit_grant`
+            // deliberately withholds it from a refused caller so that an agent cannot enumerate it
+            // one call at a time. A read open to every kind would hand it over in one request.
+            // See `grants::MAY_GRANT`.
+            //
+            // Both verbs of `/api/grants` are one declaration, unlike the two entries above for
+            // `/api/connections/{connector}`: they admit the same kinds, and X-61 records what a
+            // duplicated path costs the anonymous enumeration next door.
+            ("grants", "/api/grants", grants::MAY_GRANT),
+            // Evaluating a grant before saving it. Gated with the write rather than left open,
+            // because a proposed policy is still a policy — and because a surface that let an
+            // agent enumerate which selector admits which operation is the same disclosure the
+            // read above is closed for, reached one step sideways.
+            ("grants", "/api/grants/preview", grants::MAY_GRANT),
         ];
 
         let gated: Vec<_> = published()
@@ -902,5 +935,357 @@ mod tests {
         assert_eq!(probe_path("/health"), "/health");
         assert_eq!(probe_path("/connections/{id}"), "/connections/x");
         assert_eq!(probe_path("/a/{b}/c/{d}"), "/a/x/c/x");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // X-62: the surface a grant is edited through.
+    // -----------------------------------------------------------------------------------------
+
+    /// The development roster the three tests below sign in through: one human, one agent, one
+    /// tenant. Both kinds are needed — the claim is that the *kind* is what decides the answer.
+    const EDITORS: &str = "user:alice@acme,agent:bot@acme";
+
+    /// A grant store that lives in the test, and that really stores.
+    ///
+    /// Hand-rolled rather than re-exported from `exchange_host`, for
+    /// `invoke::tests::HeldGrants`' reason: an in-memory store published from the library crate is
+    /// a fallback a production composition could bind, and `AGENTS.md` refuses one. This one has to
+    /// actually *hold* what it is handed, because the claim below is about what a write through the
+    /// surface leaves behind for the gate to read.
+    ///
+    /// Keyed by tenant rather than a single list, so a store that answered one tenant's grants for
+    /// another could not make these tests greener than they should be.
+    #[derive(Default)]
+    struct StoredGrants(Mutex<HashMap<String, Vec<Grant>>>);
+
+    impl Grants for StoredGrants {
+        fn held(&self, tenant: &Tenant) -> Vec<Grant> {
+            self.0
+                .lock()
+                .expect("no test poisons this")
+                .get(tenant.as_str())
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        fn set(&self, tenant: &Tenant, grants: &[Grant]) -> Result<(), GrantRefusal> {
+            self.0
+                .lock()
+                .expect("no test poisons this")
+                .insert(tenant.as_str().to_owned(), grants.to_vec());
+            Ok(())
+        }
+    }
+
+    /// A bound credential store that holds nothing. Editing a grant reads no credential, and this
+    /// refuses rather than answering, so a test that accidentally reached one would say so.
+    struct NoCredentials;
+
+    #[async_trait]
+    impl SecretStore for NoCredentials {
+        async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+            Err(StoreError::NotFound {
+                path: address_path(reference),
+            })
+        }
+
+        async fn put(&self, _: &CredentialRef, _: &Secret) -> Result<(), StoreError> {
+            unreachable!("editing a grant stores no credential")
+        }
+
+        async fn delete(&self, _: &CredentialRef) -> Result<(), StoreError> {
+            unreachable!("editing a grant destroys no credential")
+        }
+    }
+
+    /// A composition that can sign the roster in and that holds `grants`.
+    ///
+    /// The grant store reaches the surface through the **invoker**, which is the same binding the
+    /// gate decides against — see `routes::grants` for why that is the shape rather than a second
+    /// port on `AppState`.
+    fn editing(grants: Arc<StoredGrants>) -> AppState {
+        let invoker = Arc::new(
+            crate::execution::invoker(
+                Arc::new(NoCredentials),
+                Arc::new(exchange_host::MemoryConfig::new()),
+                grants,
+            )
+            .expect("a usable workspace root"),
+        );
+
+        AppState::with_development_identity(Arc::new(
+            crate::dev_identity::DevIdentity::from_roster(EDITORS).expect("a well-formed roster"),
+        ))
+        .with_invoker(invoker)
+    }
+
+    /// Drive one request through a fully assembled app and hand back what a caller sees.
+    async fn driven(
+        app: Router,
+        method: Method,
+        path: &str,
+        handle: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, String) {
+        let mut service = app.into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("a router is always ready");
+
+        let mut request = HttpRequest::builder().method(method).uri(path);
+        if let Some(handle) = handle {
+            request = request.header(header::AUTHORIZATION, format!("Bearer {handle}"));
+        }
+
+        let request = match body {
+            Some(body) => request
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("a well-formed request"),
+            None => request.body(Body::empty()).expect("a well-formed request"),
+        };
+
+        let response = service
+            .call(request)
+            .await
+            .expect("a router is infallible")
+            .into_response();
+
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a response body");
+
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// **X-62's first failing-first test.** This surface publishes a route that edits a grant, and
+    /// the kinds it admits are no wider than the ones that may supply a credential.
+    ///
+    /// Stated as an enumeration over [`published`] in the shape
+    /// `the_surface_mints_an_agent_principal_and_refuses_an_anonymous_caller` uses, because the two
+    /// regressions worth catching are the same two: a route that stops being published, and one
+    /// that quietly widens. The comparison is against `connections::MAY_SUPPLY_A_CREDENTIAL`
+    /// itself rather than against a list written out here — the Acceptance's wording is *"at least
+    /// as narrow as"*, and pinning it to the constant means widening credential supply cannot
+    /// silently widen this too.
+    ///
+    /// **Why editing a grant is at least that authority.** Supplying a credential decides which
+    /// account a tenant's operations reach; editing a grant decides *which operations run at all*,
+    /// for every principal of the tenant and for every connection it holds. An agent that could
+    /// write here would grant itself the rest of the catalogue, which makes every other kind gate
+    /// on this surface advisory.
+    #[tokio::test]
+    async fn the_surface_edits_a_grant_and_the_write_is_no_wider_than_supplying_a_credential() {
+        let editable: Vec<_> = published()
+            .filter(|(module, _)| module.name == "grants")
+            .map(|(_, route)| (route.path, route.access))
+            .collect();
+
+        assert_eq!(
+            editable,
+            vec![
+                (
+                    "/api/grants",
+                    Access::PrincipalOfKind(connections::MAY_SUPPLY_A_CREDENTIAL),
+                ),
+                (
+                    "/api/grants/preview",
+                    Access::PrincipalOfKind(connections::MAY_SUPPLY_A_CREDENTIAL),
+                ),
+            ],
+            "nothing on this surface reads or edits a grant, so a deployment runs nothing at all \
+             until somebody hand-writes the grant file",
+        );
+
+        // A caller this host cannot identify is refused, and told nothing about what exists.
+        let (status, body) = driven(
+            app(AppState::without_identity()),
+            Method::PUT,
+            "/api/grants",
+            None,
+            Some(json!({ "grants": [] })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(
+            !body.contains("grant") || !body.contains("acme"),
+            "the refusal must name nothing about what this host holds: {body}",
+        );
+
+        // An agent this host *did* identify is refused for its kind, and the refusal quotes the
+        // rule and nothing else. A leaked agent token that could widen its own tenant's grants
+        // makes revocation an incomplete remedy in the worst possible direction.
+        let store = Arc::new(StoredGrants::default());
+        let (status, body) = driven(
+            app(editing(store.clone())),
+            Method::PUT,
+            "/api/grants",
+            Some("bot"),
+            Some(json!({ "grants": [] })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an agent must not be able to decide what its own tenant may run: {body}",
+        );
+        assert!(
+            body.contains("user") && !body.contains("bot") && !body.contains("acme"),
+            "the refusal must quote the rule and name nothing else: {body}",
+        );
+        assert!(
+            store.0.lock().expect("no test poisons this").is_empty(),
+            "a refused write must have stored nothing",
+        );
+    }
+
+    /// **X-62's second failing-first test, and the Acceptance's central one.** A grant written
+    /// through the surface admits exactly what the gate admits.
+    ///
+    /// Asserted against [`admit_grant`] itself — the function `Invoker::invoke` calls — and not
+    /// against a second copy of its rules. What the surface answers is a *preview*, and a preview
+    /// an operator cannot trust is worse than none: a grant that reads as narrow in the console and
+    /// is wide at the gate is exactly the mistake this whole model exists to prevent.
+    ///
+    /// The two bracketing assertions are what stop it passing vacuously. A selector that admitted
+    /// nothing would agree with a gate that admits nothing, and one that admitted the whole
+    /// connector would agree with a gate that never decided anything — so the grant written here
+    /// has to select a proper, non-empty subset of what `github` declares.
+    #[tokio::test]
+    async fn a_grant_written_through_the_surface_admits_exactly_what_the_gate_admits() {
+        let store = Arc::new(StoredGrants::default());
+
+        let (status, body) = driven(
+            app(editing(store.clone())),
+            Method::PUT,
+            "/api/grants",
+            Some("alice"),
+            Some(json!({
+                "grants": [{
+                    "connector": "github",
+                    "selector": { "max_risk": "low", "effects_within": ["network"] },
+                }],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // What the surface told the operator it had just granted.
+        let document: Value = serde_json::from_str(&body).expect("a JSON document");
+        let previewed: BTreeSet<String> = document["grants"][0]["admits"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the answer carries what the grant admits: {body}"))
+            .iter()
+            .map(|facts| {
+                facts["id"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("an admitted operation carries its id: {body}"))
+                    .to_owned()
+            })
+            .collect();
+
+        // And what the gate would decide, over every operation the connector declares, from the
+        // grants this write actually left in the store.
+        let held = store.held(&Tenant::new("acme").expect("a usable tenant"));
+        assert!(
+            !held.is_empty(),
+            "the write answered 200 and stored nothing, so the preview above describes a grant \
+             that does not exist",
+        );
+
+        let caller = Principal::new(
+            PrincipalKind::User,
+            "alice",
+            Tenant::new("acme").expect("a usable tenant"),
+        );
+        let provider = connector_catalog::provider(connector_catalog::ProviderKey::id("github"))
+            .expect("the catalogue carries `github`");
+
+        let admitted: BTreeSet<String> = provider
+            .operations
+            .iter()
+            .filter(|operation| {
+                let runtime =
+                    admit_runtime(Deployment::MultiTenant, &ConnectorSurface::of(provider))
+                        .expect("http is admitted in every deployment");
+
+                admit_grant(
+                    runtime,
+                    &caller,
+                    provider.id,
+                    &OperationFacts::of(operation),
+                    &held,
+                )
+                .is_ok()
+            })
+            .map(|operation| operation.id.to_owned())
+            .collect();
+
+        assert_eq!(
+            previewed, admitted,
+            "the surface and the gate disagree about what this grant admits; the preview is what \
+             an operator decides against, and the gate is what runs",
+        );
+        assert!(
+            !admitted.is_empty(),
+            "the grant admits nothing, so the comparison above holds between two empty sets",
+        );
+        assert!(
+            admitted.len() < provider.operations.len(),
+            "the grant admits everything `github` declares, so the selector selected nothing and \
+             the comparison above cannot tell a gate that decides from one that does not",
+        );
+    }
+
+    /// **X-62's third failing-first test.** A request naming an operation id is refused.
+    ///
+    /// The story's *what it must not become*, as a test rather than as a review note. X-13's Goal
+    /// is that a grant is decided from an operation's declared metadata **and not from a list of
+    /// names**, and `Selector` carries `allow_ids` and `deny_ids` — deliberately, as an operator's
+    /// last-resort exception — which serialise. A surface that deserialised `Selector` verbatim
+    /// would therefore let a console write ids straight back into the model, and the property the
+    /// gate was built around would be gone through the one path that edits it.
+    ///
+    /// So the refusal is asserted together with the store being untouched: *refuse; never repair*
+    /// means the ids are not quietly dropped and the rest of the grant written anyway, because a
+    /// caller that asked for an exception and got a narrower grant without being told has been
+    /// answered with something it did not ask for.
+    #[tokio::test]
+    async fn the_surface_refuses_a_grant_that_names_an_operation_id() {
+        let store = Arc::new(StoredGrants::default());
+
+        let (status, body) = driven(
+            app(editing(store.clone())),
+            Method::PUT,
+            "/api/grants",
+            Some("alice"),
+            Some(json!({
+                "grants": [{
+                    "connector": "github",
+                    "selector": {
+                        "max_risk": "low",
+                        "allow_ids": ["github-issue-create"],
+                    },
+                }],
+            })),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a grant naming an operation id must be refused: {body}",
+        );
+        assert!(
+            body.contains("allow_ids"),
+            "the refusal must name the field that was refused, or an operator cannot act on it: \
+             {body}",
+        );
+        assert!(
+            store.0.lock().expect("no test poisons this").is_empty(),
+            "a refused grant must not have been stored, in any narrowed form: the caller asked for \
+             something this surface does not express and is owed a refusal rather than a guess",
+        );
     }
 }

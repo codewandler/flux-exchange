@@ -200,6 +200,26 @@ impl Invoker {
         }
     }
 
+    /// **The grants this invoker decides against**, as the port a composition bound.
+    ///
+    /// Added by X-62, which needed a surface that *edits* a grant and had nowhere to read the store
+    /// from. Handing it back through the invoker rather than binding a second port beside it is the
+    /// decision, and it is the one [`Grants`] already asks for in as many words: *"a composition
+    /// that could bind a reader to the invoker and a writer to a surface would have two stores that
+    /// disagree about what a tenant is allowed to do"*. There is exactly one `Arc` here, so the
+    /// surface an operator edits and the gate that runs are the same store by construction rather
+    /// than by a composition being written correctly.
+    ///
+    /// It hands back the **port**, not a grant and not a decision. Whether a grant admits an
+    /// operation is still [`admit_grant`]'s question and is still asked in one place — nothing here
+    /// widens anything, because there is no method on this struct that takes a
+    /// [`Grant`](crate::Grant) and no parameter of [`invoke`](Self::invoke) through which one could
+    /// arrive. What a caller of this can do is read and replace a *tenant's* set, which is what
+    /// editing a grant is, and which the trait's own two methods bound.
+    pub fn grants(&self) -> &Arc<dyn Grants> {
+        &self.grants
+    }
+
     /// **Run one catalogue operation for `principal`'s tenant.**
     ///
     /// `params` is the operation's own declared parameter object, verbatim — there is no envelope,

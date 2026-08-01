@@ -449,3 +449,44 @@ test('the_onboarding_page_names_no_colour_of_its_own', () => {
     'the page reads a custom property this console defines nowhere, so those rules paint nothing'
   )
 })
+
+// ---------------------------------------------------------------------------------------------
+// X-62: what the page says about grants, once a route edits one.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * **X-62's failing-first test on this side.** The `invoke` warning stops saying that nothing edits
+ * a grant, and names where one is edited instead.
+ *
+ * The sentence it replaces is this story's Acceptance written as prose: *"Grants are held per
+ * tenant and there is no route that edits one, so a tenant nobody has granted anything runs nothing
+ * at all: ask whoever operates this deployment."* That was worth saying while it was true — X-13
+ * shipped the gate fail-closed with no surface behind it — and it is a claim about **this build**,
+ * so it has to leave the page in the same change that makes it false. A document that keeps telling
+ * an agent author there is no way for their tenant to be granted anything is the same dishonesty as
+ * one claiming a capability it does not have, pointed the other way.
+ *
+ * Asserted on the model and on the rendered page, because the model is what generates the
+ * descriptor the **service** serves and the page is what a human reads. Two renderings, one fact —
+ * which is what `test/descriptor.test.mjs` exists to keep true.
+ */
+test('the_invoke_warning_names_the_route_a_grant_is_edited_at', async () => {
+  const warn = step('invoke').call.warn
+
+  assert.doesNotMatch(
+    warn,
+    /no route that edits/,
+    'a route edits a grant now, and a page still saying none does sends an operator off to ask somebody rather than to the console'
+  )
+  assert.match(
+    warn,
+    /\/api\/grants/,
+    'the warning must name where a grant is edited — "ask whoever operates this deployment" was the whole answer only while there was nowhere to point'
+  )
+
+  const html = await page()
+  assert.ok(
+    html.includes('/api/grants'),
+    `the page must name the route a grant is edited at; got: ${html}`
+  )
+})

@@ -389,9 +389,31 @@ for a non-secret.
   leaks nothing the anonymous catalogue does not already publish, and it is what mints the
   `Admitted` the grant gate consumes.
 
-  What is **still** not built is any surface for *editing* a grant: the store is a file an operator
-  writes. That is a gap with a reader attached rather than a hidden one — README says so, and the
-  onboarding descriptor's `invoke` step says so to every stranger who asks.
+  **A surface for editing a grant** — this paragraph used to say there was none, and that the store
+  was a file an operator writes. **X-62 closed it**, because a gate nothing can configure is a gate
+  that runs nothing: `GET`/`PUT /api/grants` read and replace a tenant's set, and
+  `POST /api/grants/preview` answers what a proposed grant *would* admit before it is saved. Three
+  decisions came with it, and each is here rather than in `agent-access.md` because each is a
+  question about *what a grant is*:
+
+  - **It expresses a selector and refuses an operation id.** The wire body is a connector plus
+    `max_risk`, `effects_within` and `idempotency`; a request naming `allow_ids`, `deny_ids` or any
+    other id-shaped field is refused with `422` and the argument. `Selector`'s exception lists stay
+    for the file an operator edits by hand — a route that deserialised `Selector` verbatim would let
+    a console write names back into a model whose whole point is that it does not read them.
+  - **The preview is derived from the projection the gate decides on**, `OperationFacts::of` through
+    `ConnectorSurface::admitted`, and not from a second copy of `Selector::admits` beside the screen.
+    `routes::tests::a_grant_written_through_the_surface_admits_exactly_what_the_gate_admits` asserts
+    the two agree against `admit_grant` itself.
+  - **Both verbs, and the preview, admit a `User` and nothing else.** Editing decides which
+    operations run at all, which is more authority than supplying a credential (X-54). The *read* is
+    gated too, which is the half that is easy to get wrong: `admit_grant` deliberately withholds a
+    tenant's policy from a refused caller so that an agent cannot enumerate it one call at a time,
+    and a read open to every kind would hand the whole of it over in one request.
+
+  What is still a file-only decision is an **id exception**: a hand-written grant carrying
+  `allow_ids` or `deny_ids` is *shown* by the read, marked as one this surface cannot express, and a
+  `PUT` that would replace it is refused with `409` rather than dropping it silently.
 - **Execution records.** Nothing here writes an audit trail. `vision.md` requires that every execution
   be explainable — who asked, which grant admitted it, what was called, what came back — and X-13
   made three of those four facts exist. *Which grant* admitted it is the one still missing: the gate

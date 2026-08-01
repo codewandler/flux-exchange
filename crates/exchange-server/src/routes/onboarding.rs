@@ -613,6 +613,22 @@ mod tests {
             "as above.",
         ),
         (
+            "/api/grants",
+            "what a tenant may run, and where a human changes it (X-62). Not a capability, and \
+             emphatically not one an agent is invited to reach: `grants::MAY_GRANT` admits a \
+             `User` alone on both verbs, because deciding which operations run is more authority \
+             than supplying a credential, and because `exchange_host::admit_grant` deliberately \
+             withholds a tenant's policy from a refused caller so an agent cannot enumerate it. \
+             The `invoke` capability's own `warn` names this route, which is where an agent author \
+             is told to send the human who holds the tenant.",
+        ),
+        (
+            "/api/grants/preview",
+            "what a proposed grant would admit, before it is saved. The same caller and the same \
+             argument as the line above; it is a console affordance for the human editing a \
+             policy, not a step in what an agent does.",
+        ),
+        (
             "/api/onboarding",
             "this document itself. It names its own endpoint in `endpoint`, which is where a \
              caller looks for it, rather than as something an agent is told to go and do.",
