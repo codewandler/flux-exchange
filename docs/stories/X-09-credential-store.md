@@ -45,9 +45,11 @@ still wired.
   and `FileStore` then created the credential file *inside the checkout*. Fixed by resolving
   downward from the root — `..` is only ever applied to an already-resolved prefix, which is what the
   kernel does — and lexical normalisation was rejected because it is wrong under a symlink.
-- **Not wired into a binary.** `bind_configured` + `banner()` exist and are tested; `exchange-server`
-  calls neither. That is deliberate — wiring it would make `cargo run` refuse without
-  `FLUX_EXCHANGE_CREDENTIALS`, which the binary's documented posture does not yet claim.
+- **Wired into the binary by X-10.** `bind_configured` + `banner()` were left unbound here
+  deliberately; X-10 bound them, and chose *unset means bound to nothing* rather than a startup
+  refusal — the connection routes then refuse and name the setting. That keeps this story's "no
+  fallback to memory" rule (nothing else is ever selected) without making `cargo run` refuse for a
+  reader who only wants `/health`.
 
 ## Notes
 - Deleting a credential must rewrite immediately, so a revoked credential does not return on restart.

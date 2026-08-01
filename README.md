@@ -76,8 +76,8 @@ against one tenant's connections, not a vendor secret.
 
 | | |
 |---|---|
-| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound but not yet wired into a binary. **Real and tested (32 tests).** |
-| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port, OIDC sign-in **up to the token exchange**, and a per-tenant connection surface. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (99 tests).** |
+| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path. **Real and tested (39 tests).** |
+| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port, OIDC sign-in **up to the token exchange**, and a per-tenant connection surface. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (128 tests).** |
 | `console/` | A Vue 3 console reading the **live catalogue** from this service, reusing the framework-free explorer components from flux-connectors. An unreachable service renders an error naming the endpoint — never an empty catalogue. |
 
 **Not built, despite being described in the design:** the second half of sign-in (the token exchange
@@ -85,9 +85,7 @@ and id-token verification, for want of an HTTP client and a JOSE library), a sec
 connector (the address has no instance dimension until upstream publishes one), per-connection
 configuration, `invoke`,
 `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
-catalogue loader. The credential store has moved off this list and is described below — with the
-caveat that it is a library binding no binary holds yet, which is a shorter distance from "not
-built" than the section heading suggests. The design is ahead of the code on purpose; the gap is
+catalogue loader. The credential store has moved off this list and is described below. The design is ahead of the code on purpose; the gap is
 stated here so nobody has to discover it.
 
 ### The credential store, and what does not protect it

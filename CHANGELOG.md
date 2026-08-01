@@ -86,7 +86,7 @@ All notable changes to this project are documented in this file. The format is b
   a working tree is refused (one `git add -A` from a committed credential), a configuration naming
   no path is a startup error naming what would have worked with **no fallback to memory**, and the
   banner reads its path back off the store that was actually bound. The README states what does
-  *not* protect a value there: the file mode and nothing else. Not yet wired into a binary.
+  *not* protect a value there: the file mode and nothing else.
 - **An HTTP surface that refuses an open bind** (X-02). `cargo run` binds `127.0.0.1:8080` and
   answers `GET /health`. Startup on a reachable address with no identity provider configured is
   **refused before the socket opens**, and the refusal names what would have worked — a daemon
