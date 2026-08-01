@@ -8,6 +8,23 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A connector with a templated host can be invoked** (X-47). Invoke landed and immediately showed
+  that a large minority of connectors could not run at all: their `base_url` is templated on a
+  per-connection value and there was nowhere for a tenant to supply it. **Seventeen connectors** —
+  the count is derived by rehearsing the shipped catalogue rather than scanning `base_url`, because
+  five carry their configuration variables elsewhere in the operation's compiled Flux.
+
+  **Configuration is not a credential and is not stored as one**: its own file, its own port, and
+  bounds never summed with the credential allowance. Values are not read back out.
+
+  **Four connectors are deliberately refused**, and this is the security property of the release: for
+  `newrelic`, `docusign`, `okta` and `freshdesk` the templated value *is the entire destination
+  authority*, so supplying it would have been a way for a caller to name a host — and the tenant's
+  credential would have travelled there. The rule is about the **template**, not the value, and it is
+  enforced on read as well as on write, so a value that reached the file some other way is still
+  refused. The listing says which connectors are unconfigurable and why, rather than letting them
+  read as broken.
+
 - **An operator can mint an agent from the console** (X-45), and the token is shown **once**. The
   store keeps a verifier, so this host genuinely cannot show it again — the screen says so, and
   offers no affordance implying otherwise. The token is held in the view's own scope rather than the

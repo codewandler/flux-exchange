@@ -52,7 +52,7 @@ _`docs/vision.md` says the thing this epic exists to act on:_
 - [X-13 — Grants gate invocation](X-13-grants-gate-invoke.md) · Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect
 
 ## Blocked
-- [X-47 — A connector with a templated host can actually be invoked](X-47-per-connection-settings.md) · found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name
+_None._
 
 ## Backlog
 
@@ -99,6 +99,7 @@ _`docs/vision.md` says the thing this epic exists to act on:_
 - [X-44 — An operator can connect a connector without reaching for curl](X-44-connect-from-the-console.md) · X-34 shipped a read-only Connections view and said plainly that a connect form belongs in its own story. The console's first stated job is to wire things up, and it currently cannot
 - [X-45 — An operator can mint an agent and see its token once](X-45-mint-an-agent-from-the-console.md) · X-36 shipped POST /api/agents and nothing in the UI reaches it. The agent-onboarding page will tell an agent author to mint a token; this is where they do it
 - [X-46 — A connector's declared credentials are published, not discovered by provoking a refusal](X-46-catalogue-publishes-declarations.md) · found by X-44's implementor in the workaround it had to write, 2026-08-01: nothing publishes what a connector declares, so the console reads it out of the 422 that a deliberately-empty POST returns
+- [X-47 — A connector with a templated host can actually be invoked](X-47-per-connection-settings.md) · found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

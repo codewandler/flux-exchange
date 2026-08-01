@@ -1,8 +1,9 @@
 ---
 id: X-47
 title: "A connector with a templated host can actually be invoked"
-status: blocked
+status: done
 epic: connections
+design: docs/designs/connection-settings.md
 design: docs/designs/connection-settings.md
 areas: [exchange-server, exchange-host]
 note: "found by X-12's implementor once invoke worked, 2026-08-01: thirteen of fifty-three connectors declare a templated base_url and there is nowhere to put the value, so the invoker binds an empty config and they refuse by name"
@@ -30,16 +31,16 @@ X-11 brought in `connector-address` 0.9 with C-406's instance dimension, and X-1
 uses it.
 
 ## Acceptance
-- [ ] **Failing-first test** — a connector with a templated `base_url` is invoked successfully after
+- [x] **Failing-first test** — a connector with a templated `base_url` is invoked successfully after
       its per-connection value is supplied, and fails before the value can be supplied.
-- [ ] The value is **per connection and per tenant**, derived from the resolved principal like every
+- [x] The value is **per connection and per tenant**, derived from the resolved principal like every
       other address on this surface. No route accepts a tenant.
-- [ ] A connection missing a value its connector declares is still **refused by name** — this story
+- [x] A connection missing a value its connector declares is still **refused by name** — this story
       adds a way to supply the value, it does not weaken the refusal.
-- [ ] **Configuration is not a credential and must not be stored as one.** A subdomain is not a
+- [x] **Configuration is not a credential and must not be stored as one.** A subdomain is not a
       secret; putting it in the credential store would make `held` and the occupancy bound mean two
       different things. Decide where it lives and argue it.
-- [ ] The existing invoke tests stay green unmodified, including
+- [x] The existing invoke tests stay green unmodified, including
       `no_parameter_can_move_the_destination_host` — **supplying configuration must not become a way
       for a caller to name a host.** That is the invariant this story is most able to break.
 
@@ -144,3 +145,43 @@ The widened address guard (26 hostile `{service}`/`{field}` spellings, all refus
 created), the verbatim `credentials.rs` move (one doc word changed; all five escape tests survive),
 configuration-is-not-a-credential, the rollback path, and the `paths` module being **private** rather
 than new public surface as I had assumed.
+
+## Rework round 1 — the path is closed, and the measurement found more than the review did
+
+**Done 2026-08-01.** Gate green: 326 tests (52 + 16 + 3 + 10 + 5 host, 240 server), clippy, fmt.
+Merged as the rework of the reverted `90ee254`.
+
+- **The review named two connectors. The measurement found four.** `newrelic` and `docusign` as
+  reported, plus **`okta`** (`{domain}`, would have carried `okta.api_token`) and **`freshdesk`**
+  (`{domain}`, declares no credential but this host would still have been an open proxy). *That is
+  the argument for deciding it from the catalogue rather than from a list* — a hand-written list
+  would have shipped two more holes.
+- **The rule is about the *template*, never the value.** `acme.newrelic.com` is refused exactly as
+  `evil.example` is, because a value rule would be a blocklist and a blocklist catches only what
+  somebody enumerated.
+- **Enforced twice, and the second is the one that matters.** `ConnectionSettings::set` refuses, and
+  `ConfigStore::get` refuses **again** — so the property belongs to the **port** rather than to one
+  write path. An edited file, a restored backup, or a value written by an older build all bypass
+  `set`. The value is not deleted: *refuse, never repair*, and on this path somebody has to be able
+  to find out how it got there.
+- **The suffix rule needs two further labels, not one**, because `.com` pins nothing anybody cannot
+  register under. The honest answer is a public-suffix list, which is a dependency this crate may not
+  take — the approximation is stated in the code and **errs closed**.
+- **Verified at integration by falsification**, not on report: neutering `host_pinning` fails three
+  tests including the end-to-end one, which reproduces the original — `newrelic` dispatching to a
+  tenant-supplied host with the credential on the wire.
+- **Four connectors are refused rather than made to work**, taking the dispatch's explicit sanction
+  that a smaller working surface beats a larger one that leaks. Closing that gap needs somewhere an
+  **operator** can pin an allowed host per tenant — a new surface with its own authorization
+  question, and its own story.
+- **The route's allowance check was deleted rather than corrected**: `SettingsStore::set` decides
+  under the same lock it reads and inserts under — a *tighter* read-decide-write than a route-level
+  claim — so a guard on top would guard nothing and be a second place to drift.
+- **The count is 17, and a base-URL scan misses five.** Shipped surface: **49 of 53**.
+- The design doc keeps the **flawed §4 argument on the page** as an explicit correction. The flaw —
+  *a character allow-list constrains what a value looks like, not where the request goes* — is the
+  part worth not losing.
+- **Carried forward:** `suffix_of` is the whole rule in twelve lines, and its two-label threshold
+  approximates a public-suffix list. A vendor template shaped `{x}.co.uk` would pass it while pinning
+  a public suffix. Nothing shipped is in that shape, and the catalogue-wide test asserts the property
+  of every accepted suffix — but it is the assumption to re-examine first.
