@@ -66,6 +66,29 @@ pub enum SignIn {
     Oidc(Arc<Oidc>),
 }
 
+impl SignIn {
+    /// Whether a human could complete a sign-in against this composition.
+    ///
+    /// Three states collapse to one boolean, and the collapse is the point rather than a loss.
+    /// The three are what an **operator** needs, because "not configured" and "configured but
+    /// unable to finish" have different remedies — `crate::routes::signin`'s two explanatory pages
+    /// say so, to a human who asked for a login. What a **caller** may know is narrower: whether
+    /// sign-in works is a fact about the service, and which of the two ways it does not work is a
+    /// fact about the configuration. Telling them apart on the wire would report to an anonymous
+    /// caller whether this host's OIDC settings are set, which is a piece of the deployment's
+    /// shape and none of their business.
+    ///
+    /// Matched exhaustively and with no wildcard arm, deliberately: a fourth variant must be a
+    /// compile error here rather than something that silently falls to `false`, because the arm a
+    /// new state belongs in is the whole decision.
+    pub fn available(&self) -> bool {
+        match self {
+            SignIn::Oidc(_) => true,
+            SignIn::Unconfigured | SignIn::NoTokenExchange => false,
+        }
+    }
+}
+
 /// The identity port a composition bound, and what the bind rule may conclude from it.
 ///
 /// One enum rather than a port plus a flag, so "this is the development identity" is not a claim
