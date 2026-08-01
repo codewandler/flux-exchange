@@ -36,6 +36,15 @@ const TOKEN_BYTES: usize = 32;
 /// Where the token's entropy comes from.
 const ENTROPY_SOURCE: &str = "/dev/urandom";
 
+/// The most sessions one store will hold at once.
+///
+/// A bound rather than an eviction policy, and a refusal rather than a silent drop: evicting the
+/// oldest would sign somebody out to make room for a caller who may be looping, and they would have
+/// no way to tell that from a bug. Generous for the development identity this serves — a human
+/// signing in all day does not approach it — so reaching it means something is wrong and saying so
+/// is the useful behaviour.
+const MAX_LIVE_SESSIONS: usize = 4096;
+
 /// An opaque session token.
 ///
 /// It is a bearer credential: whoever holds it is the principal it names. So it does not implement
@@ -79,12 +88,28 @@ impl SessionStore {
 
     /// Open a session for a principal that has already been resolved, and return its token.
     pub fn open(&self, principal: Principal) -> Result<SessionToken, SessionError> {
+        let mut live = self.live();
+
+        // Refuse; never repair. Nothing here expires, so without a bound this map only grows.
+        if live.len() >= MAX_LIVE_SESSIONS {
+            return Err(SessionError::TooManyLive {
+                max: MAX_LIVE_SESSIONS,
+            });
+        }
+
         let token = mint()?;
-        self.live().insert(token.clone(), principal);
+        live.insert(token.clone(), principal);
         Ok(token)
     }
 
     /// The principal a presented token names, if it names one.
+    ///
+    /// A hash lookup, which is **not** constant time — a deliberate choice rather than an
+    /// oversight. Timing tells an attacker something only if it narrows a search, and there is
+    /// nothing here to narrow: a token is 256 bits from the OS, so there is no prefix to walk and
+    /// no shorter guess to confirm. The comparison would be worth making constant-time if tokens
+    /// were ever derived from something guessable, which is the thing to check before changing how
+    /// they are minted.
     pub fn resolve(&self, presented: &str) -> Option<Principal> {
         self.live()
             .get(&SessionToken(presented.to_string()))
@@ -141,6 +166,12 @@ pub enum SessionError {
         /// What went wrong reading it.
         source: std::io::Error,
     },
+
+    /// The store already holds as many sessions as it will.
+    TooManyLive {
+        /// The limit that was reached.
+        max: usize,
+    },
 }
 
 impl fmt::Display for SessionError {
@@ -151,6 +182,12 @@ impl fmt::Display for SessionError {
                 "cannot mint a session token: {ENTROPY_SOURCE} is unreadable ({source}). Refusing \
                  rather than falling back to a predictable token",
             ),
+            Self::TooManyLive { max } => write!(
+                f,
+                "cannot mint a session: this store already holds its maximum of {max}. Nothing \
+                 here expires, so either sessions are not being closed or something is opening \
+                 them in a loop",
+            ),
         }
     }
 }
@@ -159,6 +196,7 @@ impl std::error::Error for SessionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::NoEntropy { source } => Some(source),
+            Self::TooManyLive { .. } => None,
         }
     }
 }
@@ -170,7 +208,12 @@ impl std::error::Error for SessionError {
 /// - **`Secure`** — the session never travels in clear text. Browsers treat `http://localhost` as
 ///   a secure context, so this is compatible with the loopback development bind rather than in
 ///   tension with it.
-/// - **`HttpOnly`** — script cannot read it, so an XSS in the console cannot exfiltrate a session.
+/// - **`HttpOnly`** — script cannot read it. On its own that attribute buys less than it appears
+///   to: same-origin `fetch` still sends the cookie ambiently, so script can *use* a session it
+///   cannot read, and a route that handed such a caller a readable token would give the exfiltrable
+///   credential straight back. What makes this claim true is therefore not the attribute alone but
+///   `routes::identity::sign_in`, which mints nothing for a cookie-carried caller — see the
+///   invariant stated there, and `a_cookie_session_cannot_be_exchanged_for_a_readable_token`.
 /// - **`SameSite=Strict`** — the cookie is not sent on any cross-site request, which is what stops
 ///   another origin from spending it. `Strict` and not `Lax` because this surface has no
 ///   cross-site entry flow to preserve; X-04's OIDC redirect is where that question gets asked.
@@ -243,6 +286,32 @@ mod tests {
         for token in &tokens {
             assert_eq!(token.len(), TOKEN_BYTES * 2, "256 bits, hex encoded");
         }
+    }
+
+    /// Nothing here expires, so the store is bounded instead — and it refuses at the bound rather
+    /// than evicting somebody to make room, which would sign out a caller who did nothing wrong.
+    #[test]
+    fn a_full_store_refuses_rather_than_evicting() {
+        let store = SessionStore::new();
+        let mut live = Vec::with_capacity(MAX_LIVE_SESSIONS);
+
+        for _ in 0..MAX_LIVE_SESSIONS {
+            live.push(store.open(alice()).expect("the store is not yet full"));
+        }
+
+        assert!(
+            matches!(store.open(alice()), Err(SessionError::TooManyLive { .. })),
+            "a full store must refuse",
+        );
+        assert!(
+            live.iter()
+                .all(|token| store.resolve(token.as_str()).is_some()),
+            "and must not have evicted anybody to make room",
+        );
+
+        // Closing one makes room again, so the bound is a bound and not a one-way door.
+        store.close(live[0].as_str());
+        assert!(store.open(alice()).is_ok());
     }
 
     /// A bearer credential that prints itself is a bearer credential in the logs.

@@ -127,7 +127,7 @@ async fn require_principal(
         );
     };
 
-    let presented = presented(&request).unwrap_or_default();
+    let (presented, carrier) = presented(&request).unwrap_or(("", Carrier::Authorization));
     // Bound before the match so the borrow of `request` ends here and the resolved principal can be
     // attached below.
     let resolved = identity.resolve(presented).await;
@@ -135,6 +135,9 @@ async fn require_principal(
     match resolved {
         Ok(Some(principal)) => {
             request.extensions_mut().insert(principal);
+            // How the caller authenticated, for the one route that mints credentials. The guard is
+            // the only thing that inserts this, so a handler cannot be lied to about it.
+            request.extensions_mut().insert(carrier);
             next.run(request).await
         }
         Ok(None) => refuse(
@@ -156,7 +159,20 @@ async fn require_principal(
     }
 }
 
-/// The credential material a request presents, if it presents any at all.
+/// How a caller carried the credential it presented.
+///
+/// This exists because the two carriers are not equally powerful in the hands of an attacker, and a
+/// route that mints credentials has to be able to tell them apart. See
+/// [`identity`](crate::routes::identity) for the rule it enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Carrier {
+    /// An `Authorization` header, which the caller attached deliberately and can therefore read.
+    Authorization,
+    /// The session cookie, which the browser attaches ambiently and script **cannot** read.
+    Cookie,
+}
+
+/// The credential material a request presents, and how it carried it.
 ///
 /// Two ways to carry one session, because the two callers this host serves carry things
 /// differently: an **agent** sets an `Authorization` header, and a **browser** sends the cookie it
@@ -170,19 +186,21 @@ async fn require_principal(
 /// **Nothing about the tenant is read here, from either.** The credential resolves to a principal
 /// and the tenant comes from that principal — which is why this returns the material and not a
 /// caller identity.
-fn presented(request: &Request) -> Option<&str> {
+fn presented(request: &Request) -> Option<(&str, Carrier)> {
     let headers = request.headers();
 
     let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|material| (material, Carrier::Authorization));
 
     bearer.or_else(|| {
         headers
             .get(header::COOKIE)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| session::from_cookie_header(value, session::SESSION_COOKIE))
+            .map(|material| (material, Carrier::Cookie))
     })
 }
 

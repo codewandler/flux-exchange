@@ -26,7 +26,7 @@ use exchange_host::Principal;
 use serde_json::json;
 use tracing::{error, warn};
 
-use super::{Access, Module, Route};
+use super::{Access, Carrier, Module, Route};
 use crate::session;
 use crate::state::AppState;
 
@@ -62,9 +62,29 @@ async fn whoami(Extension(principal): Extension<Principal>) -> Response {
 /// Takes **no** body extractor. There is nothing a request could say about who it is that this
 /// route would read: the principal argument was resolved by the guard before the handler ran, and
 /// the session is opened for that principal.
+///
+/// # A caller that authenticated by cookie gets no token
+///
+/// This is the rule that makes `HttpOnly` mean what it says, and it is worth stating as an
+/// invariant rather than as a branch:
+///
+/// > **A session token is returned in the body only to a caller that presented a *readable*
+/// > credential. This route can never turn an unreadable credential into a readable one.**
+///
+/// Without it, `HttpOnly` is decorative. Script cannot read the cookie, but it does not need to:
+/// same-origin `fetch` has the browser attach the cookie ambiently, and `SameSite=Strict` does not
+/// apply to a same-origin request. So script could `POST` here with a credential it cannot read and
+/// receive one it can — a token that outlives the page, survives sign-out elsewhere and travels off
+/// the machine. That is precisely the exfiltration `HttpOnly` exists to prevent, reintroduced by
+/// the route that hands out credentials.
+///
+/// So a cookie-carried caller mints **nothing**: there is nothing to exchange, because a session
+/// cookie is already the session. It is answered with its principal, and no new credential enters
+/// the world.
 async fn sign_in(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Extension(carrier): Extension<Carrier>,
 ) -> Response {
     let Some(dev) = state.development_identity() else {
         // Only the development port mints its own sessions. A federated provider's session is
@@ -75,6 +95,12 @@ async fn sign_in(
             "this composition's identity provider does not mint sessions",
         );
     };
+
+    // The caller already holds a session and cannot read it. Minting a second one it *could* read
+    // would be an escalation, so this answers without creating anything.
+    if carrier == Carrier::Cookie {
+        return Json(json!({ "principal": principal })).into_response();
+    }
 
     let token = match dev.open_session(principal.clone()) {
         Ok(token) => token,
@@ -101,7 +127,8 @@ async fn sign_out(State(state): State<AppState>, request: axum::extract::Request
     if let Some(dev) = state.development_identity() {
         // Whatever the caller presented is what gets closed. A caller can only ever close its own
         // session, because closing is keyed on the token it just proved it holds.
-        dev.close_session(super::presented(&request).unwrap_or_default());
+        let presented = super::presented(&request).map_or("", |(material, _)| material);
+        dev.close_session(presented);
     } else {
         warn!("sign-out on a composition whose identity provider mints no sessions");
     }
@@ -190,6 +217,17 @@ mod tests {
             .method(method)
             .uri(path)
             .header(AUTHORIZATION, "Bearer alice")
+    }
+
+    /// Whether anything in this text could be a session token.
+    ///
+    /// Looks for the *shape* — 64 hex characters — rather than for a key named `token`, so a
+    /// refactor that renames the field, nests it, or adds a second credential somewhere else
+    /// cannot quietly reopen the escalation this guards.
+    fn carries_a_token(text: &str) -> bool {
+        text.as_bytes()
+            .windows(64)
+            .any(|window| window.iter().all(u8::is_ascii_hexdigit))
     }
 
     // ---------------------------------------------------------------------------------------
@@ -393,6 +431,99 @@ mod tests {
         );
         assert_eq!(by_cookie["principal"]["tenant"], RESOLVED);
         assert_eq!(by_cookie, by_bearer, "one session, two ways to carry it");
+    }
+
+    /// The escalation `HttpOnly` exists to prevent, asserted rather than assumed.
+    ///
+    /// The threat is same-origin script, which is the case `HttpOnly` is *for*: it cannot read the
+    /// cookie, but `fetch` has the browser attach it ambiently and `SameSite=Strict` does not apply
+    /// to a same-origin request. So script can reach every route here holding a credential it
+    /// cannot read. What it must never be able to do is come away holding one it *can* — a token
+    /// that outlives the page and travels off the machine.
+    ///
+    /// This drives exactly that: hold only the cookie, work every method, and check nothing
+    /// token-shaped comes back from any of them.
+    #[tokio::test]
+    async fn a_cookie_session_cannot_be_exchanged_for_a_readable_token() {
+        let app = dev_app(ROSTER);
+
+        // Establish a cookie session the way a browser gets one, then forget the token — from here
+        // on the attacker holds only what script could hold.
+        let (_, _, minted) = call(
+            app.clone(),
+            as_alice(Method::POST, SESSION)
+                .body(Body::empty())
+                .expect("a well-formed request"),
+        )
+        .await;
+        let cookie = format!(
+            "{SESSION_COOKIE}={}",
+            minted["token"].as_str().expect("a minted session token"),
+        );
+
+        // Everything script can do with an ambient cookie.
+        for method in [Method::GET, Method::POST] {
+            let (status, headers, body) = call(
+                app.clone(),
+                HttpRequest::builder()
+                    .method(method.clone())
+                    .uri(SESSION)
+                    .header(COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("a well-formed request"),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK, "{method} answered {status}");
+            assert!(
+                body["token"].is_null(),
+                "{method} handed a readable token to a caller that authenticated by cookie: {body}",
+            );
+            assert!(
+                !carries_a_token(&body.to_string()),
+                "{method} returned something token-shaped, which is the escalation HttpOnly \
+                 exists to prevent: {body}",
+            );
+
+            // A token planted in a fresh cookie would be just as readable to script, which can
+            // read the response headers of its own `fetch`.
+            let planted = headers
+                .get(SET_COOKIE)
+                .map(|value| value.to_str().expect("a cookie is ASCII").to_string())
+                .unwrap_or_default();
+            assert!(
+                !carries_a_token(&planted),
+                "{method} planted a new token a script could read off the response: {planted}",
+            );
+        }
+    }
+
+    /// The other half of the rule: a caller that presented a *readable* credential does get a
+    /// token, because it already held one and nothing is escalated by handing it another.
+    ///
+    /// Without this, the assertion above could be satisfied by never minting a token at all, which
+    /// would break every agent.
+    #[tokio::test]
+    async fn a_readable_credential_still_mints_a_readable_token() {
+        let (status, headers, body) = call(
+            dev_app(ROSTER),
+            as_alice(Method::POST, SESSION)
+                .body(Body::empty())
+                .expect("a well-formed request"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body["token"]
+                .as_str()
+                .is_some_and(|token| token.len() == 64),
+            "an agent authenticating by header must still get a session it can carry: {body}",
+        );
+        assert!(
+            headers.get(SET_COOKIE).is_some(),
+            "and a browser its cookie"
+        );
     }
 
     /// Signing out closes the session, so the token that worked a moment ago no longer does.

@@ -83,6 +83,15 @@ single refusal covering both would tell half its readers to do the wrong thing.
 one that is. The three constructors are the only way to build an `AppState`, which is what keeps the
 port and its binding from drifting apart.
 
+Two levels are tested, because they are two claims and only one of them was pinned at first:
+
+- **The enum** — `admit_bind(_, Development)` refuses a reachable address, in `bind::tests`.
+- **The wiring** — `AppState::with_development_identity(…)` → `identity_binding()` → `admit_bind`,
+  in `state::tests`. This is the path `main` actually runs, and it is where a future
+  "simplification" lands: collapsing `identity_binding` to report `Bound` for the development port
+  leaves every test in `bind` green while making `FLUX_EXCHANGE_BIND=0.0.0.0:8080` serve a
+  credential-free identity to the network. Pinning the enum is not pinning the wiring.
+
 ## There is no anonymous sign-in route
 
 **Decision: every route in the identity module requires a principal, including the one that mints
@@ -115,13 +124,46 @@ wins when both are present**: an `Authorization` header is something the caller 
 attached, a cookie is ambient and attached by the browser on the caller's behalf, and when they
 disagree the deliberate one is what was meant.
 
+The port does not learn which, but the *guard* records it, as `routes::Carrier` in the request
+extensions. Exactly one route reads it, for the reason in the next section.
+
+### A cookie session cannot be exchanged for a readable token
+
+**Decision: `POST /api/session` mints a token only for a caller that presented a readable
+credential.**
+
+> **A session token is returned in the body only to a caller that already held one it could read.
+> This route can never turn an unreadable credential into a readable one.**
+
+This is what makes the `HttpOnly` claim below true, and it was **not** true in the first version of
+this story — the review caught it, and the shape of the mistake is worth recording because it is
+easy to make again.
+
+`HttpOnly` stops script *reading* the cookie. It does not stop script *using* it: same-origin
+`fetch` has the browser attach the cookie ambiently, and `SameSite=Strict` does not apply to a
+same-origin request. So an XSS could `POST` here carrying a credential it could not read and receive
+one it could — and since nothing expires, that token outlives the page, survives sign-out elsewhere
+and travels off the machine. The attribute was doing nothing, while the design note claimed it was
+doing everything. A control that only appears to exist is worse than an absent one, because it stops
+anybody looking.
+
+The fix is a branch, but the thing to keep is the invariant: a cookie-carried caller mints nothing,
+because a session cookie *is* already the session and there is nothing to exchange. It is answered
+with its principal and no new credential enters the world.
+`a_cookie_session_cannot_be_exchanged_for_a_readable_token` drives every method a script could reach
+holding only the cookie and asserts nothing token-shaped comes back — matching on the 64-hex *shape*
+rather than on a field called `token`, so a rename or a nesting cannot quietly reopen it.
+`a_readable_credential_still_mints_a_readable_token` is its counterweight, since "never mint
+anything" would satisfy the first assertion and break every agent.
+
 ### The cookie
 
 `__Host-flux_exchange_session`, with `Path=/; Secure; HttpOnly; SameSite=Strict`.
 
 - **`Secure`** — never travels in clear text. Browsers treat `http://localhost` as a secure context,
   so this is compatible with the loopback development bind rather than in tension with it.
-- **`HttpOnly`** — script cannot read it, so an XSS in the console cannot exfiltrate a session.
+- **`HttpOnly`** — script cannot read it. On its own that buys less than it appears to; what makes
+  the exfiltration claim true is the rule above, not the attribute.
 - **`SameSite=Strict`** — not sent on any cross-site request, which is what stops another origin
   spending it. `Strict` and not `Lax` because this surface has no cross-site entry flow to preserve;
   X-04's OIDC redirect is where that question gets asked, and it is the one thing there that may
@@ -158,6 +200,13 @@ one in a log line is a session anyone reading the log can use.
 - **Sessions do not survive a restart.** They are in a `Mutex<HashMap>` in the development port. A
   shared store is a real design question — it decides whether this service can run more than one
   replica — and it should be answered when there is a real provider to answer it for.
+- **The store is bounded at 4096 and refuses at the bound**, rather than evicting. Since nothing
+  expires, an unbounded map only grows; and evicting the oldest would sign out a caller who did
+  nothing wrong, who could not tell that from a bug. Reaching the bound means something is looping
+  or nothing is closing, and saying so is the useful behaviour.
+- **Token lookup is a hash lookup, not a constant-time comparison.** Deliberate: timing helps an
+  attacker only if it narrows a search, and 256 bits from the OS leaves no prefix to walk and no
+  shorter guess to confirm. This is the thing to revisit if tokens ever stop being random.
 - **No `WWW-Authenticate` challenge** on the `401`, unchanged from X-02.
 - **The 401/503 split is asserted end to end**, not just at the port:
   `a_rejected_credential_and_an_unreachable_provider_are_distinguishable` drives both through the

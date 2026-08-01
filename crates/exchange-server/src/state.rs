@@ -104,3 +104,76 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::net::SocketAddr;
+
+    use crate::bind::admit_bind;
+
+    fn dev() -> Arc<DevIdentity> {
+        Arc::new(DevIdentity::from_roster("user:alice@acme").expect("a well-formed roster"))
+    }
+
+    fn addr(raw: &str) -> SocketAddr {
+        raw.parse().expect("a literal socket address")
+    }
+
+    /// The seam `main` actually runs through, end to end: compose the state, ask it for its
+    /// binding, and hand that to the bind rule.
+    ///
+    /// `bind::tests` pins the *enum* — that `Development` is refused on a reachable address. This
+    /// pins the **wiring**, which is a separate claim and the one a future simplification breaks:
+    /// collapsing `identity_binding` to return `Bound` for the development port would leave every
+    /// test in `bind` green while making `FLUX_EXCHANGE_BIND=0.0.0.0:8080` serve a credential-free
+    /// identity to the network.
+    #[test]
+    fn arming_the_development_identity_does_not_admit_a_reachable_bind() {
+        let state = AppState::with_development_identity(dev());
+
+        assert!(
+            admit_bind(addr("0.0.0.0:8080"), state.identity_binding()).is_err(),
+            "arming the development identity must not make a reachable bind legal",
+        );
+        assert!(
+            admit_bind(addr("127.0.0.1:8080"), state.identity_binding()).is_ok(),
+            "and must still allow the loopback bind it exists for",
+        );
+    }
+
+    /// The mapping itself, stated as a table so that every constructor is pinned rather than only
+    /// the one this story added.
+    #[test]
+    fn each_constructor_reports_its_own_binding() {
+        assert_eq!(
+            AppState::without_identity().identity_binding(),
+            IdentityBinding::Unbound,
+        );
+        assert_eq!(
+            AppState::with_identity(dev()).identity_binding(),
+            IdentityBinding::Bound,
+        );
+        assert_eq!(
+            AppState::with_development_identity(dev()).identity_binding(),
+            IdentityBinding::Development,
+            "the development port must never report itself as a real binding",
+        );
+    }
+
+    /// The concrete port is reachable only when it is the development one, because that is what
+    /// decides whether the session routes mint anything.
+    #[test]
+    fn only_the_development_binding_hands_back_a_development_port() {
+        assert!(AppState::with_development_identity(dev())
+            .development_identity()
+            .is_some());
+        assert!(AppState::with_identity(dev())
+            .development_identity()
+            .is_none());
+        assert!(AppState::without_identity()
+            .development_identity()
+            .is_none());
+    }
+}
