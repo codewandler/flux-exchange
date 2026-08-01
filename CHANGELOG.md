@@ -8,6 +8,31 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **An agent can fetch what this service is instead of reading a page** (X-42). `GET /api/onboarding`
+  answers anonymously with what the platform is, the auth scheme, and which capabilities are live —
+  the same facts the console's onboarding page renders, from the same source.
+
+  **The first attempt published a falsehood, and how it happened is the useful part.** It told the
+  caller the vision calls primary that `invoke` was not built, while
+  `POST /api/operations/{operation}/invoke` had been in the published surface since v0.7.0. The
+  page-and-descriptor agreement test was green the whole time, because the two renderings agreed
+  **with each other** while both were wrong. Deriving from one source protects against drift, not
+  against the source being false.
+
+  The cause was one flag answering two questions: `built` means *has this console a screen*, and the
+  document asks *does this service do this*. Those had the same answer for every surface until
+  `invoke` shipped a route with no screen. They are now two fields, and liveness is held to
+  `routes::MODULES` by a test that runs in **both** directions — a capability cannot be published as
+  not-live while a route serving it is in the surface, and a route cannot be published without either
+  being a capability or carrying a written argument for why not.
+
+  The falsehood was in three renderings. All three are corrected.
+
+  **It publishes one real exposure deliberately**: this build gates invocation by identity alone, so
+  any principal it resolves may run any catalogue operation against its own tenant's connections.
+  That is a fact about the software rather than a deployment, and publishing the endpoint while
+  withholding it would be the dishonest half of a disclosure.
+
 - **The two branches X-46 opened are pinned** (X-49). Publishing declarations changed how a connector
   that declares nothing renders — it used to arrive as `refused` and now arrives as `ready` with an
   empty list — and nothing exercised the branch it took. Both are held by tests now, and each was

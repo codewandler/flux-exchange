@@ -2,7 +2,6 @@
 id: X-42
 title: "An agent can fetch what it needs instead of reading a page"
 status: in-progress
-priority: 3
 epic: agent-onboarding
 design: docs/designs/agent-onboarding.md
 areas: [exchange-server, console]
@@ -135,3 +134,16 @@ is in `routes::MODULES`, and is gated `Access::Principal`; the document said
   `works: false` with the comment *"nothing in flux-exchange can be invoked yet"*, so the explorer
   reads "not live yet" on operations the service can run. Same root cause, different surface
   (X-07/X-46), and deciding what `works` should mean per operation is that story's call.
+
+## Carried into X-37 — a trap this story leaves one story out
+
+`nothing_this_host_binds_resolves_an_agent_token` (`onboarding.rs:708`) pins `authenticate`'s
+`live: false` by asserting `AppState::without_identity().with_agents(store).identity().is_none()`.
+
+That holds today. **It only fails at X-37 if X-37 makes `with_agents` set the identity port.** If
+X-37 instead composes an `Identity` that consults the agent store, this pin and `SERVED_BY`'s
+`("authenticate", None)` row both stay green **while the document becomes false** — the same
+*internally consistent, externally false* shape as this story's round 1, arriving one story later.
+
+X-37 must land with an assertion that flips both. This is recorded here and on the epic so it is not
+discovered by an agent author.
