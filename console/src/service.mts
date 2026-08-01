@@ -58,6 +58,19 @@ export function operationsEndpoint(connector: string): string {
 }
 
 /**
+ * Where one connector's **declared** credentials are served, by connector id.
+ *
+ * On the catalogue and not under `/api/connections` for the reason that decides everything about
+ * this read: what a connector declares is a vendor fact, identical for every caller and every
+ * deployment of a version, while whether *this tenant holds* one is per-principal state. The first
+ * is anonymous; the second is the connections surface and requires a principal. A connect form
+ * needs only the first, so it asks only for the first.
+ */
+export function declarationEndpoint(connector: string): string {
+  return `${CONNECTORS_ENDPOINT}/${encodeURIComponent(connector)}/credentials`
+}
+
+/**
  * Where one connector's connection is created, read and destroyed.
  *
  * `{connector}` is a catalogue key and never an address: it selects *what* is being connected, and
@@ -697,6 +710,9 @@ export async function loadConnections(options: LoadOptions = {}): Promise<Connec
 // thing that knows. A list kept here goes stale the day a connector gains a credential, and the
 // operator who then cannot enter it has no way to tell that the console is the one that is wrong.
 // So the declaration is read from the service, every time, and the inputs are whatever it said.
+//
+// Since X-46 that question is a `GET` on the catalogue rather than a `POST` the service refuses:
+// **rendering a form costs no write.** `loadDeclaration` carries the history.
 // ---------------------------------------------------------------------------------------------
 
 /** What a connector declares — the names a connection may carry values for. */
@@ -716,10 +732,14 @@ export interface Declaration {
  * What this console knows about one connector's declaration.
  *
  * Four states rather than the three the reads above use, and the fourth earns its place. `refused`
- * is the service answering the question — `freshdesk` declares no credential, or this host has no
- * credential store bound — in a sentence the operator acts on, and folding it into `failed` would
- * put that sentence through the summariser that truncates. `failed` stays what it is everywhere
- * else in this file: nothing was read, and the console cannot tell you anything.
+ * is the service answering the question — the catalogue does not carry this connector at all — in a
+ * sentence the operator acts on, and folding it into `failed` would put that sentence through the
+ * summariser that truncates. `failed` stays what it is everywhere else in this file: nothing was
+ * read, and the console cannot tell you anything.
+ *
+ * A connector that declares **no** credential is none of those: it is `ready` with an empty
+ * `credentials`, because "nothing to store for this one" is an answer and not an absence of one.
+ * Before X-46 it arrived as a `refused`, since the workaround could only learn it from a refusal.
  */
 export type DeclarationState =
   | { status: 'loading' }
@@ -727,72 +747,76 @@ export type DeclarationState =
   | { status: 'refused'; refusal: ServiceRefusal }
   | { status: 'failed'; failure: ServiceFailure }
 
-/** The declared names in a refusal body, or `null` when it carries none this can read. */
+/**
+ * The declared names in a catalogue declaration, or `null` when it carries none this can read.
+ *
+ * All-or-nothing, for the reason `readConnectors` gives: one entry that fails the shape check fails
+ * the whole read. A declaration silently missing a credential is a form silently missing an input,
+ * and an operator who fills in the boxes they were given has no way to tell that a box is absent.
+ */
 function readDeclared(body: unknown): string[] | null {
-  if (!isObject(body) || !Array.isArray(body.declared)) return null
-  const declared = body.declared.filter((name): name is string => typeof name === 'string')
-  return declared.length === body.declared.length ? declared : null
+  if (!isObject(body) || !Array.isArray(body.credentials)) return null
+  const declared = body.credentials
+    .map((credential) =>
+      isObject(credential) && typeof credential.name === 'string' ? credential.name : null
+    )
+    .filter((name): name is string => name !== null)
+  return declared.length === body.credentials.length ? declared : null
 }
 
 /**
- * What a connector declares, asked of the service.
- *
- * **This is a question spelled as a refused write, and that is worth being blunt about.** The
- * served catalogue publishes an operation's metadata and no credentials, and there is no route on
- * this host that reads a declaration — so the one place the service states it is the refusal it
- * gives a `POST` carrying no values:
+ * What a connector declares, read from the catalogue.
  *
  * ```text
- * POST /api/connections/slack  {"credentials": {}}
- * 422 {"connector":"slack","declared":["slack.bot_token","slack.signing_secret"],"error":…}
+ * GET /api/catalogue/connectors/slack/credentials
+ * 200 {"connector":"slack","authority":"com.slack.api","credentials":[{"name":"slack.bot_token",…}]}
  * ```
  *
- * Three things make that sound rather than a trick. It **writes nothing**: `routes::connections`
- * refuses an empty body before it takes a claim, before it probes the store and before any `put`,
- * and the refusal is load-bearing there — "allowing none would let an empty `POST` create a
- * connection with nothing behind it" — so it cannot quietly become a create. It **carries no
- * value**, so there is no secret in the question. And the names come from `connector_catalog`, so a
- * connector that gains a credential gains an input here with nobody editing this console, which is
- * the property the story is actually about.
+ * **A read, and only a read.** X-44 had no route to ask this of: the served catalogue published an
+ * operation's metadata and no credentials, so the only place the service stated a declaration was
+ * the `422` it gives a `POST /api/connections/{connector}` carrying `{"credentials": {}}`. That
+ * workaround wrote nothing and carried no value — both were verified, and the `422` still says
+ * exactly what it said — but it made a capability fact something this console inferred from an
+ * error body, so rewording the refusal would have rendered every connector unreadable. X-46 made it
+ * a field, one layer up from where X-43 made the same call for sign-in availability, and this
+ * function is the whole of the console's half of it.
  *
- * It is still a workaround for a gap in the surface, and the honest fix is a catalogue that
- * publishes what each connector declares. That is a change to the Rust crates and belongs in its
- * own story; when it lands, this function changes and nothing above it does.
+ * Three properties survive the change, and they are the ones worth keeping. The names still come
+ * from `connector_catalog`, so a connector that gains a credential gains an input with nobody
+ * editing this console. Nothing is sent, so there is no value to leak and nothing an audit of the
+ * traffic has to be told to disregard. And the endpoint is anonymous, so a form renders before a
+ * principal resolves rather than after.
  */
 export async function loadDeclaration(
   connector: string,
   options: LoadOptions = {}
 ): Promise<DeclarationState> {
-  const endpoint = connectionEndpoint(connector)
-  const answered = await read(endpoint, options, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    // No values. This is a question, and the service's refusal is the answer.
-    body: JSON.stringify({ credentials: {} }),
-  })
+  const endpoint = declarationEndpoint(connector)
+  const answered = await read(endpoint, options)
 
   if (answered.ok) {
-    // Unreachable against this host, and it must never be read as a declaration: a `2xx` here would
-    // mean the service had accepted a connection carrying nothing at all, which is precisely what
-    // that route exists to refuse. Say the answer was not one this console can read.
+    const declared = readDeclared(answered.body)
+    if (declared) return { status: 'ready', declaration: { connector, credentials: declared } }
+
+    // A `200` whose body this console cannot read is not a connector that declares nothing. An
+    // empty `credentials` array is that, and it arrives through the branch above as an empty
+    // declaration — which `Connect.mts` renders as "declares no credential", the true sentence.
     return {
       status: 'failed',
       failure: {
         kind: 'unreadable',
         endpoint,
         status: 200,
-        detail: 'the service accepted a connection carrying no credential value, which it refuses by design',
+        detail: 'the catalogue answered with no `credentials` array this console could read',
       },
     }
   }
 
-  const declared = readDeclared(answered.body)
-  if (declared) return { status: 'ready', declaration: { connector, credentials: declared } }
-
   const error = serviceError(answered.body)
   if (error !== null && answered.failure.status !== null) {
-    // The connector declares no credential, or no authority, or this host has no store bound. Each
-    // is the service stating something the operator has to act on, and each is its own sentence.
+    // The catalogue naming the id it does not carry — a `404` on a connector this console listed
+    // is the service and this bundle disagreeing about what exists, and that sentence is the one
+    // an operator acts on. Kept whole rather than summarised, for the reason `serviceError` gives.
     return {
       status: 'refused',
       refusal: { endpoint, status: answered.failure.status, error },
