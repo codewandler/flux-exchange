@@ -1,7 +1,7 @@
 ---
 id: X-02
 title: "Serve HTTP, and refuse a reachable bind with no way to authenticate"
-status: in-progress
+status: done
 priority: 1
 epic: serve
 design: docs/designs/http-surface.md
@@ -35,8 +35,11 @@ reachable address unless a principal can be resolved.
       → [`docs/designs/http-surface.md`](../designs/http-surface.md).
 
 ## Progress
-- **Done, pending review.** Implemented on `impl/X-02`; gate green (build, test, clippy `-D
-  warnings`, fmt).
+- **Done.** Merged from `impl/X-02`; gate green on the integration branch after merge.
+- Independently reviewed: a 23-address sweep found no reachable bind that is admitted (IPv4-mapped
+  IPv6 and unparseable hostnames both fail closed), 18 request shapes were driven at a guarded spy
+  route and none reached the handler, and the enumeration test was proven live by flipping a spy
+  route to `Anonymous` and watching it fail by name.
 - The surface lives in `crates/exchange-server/src/routes/`, one module per feature area, assembled
   at a single merge site (`MODULES` in `routes/mod.rs`). A module declares its routes **as data** and
   its `Router` is derived from them — axum's `Router` cannot be introspected, so an opaque

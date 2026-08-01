@@ -8,11 +8,14 @@ happened; agents are what call operations all day. That inverts the usual assump
 everything below.
 
 > [!WARNING]
-> **Status: v0.0.1 — a charter and a type system. There is no service here yet.**
+> **Status: v0.0.1 — a charter, a type system, and an HTTP surface with exactly one route.**
 >
-> `cargo run` starts, prints which runtimes each deployment shape would serve, and exits. It binds
-> no port, holds no credential, and answers no request. See [What exists today](#what-exists-today)
-> for the honest inventory before planning around any of this.
+> `cargo run` now binds `127.0.0.1:8080` and answers `GET /health`. It refuses to start on a
+> reachable address while no identity provider is configured. Nothing else is served: there is no
+> sign-in, no catalogue route, no connection, and no `invoke`. It holds no credential — the store
+> exists as a library binding and no binary holds one yet. See
+> [What exists today](#what-exists-today) for the honest inventory before planning around any of
+> this.
 
 ## Why it exists
 
