@@ -38,6 +38,30 @@ X-11 tracks the alignment. The work is upstream, in flux-connectors.
 
 ## Epics
 
+### A public documentation site
+
+`flux` and `flux-connectors` each publish a VitePress site from `web/`; this repository publishes
+nothing, so an evaluator can read what the engine does and browse the catalogue, and then hits a gap
+exactly where *"what holds my credentials, and what will it let an agent do?"* gets answered.
+
+The brief is to scaffold the **whole** future surface — channels, `subscribe`, leases, workflows —
+not just what is built. That runs straight into principle 7, and it is worth being blunt about why:
+this repository corrected **five renderings of one false claim** in a single week, each written
+honestly, each stale within a release. A docs site is a factory for that failure.
+
+So the epic is ordered around the mechanism rather than the volume. [[X-63]] is the scaffold and the
+pipeline, matched to flux-connectors. [[X-64]] makes every page's status **derived** from the same
+descriptor artifact whose `live` flags X-42 and X-52 hold to the route table — the one honesty device
+here that has survived review. Only then do [[X-65]] and [[X-66]] add the surface and the argument.
+
+Done looks like: a visitor reaches a public URL, understands why the credential never crosses the
+boundary, sees the whole intended platform including channels and workflows, and can tell built from
+planned at a glance — with that answer coming from the route table rather than from an author's
+memory.
+
+Design: [`docs/designs/public-docs-site.md`](designs/public-docs-site.md).
+
+
 ### Local identity
 
 **You cannot use this console without standing up an OIDC provider.** Everything shipped through
