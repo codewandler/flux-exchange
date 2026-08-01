@@ -41,7 +41,16 @@ use exchange_host::{async_trait, Identity, IdentityError, Principal, PrincipalKi
 use crate::session::{SessionError, SessionStore, SessionToken};
 use config::{OidcConfig, SCOPES};
 use exchange::{ExchangeError, Redemption, SignedClaims, TokenExchange};
-use flow::{FlowError, PendingAuthorizations};
+use flow::{Binder, Claimed, FlowError, PendingAuthorizations};
+
+/// An authorization request that has been opened: where to send the browser, and what to plant in
+/// it so the callback can tell it apart from every other browser.
+pub struct Authorization {
+    /// The provider URL the browser is redirected to.
+    pub url: String,
+    /// The binder for this browser. See [`flow::BINDER_COOKIE`].
+    pub binder: Binder,
+}
 
 /// A federated identity provider, and the sessions it has opened.
 ///
@@ -74,8 +83,13 @@ impl Oidc {
         }
     }
 
-    /// Open an authorization request and build the URL the browser is sent to.
-    pub fn authorization_url(&self) -> Result<String, FlowError> {
+    /// Open an authorization request: the URL the browser is sent to, and the binder to plant in it.
+    ///
+    /// Both, from one call, because they are two halves of one act. A composition able to obtain the
+    /// URL without the binder would be one where the browser is sent to the provider carrying
+    /// nothing that ties the callback back to it — which is the hole X-15 closed, reintroduced at
+    /// the seam.
+    pub fn authorize(&self) -> Result<Authorization, FlowError> {
         let begun = self.pending.begin()?;
 
         let separator = if self.config.authorization_endpoint().contains('?') {
@@ -84,7 +98,7 @@ impl Oidc {
             '?'
         };
 
-        Ok(format!(
+        let url = format!(
             "{endpoint}{separator}response_type=code\
              &client_id={client_id}\
              &redirect_uri={redirect_uri}\
@@ -101,19 +115,36 @@ impl Oidc {
             nonce = begun.nonce,
             challenge = begun.challenge.as_str(),
             method = pkce::METHOD,
-        ))
+        );
+
+        Ok(Authorization {
+            url,
+            binder: begun.binder,
+        })
     }
 
     /// Finish a sign-in: redeem the code, check every binding, and open a session.
     ///
-    /// The order matters. The `state` lookup comes first and consumes the pending request, so a
-    /// callback this host did not open costs one map lookup and reaches neither the provider nor
-    /// the session store.
-    pub async fn complete(&self, state: &str, code: &str) -> Result<SessionToken, SignInRefusal> {
-        let pending = self
-            .pending
-            .take(state)
-            .ok_or(SignInRefusal::UnknownState)?;
+    /// The order matters. The `(state, binder)` claim comes first, so a callback this host did not
+    /// open — or did not open *for this browser* — costs one map lookup and reaches neither the
+    /// provider nor the session store.
+    ///
+    /// `binder` is what the browser presented, which is why it is a `&str` and not a
+    /// [`Binder`](flow::Binder): a caller-supplied value has not been shown to be one of ours, and
+    /// giving it the type of a value this host drew would be asserting exactly what is in question.
+    /// The empty string is a legitimate argument here and can never match; the route refuses a
+    /// missing cookie before reaching this, so that it never becomes a lookup at all.
+    pub async fn complete(
+        &self,
+        state: &str,
+        code: &str,
+        binder: &str,
+    ) -> Result<SessionToken, SignInRefusal> {
+        let pending = match self.pending.claim(state, binder) {
+            Claimed::Authorization(pending) => pending,
+            Claimed::Unknown => return Err(SignInRefusal::UnknownState),
+            Claimed::AnotherBrowser => return Err(SignInRefusal::AnotherBrowser),
+        };
 
         let claims = self
             .exchange
@@ -264,6 +295,20 @@ pub enum SignInRefusal {
     /// The callback carried a `state` this host did not open, or one that was already spent.
     UnknownState,
 
+    /// The callback carried no binder cookie at all, so no browser claims to have opened it.
+    ///
+    /// Refused **before** the pending store is consulted. An attacker who simply omits the cookie
+    /// must not fall through to the path that checks only `state`, and refusing early also means the
+    /// answer cannot depend on whether the named `state` is live.
+    NoBinder,
+
+    /// The callback carried a binder, but not the one the named `state` was opened with.
+    ///
+    /// The login-CSRF this binding exists to close: a browser being walked into somebody else's
+    /// sign-in. Kept distinct from [`UnknownState`](Self::UnknownState) **in the log only** — see
+    /// [`SignInRefusal::caller_facing`].
+    AnotherBrowser,
+
     /// The provider refused the authorization code, or its id token did not verify.
     CodeRejected,
 
@@ -294,9 +339,28 @@ pub enum SignInRefusal {
 
 impl SignInRefusal {
     /// What the caller is told. A short, fixed phrase per variant, and never a value.
+    ///
+    /// # The three binding refusals answer identically, on purpose
+    ///
+    /// [`UnknownState`](Self::UnknownState), [`NoBinder`](Self::NoBinder) and
+    /// [`AnotherBrowser`](Self::AnotherBrowser) share one phrase and one status, and that is a
+    /// security property rather than an economy.
+    ///
+    /// `UnknownState` and `AnotherBrowser` are decided by a **lookup in the pending store**: the
+    /// first means no live request answers to that `state`, the second means one does. Telling those
+    /// apart on the wire would make the callback an oracle for "is this `state` live", which is the
+    /// one fact about somebody else's pending sign-in worth guessing — and
+    /// `routes::signin::tests::a_callback_without_a_code_is_not_an_oracle_for_a_live_state` already
+    /// holds that line for the other refusals on this route.
+    ///
+    /// The remedy is identical anyway — start again from the sign-in page — so nothing is withheld
+    /// that would help the human. What differs is the **diagnosis**, and that belongs to the
+    /// operator: [`fmt::Display`] keeps all three apart, because a host seeing forged states and a
+    /// host seeing browsers walked into other people's sign-ins have different problems and
+    /// different attackers.
     pub fn caller_facing(&self) -> &'static str {
         match self {
-            Self::UnknownState => {
+            Self::UnknownState | Self::NoBinder | Self::AnotherBrowser => {
                 "this sign-in could not be matched to one that started here. Start again from the \
                  sign-in page"
             }
@@ -325,6 +389,19 @@ impl fmt::Display for SignInRefusal {
         match self {
             Self::UnknownState => f.write_str(
                 "a callback presented a state this host did not open, or one already spent",
+            ),
+            // The two X-15 added. Both name the *browser*, because that is what separates them from
+            // the line above: there the value was wrong, here the value was real and the browser
+            // presenting it was not the one it was issued to.
+            Self::NoBinder => f.write_str(
+                "a callback presented no sign-in binder, so no browser claims to have opened it — \
+                 either a browser that discards cookies, or a callback walked into one that never \
+                 started a sign-in here",
+            ),
+            Self::AnotherBrowser => f.write_str(
+                "a callback presented a genuinely bound state from a browser that did not open it: \
+                 login CSRF, or a sign-in resumed in a different browser. The authorization request \
+                 was left unspent",
             ),
             Self::CodeRejected => f.write_str("the provider refused the authorization code"),
             Self::ProviderUnreachable(reason) => {
@@ -535,6 +612,51 @@ mod tests {
         );
     }
 
+    /// The three binding refusals read **identically to the caller and differently in the log**.
+    ///
+    /// Both halves matter, and they pull in opposite directions, which is why they are asserted
+    /// together rather than in two tests that could drift apart.
+    ///
+    /// *Identical to the caller*, because `UnknownState` and `AnotherBrowser` are decided by a
+    /// lookup in the pending store: telling them apart on the wire would report whether a given
+    /// `state` is live, which is the one fact about somebody else's pending sign-in worth guessing.
+    ///
+    /// *Different in the log*, because they mean different things about who is attacking. A host
+    /// seeing `UnknownState` is being sent values it never issued — someone guessing. A host seeing
+    /// `AnotherBrowser` or `NoBinder` is watching **real** authorization requests arrive in the
+    /// wrong browsers, which is login-CSRF in progress and a different incident entirely.
+    #[test]
+    fn a_walked_in_callback_reads_differently_in_the_log_from_a_forged_state() {
+        let forged = SignInRefusal::UnknownState;
+        let no_binder = SignInRefusal::NoBinder;
+        let another = SignInRefusal::AnotherBrowser;
+
+        // The caller learns nothing that separates them.
+        assert_eq!(forged.caller_facing(), no_binder.caller_facing());
+        assert_eq!(forged.caller_facing(), another.caller_facing());
+
+        // The operator does. Distinct lines, and each one names what actually happened.
+        let (forged, no_binder, another) = (
+            forged.to_string(),
+            no_binder.to_string(),
+            another.to_string(),
+        );
+
+        assert_ne!(forged, no_binder);
+        assert_ne!(forged, another);
+        assert_ne!(no_binder, another);
+
+        assert!(forged.contains("did not open"), "{forged}");
+        assert!(no_binder.contains("no sign-in binder"), "{no_binder}");
+        assert!(
+            another.contains("did not open it") && another.contains("login CSRF"),
+            "an operator must be able to recognise this one by name: {another}",
+        );
+        // And it says the honest sign-in survived, because the operator's next question is whether
+        // this cost somebody their login.
+        assert!(another.contains("left unspent"), "{another}");
+    }
+
     /// A caller-facing refusal never carries a value, and never carries what the provider said.
     /// The operator's version may; that is what the log is for.
     #[test]
@@ -571,7 +693,7 @@ mod tests {
     /// common enough that getting this wrong is a sign-in that fails at the provider.
     #[test]
     fn the_authorization_url_appends_to_an_endpoint_that_already_has_a_query() {
-        let plain = oidc().authorization_url().expect("the OS has randomness");
+        let plain = oidc().authorize().expect("the OS has randomness").url;
         assert!(plain.contains("/authorize?response_type=code"), "{plain}");
 
         let with_query = Oidc::new(
@@ -583,8 +705,9 @@ mod tests {
             ),
             Arc::new(Unused),
         )
-        .authorization_url()
-        .expect("the OS has randomness");
+        .authorize()
+        .expect("the OS has randomness")
+        .url;
 
         assert!(
             with_query.contains("?realm=staff&response_type=code"),

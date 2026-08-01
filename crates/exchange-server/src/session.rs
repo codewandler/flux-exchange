@@ -191,12 +191,51 @@ impl std::error::Error for SessionError {
     }
 }
 
-/// The `Set-Cookie` value that plants a session in a browser.
+/// How far a cookie travels on a request another site started.
 ///
-/// The three attributes the Acceptance names, and why each is here:
+/// The one attribute that differs between the two cookies this host plants, which is why it is a
+/// parameter rather than a constant: making the difference a value a caller of [`host_cookie`] has
+/// to name means neither cookie can drift into the other's policy by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SameSite {
+    /// Never sent on a request whose navigation chain began at another site.
+    ///
+    /// What the **session** cookie carries. It is an ambient authority to *act* as somebody, so the
+    /// only safe answer to "should another origin be able to cause it to be sent" is no.
+    Strict,
+
+    /// Sent on a top-level navigation another site initiated, and on nothing else.
+    ///
+    /// What the **sign-in binder** carries, because it has to survive exactly one such navigation:
+    /// the provider's redirect back to the callback. See `crate::oidc::flow::BINDER_COOKIE` for why
+    /// that is not the session cookie's rule weakened, but a different rule for a different kind of
+    /// value.
+    Lax,
+}
+
+impl SameSite {
+    /// The attribute as it goes on the wire.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "Strict",
+            Self::Lax => "Lax",
+        }
+    }
+}
+
+/// The `Set-Cookie` value for a `__Host-` cookie this host plants.
 ///
-/// - **`Secure`** — the session never travels in clear text. Browsers treat `http://localhost` as
-///   a secure context, so this is compatible with the loopback development bind rather than in
+/// **The only place this binary formats a `Set-Cookie`.** Both the session and the OIDC sign-in
+/// binder come through here, so the `__Host-` requirements — `Path=/`, `Secure`, no `Domain` — are
+/// written once and cannot hold for one cookie and quietly lapse for the other.
+///
+/// The attributes, and why each is here:
+///
+/// - **`Path=/` and no `Domain`** — what the `__Host-` prefix requires. A browser refuses a
+///   `__Host-` cookie that carries either differently, so these are enforced by the client too and
+///   not only by the test that asserts we wrote them.
+/// - **`Secure`** — the value never travels in clear text. Browsers treat `http://localhost` as a
+///   secure context, so this is compatible with the loopback development bind rather than in
 ///   tension with it.
 /// - **`HttpOnly`** — script cannot read it. On its own that attribute buys less than it appears
 ///   to: same-origin `fetch` still sends the cookie ambiently, so script can *use* a session it
@@ -204,12 +243,34 @@ impl std::error::Error for SessionError {
 ///   credential straight back. What makes this claim true is therefore not the attribute alone but
 ///   `routes::identity::sign_in`, which mints nothing for a cookie-carried caller — see the
 ///   invariant stated there, and `a_cookie_session_cannot_be_exchanged_for_a_readable_token`.
-/// - **`SameSite=Strict`** — the cookie is not sent on any cross-site request, which is what stops
-///   another origin from spending it. `Strict` and not `Lax` because this surface has no
-///   cross-site entry flow to preserve; X-04's OIDC redirect is where that question gets asked.
+/// - **`SameSite`** — the caller's, and the one thing the two cookies disagree about. See
+///   [`SameSite`].
+/// - **`Max-Age`** — only when this host expires the value on its own side too. A browser-honoured
+///   expiry the server does not enforce is a lie that reads as a security control, which is the
+///   objection this module records against decorative attributes generally.
+pub fn host_cookie(name: &str, value: &str, same_site: SameSite, max_age: Option<u64>) -> String {
+    let age = max_age
+        .map(|seconds| format!("; Max-Age={seconds}"))
+        .unwrap_or_default();
+
+    format!(
+        "{name}={value}; Path=/{age}; Secure; HttpOnly; SameSite={}",
+        same_site.as_str(),
+    )
+}
+
+/// The `Set-Cookie` value that plants a session in a browser.
+///
+/// `SameSite=Strict`: the cookie is not sent on any cross-site request, which is what stops another
+/// origin from spending it. `Strict` and not `Lax` because this surface has no cross-site entry flow
+/// that needs a *session* — the OIDC callback returns cross-site, but it arrives to **create** a
+/// session rather than to spend one, and X-04 answers it with a meta-refresh page so the navigation
+/// that first carries the session is one this host's own document initiated.
+///
+/// No `Max-Age`: nothing here expires server-side, and an expiry only the browser honours would be
+/// exactly the decorative control this module refuses elsewhere.
 pub fn planted(token: &SessionToken) -> String {
-    let token = token.as_str();
-    format!("{SESSION_COOKIE}={token}; Path=/; Secure; HttpOnly; SameSite=Strict")
+    host_cookie(SESSION_COOKIE, token.as_str(), SameSite::Strict, None)
 }
 
 /// The `Set-Cookie` value that clears a session from a browser.
@@ -218,7 +279,7 @@ pub fn planted(token: &SessionToken) -> String {
 /// path and domain, so a clearing cookie that dropped them would plant a second one instead of
 /// overwriting the first.
 pub fn cleared() -> String {
-    format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict")
+    host_cookie(SESSION_COOKIE, "", SameSite::Strict, Some(0))
 }
 
 /// The value of `name` in a `Cookie` request header, if it carries one.
@@ -314,6 +375,32 @@ mod tests {
         let printed = format!("{token:?}");
         assert!(!printed.contains(token.as_str()), "{printed}");
         assert_eq!(printed, "SessionToken(redacted)");
+    }
+
+    /// The two cookies this host plants, written out in full.
+    ///
+    /// Pinned as literals rather than rebuilt from [`host_cookie`], which would assert only that the
+    /// function equals itself. These strings are what a browser enforces the `__Host-` prefix
+    /// against, so a change to any of them should have to be typed here deliberately.
+    #[test]
+    fn every_planted_cookie_carries_the_host_prefix_attributes() {
+        let token = SessionToken("abc123".to_string());
+
+        assert_eq!(
+            planted(&token),
+            "__Host-flux_exchange_session=abc123; Path=/; Secure; HttpOnly; SameSite=Strict",
+        );
+        assert_eq!(
+            cleared(),
+            "__Host-flux_exchange_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+        );
+
+        // The shape the OIDC binder takes: the same `__Host-` attributes, a `Max-Age` this host
+        // also enforces, and the one deliberate difference.
+        assert_eq!(
+            host_cookie("__Host-x", "v", SameSite::Lax, Some(600)),
+            "__Host-x=v; Path=/; Max-Age=600; Secure; HttpOnly; SameSite=Lax",
+        );
     }
 
     #[test]
