@@ -10,6 +10,7 @@
 // catalogue can produce resolves to a view this app actually renders.
 
 import type { PathResolver } from './catalog.mts'
+import { GRANTS_PATH } from './granting.mts'
 import { AGENTS_PATH } from './minting.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { nextTick, ref, type Ref } from 'vue'
@@ -53,6 +54,7 @@ export type Route =
   | { name: 'connect'; anchor?: string }
   | { name: 'agents'; anchor?: string }
   | { name: 'connections'; anchor?: string }
+  | { name: 'grants'; anchor?: string }
   | { name: 'explorer'; anchor?: string }
   | { name: 'operation'; id: string; anchor?: string }
   | { name: 'core'; kind: string; entry: string; anchor?: string }
@@ -89,6 +91,13 @@ export function parseRoute(hash: string): Route {
   // its own path — `/explorer` is the one the carried components emit — so every link they produce
   // still resolves exactly as it did.
   if (path === '/' || path === '/connections') return { name: 'connections', ...at }
+
+  // What this tenant may run. A surface of the platform rather than a footer reference, so unlike
+  // `/connect` and `/agents` it maps to one in `surfaceOfRoute` and lights the rail — an operator
+  // editing a grant is working, and needs to see where they are. A bare path with no segment: the
+  // tenant comes from the resolved principal, and a grant is addressed by the connector *inside*
+  // the body, which is the same shape `/api/grants` has for the same reason.
+  if (path === GRANTS_PATH) return { name: 'grants', ...at }
 
   // How to connect an agent. Deliberately not a surface of the platform — it is a reference an agent
   // author reaches for once rather than a place an operator works, so it is reached from the footer

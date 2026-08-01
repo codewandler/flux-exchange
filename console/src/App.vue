@@ -34,16 +34,24 @@ import {
   loadCatalogue,
   loadConnections,
   loadDeclaration,
+  loadGrants,
   loadSession,
+  previewGrant,
+  replaceGrants,
   signOut,
   type CatalogueState,
   type ConnectionsState,
   type ConnectOutcome,
   type DeclarationState,
+  type GrantOutcome,
+  type GrantsState,
+  type PreviewState,
+  type ProposedGrant,
   type SessionState,
 } from './service.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { AGENTS_PATH } from './minting.mts'
+import { mayGrant } from './granting.mts'
 import { surfaceOfRoute } from './surfaces.mts'
 import { isDark, toggleTheme } from './theme'
 
@@ -53,6 +61,7 @@ import CatalogueFailure from './CatalogueFailure.mts'
 import Connect from './Connect.mts'
 import Connections from './Connections.mts'
 import ConsoleShell from './ConsoleShell.mts'
+import Grants from './Grants.mts'
 import OperationFacts from './OperationFacts.mts'
 import CatalogExplorer from './components/CatalogExplorer.vue'
 import CatalogSnapshot from './components/CatalogSnapshot.vue'
@@ -132,6 +141,63 @@ async function connectChosen(values: Record<string, string>) {
   if (outcome.value.status === 'connected') connections.value = await loadConnections()
 }
 
+// ---------------------------------------------------------------------------------------------
+// Grants: what this tenant may run. The half of X-62 the service already had.
+//
+// Read here and passed down, which is this file's ordinary arrangement — and deliberately *not*
+// `Agents.mts`'s exception. That one exists because a minted token must not reach this component,
+// which is the root and outlives every screen. A grant is a policy: it carries no secret, it is
+// meant to be read back, and holding it here costs nothing.
+//
+// Four pieces of state. The draft is **not** among them: it lives in `Grants.mts`, which emits a
+// proposal when it changes and a whole set when it is saved.
+// ---------------------------------------------------------------------------------------------
+
+const grants = shallowRef<GrantsState>({ status: 'loading' })
+const preview = shallowRef<PreviewState | null>(null)
+const grantOutcome = shallowRef<GrantOutcome | null>(null)
+const granting = shallowRef(false)
+
+/**
+ * Which question the preview panel is currently waiting on.
+ *
+ * Every edit asks a new one, and answers can arrive out of order — an operator who widens a bound
+ * and then narrows it again must not be shown the wider answer because it was slower. Only the
+ * newest question's answer is kept, which is `chooseConnector`'s rule made explicit because here
+ * the question changes on every keystroke-equivalent rather than once per connector.
+ */
+let asked = 0
+
+// The route requires a `User` on the read as well as the write, so this is not asked of a caller
+// this host would refuse: a `403` rendered as a failed read would tell an agent's operator that the
+// service is broken. `Grants.mts` says why there is no listing instead.
+watch(
+  () => mayGrant(principal.value),
+  async (may) => {
+    if (may) grants.value = await loadGrants()
+  }
+)
+
+/** Ask what a proposed grant would admit. Reads the preview route; writes nothing. */
+async function previewProposed(proposed: ProposedGrant) {
+  const question = ++asked
+  preview.value = { status: 'loading' }
+  const answer = await previewGrant(proposed)
+  if (question === asked) preview.value = answer
+}
+
+/** Replace the whole set, then re-read — what is shown is the service's answer, not what was sent. */
+async function saveGrants(next: ProposedGrant[]) {
+  if (granting.value) return
+
+  granting.value = true
+  grantOutcome.value = await replaceGrants(next)
+  granting.value = false
+
+  const outcome = grantOutcome.value
+  if (outcome.status === 'saved') grants.value = { status: 'ready', grants: outcome.grants, editable: outcome.editable }
+}
+
 /** Sign out, then reload — the session cookie is gone and every view on the page depends on it. */
 async function endSession() {
   await signOut()
@@ -156,6 +222,21 @@ const sessionFailure = computed(() =>
  * read as the complete one.
  */
 const connectors = computed(() => ready.value?.catalog.providers.map((provider) => provider.id) ?? [])
+
+/**
+ * Every risk level and every effect the catalogue actually publishes.
+ *
+ * Handed to the grants screen so that a vocabulary it does not offer as a bound is something it can
+ * *say*, rather than something that silently narrows the widest grant an operator can write. The
+ * console keeps the ordered list because `max_risk` means "at or below" and an order cannot be
+ * recovered from a set of strings; this is what keeps that list from going stale in silence.
+ */
+const catalogueRisks = computed(() => [
+  ...new Set(Object.values(ready.value?.served ?? {}).map((operation) => operation.risk)),
+])
+const catalogueEffects = computed(() => [
+  ...new Set(Object.values(ready.value?.served ?? {}).flatMap((operation) => operation.effects)),
+])
 
 /** The served facts about the operation on screen, when the route names one this catalogue has. */
 const facts = computed(() =>
@@ -251,6 +332,33 @@ const active = computed(() => surfaceOfRoute(route.value.name))
           </p>
           <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
         </section>
+      </template>
+
+      <!--
+        Grants — what this tenant may run, and the screen X-13's gate had been waiting for.
+
+        Directly after connections in the rail because the two are one job in two steps: a tenant
+        with a connection and no grant runs nothing at all. The screen is handed the session and
+        renders its own gate from it — the route admits a `User` on the read as well as the write,
+        so an agent's operator is told why rather than being shown a listing that failed.
+
+        The connector list is the catalogue's, so this console enumerates none of its own; the risk
+        and effect vocabularies are passed too, so a level the catalogue publishes and the screen
+        cannot offer is something it states rather than something it silently drops.
+      -->
+      <template v-else-if="route.name === 'grants'">
+        <Grants
+          :session="session"
+          :grants="grants"
+          :connectors="connectors"
+          :catalogue-risks="catalogueRisks"
+          :catalogue-effects="catalogueEffects"
+          :preview="preview"
+          :outcome="grantOutcome"
+          :busy="granting"
+          @preview="previewProposed"
+          @save="saveGrants"
+        />
       </template>
 
       <!-- Everything below is the catalogue: reference material, and no longer the front door. -->

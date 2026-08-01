@@ -892,6 +892,387 @@ export async function connect(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Grants: what this tenant may run — and the one read in this file whose answer is a *policy*.
+//
+// X-13 gated `invoke` on a grant and X-62 gave the grant a surface. Three routes, and the third is
+// the point rather than a convenience: `POST /api/grants/preview` answers **which operations a
+// proposed grant would admit**, before it exists, from the same `OperationFacts::of` projection the
+// gate itself decides on. A grant nobody can evaluate before saving is a grant somebody sets too
+// wide.
+//
+// **Nothing here composes an operation id.** The selector on the wire is three axes — `max_risk`,
+// `effects_within`, `idempotency` — and the route refuses `allow_ids`, `deny_ids` and four more
+// spellings with a `422`. `selectorBody` below is the whole of what this console can send, and it
+// has nowhere to put a name. `test/grants.test.mjs::the_console_never_sends_an_operation_id` walks
+// the bodies rather than the statuses, because not tripping a refusal is a weaker claim than being
+// unable to.
+//
+// **And nothing here decides admission.** `admits` is read off the answer, never computed. See
+// `granting.mts`, which holds the vocabulary and the whole-set composition and no rule.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Where this tenant's grants are read and replaced.
+ *
+ * A collection path with no parameter, and there is nowhere a tenant could be spelled into it: the
+ * tenant is read from the principal this host resolved. `routes::grants` carries the other half.
+ */
+export const GRANTS_ENDPOINT = '/api/grants'
+
+/**
+ * Where a proposed grant is evaluated without being stored.
+ *
+ * A path of its own rather than a flag on the write, so evaluating a policy is not one typo away
+ * from applying it — the service makes that structural and this console spells it the same way.
+ */
+export const GRANTS_PREVIEW_ENDPOINT = '/api/grants/preview'
+
+/**
+ * A predicate over what an operation *declares*. The only thing this console can express.
+ *
+ * `null` on any axis means the axis bounds nothing, which the service spells by the field being
+ * absent — see [`selectorBody`]. Three fields, and there is deliberately no fourth: `Selector` in
+ * `exchange-host` also carries `allow_ids` and `deny_ids`, for an operator editing the grant file by
+ * hand, and this type is where the console's inability to write one begins.
+ */
+export interface Selector {
+  /** Admit only operations at or below this risk, in the catalogue's own spelling. */
+  maxRisk: string | null
+  /** Admit only operations whose effects are a subset of this set. */
+  effectsWithin: string[] | null
+  /** Admit only operations with this idempotency. */
+  idempotency: string | null
+}
+
+/** One grant as a caller states it: a connector, and a predicate over its operations. */
+export interface ProposedGrant {
+  /** The catalogue id. Never a wildcard — a grant that reached every connector would re-admit
+   * whatever the next connection added, without anyone deciding to. */
+  connector: string
+  selector: Selector
+}
+
+/**
+ * One operation a grant admits, with the facts it was admitted **on**.
+ *
+ * The service's `OperationFacts`, verbatim. They are here rather than left to be joined against the
+ * catalogue because the whole value of the preview is that an operator can see *why* — a list of
+ * forty ids says nothing about whether the bound was set too wide.
+ */
+export interface AdmittedOperation {
+  id: string
+  risk: string
+  idempotency: string
+  effects: string[]
+}
+
+/**
+ * One grant this tenant holds, as `GET /api/grants` answers with one.
+ *
+ * `expressible` is the field that matters most and it is the service's, not this console's: a grant
+ * written by hand may name operations explicitly, or name a connector this build does not carry, and
+ * this surface can render neither back. It is shown rather than hidden — a read that quietly omitted
+ * it would let an operator replace a set they had never been shown — and `PUT` is refused while one
+ * is held.
+ */
+export interface HeldGrant {
+  connector: string
+  vendor: string
+  selector: Selector
+  /** Whether this surface could have written this grant, and could write it again. */
+  expressible: boolean
+  /** Why not, in the service's own words. Empty when it could. */
+  reason: string
+  /** The operations it names explicitly, when it names any. `null` otherwise. */
+  exempt: { always: string[]; never: string[] } | null
+  /** How many operations the connector declares — what `admits` is read against. */
+  declares: number
+  /** What it admits **today**, from the projection the gate decides on. */
+  admits: AdmittedOperation[]
+}
+
+/**
+ * What the console knows about this tenant's grants.
+ *
+ * The same three states the connections read has, and for the same reason: a tenant that has been
+ * granted nothing and a read that never happened must never render alike. The first is the state
+ * every deployment starts in since X-13 — and it is the state in which nothing runs — so a console
+ * that showed it as a failure would send an operator looking for an outage.
+ */
+export type GrantsState =
+  | { status: 'loading' }
+  | {
+      status: 'ready'
+      grants: HeldGrant[]
+      /** Whether a `PUT` here would faithfully replace what is stored. The service's own field. */
+      editable: boolean
+    }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/**
+ * What the console knows about a grant that does not exist yet.
+ *
+ * Four states, and `refused` earns its place for [`DeclarationState`]'s reason: a connector this
+ * build does not carry, or a body naming an operation, is the service answering the question in a
+ * sentence an operator acts on, and folding it into `failed` would put that sentence through the
+ * summariser that truncates.
+ */
+export type PreviewState =
+  | { status: 'loading' }
+  | { status: 'ready'; grant: HeldGrant }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/** What became of a write. The same three outcomes a connect has, for the same reason. */
+export type GrantOutcome =
+  | { status: 'saved'; grants: HeldGrant[]; editable: boolean }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/** A selector in a served body. Every axis absent-or-null means the axis bounds nothing. */
+function readSelector(value: unknown): Selector {
+  if (!isObject(value)) return { maxRisk: null, effectsWithin: null, idempotency: null }
+  return {
+    maxRisk: typeof value.max_risk === 'string' ? value.max_risk : null,
+    effectsWithin: Array.isArray(value.effects_within)
+      ? value.effects_within.filter((effect): effect is string => typeof effect === 'string')
+      : null,
+    idempotency: typeof value.idempotency === 'string' ? value.idempotency : null,
+  }
+}
+
+/**
+ * The admitted operations in a served grant, or the reason the entry is not one.
+ *
+ * All-or-nothing, for `readConnectors`' reason and with more at stake: a preview silently missing an
+ * operation is an operator approving a grant they have not seen the whole of.
+ */
+function readAdmitted(value: unknown): AdmittedOperation[] | string {
+  if (!Array.isArray(value)) return 'a grant carries no `admits` array'
+  const admitted: AdmittedOperation[] = []
+  for (const entry of value) {
+    if (!isObject(entry) || typeof entry.id !== 'string') return 'an admitted operation has no `id`'
+    admitted.push({
+      id: entry.id,
+      risk: typeof entry.risk === 'string' ? entry.risk : '',
+      idempotency: typeof entry.idempotency === 'string' ? entry.idempotency : '',
+      effects: Array.isArray(entry.effects)
+        ? entry.effects.filter((effect): effect is string => typeof effect === 'string')
+        : [],
+    })
+  }
+  return admitted
+}
+
+/** The operations a grant names explicitly, or `null` when it names none. */
+function readExempt(value: unknown): HeldGrant['exempt'] {
+  if (!isObject(value)) return null
+  const names = (of: unknown): string[] =>
+    Array.isArray(of) ? of.filter((name): name is string => typeof name === 'string') : []
+  return { always: names(value.always), never: names(value.never) }
+}
+
+/**
+ * One grant, or the reason the value is not one.
+ *
+ * Shared by the listing, by what a write answers with, and by the preview — because all three are
+ * the same view. That is deliberate rather than economical: the preview an operator decides against
+ * and the grant they end up holding must be rendered from one reader, or the two could differ in a
+ * field and nobody would be able to see it.
+ */
+function readGrant(entry: unknown): HeldGrant | string {
+  if (!isObject(entry) || typeof entry.connector !== 'string') {
+    return 'a grant entry has no `connector`'
+  }
+  const admits = readAdmitted(entry.admits)
+  if (typeof admits === 'string') return admits
+
+  return {
+    connector: entry.connector,
+    vendor: typeof entry.vendor === 'string' ? entry.vendor : entry.connector,
+    selector: readSelector(entry.selector),
+    // Absent reads as **not** expressible. The safe direction: a console that assumed it could write
+    // a grant back would compose a set that silently dropped whatever it could not read.
+    expressible: entry.expressible === true,
+    reason: typeof entry.reason === 'string' ? entry.reason : '',
+    exempt: readExempt(entry.exempt),
+    declares: typeof entry.declares === 'number' ? entry.declares : 0,
+    admits,
+  }
+}
+
+/** The grants in a `GET`/`PUT /api/grants` body, or the reason it is not one. */
+function readGrants(body: unknown): { grants: HeldGrant[]; editable: boolean } | string {
+  if (!isObject(body) || !Array.isArray(body.grants)) return 'no `grants` array in the body'
+  const grants: HeldGrant[] = []
+  for (const entry of body.grants) {
+    const grant = readGrant(entry)
+    if (typeof grant === 'string') return grant
+    grants.push(grant)
+  }
+  // `!== false` rather than `=== true`: a body that omitted the flag is one this console cannot
+  // read, and the screen refuses to write on `editable: false` — so defaulting it false would turn
+  // an unreadable field into a screen that will not save and cannot say why.
+  return { grants, editable: body.editable !== false }
+}
+
+/**
+ * A selector as the service takes it: **omitted means unbounded**, and `null` is not the same word.
+ *
+ * The route's own documentation says every field of the selector may be omitted, and an omitted
+ * `max_risk` admits every level. Sending `null` would work today — `Option<Risk>` reads it as
+ * `None` — and it says something weaker: a body that names an axis it is not bounding is a body
+ * that has to be read twice.
+ *
+ * **There is nowhere here for an operation id**, which is this function's other job. Three keys,
+ * written out, from three typed fields. `the_console_never_sends_an_operation_id` asserts the shape
+ * of what leaves rather than the status of what comes back.
+ */
+function selectorBody(selector: Selector): Record<string, unknown> {
+  const body: Record<string, unknown> = {}
+  if (selector.maxRisk !== null) body.max_risk = selector.maxRisk
+  if (selector.effectsWithin !== null) body.effects_within = selector.effectsWithin
+  if (selector.idempotency !== null) body.idempotency = selector.idempotency
+  return body
+}
+
+/** One proposed grant as the service takes it. */
+function grantBody(proposed: ProposedGrant): Record<string, unknown> {
+  return { connector: proposed.connector, selector: selectorBody(proposed.selector) }
+}
+
+/**
+ * What this tenant may run.
+ *
+ * ```text
+ * GET /api/grants
+ * 200 {"grants":[{"connector":"github","selector":{…},"admits":[{…}],"declares":12,…}],"editable":true}
+ * ```
+ *
+ * A single entry that fails the shape check fails the whole read, for `loadConnections`' reason and
+ * with more at stake: this is the page an operator uses to check what an agent of their tenant can
+ * do, and a listing silently missing a grant is a listing that under-reports authority.
+ */
+export async function loadGrants(options: LoadOptions = {}): Promise<GrantsState> {
+  const answered = await read(GRANTS_ENDPOINT, options)
+  if (!answered.ok) return { status: 'failed', failure: answered.failure }
+
+  const held = readGrants(answered.body)
+  if (typeof held === 'string') {
+    return {
+      status: 'failed',
+      failure: { kind: 'unreadable', endpoint: GRANTS_ENDPOINT, status: 200, detail: held },
+    }
+  }
+
+  return { status: 'ready', ...held }
+}
+
+/**
+ * What a proposed grant would admit, without storing it.
+ *
+ * ```text
+ * POST /api/grants/preview  {"connector":"github","selector":{"max_risk":"low"}}
+ * 200                       {"connector":"github","declares":12,"admits":[{"id":…,"risk":…},…]}
+ * ```
+ *
+ * **A read that happens to be a `POST`**, because the question has a body. It stores nothing — the
+ * route is a pure function of the catalogue and of what the caller just typed, and it answers on a
+ * host that has bound no grant store at all, which is the composition an operator meets before they
+ * have finished configuring anything.
+ *
+ * The answer is the service's own projection. Nothing here filters it, sorts it or decides any part
+ * of it: `granting.mts` holds no admission rule and neither does this.
+ */
+export async function previewGrant(
+  proposed: ProposedGrant,
+  options: LoadOptions = {}
+): Promise<PreviewState> {
+  const answered = await read(GRANTS_PREVIEW_ENDPOINT, options, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(grantBody(proposed)),
+  })
+
+  if (!answered.ok) {
+    const error = serviceError(answered.body)
+    if (error !== null && answered.failure.status !== null) {
+      return {
+        status: 'refused',
+        refusal: { endpoint: GRANTS_PREVIEW_ENDPOINT, status: answered.failure.status, error },
+      }
+    }
+    return { status: 'failed', failure: answered.failure }
+  }
+
+  const grant = readGrant(answered.body)
+  if (typeof grant === 'string') {
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable',
+        endpoint: GRANTS_PREVIEW_ENDPOINT,
+        status: 200,
+        detail: grant,
+      },
+    }
+  }
+
+  return { status: 'ready', grant }
+}
+
+/**
+ * Replace what this tenant may run, entire.
+ *
+ * ```text
+ * PUT /api/grants  {"grants":[{"connector":"github","selector":{"max_risk":"low"}}]}
+ * 200              {"grants":[…],"editable":true}
+ * ```
+ *
+ * **Whole-set, because the store is.** `exchange_host::Grants::set` takes the entire set on purpose:
+ * what an operator needs to be able to state is *what this tenant may do*, entire, and a `grant(one)`
+ * beside a `revoke(one)` is a sequence nobody can see the end state of. Composing that set is
+ * `granting.mts`'s job — including refusing to compose one that would silently drop what it could
+ * not express.
+ *
+ * A refusal is carried whole. The two this route reserves are worth naming because a status code is
+ * not an answer to either: `409` is this tenant holding a grant that names operations explicitly,
+ * and `422` is a body this surface cannot express. The *view* is what turns each into something to
+ * do; this function does not paraphrase them.
+ */
+export async function replaceGrants(
+  grants: readonly ProposedGrant[],
+  options: LoadOptions = {}
+): Promise<GrantOutcome> {
+  const answered = await read(GRANTS_ENDPOINT, options, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ grants: grants.map(grantBody) }),
+  })
+
+  if (!answered.ok) {
+    const error = serviceError(answered.body)
+    if (error !== null && answered.failure.status !== null) {
+      return {
+        status: 'refused',
+        refusal: { endpoint: GRANTS_ENDPOINT, status: answered.failure.status, error },
+      }
+    }
+    return { status: 'failed', failure: answered.failure }
+  }
+
+  const held = readGrants(answered.body)
+  if (typeof held === 'string') {
+    return {
+      status: 'failed',
+      failure: { kind: 'unreadable', endpoint: GRANTS_ENDPOINT, status: 200, detail: held },
+    }
+  }
+
+  return { status: 'saved', ...held }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Agents: the one answer in this console that is readable, valuable and unrepeatable.
 //
 // `POST /api/agents` mints an agent principal for the caller's tenant and hands back its token

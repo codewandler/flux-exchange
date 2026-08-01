@@ -18,6 +18,8 @@
 @import './onboarding.css';
 /* The mint screen's, kept apart for the same reason. See `agents.css`. */
 @import './agents.css';
+/* The grants screen's, kept apart for the same reason. See `grants.css`. */
+@import './grants.css';
 
 *,
 *::before,

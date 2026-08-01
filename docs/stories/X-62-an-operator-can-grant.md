@@ -50,7 +50,7 @@ answered for credentials, and the answer here should not be weaker.
       admits. Assert it against `admit_grant`, not against a copy of its rules.
 - [x] The surface expresses selectors, never operation ids. **Failing-first test** — a request naming
       an operation id is refused.
-- [ ] The console shows which operations a proposed grant would admit, derived from the same facts
+- [x] The console shows which operations a proposed grant would admit, derived from the same facts
       the gate uses, before it is saved.
 - [x] **Nothing tenant-specific leaks anonymously.** What a tenant is granted is tenant data; the
       catalogue and the descriptor must not learn it.
@@ -137,3 +137,40 @@ discover in advance what it may run.
 the second's stated set wins entire. That is `Grants::set`'s documented whole-set semantics and the end
 state is always one caller's intent — but there is no `ConnectionGuard` equivalent. First thing to
 look at if a grant "reverts".
+
+### The console half (second wave, `impl/X-62-console`)
+
+**Done. The last Acceptance item is ticked and the story is complete.** `service.mts` was freed when
+X-57 landed, so the screen was built where it belongs rather than around a fence.
+
+- `console/src/service.mts` — `loadGrants`, `replaceGrants`, `previewGrant`, and the read of a served
+  grant. `selectorBody` is the whole of what this console can send: three keys from three typed
+  fields, with **nowhere for an operation id to go**. The test walks the request bodies rather than
+  the statuses, because not tripping the route's `422` is a weaker claim than being unable to.
+- `console/src/granting.mts` — the vocabulary and the whole-set composition, as pure functions, in
+  `minting.mts`'s shape. `replacing`/`without` return **`null`** rather than composing a set that
+  would silently drop an id exception; the console is structurally unable to ask for the `409`.
+- `console/src/Grants.mts` — the screen. **Saving is refused until the service has answered what the
+  grant would admit**, which is the story's own sentence made structural rather than advisory, and
+  the preview sits between the choosing and the button in reading order.
+- `console/src/surfaces.mts` — a `grants` surface, second in the rail, directly after Connections:
+  the two are one job in two steps, and a tenant with a connection and no grant runs nothing.
+
+**Why this does not follow `Agents.mts`.** That screen fetches for itself because a minted token must
+not reach `App.vue`, which is the root and outlives every screen. A grant carries no secret and is
+meant to be read back, so borrowing the exception would be copying a security workaround into a place
+with no secret in it. This screen takes props and emits, like `Connect.mts` — which is also what lets
+every claim be driven from fixtures with no transport.
+
+**`RISK_LEVELS` is a list this console maintains**, which is the shape this whole story is against.
+It has to be: `max_risk` means *at or below* and an order cannot be recovered from a set of strings.
+The cost is paid rather than hidden — `unknownRisks` compares it against what the catalogue actually
+publishes and the screen says so out loud, so a level added upstream is a sentence on the page
+instead of a silently narrower chooser.
+
+**Both refusals now reach a person.** The `409` is *pre-empted*: an inexpressible grant is rendered
+as stored, with the operations it names and what would be lost, and saving is not offered while one
+is held — so the common case never reaches the status code. If it arrives anyway the service's
+sentence is quoted whole, with the blocking grant listed beneath it. The `422` for two grants at one
+connector is unreachable by construction (the set is composed by *replacing* by connector) and is
+quoted whole if the service ever raises it.
