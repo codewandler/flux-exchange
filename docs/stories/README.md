@@ -38,6 +38,9 @@ _None._
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
+- [X-28 — The gate runs on every push, not only at a release](X-28-ci-gate.md) · the crates.io workflow runs the gate inline because there is no ci.yml at all — so a red main is only discovered when someone tries to release, and the console's Node build is never run by CI
+- [X-27 — Configuration is read by name, not by position](X-27-config-read-by-name.md) · raised by X-04's review and again by X-23's implementor, 2026-08-01: REQUIRED, the positional reads in OidcConfig::read, and TRANSPORT_CHECKED are three lists describing one set of variables, and the drift they permit has already shipped once
+- [X-26 — A sign-in refusal carries its own status](X-26-refusal-status.md) · found by X-24's implementor, 2026-08-01: the refusal-to-status table lives inline in routes::signin::callback and is unreachable from any other module, so a test that wants to state 'this refusal, and this status' has to be written at the route instead of beside the refusal
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
