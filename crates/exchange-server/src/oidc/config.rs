@@ -372,6 +372,10 @@ impl OidcConfig {
 ///
 /// `localhost` is accepted by name. It resolves through the operator's own machine, and an operator
 /// who has pointed it somewhere else has made a decision this host is not positioned to second-guess.
+///
+/// **Which host this is deciding about** is [`host_in`]'s problem, and it is the whole of the
+/// difficulty: a rule about loopback is worth nothing if the address it reads is not the one reqwest
+/// dials. See that function for what the agreement promises and where it stops.
 fn carries_a_secret_safely(endpoint: &str) -> bool {
     let Some((scheme, rest)) = endpoint.split_once("://") else {
         return false;
@@ -379,20 +383,45 @@ fn carries_a_secret_safely(endpoint: &str) -> bool {
 
     match scheme.to_ascii_lowercase().as_str() {
         "https" => true,
-        "http" => is_loopback(host_in(rest)),
+        "http" => host_in(rest).is_some_and(is_loopback),
         _ => false,
     }
 }
 
-/// The host of a URL, given everything after its `://`.
+/// The host of a URL, given everything after its `://`, or `None` if this module cannot say.
 ///
 /// Hand-rolled rather than parsed, because this crate carries no URL parser and adding one to
-/// answer "is this loopback" would be a dependency taken for a nine-line function. It is
-/// deliberately **conservative**: anything it does not understand comes out as a string that is not
-/// a loopback address, and the endpoint is refused. A parser bug here can therefore refuse a
-/// working configuration, which an operator sees immediately, but cannot admit a cleartext one.
-fn host_in(rest: &str) -> &str {
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+/// answer "is this loopback" would be a dependency taken for a twenty-line function.
+///
+/// # What this promises, and what it does not
+///
+/// The thing that matters is not that this parser is *correct*; it is that it agrees with the
+/// parser that actually dials the endpoint — `url`, which reqwest resolves the very same string
+/// with. Where the two disagree in the *admitting* direction, [`carries_a_secret_safely`] clears a
+/// configuration whose client secret then goes to a host this module never looked at. X-17 shipped
+/// exactly one such disagreement: WHATWG ends a special scheme's authority at `\` as well as at
+/// `/`, `?` and `#`, so `url` reads `http://evil.example\@127.0.0.1/token` as `evil.example` while
+/// this read the userinfo split and answered `127.0.0.1`.
+///
+/// So the promise is one-directional and it is this: **whenever this returns a host, `url` returns
+/// the same host.** Everything below is that claim and nothing else — the WHATWG terminator set,
+/// the last-`@` userinfo split, a bracketed literal that must actually be IPv6, and a port `url`
+/// would accept. X-19 measured it against `url` 2.5.8 over 475,270 generated spellings and found no
+/// case where this returns a host and `url` resolves a different one, or none.
+///
+/// The converse is deliberately **not** promised, and this is where the honest limit is. Plenty of
+/// addresses `url` dials happily come back `None` here: IPv4 shorthand (`2130706433`, `0x7f.0.0.1`),
+/// a trailing dot, a percent-encoded or IDNA-mapped spelling of `localhost`, a `\\` after the
+/// scheme, whitespace `url` strips. Each of those refuses a working configuration, which an
+/// operator meets at startup and fixes by spelling the address plainly. That is the trade this
+/// function is making, and it is only sound in that one direction.
+///
+/// It is a measured agreement rather than a proved one. The parser that cannot disagree is `url`
+/// itself, and adopting it is a dependency decision this story deliberately left open.
+fn host_in(rest: &str) -> Option<&str> {
+    // WHATWG's authority terminator set for a *special* scheme, which is what `http` is. The `\` is
+    // the one X-17 did not have, and the whole of the divergence X-19 exists for.
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
 
     // `user:password@host`. Everything before the last `@` is userinfo, not the host — reading the
     // wrong side of it is how `http://127.0.0.1@evil.example/` would pass for loopback.
@@ -401,11 +430,33 @@ fn host_in(rest: &str) -> &str {
         None => authority,
     };
 
-    // `[::1]:8080` — a bracketed IPv6 literal, whose own colons are not the port separator.
-    match authority.strip_prefix('[') {
-        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
-        None => authority.split(':').next().unwrap_or_default(),
-    }
+    let (host, port) = match authority.strip_prefix('[') {
+        // `[::1]:8080` — a bracketed IPv6 literal, whose own colons are not the port separator. The
+        // bracket must close, what is inside it must really be IPv6, and only a port may follow:
+        // `[127.0.0.1]` and `[::1]evil.example` are URLs `url` refuses outright, so this must not
+        // read a host out of either.
+        Some(bracketed) => {
+            let (literal, after) = bracketed.split_once(']')?;
+            literal.parse::<std::net::Ipv6Addr>().ok()?;
+
+            match after {
+                "" => (literal, ""),
+                _ => (literal, after.strip_prefix(':')?),
+            }
+        }
+        None => match authority.split_once(':') {
+            Some((host, port)) => (host, port),
+            None => (authority, ""),
+        },
+    };
+
+    // WHATWG's port state takes ASCII digits and nothing else, and refuses what will not fit a
+    // `u16`. An authority this reads a port out of and `url` does not is one where the two are
+    // describing different URLs, whatever they then say about the host.
+    let port_is_dialable = port.is_empty()
+        || (port.bytes().all(|byte| byte.is_ascii_digit()) && port.parse::<u16>().is_ok());
+
+    port_is_dialable.then_some(host)
 }
 
 /// Whether `host` names this machine.
@@ -817,6 +868,91 @@ mod tests {
             assert!(
                 !carries_a_secret_safely(refused),
                 "{refused} must be refused",
+            );
+        }
+    }
+
+    /// **X-19.** The parser that *decides* and the parser that *dials* must not disagree.
+    ///
+    /// [`carries_a_secret_safely`] answers "is this host loopback"; `url` 2.5.8 — which reqwest
+    /// resolves the very same string with — answers "what host is this". Where those two disagree in
+    /// the *admitting* direction, this module clears a configuration that then sends
+    /// [`CLIENT_SECRET_ENV`] as HTTP Basic credentials, in cleartext, to whatever host reqwest
+    /// picked. That is not a check with a bug in it; that is no check at all for that spelling.
+    ///
+    /// The one spelling that did it was a backslash before the `@`:
+    /// `http://evil.example\@127.0.0.1/token`. WHATWG ends a special scheme's authority at `\` as
+    /// well as at `/`, `?` and `#`, so `url` reads the host as `evil.example` while this module read
+    /// the userinfo split and answered `127.0.0.1`.
+    ///
+    /// So the table is the **class**, not the instance. It carries every spelling X-17's reviewer
+    /// measured against `url` in one program and found conservative, plus the whole backslash family
+    /// the divergence lives in. Refusing is the safe side of any disagreement — an operator meets it
+    /// at startup, before a secret has moved — which is why spellings `url` would happily dial on
+    /// loopback are refused here too, and marked as such.
+    #[test]
+    fn no_hostile_authority_is_read_as_loopback() {
+        for hostile in [
+            // The divergence X-19 exists for. `url` resolves each of these to `evil.example`,
+            // because the authority ends at the `\`.
+            "http://evil.example\\@127.0.0.1/token",
+            "http://evil.example\\@localhost/token",
+            "http://evil.example\\@[::1]/token",
+            "http://evil.example\\127.0.0.1/token",
+            "http://evil.example\\?@127.0.0.1/token",
+            "http://evil.example\\#@127.0.0.1/token",
+            // A bracketed literal that does not end the host. `url` refuses the URL outright, so
+            // reqwest would never dial it; reading `::1` out of it and calling the address safe is
+            // still this module answering a question it cannot answer.
+            "http://[::1]evil.example/token",
+            "http://[::1]@evil.example/token",
+            // The fifteen X-17's reviewer confirmed conservative, pinned so they stay that way.
+            // Several are loopback to `url` and refused here — an IPv4 shorthand, a trailing dot, an
+            // IDNA mapping — which is the safe side of a disagreement and deliberate.
+            "http://127.0.0.1.evil.com/token",
+            "http://0x7f.0.0.1/token",
+            "http://0177.0.0.1/token",
+            "http://2130706433/token",
+            "http://127.0.0.1./token",
+            "http://[::ffff:127.0.0.1]/token",
+            "http://[::1%eth0]/token",
+            "http://localhost./token",
+            "http://localhost.evil.example/token",
+            "http://\u{24DB}ocalhost/token",
+            "http://127\u{3002}0\u{3002}0\u{3002}1/token",
+            "http://127.0.0.1\t@evil.example/token",
+            "http://127.0.0.1\n@evil.example/token",
+            "http://127.0.0.1@evil.example/token",
+            " http://127.0.0.1/token",
+            // `#`, `?` and `/` placements: the authority ends at the first of them, so what follows
+            // is a fragment, a query or a path and never a host.
+            "http://evil.example#@127.0.0.1/token",
+            "http://evil.example?@127.0.0.1/token",
+            "http://evil.example/@127.0.0.1/token",
+            // The scheme separator itself. WHATWG accepts `\\`, `/\` and `\/` here for a special
+            // scheme; this module accepts only `://`, so all of them are refused.
+            "http:\\\\evil.example\\@127.0.0.1/token",
+            "http:/\\127.0.0.1/token",
+        ] {
+            assert!(
+                !carries_a_secret_safely(hostile),
+                "{hostile:?} must be refused: `url` does not read a loopback host out of it",
+            );
+        }
+
+        // The other half, in the same run: a fix that refuses everything is not a fix. These are the
+        // local-test-provider addresses X-17 exists to keep working, and `url` reads a loopback host
+        // out of every one of them.
+        for genuine in [
+            "http://127.0.0.1:8080/token",
+            "http://localhost/token",
+            "http://[::1]/token",
+            "http://user:pass@127.0.0.1:8080/token",
+            "https://accounts.example.com/token",
+        ] {
+            assert!(
+                carries_a_secret_safely(genuine),
+                "{genuine:?} must still be permitted",
             );
         }
     }
