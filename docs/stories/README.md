@@ -48,7 +48,6 @@ _`docs/vision.md` says the thing this epic exists to act on:_
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
-- [X-43 — Whether a human can sign in here is a fact the console reads, not prose it parses](X-43-signin-availability.md) · found by X-34's implementor, 2026-08-01: the console links to /api/signin unconditionally, so on a host with no identity provider the Sign in button leads to a 503 page. The 401 body distinguishes the cases in prose, and matching on prose is fragile
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
@@ -93,6 +92,7 @@ _`docs/vision.md` says the thing this epic exists to act on:_
 - [X-36 — An agent token is minted once, and this host keeps only a verifier](X-36-mint-agent-token.md) · the first half of closing the vision's largest unblocked gap — nothing today can create a principal an agent could present
 - [X-39 — A credential can be rotated without a window where the connection is gone](X-39-credential-rotation.md) · the surface can create and destroy a connection but not replace a credential: a second create is refused 409, so rotating a leaked secret today means DELETE then POST, and everything using it is broken in between
 - [X-41 — An agent arriving at this service is told how to connect](X-41-agent-onboarding-page.md) · owner-raised 2026-08-01, high priority: the charter's primary caller is an agent and nothing anywhere tells one how to reach this service. Public, linked from the footer, and honest about what it cannot yet do
+- [X-43 — Whether a human can sign in here is a fact the console reads, not prose it parses](X-43-signin-availability.md) · found by X-34's implementor, 2026-08-01: the console links to /api/signin unconditionally, so on a host with no identity provider the Sign in button leads to a 503 page. The 401 body distinguishes the cases in prose, and matching on prose is fragile
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

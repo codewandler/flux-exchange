@@ -6,6 +6,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **Whether this deployment can sign anyone in is a field** (X-43). The console linked to
+  `/api/signin` unconditionally, so on a host with no identity provider the **Sign in** button led to
+  a `503` — the operator learned the platform could not sign them in by being refused. The
+  distinction existed only in a human-readable sentence, and a client branching on the wording of a
+  refusal breaks when someone improves the wording.
+
+  `GET /api/signin/availability` answers `{"sign_in_available": …}` — one key, anonymously. It is a
+  **boolean and not the three internal states**, because a three-valued answer would tell a stranger
+  whether this host's OIDC variables are set; the two unavailable compositions answer byte for byte
+  identically, status included.
+
 ## [0.5.0] - 2026-08-01
 
 ### Added
