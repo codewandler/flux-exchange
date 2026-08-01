@@ -10,6 +10,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A browser-facing OIDC endpoint is refused in cleartext too** (X-23). X-17's refusal covered only
+  the token endpoint and the key set, on the argument that a browser enforces the transport of the
+  addresses it navigates. That does not cover the authorization URL carrying `state`, `nonce` and the
+  PKCE challenge readable and modifiable in flight, nor an operator who typed `http` and was told
+  nothing. All four `FLUX_EXCHANGE_OIDC_*` endpoints are now checked; loopback stays exempt, private
+  ranges do not.
+
+  **Upgrading:** this is a refusal, so a deployment with an `http` authorization endpoint or redirect
+  URI on a non-loopback address will stop offering `/api/signin` at startup, naming the variable.
+  `/health` and the catalogue keep serving. Look for `InsecureEndpoint` in the startup log.
+
 - **An operator can tell their own misconfiguration from a refused credential** (X-17).
   `ExchangeError::Rejected` collapsed four causes, one of which was *this host's own client secret
   being wrong* — logged as "the provider refused the authorization code", which sends an operator to
