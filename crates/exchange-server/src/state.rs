@@ -234,10 +234,35 @@ mod tests {
 
     use std::net::SocketAddr;
 
+    use exchange_host::async_trait;
+
     use crate::bind::admit_bind;
+    use crate::oidc::config::OidcConfig;
+    use crate::oidc::exchange::{ExchangeError, Redemption, SignedClaims, TokenExchange};
 
     fn dev() -> Arc<DevIdentity> {
         Arc::new(DevIdentity::from_roster("user:alice@acme").expect("a well-formed roster"))
+    }
+
+    /// A federated composition.
+    ///
+    /// The exchange is never called — deciding a binding redeems nothing — but `with_oidc` needs
+    /// one to exist, which is itself the point of that constructor: there is no way to build a
+    /// composition that reports `Bound` without something able to complete a sign-in.
+    fn oidc() -> Arc<Oidc> {
+        struct Unused;
+
+        #[async_trait]
+        impl TokenExchange for Unused {
+            async fn redeem(&self, _: Redemption<'_>) -> Result<SignedClaims, ExchangeError> {
+                unreachable!("deciding an identity binding redeems no authorization code")
+            }
+        }
+
+        Arc::new(Oidc::new(
+            OidcConfig::for_test("https://accounts.example.com", "flux-exchange", "acme"),
+            Arc::new(Unused),
+        ))
     }
 
     fn addr(raw: &str) -> SocketAddr {
@@ -266,8 +291,13 @@ mod tests {
         );
     }
 
-    /// The mapping itself, stated as a table so that every constructor is pinned rather than only
-    /// the one this story added.
+    /// The mapping itself, stated as a table so that **every** constructor is pinned rather than
+    /// only the one a given story added.
+    ///
+    /// The table is the point. X-04 added two constructors and pinned neither, which is the same
+    /// omission X-03 was reworked for — a constructor absent from here is a binding nothing
+    /// asserts, and `identity_binding` is what `admit_bind` decides a reachable bind on. Adding a
+    /// constructor without adding a row is the whole failure mode.
     #[test]
     fn each_constructor_reports_its_own_binding() {
         assert_eq!(
@@ -282,6 +312,50 @@ mod tests {
             AppState::with_development_identity(dev()).identity_binding(),
             IdentityBinding::Development,
             "the development port must never report itself as a real binding",
+        );
+        assert_eq!(
+            AppState::with_oidc(oidc()).identity_binding(),
+            IdentityBinding::Bound,
+            "a federated principal is backed by a secret proved to a third party, which is what \
+             the development identity lacks and what makes this one a real binding",
+        );
+        assert_eq!(
+            AppState::oidc_without_a_token_exchange().identity_binding(),
+            IdentityBinding::Unbound,
+            "OIDC configured with nothing able to redeem an authorization code can authenticate \
+             nobody, so it must not report itself as bound",
+        );
+    }
+
+    /// The seam `main` runs through for the composition this build actually produces: compose the
+    /// state, ask it for its binding, hand that to the bind rule.
+    ///
+    /// This is the OIDC twin of `arming_the_development_identity_does_not_admit_a_reachable_bind`,
+    /// and it exists for the reason that one does — **pinning the enum is not pinning the wiring.**
+    /// `bind::tests` pins that `Unbound` refuses a reachable address; nothing pinned that *this
+    /// constructor* reports `Unbound`, so the claim `docs/designs/oidc-signin.md` calls
+    /// load-bearing rested on a single unasserted literal.
+    ///
+    /// The mistake this catches is a plausible one, not a contrived one: somebody reasons "an OIDC
+    /// provider is configured, so this host has an identity provider" and teaches
+    /// `identity_binding` to say `Bound` for it. Every test in `bind` stays green, and
+    /// `FLUX_EXCHANGE_BIND=0.0.0.0:8080` starts serving a host at which **no sign-in can complete**
+    /// — an identity provider in name only.
+    #[test]
+    fn configuring_oidc_without_a_token_exchange_does_not_admit_a_reachable_bind() {
+        let state = AppState::oidc_without_a_token_exchange();
+
+        for reachable in ["0.0.0.0:8080", "[::]:8080", "192.168.1.10:8080"] {
+            assert!(
+                admit_bind(addr(reachable), state.identity_binding()).is_err(),
+                "`{reachable}` must be refused: configuring OIDC without a token exchange \
+                 authenticates nobody, so it cannot legalise a reachable bind",
+            );
+        }
+
+        assert!(
+            admit_bind(addr("127.0.0.1:8080"), state.identity_binding()).is_ok(),
+            "and loopback must still be admitted, or the safe configuration is the unusable one",
         );
     }
 
