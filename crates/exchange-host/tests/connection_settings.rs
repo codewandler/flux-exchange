@@ -9,6 +9,11 @@
 //! Thirteen of the seventeen are made configurable here. **Four are refused on purpose** — see
 //! [`a_setting_cannot_become_the_destination_authority`], which is the whole of why.
 //!
+//! Re-measured against catalogue 0.10 by X-70: fifty-four connectors, nineteen declaring a
+//! per-connection value, **three refused** — `docusign`, `freshdesk`, `okta` — and two whose host
+//! is a closed set of vendor region hostnames the catalogue publishes, which is
+//! [`only_an_exactly_declared_choice_may_be_supplied`].
+//!
 //! This file is the whole of that claim, driven the way `invoke.rs` drives its own: through a
 //! transport that records instead of sending, so "the request went to the origin this tenant
 //! configured" and "the refusal dispatched nothing" are counts rather than sentences.
@@ -620,6 +625,15 @@ async fn no_setting_can_move_the_destination_host() {
 /// The assertions are ordered so the **dispatch** is checked before the refusal: a run against code
 /// that stores the value fails by reporting the origin it reached and the credential it carried,
 /// which is the failure worth reading.
+///
+/// # `newrelic` stays here after X-70, and on purpose
+///
+/// Its template is still `{host}`; what changed is that the catalogue now publishes the two region
+/// hostnames it permits, so the refusal below is `NotADeclaredChoice` rather than
+/// `WouldNameTheHost`. The claim this test makes is unchanged and is the one that matters — a
+/// tenant offering `evil.example` gets nothing stored, nothing dispatched and no credential on the
+/// wire — and a connector whose values are a closed set is exactly where a regression would be
+/// easiest to miss.
 #[tokio::test]
 async fn a_setting_cannot_become_the_destination_authority() {
     // Every connector whose host template pins no suffix, with an operation and the credential it
@@ -853,22 +867,27 @@ async fn a_planted_whole_authority_value_is_refused_on_the_way_out() {
 /// `freshdesk` and `okta`: the review that found this named `newrelic` and `docusign`, and the
 /// measurement finds five. A rule enumerated by hand would have shipped three of them.
 ///
-/// # The fifth arrived by upstream bump, which is the mechanism working (X-67)
+/// # The fifth arrived by upstream bump, and X-70 measured what it actually was
 ///
 /// It was four against catalogue 0.9. Moving to 0.10 turned this red rather than quietly widening
 /// what a tenant may configure, which is what X-47's design said a host-template change *should*
-/// do. `intercom` is the arrival: upstream C-225 made its `base_url` `https://{host}` so an EU or
-/// AU workspace can be connected at all, and a bare placeholder is the whole authority. The
-/// refusal here is not a disagreement with that change — it is this host declining to let a
-/// *tenant* be the one who supplies it.
+/// do. `intercom` was the arrival: upstream C-225 made its `base_url` `https://{host}` so an EU or
+/// AU workspace can be connected at all, and a bare placeholder is the whole authority.
 ///
-/// `algolia`, the 54th provider, is **not** here: it ships `{app_id}.algolia.net`, which pins two
+/// The same upstream change published `config_choices`, and re-reading the catalogue for them moved
+/// **two** connectors rather than one: `intercom`'s three region hosts and `newrelic`'s two. Both
+/// now land in [`HostPinning::ChosenFrom`], which is censused below beside the refusals — a set
+/// that grows is a widening of what a tenant may supply and has to be as hard to do by accident as
+/// the refusals are.
+///
+/// `algolia`, the 54th provider, is in neither list: it ships `{app_id}.algolia.net`, which pins two
 /// labels and lands in [`HostPinning::PinnedTo`] with the seven that were already there. Worth
-/// stating because the estimate this bump was planned against read its template as unpinnable and
-/// expected a sixth refusal; the measurement is what decided it, not the estimate.
+/// stating because the estimate the 0.10 bump was planned against read its template as unpinnable
+/// and expected a sixth refusal; the measurement is what decided it, not the estimate.
 #[test]
 fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
     let mut refused = Vec::new();
+    let mut chosen = Vec::new();
 
     for provider in connector_catalog::providers() {
         for declared in declared_settings(provider).expect("every connector's operations rehearse")
@@ -886,6 +905,24 @@ fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
                     provider.id,
                     declared.binds(),
                 ),
+                // The value is one of a closed set the **catalogue** publishes, so it is a choice
+                // rather than a destination. The set itself is quoted, because "a closed set" that
+                // nobody looked at is how a widening would arrive unnoticed.
+                HostPinning::ChosenFrom(choices) => {
+                    assert!(
+                        !choices.is_empty(),
+                        "`{}` {} claims a closed set with nothing in it, which admits nothing and \
+                         should have stayed a template question",
+                        provider.id,
+                        declared.binds(),
+                    );
+                    chosen.push(format!(
+                        "{}/{} ({})",
+                        provider.id,
+                        declared.binds(),
+                        choices.join(", "),
+                    ));
+                }
                 HostPinning::WholeAuthority(template) => {
                     refused.push(format!("{}/{} ({template})", provider.id, declared.binds()));
                 }
@@ -894,20 +931,299 @@ fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
     }
 
     // Pinned exactly, so that a catalogue change in either direction is a failing test rather than
-    // a silent hole: a sixth connector arriving unpinned, or one of these five gaining a suffix
+    // a silent hole: a fourth connector arriving unpinned, or one of these three gaining a suffix
     // upstream and staying refused for no reason. It has already fired once for real — `intercom`
-    // is here because catalogue 0.10 moved its host, and this assertion is how anybody found out.
+    // arrived here when catalogue 0.10 moved its host, and this assertion is how anybody found out.
     assert_eq!(
         refused,
         vec![
             "docusign/endpoint.account_host ({account_host})".to_owned(),
             "freshdesk/endpoint.domain ({domain})".to_owned(),
-            "intercom/endpoint.host ({host})".to_owned(),
-            "newrelic/endpoint.host ({host})".to_owned(),
             "okta/endpoint.domain ({domain})".to_owned(),
         ],
         "the set of connectors a tenant may not configure has changed",
     );
+
+    // And the other half of the same census. Every value here is the vendor's own published string:
+    // a diff that adds one is upstream widening a closed set, and a diff that adds a *connector* is
+    // a field this host used to refuse and now admits.
+    assert_eq!(
+        chosen,
+        vec![
+            "intercom/endpoint.host (api.intercom.io, api.eu.intercom.io, api.au.intercom.io)"
+                .to_owned(),
+            "newrelic/endpoint.host (api.newrelic.com, api.eu.newrelic.com)".to_owned(),
+        ],
+        "the set of settings whose values come from a catalogue-declared closed set has changed",
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// A closed set the catalogue publishes is not the caller naming a host (X-70)
+// ---------------------------------------------------------------------------------------------
+
+/// **The failing-first test.** A tenant on Intercom's EU region can configure their connection, and
+/// the request goes to the region they chose.
+///
+/// Upstream C-225 made intercom's `base_url` `https://{host}`, and a bare placeholder is the whole
+/// authority — so X-47's rule refused it, correctly under the rule and wrongly about intercom. The
+/// same upstream change published `config_choices`: `{host}` is a closed set of **three vendor
+/// hostnames**, and choosing among them is choosing a region from a dropdown rather than naming a
+/// destination.
+///
+/// What makes that admissible is *not* that the hostnames look safe. It is that the choice set is a
+/// second piece of declared catalogue data from the same source the host rule is already derived
+/// from — so admitting a value because the catalogue declares it as one of a closed set is still
+/// deciding from the catalogue, which is the property X-47 exists to keep.
+#[tokio::test]
+async fn a_tenant_may_choose_intercoms_declared_region_and_the_request_goes_there() {
+    let (_scratch, settings) = settings_store("intercom-region");
+    let host = setting_of(provider("intercom"), "endpoint.host");
+
+    settings
+        .set(&tenant(), "intercom", &host, "api.eu.intercom.io")
+        .expect("a hostname the catalogue itself declares as one of intercom's three regions");
+
+    let credentials = credential_store(
+        "com.intercom.api",
+        Some(("intercom.access_token", "access_token")),
+    )
+    .await;
+    let (wire, egress) = silent_egress();
+    let outcome = invoker(credentials, settings, egress)
+        .invoke(
+            &caller(),
+            "intercom-contact-get",
+            json!({ "contact_id": "1" }),
+        )
+        .await;
+
+    let invocation = outcome.expect("a configured region, a stored credential, and one operation");
+    assert_eq!(invocation.operation, "intercom-contact-get");
+
+    let wire = wire.lock().expect("the wire lock");
+    assert_eq!(wire.count(), 1, "exactly one dispatch, for one invoke");
+    assert_eq!(
+        wire.origin(0),
+        "https://api.eu.intercom.io",
+        "the origin is the region this tenant chose out of the catalogue's own closed set",
+    );
+}
+
+/// **The equality edge, driven rather than read.** Only a value that is *exactly* one of the
+/// declared choices is admitted.
+///
+/// Not a prefix of one, not an extension of one, not a case-folded one, not one with whitespace
+/// around it. Each of those is a value a caller composed rather than a value the catalogue
+/// published, and `api.eu.intercom.io.evil.example` is the shape that matters: it *contains* a
+/// declared choice and resolves wherever its registrant says.
+///
+/// The refusal names the address and never repeats what was sent — the same standard every other
+/// refusal on this surface holds to. It does quote the choices, which are the catalogue's own data
+/// and the whole of what makes the refusal actionable.
+#[test]
+fn only_an_exactly_declared_choice_may_be_supplied() {
+    let intercom = provider("intercom");
+    let host = setting_of(intercom, "endpoint.host");
+
+    for admitted in [
+        "api.intercom.io",
+        "api.eu.intercom.io",
+        "api.au.intercom.io",
+    ] {
+        let (_scratch, settings) = settings_store("choice-exact");
+        settings
+            .set(&tenant(), "intercom", &host, admitted)
+            .unwrap_or_else(|refusal| panic!("`{admitted}` is a declared choice: {refusal}"));
+        assert!(settings.is_set(&tenant(), "intercom", &host));
+    }
+
+    // The refusal names the *address* and the catalogue's own choices, and carries nothing of what
+    // was offered — asserted as an equality against one expected value rather than as a search
+    // through the message, because a refusal that is byte-identical whatever was sent is a refusal
+    // that cannot have repeated it. (Some near-misses below are substrings of a declared choice, so
+    // "the message does not contain the value" would be the wrong question to ask.)
+    let expected = exchange_host::SettingsRefusal::NotADeclaredChoice {
+        connector: "intercom".to_owned(),
+        setting: "endpoint.host".to_owned(),
+        choices: vec![
+            "api.intercom.io".to_owned(),
+            "api.eu.intercom.io".to_owned(),
+            "api.au.intercom.io".to_owned(),
+        ],
+    };
+
+    for refused in [
+        "api.eu.intercom.io.evil.example",
+        "evil.example.api.eu.intercom.io",
+        "API.EU.INTERCOM.IO",
+        " api.eu.intercom.io",
+        "api.eu.intercom.io ",
+        "api.eu.intercom.i",
+        "eu.intercom.io",
+        "evil.example",
+    ] {
+        let (_scratch, settings) = settings_store("choice-near-miss");
+        let refusal = settings
+            .set(&tenant(), "intercom", &host, refused)
+            .expect_err("a value the catalogue does not declare is not a choice");
+
+        assert_eq!(
+            refusal, expected,
+            "`{refused}` was refused with something other than the one refusal this address has — \
+             a refusal that varies with the value is a refusal that repeats it",
+        );
+
+        let message = refusal.to_string();
+        assert!(
+            message.contains("intercom") && message.contains("endpoint.host"),
+            "the refusal must name the address: {message}",
+        );
+        assert!(
+            !message.contains("evil.example"),
+            "the refusal must not repeat the value it refused: {message}",
+        );
+        assert!(
+            !settings.is_set(&tenant(), "intercom", &host),
+            "`{refused}` was stored despite being refused",
+        );
+    }
+}
+
+/// The admitted set comes from the catalogue and from **nothing written in this repository**.
+///
+/// Walked over the whole catalogue in both directions, so neither half can be satisfied by a name
+/// somebody typed here:
+///
+/// - a setting the catalogue publishes a non-empty closed set for admits **every** value in that
+///   set and refuses one outside it;
+/// - a setting this host refuses outright has **no** closed set published for it — which is the
+///   Acceptance's third line, derived rather than enumerated: a connector whose choice set is empty
+///   or absent is still refused as the whole authority.
+#[test]
+fn what_a_tenant_may_supply_is_read_off_the_catalogues_own_choices() {
+    for provider in connector_catalog::providers() {
+        for declared in declared_settings(provider).expect("every connector's operations rehearse")
+        {
+            let published = provider
+                .choices_for(&declared.service, declared.kind.as_str(), &declared.name)
+                .map_or(&[][..], |entry| entry.choices);
+
+            if published.is_empty() {
+                // Nothing to admit from, so the template is the whole of the answer — and an
+                // unpinned one stays refused whatever is offered.
+                if let HostPinning::WholeAuthority(template) = host_pinning(provider, &declared) {
+                    assert!(
+                        template.contains('{'),
+                        "`{}` {} is refused against a template that carries no placeholder",
+                        provider.id,
+                        declared.binds(),
+                    );
+                    let (_scratch, settings) = settings_store("no-choices");
+                    settings
+                        .set(&tenant(), provider.id, &declared, "evil.example")
+                        .expect_err(
+                            "a connector with no declared choices templates the whole authority, \
+                             so no value may be supplied",
+                        );
+                }
+                continue;
+            }
+
+            for choice in published {
+                let (_scratch, settings) = settings_store("catalogue-choice");
+                settings
+                    .set(&tenant(), provider.id, &declared, choice.value)
+                    .unwrap_or_else(|refusal| {
+                        panic!(
+                            "`{}` publishes `{}` as a choice for {} and this host refused it: \
+                             {refusal}",
+                            provider.id,
+                            choice.value,
+                            declared.binds(),
+                        )
+                    });
+            }
+
+            let (_scratch, settings) = settings_store("catalogue-non-choice");
+            let _ = settings.set(&tenant(), provider.id, &declared, "evil.example");
+            assert!(
+                !settings.is_set(&tenant(), provider.id, &declared),
+                "`{}` accepted a value for {} that its own catalogue entry does not declare",
+                provider.id,
+                declared.binds(),
+            );
+        }
+    }
+}
+
+/// **The `get` side**, for the fourth answer — a value that reached the file some other way is
+/// checked against the choices on the way out too.
+///
+/// The rule is enforced twice for `a_planted_whole_authority_value_is_refused_on_the_way_out`'s
+/// reason, and a closed set is no different: an edited store, a backup taken before this rule
+/// existed, or a value written by an older build all bypass `set`. What is new here is that the
+/// question the port asks is now about the **value**, so the answer must be right in both
+/// directions — a planted extension of a choice is refused, and a planted choice is honoured.
+///
+/// Both halves run against the same planting mechanism the older test uses: the bytes are written
+/// straight into the store file by something that is not this store.
+#[test]
+fn a_planted_value_is_admitted_only_when_it_is_a_declared_choice() {
+    use exchange_host::ConfigStore as _;
+
+    for (planted, admitted) in [
+        ("api.eu.intercom.io", true),
+        ("api.eu.intercom.io.evil.example", false),
+        ("API.EU.INTERCOM.IO", false),
+        ("evil.example", false),
+    ] {
+        let scratch = Scratch::new("planted-choice");
+        let path = scratch.join("state").join("settings");
+        let intercom = provider("intercom");
+        let host = setting_of(intercom, "endpoint.host");
+
+        let mut file = json!({ TENANT: { "intercom": {} } });
+        file[TENANT]["intercom"][&host.service][host.binds()] = json!(planted);
+        fs::create_dir_all(path.parent().expect("the store path has a parent"))
+            .expect("a scratch directory");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&file).expect("a serialisable store"),
+        )
+        .expect("a planted store file");
+        let on_disk = fs::read(&path).expect("the planted file is readable");
+
+        let settings =
+            SettingsStore::bind(&path).expect("the store reopens over a file it did not write");
+        assert!(
+            settings.held_bytes(&tenant()) >= planted.len(),
+            "nothing was planted, so nothing below is a test of the guard",
+        );
+
+        let read = settings.get(TENANT, "intercom", &host.service, host.field());
+        if admitted {
+            assert_eq!(
+                read,
+                Some(planted.to_owned()),
+                "a stored value that *is* one of the catalogue's declared choices must reach the \
+                 invoker — refusing it would make the closed set unusable",
+            );
+        } else {
+            assert_eq!(
+                read, None,
+                "`{planted}` is not one of intercom's declared choices and reached the invoker out \
+                 of a file `set` never saw",
+            );
+        }
+
+        // Refuse; never repair — on both paths, and for the same reason.
+        assert_eq!(
+            fs::read(&path).expect("the file is still readable"),
+            on_disk,
+            "the store rewrote a file it read a value out of",
+        );
+    }
 }
 
 /// The refusal is actionable: it says which connectors this host will not let a tenant configure,
@@ -915,29 +1231,36 @@ fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
 ///
 /// A smaller working surface beats a larger one that leaks — but only if an operator can tell the
 /// difference between "refused on purpose" and "broken".
+///
+/// Driven on `okta` rather than on `newrelic`, which it used to drive: newrelic's `{host}` is a
+/// closed set of two region hostnames as of catalogue 0.10, so it is [`HostPinning::ChosenFrom`]
+/// and no longer an example of this. Okta declares `{domain}` and publishes no choices for it,
+/// which is the state this test is about — the value would be the whole origin and there is nothing
+/// declared to pick from.
 #[test]
 fn a_connector_this_host_will_not_configure_says_so() {
     let (_scratch, settings) = settings_store("unsuppliable");
-    let newrelic = provider("newrelic");
-    let host = setting_of(newrelic, "endpoint.host");
+    let okta = provider("okta");
+    let domain = setting_of(okta, "endpoint.domain");
 
     let refusal = settings
-        .set(&tenant(), "newrelic", &host, "acme.newrelic.com")
-        .expect_err("newrelic's host is the whole authority, whatever value is offered");
+        .set(&tenant(), "okta", &domain, "acme.okta.com")
+        .expect_err("okta's domain is the whole authority, whatever value is offered");
 
     let message = refusal.to_string();
-    assert!(message.contains("newrelic"), "{message}");
-    assert!(message.contains("endpoint.host"), "{message}");
+    assert!(message.contains("okta"), "{message}");
+    assert!(message.contains("endpoint.domain"), "{message}");
     assert!(
-        message.contains("{host}"),
+        message.contains("{domain}"),
         "the refusal must quote the template that pins nothing, so an operator can see why: \
          {message}",
     );
 
-    // Even a value that really is a New Relic host is refused. The rule is about the *template*,
-    // not about the value — a rule that inspected values would be a blocklist, and a blocklist is
-    // the thing this repository already refuses on the credential side.
-    assert!(!settings.is_set(&tenant(), "newrelic", &host));
+    // Even a value that really is an Okta host is refused. Where the catalogue declares no closed
+    // set, the rule is about the *template* and not about the value — a rule that inspected values
+    // would be a blocklist, and a blocklist is the thing this repository already refuses on the
+    // credential side.
+    assert!(!settings.is_set(&tenant(), "okta", &domain));
 }
 
 /// The refusal for a missing value is **unchanged** by this story: still by name, still terminal,

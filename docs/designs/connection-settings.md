@@ -29,6 +29,10 @@ The story's own note says thirteen. The measured number is seventeen, and the di
 whole of § *The surface is read off the connector, not off its base URL* below. **Thirteen of the
 seventeen are made configurable here; four are refused on purpose (§4), so this ships 49 of 53.**
 
+*Re-measured against catalogue 0.10 by X-70: fifty-four connectors, nineteen declaring a
+per-connection value, three refused — **51 of 54**. §4 § *The third correction* is why the refused
+set shrank.*
+
 ## §1 The value lives in a second store, and that is the decision
 
 **Decision: connection settings are kept in their own file, behind their own port, with their own
@@ -139,13 +143,18 @@ entirely, which needs a username and nothing else.
 
 ## §4 Supplying configuration does not become a way to name a host
 
-**This section is a correction, twice over.** The first cut of X-47 argued that `connector-pack`
-already prevents this, and shipped a hole. The rework closed that one and left a second, on the
-connectors it had just finished calling safe. Both arguments are recorded here with their flaws,
-because the flaws are the interesting part and they are the same flaw one level apart:
+**This section is a correction, three times over.** The first cut of X-47 argued that
+`connector-pack` already prevents this, and shipped a hole. The rework closed that one and left a
+second, on the connectors it had just finished calling safe. X-70 is the third, and unlike the other
+two it corrects the rule for being *too closed* rather than too open. All three arguments are
+recorded here with their flaws, because the flaws are the interesting part and the first two are the
+same flaw one level apart:
 
 > a character allow-list constrains what a value **looks like**, not where the request goes —
 > and **a suffix pin constrains which vendor a request reaches, not whose account at that vendor.**
+>
+> — and, from the third: **a value out of a set the catalogue closed is not a value the caller
+> chose.**
 
 ### What the first cut argued, and why it was vacuous
 
@@ -194,13 +203,15 @@ The distinction is published and needs no new dependency: `connector_catalog::Op
 carries each operation's host templates with their templating intact. (`connector-pack`'s own `Slot`
 would also answer it and is `pub(crate)`, so the catalogue is what carries this.)
 
-`exchange_host::host_pinning` returns one of three answers:
+`exchange_host::host_pinning` returns one of four answers — three as of X-47, and
+`ChosenFrom` since X-70 (§ *The third correction*):
 
 | answer | example | may a value be supplied |
 | --- | --- | --- |
 | `OutsideTheAuthority` | `bitbucket` `workspace` — in no host template | yes, by a `User` |
 | `PinnedTo(".zendesk.com")` | `zendesk` `hosts: ["{subdomain}.zendesk.com"]` | yes, by a `User` |
-| `WholeAuthority("{host}")` | `newrelic` `hosts: ["{host}"]` | **no, by nobody** |
+| `ChosenFrom([…])` | `intercom` `{host}`, three declared region hostnames | yes, by a `User`, and **only one of the declared values** |
+| `WholeAuthority("{domain}")` | `okta` `hosts: ["{domain}"]` | **no, by nobody** |
 
 The *kind* column is a second rule and is decided somewhere else — see § *Who may supply a value*.
 `host_pinning` answers only whether there is an address here at all; it says nothing about who may
@@ -212,10 +223,11 @@ least two further labels. Two rather than one because `.com` pins nothing anybod
 under. The honest name for what is wanted is a public-suffix list, which this crate may not take as
 a dependency; the approximation is stated rather than hidden and it errs closed.
 
-The rule is about the **template**, never about the value. A rule that inspected values would be a
-blocklist of hosts, and a blocklist only catches what somebody enumerated — the same argument
-`tests/no_second_request_path.rs` makes for its dependency allow-list. `acme.newrelic.com` is refused
-exactly as `evil.example` is.
+The rule is about the **declaration**, never about the value as it looks. A rule that inspected
+values would be a blocklist of hosts, and a blocklist only catches what somebody enumerated — the
+same argument `tests/no_second_request_path.rs` makes for its dependency allow-list.
+`acme.okta.com` is refused exactly as `evil.example` is. (§ *The third correction* adds one place
+where a *declared* set of values decides, and says why that is not the same thing.)
 
 ### What it costs: four connectors, named
 
@@ -237,6 +249,10 @@ template quoted. `GET .../settings` reports `configurable: false` and a per-fiel
 connector refused on purpose does not read as a broken one. A smaller working surface beats a larger
 one that leaks.
 
+*Re-measured against catalogue 0.10 by X-70: **51 of 54**. `newrelic` left this table — see
+§ *The third correction* — `intercom` arrived and left again in the same bump, and the three that
+remain are `okta`, `docusign` and `freshdesk`.*
+
 ### Where it is enforced
 
 Twice, deliberately.
@@ -245,6 +261,12 @@ Twice, deliberately.
 - `ConfigStore::get` refuses again on the way out, so the property belongs to the **port** rather
   than to one write path — an edited file, a backup taken before this rule existed, or a value
   written by an older build all bypass `set` and none of them bypass this.
+
+Both points ask `HostPinning::admits(value)` since X-70, which is the same question with the value
+in hand: for three of the four answers the value is irrelevant and this is the old check unchanged,
+and for `ChosenFrom` it is membership of the declared set. The `get` side matters more for the
+fourth answer than for the third, not less — a planted `api.eu.intercom.io.evil.example` is a
+plausible-looking string in a file, and the port is what refuses it.
 
 The value is not deleted when `get` refuses it: **refuse; never repair.** A store that silently
 rewrote a file it found suspicious would destroy the evidence of how the value got there.
@@ -286,6 +308,74 @@ What a suffix pin *does* buy is still real and is why the `WholeAuthority` rule 
 blast radius to one vendor's namespace, so the value cannot become an arbitrary origin, and it keeps
 the four unpinned connectors — where there is no bound at all — refused for everyone. It is a bound,
 not a boundary.
+
+### The third correction: a closed set the catalogue publishes is not the caller choosing (X-70)
+
+The two corrections above are about the rule being too **open**. This one is about it being too
+**closed**, and it is the same reasoning applied to a fact the rule was not reading.
+
+X-67 moved to catalogue 0.10 and the guard turned red, naming a fifth connector:
+
+```text
+left:  [docusign/…, freshdesk/…, intercom/endpoint.host ({host}), newrelic/…, okta/…]
+right: [docusign/…, freshdesk/…, newrelic/…, okta/…]
+```
+
+Upstream C-225 changed intercom's `base_url` to `https://{host}`, and a bare placeholder **is** the
+whole authority — so the refusal was **correct under the rule and wrong about intercom**. The same
+upstream change shipped `config_choices`, and intercom's `{host}` is a closed set of three vendor
+hostnames: `api.intercom.io`, `api.eu.intercom.io`, `api.au.intercom.io`. A tenant picking one of
+those is choosing a region from a dropdown. There is no value in the set that reaches
+`evil.example`, because the value is not free.
+
+**Decision: `host_pinning` gains a fourth answer, `ChosenFrom([…])`, wherever
+`connector_catalog::Provider::choices_for` publishes a non-empty set for the field — and a value is
+admitted only if it is *exactly* one of the declared values.**
+
+Why this is not the value rule §4 refuses to write, stated so a later reader does not have to
+reconstruct it: **the admitted set is a second piece of declared catalogue data, published by the
+same source the host templates this rule already reads come from.** Admitting a value because the
+catalogue declares it as one of a closed set is still deciding from the catalogue — the property
+X-47 exists to keep, and the reason the guard found four connectors where a hand-written list found
+two. Admitting a value because it *looks* fine is what must stay refused, and still is. Nothing in
+this repository enumerates a hostname.
+
+The comparison is **byte equality against the published strings**. Not a prefix, not a suffix, not
+case-insensitive, nothing trimmed:
+
+| offered | verdict |
+| --- | --- |
+| `api.eu.intercom.io` | admitted — the catalogue declares it |
+| `api.eu.intercom.io.evil.example` | refused — a host somebody else registered, which merely contains one |
+| `evil.example.api.eu.intercom.io` | refused — the same, the other way round |
+| `API.EU.INTERCOM.IO` | refused — resolves the same and is not what was published; a comparison that normalises is one somebody has to get right |
+| `⎵api.eu.intercom.io` | refused — trimming is a repair, and this design refuses rather than repairs |
+
+Two properties keep this from widening by accident, and both are measured rather than reviewed:
+
+- **A choice set that is empty or absent changes nothing.** The template decides, and an unpinned
+  one is still `WholeAuthority` — `okta`, `docusign` and `freshdesk` publish no choices and are
+  refused exactly as before.
+- **The admitted set is censused.** `no_shipped_connector_lets_a_tenant_supply_its_whole_authority`
+  now pins *both* lists, with the declared values written out, so an upstream bump that adds a
+  connector or a value to the closed set is a failing test rather than a quiet widening — the same
+  mechanism that made this story exist.
+
+**The census moved two connectors, not one.** `newrelic` publishes its own closed set — two region
+hosts, `api.newrelic.com` and `api.eu.newrelic.com` — and a rule read off the catalogue admits it
+for exactly the reason it admits intercom. That was not predicted when this story was written and it
+is recorded here rather than smoothed over: a rule that had been special-cased to intercom would
+have left newrelic uninvocable for no reason anybody could state.
+
+`newrelic` is therefore no longer the worked example of § *The rule, and where it is decided* — okta
+is. The exfiltration measurement that section quotes stands as history; the connector it was
+measured on has since had its values closed by the vendor.
+
+**What this does not change:** who may write one. A `ChosenFrom` field is still `User`-only, because
+the kind gate is the whole write surface and deliberately not a per-field rule (§ *Who may supply a
+value*). And it does not touch § *What this does not close* — a `User` of the tenant can still point
+a connection at a region the credential's owner did not intend, which is a smaller exposure than the
+one that section already records and is not a new one.
 
 ### Who may supply a value, and why that is the fix rather than a value rule
 
@@ -383,11 +473,12 @@ The reasoning for the order:
   help text of upstream's C-87, which the catalogue does not publish.
 - **No read-back of values.** §2 argues why, and says which direction the omission errs in.
 - **No per-instance settings.** §6.
-- **Four connectors this host will not let a tenant configure at all** — `newrelic`, `okta`,
-  `docusign`, `freshdesk`. Not an oversight and not a gap to close later by relaxing §4: closing it
-  needs a place for an *operator* to pin an allowed host per tenant, which is a new surface with its
-  own authorization question and belongs in its own story. Until then they refuse, and the refusal
-  says which connector, which template and why.
+- **Three connectors this host will not let a tenant configure at all** — `okta`, `docusign`,
+  `freshdesk`. It was four; `newrelic` left the list when the catalogue closed its host to two
+  published regions (§4 § *The third correction*). Not an oversight and not a gap to close later by
+  relaxing §4: closing it needs a place for an *operator* to pin an allowed host per tenant, which
+  is a new surface with its own authorization question and belongs in its own story. Until then they
+  refuse, and the refusal says which connector, which template and why.
 - **No validation of what a value means.** This host refuses a value at an address the connector
   never declared, and one past a bound. Whether `acme` is a real Zendesk subdomain is a question only
   Zendesk can answer, and it answers it with a `404` that reaches the caller whole.

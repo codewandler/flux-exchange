@@ -6,9 +6,16 @@
 //! connectors refused by name — the right failure, and still a surface that ran thirty-six of
 //! fifty-three.
 //!
-//! **Thirteen of the seventeen are now configurable. Four are refused on purpose** — see
-//! [`HostPinning`] — so the surface this ships is forty-nine of fifty-three, and the four that are
-//! left say so rather than looking broken.
+//! **Thirteen of the seventeen were made configurable. Four were refused on purpose** — see
+//! [`HostPinning`] — so the surface X-47 shipped was forty-nine of fifty-three, and the four that
+//! were left said so rather than looking broken.
+//!
+//! Re-measured against catalogue 0.10 (X-70): **fifty-four connectors, nineteen of which declare a
+//! per-connection value, and three of those are refused** — `docusign`, `freshdesk` and `okta`,
+//! whose host is a bare placeholder with nothing declared to pick from. `intercom` and `newrelic`
+//! template their whole authority too and are *not* refused, because the catalogue publishes the
+//! closed set of region hostnames each of them permits: see [`HostPinning::ChosenFrom`]. Fifty-one
+//! of fifty-four.
 //!
 //! `docs/designs/connections.md` recorded why this was deferred out of X-10: *"a vendor subdomain is
 //! exactly the per-instance fact with no home until two instances can be told apart"*. This module is
@@ -83,10 +90,10 @@
 //! it was. A character allow-list constrains what a value *looks like*; it says nothing about where
 //! the request goes. Where the connector's template pins a suffix — `{subdomain}.zendesk.com` — the
 //! two coincide, because any admissible value composes an authority inside the vendor's domain.
-//! Where the template **is** the variable — newrelic's `{host}`, okta's and freshdesk's `{domain}`,
-//! docusign's `{account_host}` — they come apart completely: `evil.example` is a perfectly valid
-//! hostname, the character check admits it, and the request goes wherever the caller said, carrying
-//! that tenant's credential.
+//! Where the template **is** the variable — okta's and freshdesk's `{domain}`, docusign's
+//! `{account_host}` — they come apart completely: `evil.example` is a perfectly valid hostname, the
+//! character check admits it, and the request goes wherever the caller said, carrying that tenant's
+//! credential.
 //!
 //! That is `AGENTS.md`'s *"an agent's token grants access to an operation, never to a credential"*
 //! broken through a configuration field, and it is this module's question rather than the pack's
@@ -94,6 +101,15 @@
 //! reads and the pack does not expose. [`host_pinning`] is the answer; [`ConnectionSettings::set`]
 //! refuses on it, and [`ConfigStore::get`] refuses on it again so the property belongs to the port
 //! rather than to one write path.
+//!
+//! **A closed set the catalogue publishes is a third case, and it is still catalogue data** (X-70).
+//! `intercom` and `newrelic` template their whole authority *and* declare, per field, the vendor
+//! hostnames that field permits — three regions and two. A tenant picking one of those is choosing
+//! a region, not naming a destination, so the value is admitted; a tenant offering anything else is
+//! refused, by equality against a set nothing in this repository wrote down. That is deliberately
+//! not a value rule of the kind [`HostPinning`] argues against: the admitted set is published by
+//! the same source the host templates are, and what stays refused is admitting a value because it
+//! *looks* fine.
 //!
 //! What this module also refuses is a value at an address the connector never declared, for
 //! [`ConnectorDeclaration`](crate::ConnectorDeclaration)'s reason: a value stored under an
@@ -335,15 +351,17 @@ pub fn declared_settings(
 ///
 /// ```text
 /// zendesk    hosts: ["{subdomain}.zendesk.com"]   -> PinnedTo(".zendesk.com")
-/// newrelic   hosts: ["{host}"]                    -> WholeAuthority("{host}")
+/// okta       hosts: ["{domain}"]                  -> WholeAuthority("{domain}")
 /// bitbucket  hosts: ["api.bitbucket.org"]         -> OutsideTheAuthority
+/// intercom   hosts: ["{host}"], three choices     -> ChosenFrom([three vendor hostnames])
 /// ```
 ///
 /// For zendesk the composed authority always ends in `.zendesk.com`, whatever a tenant supplies, so
 /// the origin cannot leave the vendor and a tenant naming its own subdomain is exactly the intended
-/// use. For newrelic the value **is** the authority: `evil.example` is a perfectly valid hostname,
-/// the character check admits it, and the request — carrying that tenant's `X-Api-Key` — goes
-/// wherever the caller said. Four shipped connectors are in that state.
+/// use. For okta the value **is** the authority: `evil.example` is a perfectly valid hostname, the
+/// character check admits it, and the request — carrying that tenant's `okta.api_token` — goes
+/// wherever the caller said. Three shipped connectors are in that state, and two more would be if
+/// the catalogue did not publish the closed set of hostnames they permit.
 ///
 /// **This distinction is about the vendor and not about the account**, and it is the whole of what
 /// this function decides. A pinned suffix keeps the origin at zendesk; it does not keep it at *this
@@ -353,13 +371,20 @@ pub fn declared_settings(
 /// call, and deliberately so: this is a question about `&'static` catalogue data, decided once per
 /// variable and the same answer for every caller.
 ///
-/// # Why the rule is about the template and never about the value
+/// # Why the rule is about the declaration and never about the value
 ///
 /// A rule that inspected values would be a blocklist of hosts, and a blocklist only ever catches
 /// what somebody enumerated — the same argument `tests/no_second_request_path.rs` makes for its
 /// dependency allow-list. This asks a question about the **connector's own declaration**, which is
 /// `&'static` catalogue data a request cannot reach, so it is decided once per variable and is the
-/// same answer for every caller and every value.
+/// same answer for every caller.
+///
+/// [`ChosenFrom`](Self::ChosenFrom) is the one answer that then looks at a value, and it does not
+/// weaken that: **the admitted set is itself declared catalogue data**, published by the same source
+/// the host templates are read from, so admitting a value because the catalogue lists it as one of a
+/// closed set is still deciding from the catalogue. What stays refused is admitting a value because
+/// it *looks* fine — see [`admits`](Self::admits), which compares for equality against a set no
+/// tenant can influence and does nothing else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostPinning {
     /// The variable appears in no host template, so it lands in a path or a query and cannot reach
@@ -381,18 +406,69 @@ pub enum HostPinning {
     /// At least one host template carrying this variable pins no suffix, so the value **is** the
     /// destination authority. Carries the offending template, for a refusal that shows its working.
     WholeAuthority(String),
+    /// **The catalogue publishes a closed set of values for this field**, so what a tenant supplies
+    /// is a choice out of the vendor's own list rather than a string they compose (X-70, upstream
+    /// C-225). Carries the declared values, in the vendor's order, for a refusal that says what
+    /// would have worked.
+    ///
+    /// Intercom is the shipped case: its `base_url` is `https://{host}`, which reads as
+    /// [`WholeAuthority`](Self::WholeAuthority) from the template alone — and its
+    /// `config_choices` declare `{host}` to be one of `api.intercom.io`, `api.eu.intercom.io` and
+    /// `api.au.intercom.io`. A caller picking among three hostnames the **vendor** published is
+    /// choosing a region, not naming a destination, and `evil.example` is not on the list.
+    ///
+    /// **This is not the value rule X-47 refused to write.** The set is a second piece of declared
+    /// catalogue data from the same source the host templates come from, and it is not something
+    /// this repository enumerated — a blocklist catches only what somebody wrote down, and there is
+    /// nothing written down here. [`admits`](Self::admits) compares a value against it for
+    /// **equality**: not a prefix, not a suffix, not case-insensitively, because
+    /// `api.eu.intercom.io.evil.example` contains a declared choice and resolves wherever its
+    /// registrant says.
+    ///
+    /// A closed set is a **stronger** constraint than any template pin, so it is the answer
+    /// wherever the catalogue publishes one — including over a template that pins a suffix. Erring
+    /// that way is the direction that cannot be wrong: upstream documents these as *"the permitted
+    /// values"*, and a host that offered a value it was not offered would be widening a set the
+    /// vendor closed.
+    ChosenFrom(Vec<String>),
 }
 
 impl HostPinning {
-    /// Whether a tenant may supply a value at all.
+    /// Whether a tenant may supply a value **at this address at all**.
+    ///
+    /// Not whether a particular value may be supplied — that is [`admits`](Self::admits), and the
+    /// two differ for exactly one answer: a [`ChosenFrom`](Self::ChosenFrom) address accepts a
+    /// value, and accepts only the declared ones. A caller that decides about a *value* must ask
+    /// `admits`; this one answers the question a listing asks, which is whether there is anything
+    /// to offer here.
     ///
     /// Matched exhaustively with no wildcard arm, deliberately: a variant added here is a new
     /// answer to "can a caller name the host", and it must be a compile error at the one place that
     /// decides rather than something that silently falls to `true`.
     pub fn tenant_may_supply(&self) -> bool {
         match self {
+            Self::OutsideTheAuthority | Self::PinnedTo(_) | Self::ChosenFrom(_) => true,
+            Self::WholeAuthority(_) => false,
+        }
+    }
+
+    /// **Whether this exact value may be supplied here**, which is the question both enforcement
+    /// points ask.
+    ///
+    /// For three of the four answers it is [`tenant_may_supply`](Self::tenant_may_supply): the
+    /// value is irrelevant, because the decision was made about the template. For
+    /// [`ChosenFrom`](Self::ChosenFrom) it is set membership by **byte equality** — the value has
+    /// to be one the catalogue published, with nothing trimmed, nothing case-folded and no prefix
+    /// or suffix admitted. `API.EU.INTERCOM.IO` resolves the same as its lower-case spelling and is
+    /// still refused: a comparison that normalises is a comparison somebody has to get right, and
+    /// the set was published to be compared against literally.
+    ///
+    /// Matched exhaustively for [`tenant_may_supply`](Self::tenant_may_supply)'s reason.
+    pub fn admits(&self, value: &str) -> bool {
+        match self {
             Self::OutsideTheAuthority | Self::PinnedTo(_) => true,
             Self::WholeAuthority(_) => false,
+            Self::ChosenFrom(choices) => choices.iter().any(|choice| choice == value),
         }
     }
 }
@@ -406,6 +482,15 @@ impl HostPinning {
 /// Only [`SettingKind::Endpoint`] can reach an authority. A [`SettingKind::Username`] is the
 /// non-secret half of a Basic credential and is placed in a header, never in a URL, so it is always
 /// [`OutsideTheAuthority`](HostPinning::OutsideTheAuthority).
+///
+/// # A declared closed set is asked about first
+///
+/// `connector_catalog::Provider::choices_for` publishes, per `(service, kind, name)`, the values a
+/// field permits — upstream C-225, and the same catalogue this function already reads its host
+/// templates out of. Where there is one, it is the answer: a closed set bounds the value more
+/// tightly than any suffix pin does, so consulting it before the template errs closed rather than
+/// open, and a set that is **empty or absent** changes nothing at all — the template decides, and
+/// an unpinned one is still [`WholeAuthority`](HostPinning::WholeAuthority).
 ///
 /// # What counts as pinned
 ///
@@ -421,6 +506,24 @@ pub fn host_pinning(
 ) -> HostPinning {
     if declared.kind != SettingKind::Endpoint {
         return HostPinning::OutsideTheAuthority;
+    }
+
+    // The vendor's own closed set, addressed exactly as this port addresses a stored value. An
+    // entry with no choices in it is not a closed set — it declares nothing to admit from — and
+    // falls through to the template below, so a connector that publishes an empty set is refused
+    // exactly as one that publishes none is.
+    if let Some(published) =
+        provider.choices_for(&declared.service, declared.kind.as_str(), &declared.name)
+    {
+        if !published.choices.is_empty() {
+            return HostPinning::ChosenFrom(
+                published
+                    .choices
+                    .iter()
+                    .map(|choice| choice.value.to_owned())
+                    .collect(),
+            );
+        }
     }
 
     let mut pinned: Option<String> = None;
@@ -611,11 +714,15 @@ pub enum SettingsRefusal {
 
     /// **The value would be the destination host, so no tenant may supply it.**
     ///
-    /// Not about the value offered — `acme.newrelic.com` is refused exactly as `evil.example` is —
+    /// Not about the value offered — `acme.okta.com` is refused exactly as `evil.example` is —
     /// because the defect is in the *template*: it pins no suffix, so whatever is substituted is
     /// the whole authority and a caller who can write here can name the host this process sends a
     /// tenant's credential to. `AGENTS.md`: an agent's token grants access to an operation, never
     /// to a credential.
+    ///
+    /// Raised only where the catalogue declares **no** closed set for the field. Where it declares
+    /// one, the value is not free and [`NotADeclaredChoice`](Self::NotADeclaredChoice) is the
+    /// refusal a wrong value gets instead.
     ///
     /// The consequence is stated plainly rather than softened: this connector cannot be configured
     /// by a tenant on this host, and it stays uninvocable. A smaller working surface beats a larger
@@ -637,6 +744,32 @@ pub enum SettingsRefusal {
         setting: String,
         /// The connector's own host template, quoted so the refusal shows its working.
         template: String,
+    },
+
+    /// **The value is not one of the ones the catalogue declares for this field.**
+    ///
+    /// The refusal that comes with [`HostPinning::ChosenFrom`]: the connector publishes a closed
+    /// set for this setting, and what was offered is not in it. Comparison is by equality, so this
+    /// is also what refuses a value that merely *contains* a declared one —
+    /// `api.eu.intercom.io.evil.example` is a hostname somebody else registered.
+    ///
+    /// The declared choices are quoted because they are the catalogue's own published data and are
+    /// the whole of what makes the refusal actionable; the value that was offered is not, and there
+    /// is deliberately no field here one could occupy.
+    #[error(
+        "connector `{connector}` setting `{setting}` takes one of the values its own catalogue \
+         entry declares: {}. Nothing was stored, and this refusal does not repeat what was sent — \
+         the value is matched exactly, so a hostname that merely extends one of these is a \
+         different host",
+        crate::settings::quoted(choices)
+    )]
+    NotADeclaredChoice {
+        /// The connector that was named.
+        connector: String,
+        /// The `binds` target whose value is a closed set.
+        setting: String,
+        /// The values the catalogue declares for it, in the vendor's own order.
+        choices: Vec<String>,
     },
 
     /// A supplied value is larger than a connection setting is.
@@ -1052,19 +1185,34 @@ mod file {
             }
 
             // **The authority rule**, after the address is known to exist and before anything is
-            // written. A value that would be the destination host is refused whatever it says,
-            // because the defect is in the connector's own template rather than in the value — see
-            // `HostPinning`. It sits above the size bound because "no value is acceptable here" is
-            // a stronger statement than "that one is too big", and an operator should read the
+            // written. It sits above the size bound because "no value is acceptable here" is a
+            // stronger statement than "that one is too big", and an operator should read the
             // stronger one.
-            if let super::HostPinning::WholeAuthority(template) =
-                super::host_pinning(provider, declared)
-            {
+            let pinning = super::host_pinning(provider, declared);
+
+            // A value that would be the destination host is refused whatever it says, because the
+            // defect is in the connector's own template rather than in the value — see
+            // `HostPinning`. Raised before the membership check below so that "nobody may supply
+            // this" is never reported as "you picked the wrong one from a list".
+            if let super::HostPinning::WholeAuthority(template) = &pinning {
                 return Err(SettingsRefusal::WouldNameTheHost {
                     connector: connector.to_owned(),
                     setting: declared.binds(),
-                    template,
+                    template: template.clone(),
                 });
+            }
+
+            // And the one place a *value* is decided about: it has to be one the catalogue
+            // declares. Only `ChosenFrom` reaches this, and only because the set it compares
+            // against is the connector's own published data (X-70).
+            if let super::HostPinning::ChosenFrom(choices) = &pinning {
+                if !pinning.admits(value) {
+                    return Err(SettingsRefusal::NotADeclaredChoice {
+                        connector: connector.to_owned(),
+                        setting: declared.binds(),
+                        choices: choices.clone(),
+                    });
+                }
             }
 
             if value.len() > MAX_SETTING_VALUE_BYTES {
@@ -1131,6 +1279,13 @@ mod file {
         /// is read once per projection. That is the right side of the trade for the one rule whose
         /// failure sends a tenant's credential to a caller's server.
         ///
+        /// **Since X-70 the question is asked about the value**, not only about the address: a
+        /// field whose values are a closed set the catalogue declares is checked against that set
+        /// here as well as in `set`, so a planted `api.eu.intercom.io.evil.example` is refused on
+        /// the way out exactly as a planted `evil.example` at an unpinned address is. The read
+        /// happens first and the decision second, because there is no value to decide about until
+        /// there is one.
+        ///
         /// The value is not deleted, and deliberately: **refuse; never repair.** A store that
         /// silently rewrote a file it found suspicious would destroy the evidence of how the value
         /// got there, on the one path where somebody has to find that out.
@@ -1143,23 +1298,30 @@ mod file {
         ) -> Option<String> {
             let binds = binds_of(field);
 
-            if let Some(catalogued) =
+            let catalogued =
                 connector_catalog::provider(connector_catalog::ProviderKey::id(provider))
-            {
-                let declared = DeclaredSetting::parse(service, &binds)?;
-                if !super::host_pinning(catalogued, &declared).tenant_may_supply() {
-                    return None;
-                }
-            }
+                    .map(|catalogued| (catalogued, DeclaredSetting::parse(service, &binds)));
 
-            self.values
+            let value = self
+                .values
                 .read()
                 .ok()?
                 .get(tenant)?
                 .get(provider)?
                 .get(service)?
                 .get(&binds)
-                .cloned()
+                .cloned()?;
+
+            if let Some((catalogued, declared)) = catalogued {
+                // A `binds` target the pack asked for that this host cannot parse is not one it
+                // can decide about, and an undecided value is not one it hands over.
+                let declared = declared?;
+                if !super::host_pinning(catalogued, &declared).admits(&value) {
+                    return None;
+                }
+            }
+
+            Some(value)
         }
     }
 

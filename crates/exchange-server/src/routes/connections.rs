@@ -997,10 +997,11 @@ async fn list_settings(
         Err(refusal) => return settings_refused(&refusal),
     };
 
-    // `suppliable` is the half that stops a refused connector reading as a broken one. Four shipped
-    // connectors template their whole authority, so no tenant may supply their host at all — and an
-    // operator staring at a connection that will not work needs to be told that on purpose, with
-    // the connector's own template quoted, rather than left to conclude this host is faulty.
+    // `suppliable` is the half that stops a refused connector reading as a broken one. Three
+    // shipped connectors template their whole authority with nothing declared to pick from, so no
+    // tenant may supply their host at all — and an operator staring at a connection that will not
+    // work needs to be told that on purpose, with the connector's own template quoted, rather than
+    // left to conclude this host is faulty.
     let settings: Vec<Value> = declared
         .iter()
         .map(|setting| {
@@ -1249,6 +1250,23 @@ fn settings_refused(refusal: &SettingsRefusal) -> Response {
                 "field": setting,
                 "host_template": template,
                 "suppliable": false,
+            }),
+        ),
+        // **The value is not one the connector declares.** `422` for the same reason the
+        // addressing refusals are: the request is well formed and there is no address here for
+        // *that* value. The declared choices are echoed — they are the catalogue's own published
+        // data, they are what a form would render, and without them the caller can only guess.
+        SettingsRefusal::NotADeclaredChoice {
+            connector,
+            setting,
+            choices,
+        } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "choices": choices,
+                "suppliable": true,
             }),
         ),
         SettingsRefusal::SettingTooLarge {
@@ -5067,14 +5085,16 @@ mod tests {
     /// resolves to. Both are needed: the host-level test says the value cannot be stored, and this
     /// says there is no request that stores it.
     ///
-    /// The four connectors are the ones whose host template pins no vendor suffix, so the tenant's
-    /// value would be the whole origin this host sends their credential to.
+    /// The three connectors are the ones whose host template pins no vendor suffix **and** whose
+    /// catalogue entry declares no closed set of values, so the tenant's value would be the whole
+    /// origin this host sends their credential to. `newrelic` was a fourth until X-70 measured its
+    /// `config_choices`; the route test for what replaced it is
+    /// [`no_route_lets_a_tenant_supply_a_value_the_catalogue_does_not_declare`].
     #[tokio::test]
     async fn no_route_lets_a_tenant_supply_a_connectors_whole_authority() {
         let (app, store, settings, _scratch) = configurable_app();
 
         for (connector, field) in [
-            ("newrelic", "endpoint.host"),
             ("okta", "endpoint.domain"),
             ("docusign", "endpoint.account_host"),
             ("freshdesk", "endpoint.domain"),
@@ -5138,6 +5158,77 @@ mod tests {
         );
     }
 
+    /// **The closed set, over HTTP** — a region a tenant may choose, and nothing that merely looks
+    /// like one (X-70).
+    ///
+    /// `connection_settings.rs::only_an_exactly_declared_choice_may_be_supplied` proves the store
+    /// decides this; this proves the route carries the decision out to a caller as a `422` that
+    /// says what would have worked. The pairing matters more here than usual: a build that refused
+    /// everything would satisfy the second half alone, which is exactly the state this story found.
+    #[tokio::test]
+    async fn no_route_lets_a_tenant_supply_a_value_the_catalogue_does_not_declare() {
+        let (app, _store, _settings, _scratch) = configurable_app();
+        let address = "/api/connections/intercom/settings/default/endpoint.host";
+
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            address,
+            Some(json!({ "value": "api.eu.intercom.io" })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a region intercom's own catalogue entry declares must be suppliable: {body}",
+        );
+
+        for refused in [
+            "api.eu.intercom.io.evil.example",
+            "API.EU.INTERCOM.IO",
+            " api.eu.intercom.io",
+            "evil.example",
+        ] {
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                address,
+                Some(json!({ "value": refused })),
+            )
+            .await;
+
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "`{refused}` is not one of intercom's declared regions: {body}",
+            );
+            assert_eq!(
+                body["choices"],
+                json!([
+                    "api.intercom.io",
+                    "api.eu.intercom.io",
+                    "api.au.intercom.io"
+                ]),
+                "the refusal must say what would have worked, out of the catalogue's own data: \
+                 {body}",
+            );
+        }
+
+        // And the listing says this address takes a value, so an operator is not told it is one of
+        // the connectors nobody may configure.
+        let (_, listed) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/intercom/settings",
+            None,
+        )
+        .await;
+        assert_eq!(listed["configurable"], true, "{listed}");
+    }
+
     /// A tenant sitting on its settings allowance can still replace a value with one the same size.
     ///
     /// **The regression the first cut shipped.** This handler ran its own
@@ -5155,15 +5246,18 @@ mod tests {
         let acme = Tenant::new("acme").expect("a plain tenant id");
         let full = "x".repeat(exchange_host::MAX_SETTING_VALUE_BYTES);
 
-        // Every address this host will actually accept a value at, across the whole catalogue —
-        // one connector does not have enough of them to reach a per-tenant bound.
+        // Every address this host will actually accept **this** value at, across the whole
+        // catalogue — one connector does not have enough of them to reach a per-tenant bound.
+        // Asked with the value in hand rather than as `tenant_may_supply`, because a field whose
+        // values are a catalogue-declared closed set is suppliable and still refuses a kilobyte of
+        // `x` (X-70).
         let addresses: Vec<(String, String, String)> = connector_catalog::providers()
             .iter()
             .flat_map(|provider| {
                 declared_settings(provider)
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|setting| host_pinning(provider, setting).tenant_may_supply())
+                    .filter(|setting| host_pinning(provider, setting).admits(&full))
                     .map(|setting| {
                         (
                             provider.id.to_owned(),
