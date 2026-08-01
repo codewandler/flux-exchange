@@ -6,6 +6,38 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-01
+
+### Added
+
+- **This host executes an operation** (X-12). A caller names an operation id and **nothing else about
+  the request is theirs** — not the host (the URL comes from the operation's own compiled Flux), not
+  the credential (the address is derived from the resolved principal's tenant and the connector's
+  declared authority), not the tenant. That is the whole confused-deputy answer, and it is what makes
+  this an execution platform rather than a credential store with a catalogue.
+
+  **The "this host builds no request of its own" rule is now enforced structurally rather than
+  promised** — three locks covering different ground: the manifest's dependency list as an allow-list
+  with a reason per entry, a single dispatch seam with no reachable socket (guarded by a scanner that
+  self-tests against sources it must reject *and* accept), and a transport counter so a test cannot
+  pass by never dispatching.
+
+  A missing credential refuses **by address, never by value**, and is terminal — the request was
+  never sent. A runtime this deployment does not admit is refused before the credential store is
+  touched.
+
+### Changed
+
+- **`codewandler-flux-exchange-host` now carries the flux engine.** `connector-pack` and
+  `flux-runtime` moved from dev-dependencies to dependencies, because the published crate executes
+  now. `flux-web` did **not** — it holds the transport, and the crate that dispatches holds none.
+
+### Known
+
+- **Thirteen of fifty-three connectors cannot yet be invoked.** Their `base_url` is templated on a
+  per-connection value and there is nowhere to supply it, so they refuse by name. It fails closed and
+  says which field is missing. Tracked as X-47.
+
 ### Changed
 
 - **The flux engine line is aligned, and `connector-pack` links** (X-11). Upstream published 0.9.0:

@@ -1,7 +1,7 @@
 ---
 id: X-12
 title: "Invoke an operation"
-status: in-progress
+status: done
 epic: invoke
 areas: [exchange-host, exchange-server]
 design: docs/designs/invoke.md
@@ -15,15 +15,15 @@ A caller names an operation and gets a result. This host resolves the credential
 `connector_pack` builds the request from the operation's own compiled Flux.
 
 ## Acceptance
-- [ ] A route runs one catalogue operation for the caller's tenant and returns the result.
-- [ ] **This host constructs no request of its own.** Every path ends in `connector_pack`. Assert it
+- [x] A route runs one catalogue operation for the caller's tenant and returns the result.
+- [x] **This host constructs no request of its own.** Every path ends in `connector_pack`. Assert it
       structurally — a test that fails if a second request-building path appears.
-- [ ] **Failing-first test** — no request field lets a caller influence the destination host.
-- [ ] **Failing-first test** — a missing credential refuses by **address**, never by value, and is
+- [x] **Failing-first test** — no request field lets a caller influence the destination host.
+- [x] **Failing-first test** — a missing credential refuses by **address**, never by value, and is
       terminal rather than retryable: the request was never sent.
-- [ ] The credential is registered with the redactor **before** the request is built, and the
+- [x] The credential is registered with the redactor **before** the request is built, and the
       registration is verified to have taken.
-- [ ] A connector whose declared runtime this deployment does not admit is refused via
+- [x] A connector whose declared runtime this deployment does not admit is refused via
       `Deployment::admits`, not executed.
 
 ## Progress
@@ -75,3 +75,36 @@ Also inherited, and it is the thing to be careful with: `connector-address` 0.9 
 **instance dimension** — `CredentialRef` gained an optional `@instances/<uuid>` level, and
 `CredentialRef::new` still elides it. X-14 is the story that uses it. Invoke must not start
 resolving credentials at instanced addresses by accident.
+- **Done 2026-08-01.** Gate green: 291 Rust tests (48 + 3 + 10 + 5 + 225), clippy clean, fmt clean.
+  **This host executes.** Genuine merge-base failure — the test could not resolve the symbols it
+  names.
+- **The no-second-request-path invariant is enforced structurally, in three locks covering different
+  ground**, not promised: the manifest's `[dependencies]` as an allow-list with a reason per entry;
+  one dispatch seam with no reachable socket, guarded by a scanner that **self-tests** against
+  sources it must reject and accept; and a transport counter, so a test cannot pass by never
+  dispatching. The scanner was proved **on the real tree** — a planted file naming `reqwest` made it
+  fail.
+- **`connector_pack::resolve`, not `pack`**, and the reason is upstream's: C-413 split the seams
+  after the design was written, and `pack` is **model-facing — it withholds every `expose = false`
+  operation**, so an execute route built on it would silently refuse operations callers are entitled
+  to run. Lock 2 counts `resolve` and separately **forbids** `pack`.
+- **`flux-system` is deliberately not in `exchange-host`.** Building a `ToolContext` needs it and it
+  dials, so writing "not a transport" beside it in the allow-list would have been false. `Contexts`
+  is a port the composition implements, and lock 2 forbids naming `flux_system` in host sources.
+- **One place fidelity was lost deliberately and documented rather than smoothed over:** every
+  `connector_pack::Error` arrives as `flux_core::Error::Config(String)`, so this host **cannot tell a
+  missing credential from an unreachable store**. It reports the conservative answer for both — not
+  sent, not retryable — rather than string-matching upstream's prose. The bias never causes a
+  duplicated write. **Re-measure this on any `connector-pack` or `flux-web` bump.**
+- **A design premise turned out false in our favour:** C-405 landed, so `catalog::Provider` now
+  publishes its runtime and `ConnectorSurface` *reads* it rather than deriving `Http`, with an
+  exhaustive no-wildcard mapping making a new upstream runtime a compile error here.
+- **The published crate now carries the flux engine.** `connector-pack` and `flux-runtime` were
+  promoted to `[dependencies]`; `flux-web` was **not**, because it holds the transport and lock 1
+  says the crate that dispatches holds none. Every consumer of
+  `codewandler-flux-exchange-host` now pays for the engine — that is the weight this story sanctions.
+- **Filed as [X-47](X-47-per-connection-settings.md):** thirteen of fifty-three connectors declare a
+  templated `base_url` with nowhere to put the value, so the shipped surface runs 40 of 53. It fails
+  closed and names the field, which is right — and it is still a story.
+- **Carried forward:** `invoke` is in the console navigation and **inert**; the backend it was
+  waiting for now exists.

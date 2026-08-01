@@ -35,7 +35,7 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.6.0. The service serves health, the catalogue, a session, a complete OIDC sign-in, and — since
+**v0.7.0. The service serves health, the catalogue, a session, a complete OIDC sign-in, and — since
 X-12 — `POST /api/operations/{operation}/invoke`, which runs one catalogue operation for the
 caller's tenant.** `cargo run` binds
 loopback and refuses to start on a reachable address with no identity provider configured. What exists beyond
