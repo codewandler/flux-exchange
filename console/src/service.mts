@@ -57,6 +57,30 @@ export function operationsEndpoint(connector: string): string {
   return `${CONNECTORS_ENDPOINT}/${encodeURIComponent(connector)}/operations`
 }
 
+/**
+ * Where one connector's connection is created, read and destroyed.
+ *
+ * `{connector}` is a catalogue key and never an address: it selects *what* is being connected, and
+ * the tenant — the only part of a credential address a caller could want to move — comes from the
+ * resolved principal. `routes::connections` carries the other half of this.
+ */
+export function connectionEndpoint(connector: string): string {
+  return `${CONNECTIONS_ENDPOINT}/${encodeURIComponent(connector)}`
+}
+
+/**
+ * Where one credential of one connection is **replaced**.
+ *
+ * X-39's route, and the reason this console never offers a delete. Replacing a leaked secret by
+ * `DELETE` then `POST` has a window in it where the tenant has no connection at all and everything
+ * relying on it fails; a rotation is a single atomic write with no such moment. Nothing here calls
+ * it yet — the console names it, so an operator meeting the `409` is sent to the operation that
+ * works rather than to the one that breaks their tenant for a few seconds.
+ */
+export function credentialEndpoint(connector: string, credential: string): string {
+  return `${connectionEndpoint(connector)}/credentials/${encodeURIComponent(credential)}`
+}
+
 // ---------------------------------------------------------------------------------------------
 // The served contract.
 //
@@ -198,8 +222,35 @@ export interface LoadOptions {
   origin?: string
 }
 
+/**
+ * A refusal this service worded for itself.
+ *
+ * Distinct from [`ServiceFailure`], and the difference is who is speaking. A `ServiceFailure` is
+ * this console's account of a read that did not happen — it summarises, and [`refusalDetail`]
+ * truncates, because there a sentence on a page is better than a dump of a body. A refusal of a
+ * *write* is the opposite case: the service has answered in sentences several stories were spent
+ * arguing over (X-18, X-20, X-29), and those sentences are what an operator acts on.
+ *
+ * So `error` is carried **whole and verbatim**. The `409` on an already-connected connector is 206
+ * characters long; put through the summariser it would arrive on the page missing its last clause,
+ * which is this console re-wording a refusal it was told not to re-word.
+ */
+export interface ServiceRefusal {
+  /** The endpoint that refused. */
+  endpoint: string
+  /** The HTTP status it refused with. */
+  status: number
+  /** The service's own `error` sentence, untruncated and unedited. */
+  error: string
+}
+
 /** A body that was read, or the failure that reading it was. */
-type Read = { ok: true; body: unknown } | { ok: false; failure: ServiceFailure }
+type Read =
+  | { ok: true; body: unknown }
+  // The body is carried on the failure too, because a refusal's body is where the service says what
+  // would have worked — the declared credential names on a `422`, the address on a `409` — and a
+  // caller that only ever saw the summarised sentence could not read either.
+  | { ok: false; failure: ServiceFailure; body: unknown }
 
 /** What went wrong, in the transport's own words — never a sentence invented here. */
 function describe(error: unknown): string {
@@ -226,17 +277,37 @@ function refusalDetail(body: unknown): string {
   return ''
 }
 
-/** One endpoint, read as JSON, with every way that can go wrong named as itself. */
-async function read(endpoint: string, options: LoadOptions): Promise<Read> {
+/**
+ * What a body says its `error` is, verbatim, or `null` when it says nothing this can read.
+ *
+ * Deliberately reads only `error` and deliberately does not truncate: this is the sentence the
+ * service composed for a caller, and the two liberties [`refusalDetail`] takes — guessing among
+ * spellings, cutting at 200 characters — are both wrong for a refusal that is itself the answer.
+ */
+function serviceError(body: unknown): string | null {
+  if (!isObject(body)) return null
+  return typeof body.error === 'string' ? body.error : null
+}
+
+/**
+ * One endpoint, read as JSON, with every way that can go wrong named as itself.
+ *
+ * `init` is how a write goes through the same three-kind funnel as a read. It is not a general
+ * escape hatch: everything that reaches the network in this console does so here, so there is one
+ * place that decides what "unreachable", "refused" and "unreadable" mean, and one place a reviewer
+ * checks that no caller put a credential value somewhere other than the body.
+ */
+async function read(endpoint: string, options: LoadOptions, init?: RequestInit): Promise<Read> {
   const transport = options.fetch ?? globalThis.fetch
   const url = `${options.origin ?? ''}${endpoint}`
 
   let response: Response
   try {
-    response = await transport(url)
+    response = await transport(url, init)
   } catch (error) {
     return {
       ok: false,
+      body: undefined,
       failure: { kind: 'unreachable', endpoint, status: null, detail: describe(error) },
     }
   }
@@ -254,6 +325,7 @@ async function read(endpoint: string, options: LoadOptions): Promise<Read> {
   if (!response.ok) {
     return {
       ok: false,
+      body,
       failure: {
         kind: 'refused',
         endpoint,
@@ -266,6 +338,7 @@ async function read(endpoint: string, options: LoadOptions): Promise<Read> {
   if (unreadable !== null) {
     return {
       ok: false,
+      body,
       failure: { kind: 'unreadable', endpoint, status: response.status, detail: unreadable },
     }
   }
@@ -554,6 +627,28 @@ function readCredentials(entry: Record<string, unknown>): HeldCredential[] | str
   return credentials
 }
 
+/**
+ * One connection, or the reason the value is not one.
+ *
+ * Shared by the listing and by what a create answers with, because they are the same view: `POST`
+ * answers `201` with exactly the object `GET` lists. That is worth having in one function rather
+ * than two — the property this console is holding is that neither of them can carry a value, and a
+ * second reader is a second place for one to appear.
+ */
+function readConnection(entry: unknown): Connection | string {
+  if (!isObject(entry) || typeof entry.connector !== 'string') {
+    return 'a connection entry has no `connector`'
+  }
+  const credentials = readCredentials(entry)
+  if (typeof credentials === 'string') return credentials
+  return {
+    connector: entry.connector,
+    vendor: typeof entry.vendor === 'string' ? entry.vendor : entry.connector,
+    authority: typeof entry.authority === 'string' ? entry.authority : null,
+    credentials,
+  }
+}
+
 /** The connections in a `GET /api/connections` body, or the reason it is not one. */
 function readConnections(body: unknown): Connection[] | string {
   if (!isObject(body) || !Array.isArray(body.connections)) {
@@ -561,17 +656,9 @@ function readConnections(body: unknown): Connection[] | string {
   }
   const connections: Connection[] = []
   for (const entry of body.connections) {
-    if (!isObject(entry) || typeof entry.connector !== 'string') {
-      return 'a connection entry has no `connector`'
-    }
-    const credentials = readCredentials(entry)
-    if (typeof credentials === 'string') return credentials
-    connections.push({
-      connector: entry.connector,
-      vendor: typeof entry.vendor === 'string' ? entry.vendor : entry.connector,
-      authority: typeof entry.authority === 'string' ? entry.authority : null,
-      credentials,
-    })
+    const connection = readConnection(entry)
+    if (typeof connection === 'string') return connection
+    connections.push(connection)
   }
   return connections
 }
@@ -601,6 +688,175 @@ export async function loadConnections(options: LoadOptions = {}): Promise<Connec
   }
 
   return { status: 'ready', connections }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Connecting: the write, and the one question that has to be asked before it.
+//
+// A connect form needs to know **what a connector declares**, and this console must not be the
+// thing that knows. A list kept here goes stale the day a connector gains a credential, and the
+// operator who then cannot enter it has no way to tell that the console is the one that is wrong.
+// So the declaration is read from the service, every time, and the inputs are whatever it said.
+// ---------------------------------------------------------------------------------------------
+
+/** What a connector declares — the names a connection may carry values for. */
+export interface Declaration {
+  /** The connector these belong to, echoed so the value stands on its own. */
+  connector: string
+  /**
+   * The flat-namespace names the catalogue publishes, in the order the service published them.
+   *
+   * Unreordered and unfiltered on purpose: the order is the connector's own, and a console that
+   * sorted them would be presenting its own opinion of a declaration as the declaration.
+   */
+  credentials: string[]
+}
+
+/**
+ * What this console knows about one connector's declaration.
+ *
+ * Four states rather than the three the reads above use, and the fourth earns its place. `refused`
+ * is the service answering the question — `freshdesk` declares no credential, or this host has no
+ * credential store bound — in a sentence the operator acts on, and folding it into `failed` would
+ * put that sentence through the summariser that truncates. `failed` stays what it is everywhere
+ * else in this file: nothing was read, and the console cannot tell you anything.
+ */
+export type DeclarationState =
+  | { status: 'loading' }
+  | { status: 'ready'; declaration: Declaration }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/** The declared names in a refusal body, or `null` when it carries none this can read. */
+function readDeclared(body: unknown): string[] | null {
+  if (!isObject(body) || !Array.isArray(body.declared)) return null
+  const declared = body.declared.filter((name): name is string => typeof name === 'string')
+  return declared.length === body.declared.length ? declared : null
+}
+
+/**
+ * What a connector declares, asked of the service.
+ *
+ * **This is a question spelled as a refused write, and that is worth being blunt about.** The
+ * served catalogue publishes an operation's metadata and no credentials, and there is no route on
+ * this host that reads a declaration — so the one place the service states it is the refusal it
+ * gives a `POST` carrying no values:
+ *
+ * ```text
+ * POST /api/connections/slack  {"credentials": {}}
+ * 422 {"connector":"slack","declared":["slack.bot_token","slack.signing_secret"],"error":…}
+ * ```
+ *
+ * Three things make that sound rather than a trick. It **writes nothing**: `routes::connections`
+ * refuses an empty body before it takes a claim, before it probes the store and before any `put`,
+ * and the refusal is load-bearing there — "allowing none would let an empty `POST` create a
+ * connection with nothing behind it" — so it cannot quietly become a create. It **carries no
+ * value**, so there is no secret in the question. And the names come from `connector_catalog`, so a
+ * connector that gains a credential gains an input here with nobody editing this console, which is
+ * the property the story is actually about.
+ *
+ * It is still a workaround for a gap in the surface, and the honest fix is a catalogue that
+ * publishes what each connector declares. That is a change to the Rust crates and belongs in its
+ * own story; when it lands, this function changes and nothing above it does.
+ */
+export async function loadDeclaration(
+  connector: string,
+  options: LoadOptions = {}
+): Promise<DeclarationState> {
+  const endpoint = connectionEndpoint(connector)
+  const answered = await read(endpoint, options, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    // No values. This is a question, and the service's refusal is the answer.
+    body: JSON.stringify({ credentials: {} }),
+  })
+
+  if (answered.ok) {
+    // Unreachable against this host, and it must never be read as a declaration: a `2xx` here would
+    // mean the service had accepted a connection carrying nothing at all, which is precisely what
+    // that route exists to refuse. Say the answer was not one this console can read.
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable',
+        endpoint,
+        status: 200,
+        detail: 'the service accepted a connection carrying no credential value, which it refuses by design',
+      },
+    }
+  }
+
+  const declared = readDeclared(answered.body)
+  if (declared) return { status: 'ready', declaration: { connector, credentials: declared } }
+
+  const error = serviceError(answered.body)
+  if (error !== null && answered.failure.status !== null) {
+    // The connector declares no credential, or no authority, or this host has no store bound. Each
+    // is the service stating something the operator has to act on, and each is its own sentence.
+    return {
+      status: 'refused',
+      refusal: { endpoint, status: answered.failure.status, error },
+    }
+  }
+
+  return { status: 'failed', failure: answered.failure }
+}
+
+/**
+ * What became of a connect.
+ *
+ * Three outcomes for the same reason every read here has three states: a refusal and an outage are
+ * different events, and a caller must not be able to confuse either with success. There is no
+ * `loading` — a write is awaited by whoever started it, and the busy flag belongs to the view.
+ */
+export type ConnectOutcome =
+  | { status: 'connected'; connection: Connection }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/**
+ * Connect a connector, with the values an operator typed.
+ *
+ * **The values go in the body and nowhere else.** Not in the path, not in a query string — a value
+ * in a query string is a value in an access log, and in a browser's history and in every referrer
+ * header the page then sends. This function is the only place in the console a credential value is
+ * ever handled, it holds none after it returns, and what it returns is the service's own view of
+ * the connection: addresses and `held`, never a value.
+ *
+ * A refusal is carried whole. `409` — the connector is already connected — is not special-cased
+ * here; it is a refusal like any other, and the *view* is what knows to point an operator at
+ * rotation. This function will not delete anything, and there is deliberately no sibling that
+ * would: `DELETE` then `POST` is the window X-39 exists to remove.
+ */
+export async function connect(
+  connector: string,
+  values: Record<string, string>,
+  options: LoadOptions = {}
+): Promise<ConnectOutcome> {
+  const endpoint = connectionEndpoint(connector)
+  const answered = await read(endpoint, options, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ credentials: values }),
+  })
+
+  if (!answered.ok) {
+    const error = serviceError(answered.body)
+    if (error !== null && answered.failure.status !== null) {
+      return { status: 'refused', refusal: { endpoint, status: answered.failure.status, error } }
+    }
+    return { status: 'failed', failure: answered.failure }
+  }
+
+  const connection = readConnection(answered.body)
+  if (typeof connection === 'string') {
+    return {
+      status: 'failed',
+      failure: { kind: 'unreadable', endpoint, status: 201, detail: connection },
+    }
+  }
+
+  return { status: 'connected', connection }
 }
 
 // ---------------------------------------------------------------------------------------------
