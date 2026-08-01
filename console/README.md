@@ -41,7 +41,7 @@ only module in this app that knows a network exists.
 npm install
 npm run dev      # vite dev server
 npm run build    # vue-tsc --noEmit && vite build
-npm test         # node --test test/*.test.mjs
+npm test         # node --test 'test/**/*.test.mjs'
 npm run preview  # serve the built output
 ```
 
@@ -65,8 +65,21 @@ src/
   components/          the fifteen carried components; see components/README.md
 test/
   components.test.mjs  the boundary that keeps the components carryable
+  routing.test.mjs     the fragment router, anchors included
   service.test.mjs     an unreachable service is never an empty catalogue
+  discovery.test.mjs   the suite finds tests at every depth — see below
+  discovery/
+    subdirectory.test.mjs  the nested test that proves it
 ```
+
+The quoting in `npm test` is load-bearing. `test/*.test.mjs` matches one directory level, so a test
+filed under `test/<anything>/` never runs and the suite reports success without it — which is what
+`test/discovery/subdirectory.test.mjs` exists to catch by running. The `**` must reach Node
+unexpanded, because `npm` runs scripts through `sh`, and POSIX `sh` has no globstar: unquoted,
+`test/**/*.test.mjs` is expanded by the shell as `test/*/*.test.mjs` and only the second level
+survives. `test/discovery.test.mjs` asserts both properties, and measures the second against a
+throwaway fixture rather than trusting a Node version's documented behaviour — on Node 22.23.1,
+pointing `--test` at a directory does not enumerate it, it fails with `MODULE_NOT_FOUND`.
 
 `CatalogueFailure.mts` and `OperationFacts.mts` are render functions rather than single-file
 components, and that is deliberate: both carry a claim worth asserting — *the failure names the
