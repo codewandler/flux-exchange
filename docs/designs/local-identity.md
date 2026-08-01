@@ -35,9 +35,17 @@ pub fn available(&self) -> bool {
 ```
 
 **`available()` does not mean "can somebody sign in here". It means "is OIDC configured".** So a
-deployment with a perfectly good development identity armed reports sign-in unavailable, the console
-hides its sign-in affordance, and the only way in is to present a roster handle as a bearer token by
-hand. The console is locked out of a host that would happily let it in.
+deployment with a perfectly good development identity armed reports sign-in unavailable, and the only
+way in is to present a roster handle as a bearer token by hand.
+
+⚠ **This paragraph originally continued "…the console hides its sign-in affordance", and that was
+wrong.** X-57 found it while implementing: the console renders the *Sign in* anchor
+**unconditionally** (`ConsoleShell.mts:140`, `:149`) and nothing under `console/src` reads
+`sign_in_available` at all — X-43 published that field precisely so the console would stop rendering a
+link into a `503`, and nothing ever consumed it. **The symptom was worse than diagnosed here: not a
+hidden button, a button that lied.** See *Two findings from doing it* below. The prescription was
+unaffected, which is luck rather than method — a design whose stated symptom is wrong can just as
+easily prescribe the wrong fix.
 
 That conflation is the shared prerequisite for everything below, and it is [[X-57]].
 

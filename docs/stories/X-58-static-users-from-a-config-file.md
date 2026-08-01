@@ -62,8 +62,15 @@ Decide it in the design before writing code, and write down which and why.
 - [ ] The console can sign a user in through it end to end. [[X-57]] must land first.
 
 ## Notes
-- Depends on [[X-57]]. Without it the console will not show a sign-in affordance however well this
-  works.
+- Depends on [[X-57]], **but not for the reason this story originally gave.** It said "without it the
+  console will not show a sign-in affordance"; X-57 established that the console shows the affordance
+  **unconditionally** and always has — nothing under `console/src` reads `sign_in_available`. What
+  X-57 actually did was fix where that affordance *leads*, and give `available()` an honest meaning
+  for a non-OIDC provider to inherit.
+- **So this story inherits an unbuilt piece X-57 named**: gating the affordance on the field, which is
+  what X-43 published it for and what nothing has ever done. A local-users deployment that is
+  misconfigured should not render a link into a refusal, and the form this story builds is the first
+  thing that makes the distinction matter.
 - **This is the first thing in this repository that looks like an operator surface**, and [[X-54]] is
   already blocked on the absence of one. The two should be designed knowing about each other — if a
   users file can say who may configure a connection, X-54's question gets easier.
