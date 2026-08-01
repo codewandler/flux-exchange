@@ -38,6 +38,11 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 - [X-35 — Agent access (epic)](X-35-agent-access-epic.md) · EPIC — the vision's primary caller cannot authenticate. PrincipalKind::Agent exists as a type and appears in the loopback dev roster; nothing mints or verifies an agent's token. Not blocked by X-11, unlike everything else downstream
 - [X-40 — A leaked agent token cannot mint its own successors](X-40-who-may-mint-an-agent.md) · found by X-36's implementor in the surface it had just built, 2026-08-01: nothing gates minting by principal kind, so once X-37 binds the Identity port a leaked agent token mints successor agents — and revoking the first will not kill the descendants
 
+### agent onboarding
+_`docs/vision.md` says the thing this epic exists to act on:_
+- [X-41 — An agent arriving at this service is told how to connect](X-41-agent-onboarding-page.md) · owner-raised 2026-08-01, high priority: the charter's primary caller is an agent and nothing anywhere tells one how to reach this service. Public, linked from the footer, and honest about what it cannot yet do
+- [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
+
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
 

@@ -71,6 +71,24 @@ fallback to memory. The last one matters most — a host that fell back would st
 serve every route correctly, look exactly like a working one, and lose everything on the next
 restart.
 
+### Agent onboarding — X-41, X-42 · 🔄 **READY**
+
+The charter's second sentence calls the agent the **primary caller**, and everything built so far
+serves the other one. A human can sign in, wire up a connection and read a catalogue; **an agent
+arriving at this service is told nothing** — no page, no descriptor, no route answers "what is this
+and how do I connect to it". X-36 made it possible to mint an agent principal and hand it a token,
+and nothing tells anyone so.
+
+Two renderings of one truth: a public page reachable from the console's footer (X-41), and a
+fetchable descriptor for the caller that does not read pages (X-42). Both derive what they claim from
+the same surface declaration the navigation uses, so neither can advertise a capability the console
+marks unbuilt — which matters more than usual here, because the honest answer today is *an agent can
+be issued an identity and cannot yet use it*.
+
+**Done** looks like: an agent author who has never seen this deployment can reach the page without an
+account, learn what it can and cannot do today, and fetch the same facts in a parseable form. See
+[`docs/designs/agent-onboarding.md`](designs/agent-onboarding.md).
+
 ### Invoke — X-11…X-13 · ⛔ **BLOCKED on the engine line**
 
 Where the confused-deputy answer becomes code: the caller names an operation id, and nothing else
