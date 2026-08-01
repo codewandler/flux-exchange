@@ -121,9 +121,13 @@ export interface ServedConnector {
  *
  *   - `effects_derived: true` means the service **inferred** the effects rather than reading them
  *     from a declaration. An inference shown as a declaration is a claim nobody made.
- *   - `admitted` is three-valued. `null` is not `false`: it means no principal was resolved, so the
- *     catalogue is saying what exists rather than what the reader may call. There is no sign-in yet,
- *     so `null` is what every operation carries today.
+ *   - `admitted` is three-valued. `null` is not `false`: it means the question was never asked, so
+ *     the catalogue is saying what exists rather than what the reader may call. `null` is what every
+ *     operation carries today, and **not because nobody can sign in** — that sentence was true when
+ *     this file was written and stopped being true when OIDC landed, and X-57 made a locally
+ *     provisioned host say so as well. It is `null` because nothing in this build decides what a
+ *     principal may run: there is no grant model, so the answer would be the same for a signed-in
+ *     reader. X-13 is the story that gives this field its other two values.
  */
 export interface ServedOperation {
   id: string
@@ -1060,16 +1064,25 @@ const SOURCE_SCOPE: Issue = {
  * Why nothing in this catalogue is admitted or refused.
  *
  * Attached only when every served operation carries `admitted: null`, so it is read off the document
- * rather than asserted: the day a principal resolves, some operation answers `true` or `false` and
- * this condition disappears on its own with no edit here.
+ * rather than asserted: the day the service answers `true` or `false` for one, this condition
+ * disappears on its own with no edit here.
+ *
+ * **The summary used to say "this console has no sign-in yet", and that stopped being true when OIDC
+ * landed.** It was doubly wrong after X-57, which made a host provisioned with a local identity
+ * report sign-in as available too — so a reader who *was* signed in read a banner telling them the
+ * console could not sign anyone in. The correction is not to swap one cause for another, either:
+ * `admitted` is `null` whoever is reading, because nothing in this build decides what a principal
+ * may run. That is X-13, and it is the event this condition should key on. The code keeps its name
+ * so the string a component may already be matching on does not move; what it *says* is the fact.
  */
 const NO_PRINCIPAL: Issue = {
   code: 'CONSOLE-NO-PRINCIPAL',
   scope: 'catalog',
   summary:
-    'No principal is resolved — this console has no sign-in yet — so the service answered `admitted: ' +
-    'null` for every operation. What follows is therefore what exists, not what you may call. It is ' +
-    'not a statement that anything here is closed to you.',
+    'The service answered `admitted: null` for every operation, so what follows is what exists, not ' +
+    'what you may call. That is not about being signed out: this host decides nothing about what a ' +
+    'principal may run, so the answer is the same whoever is reading. It is not a statement that ' +
+    'anything here is closed to you.',
   params: [],
 }
 

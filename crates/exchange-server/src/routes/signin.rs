@@ -110,6 +110,9 @@ async fn signin(State(state): State<AppState>) -> Response {
         // panic at startup and not a redirect that dies at the callback.
         SignIn::Unconfigured => return unconfigured_page(),
         SignIn::NoTokenExchange => return no_token_exchange_page(),
+        // Sign-in is *available* here and it is not a redirect, which is X-57's whole distinction.
+        // There is no provider to send the browser to; the caller signs in against this host.
+        SignIn::Development => return development_page(),
     };
 
     match oidc.authorize() {
@@ -196,6 +199,13 @@ async fn callback(
         SignIn::Oidc(oidc) => oidc,
         SignIn::Unconfigured => return unconfigured_page(),
         SignIn::NoTokenExchange => return no_token_exchange_page(),
+        // A callback on a host that federates nothing. Sign-in *is* available here, so neither
+        // page above is true — and `development_page` is not the answer either: a browser arriving
+        // mid-redirect asked to finish a flow, not for instructions. This host planted no `state`
+        // and never will, which is exactly [`SignInRefusal::UnknownState`] — the same `400` and the
+        // same phrase a forged `state` gets on a federated host, so this route stays the oracle for
+        // nothing that `a_callback_without_a_code_is_not_an_oracle_for_a_live_state` made it.
+        SignIn::Development => return refused(&SignInRefusal::UnknownState),
     };
 
     // The provider refused, or something walked a browser here with an `error` of its own. Either
@@ -344,6 +354,47 @@ fn no_token_exchange_page() -> Response {
         "An identity provider is configured, but this build carries no client for the provider's \
          token endpoint, so a sign-in could not be completed. Rather than send you to a login that \
          would fail on the way back, this host stops here. The startup log has the detail.",
+        None,
+    )
+}
+
+/// The page a human meets on a host whose identity is the development one.
+///
+/// **A `200`, not a `503`.** Its two neighbours above refuse — this host cannot sign anybody in —
+/// and this one answers: sign-in *is* available here, it simply is not a redirect. That is X-57's
+/// distinction made where a human meets it, and it is why [`SignIn::available`] can stay a single
+/// boolean: whether anyone can sign in is published anonymously, and **how** is answered here, one
+/// request later, to a caller who came to sign in.
+///
+/// # What it says, and why saying it is allowed
+///
+/// It names the mechanism — present a roster handle as a bearer token, and `POST /api/session`
+/// exchanges it for a session cookie — which does tell the reader that this deployment runs the
+/// development identity. That is a disclosure, and it is bounded rather than waved through:
+///
+/// 1. **This composition cannot be reached from anywhere else.**
+///    [`IdentityBinding::Development`](crate::bind::IdentityBinding::Development) refuses every
+///    bind but loopback for as long as the port is armed, so the only caller that can read this
+///    page is already on the machine and can read the roster out of the process' own environment.
+/// 2. **`/api/signin` is the operator's channel and already works this way.** The two pages above
+///    tell an anonymous caller which of two misconfigurations a host has, deliberately, because a
+///    human who asked for a login has to be told what to do next. The *fact* surfaces —
+///    `/api/signin/availability` and `/api/onboarding` — are the caller's channel, and they answer
+///    a federated host and this one identically;
+///    `tests::no_anonymous_surface_says_which_kind_of_provider_signs_people_in` is that claim.
+///
+/// It names **no roster entry**. The mechanism is a property of this build; a handle is a principal
+/// this host would mint, and printing one would put a working credential on an anonymous page.
+fn development_page() -> Response {
+    page(
+        StatusCode::OK,
+        "Sign in with this host's development identity",
+        "This host has no federated identity provider, and does not need one: it was started with \
+         a development roster, so it can sign you in itself. Present the handle of a rostered \
+         principal as a bearer token — `Authorization: Bearer <handle>` — and `POST /api/session` \
+         exchanges it for a session cookie. The roster is the one the operator wrote at startup, \
+         and this page does not name it. The development identity is deliberately unavailable on \
+         any address but loopback, because a handle is a name rather than a secret.",
         None,
     )
 }
@@ -1536,12 +1587,18 @@ mod tests {
     /// in a wider answer.
     const FIELD: &str = "sign_in_available";
 
-    /// The three compositions this host has, each with whether a human can sign in through it.
+    /// Every composition this host has, each with whether a human can sign in through it.
     ///
-    /// Written out in one place because three tests below drive all three, and a composition
-    /// covered by two of them is the gap that matters. There is no fourth: [`SignIn`] has three
-    /// variants and [`SignIn::available`] matches them exhaustively, so a fourth cannot arrive
-    /// without a compile error pointing at the decision.
+    /// Written out in one place because three tests below drive all of them, and a composition
+    /// covered by two of them is the gap that matters. The list is exhaustive by construction:
+    /// [`SignIn`] has four variants and [`SignIn::available`] matches them with no wildcard arm, so
+    /// a fifth cannot arrive without a compile error pointing at the decision — and a fifth that
+    /// arrived without a row here would be a state two of the three tests below never drove.
+    ///
+    /// **The fourth entry is X-57's**, and it is the one that makes this fixture say something it
+    /// did not before: a composition where sign-in is available and is *not* a redirect. Until it
+    /// existed, "available" and "redirects to a provider" were the same set, which is exactly the
+    /// conflation [`SignIn::available`] used to encode.
     fn every_composition() -> Vec<(&'static str, AppState, bool)> {
         vec![
             (
@@ -1552,6 +1609,7 @@ mod tests {
                 ))),
                 true,
             ),
+            ("the development identity armed", development(), true),
             (
                 "OIDC configured with no token exchange",
                 AppState::oidc_without_a_token_exchange(),
@@ -1681,29 +1739,56 @@ mod tests {
     /// `/api/signin` answers exactly what it answered before. This story adds a way to ask
     /// beforehand; it does not change the answer.
     ///
-    /// The three compositions again, both routes in one run, so "the field says available" and
-    /// "the redirect happens" are pinned as the *same* fact rather than as two that could drift.
-    /// That is the regression worth naming: a field the console trusts and a route that disagrees
-    /// with it is worse than the prose it replaced.
+    /// Every composition, both routes in one run, so "the field says available" and "`/api/signin`
+    /// does not turn the caller away" are pinned as the *same* fact rather than as two that could
+    /// drift. That is the regression worth naming: a field the console trusts and a route that
+    /// disagrees with it is worse than the prose it replaced.
+    ///
+    /// **X-57 split one branch of this in two, and that split is the story.** The available arm
+    /// used to assert a `303`, which read as "available means a redirect" — the same conflation
+    /// [`SignIn::available`] itself carried, one layer up. It is a redirect only when a *provider*
+    /// is bound; the development identity signs a caller in against this host, so `/api/signin`
+    /// answers it rather than sending it anywhere. What both available arms share is the claim
+    /// worth keeping: the caller is not told this host cannot sign anybody in.
     #[tokio::test]
     async fn asking_whether_sign_in_is_available_does_not_change_what_signin_answers() {
         for (composition, state, expected) in every_composition() {
+            // Read before the state is moved into the router. Which of the two available shapes
+            // this composition has is decided here, in the language that owns the enum, rather
+            // than by matching on the composition's name.
+            let redirects = matches!(state.sign_in(), SignIn::Oidc(_));
             let app = super::super::app(state);
 
             // Ask first, which is the whole point of the route.
             let (_, _, asked) = call(app.clone(), get(AVAILABILITY)).await;
             let (status, headers, body) = call(app, get(SIGNIN)).await;
 
-            if expected {
+            if redirects {
                 assert_eq!(
                     status,
                     StatusCode::SEE_OTHER,
-                    "{composition} reports sign-in available, so `{SIGNIN}` must still redirect: \
-                     {body}",
+                    "{composition} federates sign-in, so `{SIGNIN}` must still redirect: {body}",
                 );
                 assert!(
                     headers.get(header::LOCATION).is_some(),
                     "{composition}: a redirect names where it goes",
+                );
+            } else if expected {
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{composition} reports sign-in available and federates nothing, so `{SIGNIN}` \
+                     must answer rather than refuse — a `503` here would be the console's \
+                     affordance leading to a page saying this host cannot do the thing the field \
+                     just said it can: {body}",
+                );
+                assert!(
+                    body.contains("<html"),
+                    "{composition}: and be a page: {body}",
+                );
+                assert!(
+                    headers.get(header::LOCATION).is_none(),
+                    "{composition}: there is no provider to send the browser to",
                 );
             } else {
                 assert_eq!(
@@ -1728,5 +1813,174 @@ mod tests {
                 "{composition}: asking about availability issues nothing: {asked}",
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // X-57: "available" stops meaning "OIDC is configured".
+    // ---------------------------------------------------------------------------------------
+
+    /// The descriptor, the other surface this boolean is published on.
+    const ONBOARDING: &str = "/api/onboarding";
+
+    /// A roster with two tenants on it, so an answer that leaked one could be caught leaking it.
+    const ROSTER: &str = "user:alice@acme,user:bob@globex";
+
+    /// A composition with the development identity armed — the one this story is about.
+    fn development() -> AppState {
+        AppState::with_development_identity(Arc::new(
+            crate::dev_identity::DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+        ))
+    }
+
+    /// **X-57's failing-first test.** A host with the development identity armed reports that a
+    /// caller can sign in.
+    ///
+    /// It *can* turn a caller into a principal — that is what [`IdentityBinding::Development`]
+    /// means, and `crate::routes::identity` already exchanges a resolved principal for a session on
+    /// exactly this composition. Reporting `false` here is the field answering "is OIDC
+    /// configured", which is not the question it is named for: the console reads this to decide
+    /// whether to offer signing in at all, so a host that would let it in is one it declines to
+    /// offer a way into.
+    ///
+    /// Both anonymous surfaces, because the field is published on both and a console that trusted
+    /// one while the other disagreed would be worse off than one that trusted neither.
+    ///
+    /// [`IdentityBinding::Development`]: crate::bind::IdentityBinding::Development
+    #[tokio::test]
+    async fn a_host_with_the_development_identity_reports_that_a_caller_can_sign_in() {
+        let app = super::super::app(development());
+
+        for endpoint in [AVAILABILITY, ONBOARDING] {
+            let (status, _, body) = call(app.clone(), get(endpoint)).await;
+
+            assert_eq!(status, StatusCode::OK, "`{endpoint}`: {body}");
+
+            let answer: serde_json::Value = serde_json::from_str(&body)
+                .unwrap_or_else(|error| panic!("`{endpoint}` answered non-JSON ({error}): {body}"));
+
+            assert_eq!(
+                answer[FIELD],
+                serde_json::Value::Bool(true),
+                "`{endpoint}` reports that this deployment can sign nobody in, and the development \
+                 identity is armed — it mints principals from a roster the operator wrote at \
+                 startup, and `POST /api/session` exchanges one for a session. `{FIELD}` answers \
+                 *can this deployment turn a caller into a principal*, not *is OIDC configured*: \
+                 {body}",
+            );
+        }
+    }
+
+    /// **X-57's second failing-first test.** Nothing published anonymously says *which kind* of
+    /// provider a deployment runs.
+    ///
+    /// Two deployments with two different providers, and the anonymous answer must be identical —
+    /// byte for byte, on both surfaces that carry the field. This is the property
+    /// [`SignIn::available`] already collapsed three states to protect, asserted across the axis
+    /// this story widens: a stranger learns whether sign-in works and nothing about what it is
+    /// wired to.
+    ///
+    /// Byte identity rather than a field comparison, for
+    /// `super::super::onboarding::tests::the_document_is_identical_with_two_tenants_connected`'s
+    /// reason: a leak worth catching does not arrive as a key somebody thought to check.
+    #[tokio::test]
+    async fn no_anonymous_surface_says_which_kind_of_provider_signs_people_in() {
+        let federated = super::super::app(AppState::with_oidc(Arc::new(Oidc::new(
+            config(),
+            Arc::new(StubExchange::returning(claims("nonce"))),
+        ))));
+        let local = super::super::app(development());
+
+        for endpoint in [AVAILABILITY, ONBOARDING] {
+            let (federated_status, _, federated_body) =
+                call(federated.clone(), get(endpoint)).await;
+            let (local_status, _, local_body) = call(local.clone(), get(endpoint)).await;
+
+            assert_eq!(
+                federated_status, local_status,
+                "`{endpoint}`: a federated host and a local one must not differ in status",
+            );
+            assert_eq!(
+                federated_body, local_body,
+                "`{endpoint}` answers a federated deployment and a locally-provisioned one \
+                 differently, so an anonymous caller can tell which kind of provider this host \
+                 runs. Whether sign-in works is a fact about the service; what it is wired to is \
+                 the shape of the deployment and none of a stranger's business",
+            );
+
+            // And neither answer names the roster it would resolve, which is the disclosure this
+            // story could most easily have added: a handle is a credential with no secret in it.
+            for handle in ["alice", "bob", "acme", "globex"] {
+                assert!(
+                    !local_body.contains(handle),
+                    "`{endpoint}` named `{handle}`, which is a principal or a tenant this host \
+                     would mint rather than a fact about the service: {local_body}",
+                );
+            }
+        }
+    }
+
+    /// The page `/api/signin` answers on a development host says how to sign in, and names no
+    /// principal it would mint.
+    ///
+    /// The other half of the disclosure decision. `/api/signin` is the **operator's** channel and
+    /// is allowed to say more than the fact surfaces — the two `503` pages already tell an
+    /// anonymous caller which of two misconfigurations a host has — but "more" stops at the
+    /// mechanism. A roster handle is a working credential on this composition, so a page that
+    /// printed one would be an anonymous page handing out a way in. See `development_page`.
+    #[tokio::test]
+    async fn the_development_signin_page_explains_how_and_names_nobody() {
+        let (status, headers, body) = call(super::super::app(development()), get(SIGNIN)).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("<html"), "and is a page: {body}");
+        assert!(
+            headers.get(header::LOCATION).is_none(),
+            "there is no provider to send the browser to: {body}",
+        );
+        assert!(
+            body.contains("/api/session"),
+            "the page must say how sign-in is done here, or the affordance leads to prose that \
+             changes nothing: {body}",
+        );
+
+        for named in ["alice", "bob", "acme", "globex"] {
+            assert!(
+                !body.contains(named),
+                "the page named `{named}`, which is a credential on this composition rather than \
+                 a fact about the build: {body}",
+            );
+        }
+
+        // The same line the two `503` pages hold: the remedy's shape, never this deployment's
+        // settings. See `unconfigured_page`.
+        for variable in WITHHELD_FROM_THE_PAGE {
+            assert!(
+                !body.contains(variable),
+                "the page must not enumerate this host's settings to an anonymous caller, found \
+                 {variable}: {body}",
+            );
+        }
+    }
+
+    /// A callback cannot be completed on a host that federates nothing, and issues nothing trying.
+    ///
+    /// `crate::routes::identity` is where a caller signs in on this composition. What matters here
+    /// is that the callback does not become a second door: no cookie, no token, and an answer that
+    /// says nothing about what this host is holding.
+    #[tokio::test]
+    async fn a_callback_on_a_development_host_issues_nothing() {
+        let (status, headers, body) = call(
+            super::super::app(development()),
+            get(&format!("{CALLBACK}?state=anything&code=anything")),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "this host planted no state and never will: {body}",
+        );
+        assert!(headers.get(SET_COOKIE).is_none(), "{body}");
+        assert!(!carries_a_token(&body), "{body}");
     }
 }

@@ -75,7 +75,7 @@ the tenancy axis and it is a convenience.
 
 ## Approach
 
-### 1. `available()` answers the question it is named for (X-57)
+### 1. `available()` answers the question it is named for (X-57) — **done**
 
 `SignIn` gains a variant for a locally-configured provider, and `available()` becomes *can this
 deployment turn a caller into a principal*. The OIDC branch is unchanged.
@@ -86,6 +86,51 @@ that a host with no identity provider says sign-in is unavailable *rather than p
 tests must keep meaning what they mean — "no provider" must still answer `false` — while "a local
 provider" starts answering `true`. That is a three-state question being asked as a boolean, and the
 right move is to check whether the boolean still suffices rather than to widen it by reflex.
+
+#### What X-57 built, and the one decision it turned on
+
+`SignIn::Development` is the new variant. It is a **unit** variant: the federated state carries its
+port because `/api/signin` calls `authorize()` on it, and there is nothing this one's `/api/signin`
+would do with a port — signing in against it is `POST /api/session`, which already reaches the
+concrete port through `AppState::development_identity`. `with_development_identity` sets the identity
+port and the sign-in state in one call, for the reason `with_oidc` does: a composition able to set
+one without the other is the bug this story fixed.
+
+**The boolean still suffices.** This was the decision the story asked to be made rather than
+defaulted, and the answer is no widening at all. The tempting shape was a three-valued field —
+unavailable / redirect / form — on the reasoning that a console needs to know *how* to sign somebody
+in and not merely *whether*. Rejected twice over:
+
+- Publishing "how" anonymously **is** publishing which kind of provider a deployment runs. That is
+  the property `SignIn::available` collapsed states to protect, and this story's own constraint says
+  widening the enum must not widen the disclosure.
+- Nothing needs it published. The affordance a console renders is a link to `/api/signin`, and
+  **`/api/signin` is where "how" is answered** — one request later, to a caller who has come to sign
+  in, by the route whose job that is. That route was already the operator's channel: it tells an
+  anonymous caller which of two misconfigurations a host has, because a human who asked for a login
+  has to be told what to do next.
+
+So there are two answers and they are two different values, which is exactly the story's warning
+taken seriously — but only one of them is a *value* at all. The published one is the boolean. The
+other is the page, and it is not on the fact surface.
+
+`/api/signin` therefore gained a third answer for `SignIn::Development`: a `200`, not a `503`, because
+sign-in is available here and simply is not a redirect. A `503` would have been the console's
+affordance leading to a page saying the host cannot do the thing the field had just said it can.
+
+#### Two findings from doing it
+
+1. **The console never consumed `sign_in_available`.** X-43 published the field precisely so the
+   console would stop rendering a *Sign in* link into a `503`, and nothing in `console/src` reads it
+   — `ConsoleShell.mts` renders the anchor unconditionally. So the epic's premise that "the console
+   hides its sign-in affordance" is not literally what the console does: it shows it always, and on a
+   development host it led somewhere false. X-57 fixed where it leads. **Gating the affordance on the
+   field is still unbuilt**, and it is what X-58 should pick up along with the form.
+2. **One X-43 assertion encoded the same conflation, one layer up.**
+   `asking_whether_sign_in_is_available_does_not_change_what_signin_answers` asserted that an
+   available composition answers `/api/signin` with a `303`, i.e. *available means a redirect*. It
+   had to be split: a redirect when a provider is bound, a page when the identity is local. The claim
+   worth keeping — the caller is not told this host can sign nobody in — survives both arms.
 
 ### 2. Static users from a config file (X-58)
 

@@ -979,6 +979,50 @@ mod tests {
         );
     }
 
+    /// **X-57.** The descriptor stays the derived artifact plus one field on a host whose identity
+    /// is the development one — and that field says a caller can sign in.
+    ///
+    /// The composition the sibling test above cannot reach: it drives "no provider" and "a bound
+    /// OIDC provider", which were the only two answers `sign_in_available` had. A host with the
+    /// development identity armed mints principals from a roster and exchanges one for a session at
+    /// `POST /api/session`, so a descriptor telling an agent author that nobody can sign in here
+    /// describes a mint step — whose caller is "a signed-in human" — as unreachable on a host where
+    /// it is not.
+    ///
+    /// The second assertion is the one that keeps this story honest: everything **except** that
+    /// boolean must still be the artifact, byte for byte. A variant added to `SignIn` may widen
+    /// what a caller is told about the *service* and must not widen what it is told about the
+    /// *deployment*.
+    #[tokio::test]
+    async fn a_host_with_the_development_identity_says_a_caller_can_sign_in() {
+        let app = super::super::app(AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+        )));
+
+        let (status, body) = fetched(&app).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let mut document: Value = serde_json::from_str(&body).expect("a JSON document");
+        assert_eq!(
+            document["sign_in_available"], true,
+            "the development identity is armed, so this deployment can turn a caller into a \
+             principal and the descriptor must say so: {body}",
+        );
+
+        document
+            .as_object_mut()
+            .expect("a JSON object")
+            .remove("sign_in_available");
+
+        assert_eq!(
+            document,
+            artifact(),
+            "what this host serves is no longer the derived artifact plus one field, so arming a \
+             local identity has widened what a stranger learns about this deployment beyond \
+             whether sign-in works",
+        );
+    }
+
     /// A token exchange that is never called: deciding sign-in *availability* redeems nothing.
     struct NoExchange;
 
