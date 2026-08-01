@@ -36,6 +36,9 @@ pub const ISSUER_ENV: &str = "FLUX_EXCHANGE_OIDC_ISSUER";
 pub const AUTHORIZATION_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_AUTHORIZATION_ENDPOINT";
 
 /// Where the authorization code is redeemed, back-channel.
+///
+/// **Must be `https`, or `http` on loopback.** See [`BACK_CHANNEL`]: this is the request that
+/// carries [`CLIENT_SECRET_ENV`] as HTTP Basic credentials.
 pub const TOKEN_ENDPOINT_ENV: &str = "FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT";
 
 /// Where the provider publishes the keys that sign its id tokens.
@@ -60,6 +63,25 @@ pub const REDIRECT_URI_ENV: &str = "FLUX_EXCHANGE_OIDC_REDIRECT_URI";
 
 /// The tenant every principal this provider authenticates belongs to. See [`OidcConfig::tenant`].
 pub const TENANT_ENV: &str = "FLUX_EXCHANGE_OIDC_TENANT";
+
+/// The variables naming an endpoint this host talks to **itself**, which must therefore be on a
+/// channel worth sending a secret over.
+///
+/// # Why these two and not every URL here
+///
+/// [`TOKEN_ENDPOINT_ENV`] is the one request that carries [`CLIENT_SECRET_ENV`], as HTTP Basic
+/// credentials — in cleartext, over `http`, to anybody on the path, with no refusal and no symptom.
+/// [`JWKS_URI_ENV`] carries no secret, but it decides **which keys can mint a session here**, and a
+/// key set an attacker can rewrite in flight is a host that accepts tokens they signed. Both are
+/// this process talking to the provider, where the only thing that can insist on TLS is this
+/// process.
+///
+/// [`AUTHORIZATION_ENDPOINT_ENV`] and [`REDIRECT_URI_ENV`] are deliberately **not** here. Those are
+/// addresses a *browser* navigates to, so the browser is the thing that enforces their transport,
+/// and a `redirect_uri` is in any case re-checked by the provider against a registration this host
+/// does not own. Widening this list to them is a defensible separate story; folding it in here
+/// would refuse configurations for reasons this story did not weigh.
+const BACK_CHANNEL: &[&str] = &[TOKEN_ENDPOINT_ENV, JWKS_URI_ENV];
 
 /// Every variable this module reads, in the order a refusal lists them.
 const REQUIRED: &[&str] = &[
@@ -196,6 +218,30 @@ impl OidcConfig {
         let tenant =
             Tenant::new(tenant).map_err(|source| ConfigRefusal::UnusableTenant { source })?;
 
+        // The back channel, refused here rather than at somebody's first sign-in. A host that
+        // starts and then sends its client secret in cleartext has already sent it by the time
+        // anybody could notice; a host that refuses to offer sign-in has sent nothing.
+        //
+        // Named in `BACK_CHANNEL`'s order and all at once, following `Unset`: an operator who got
+        // one of these wrong very likely got both wrong the same way, and fixing them one restart
+        // at a time is a thing we would be doing to them.
+        //
+        // Paired by name rather than positionally: the positional read above already has
+        // `every_configured_value_lands_in_its_own_field` holding it in step with `REQUIRED`, and
+        // one such list is enough for this module to be carrying.
+        let insecure: Vec<&'static str> = [
+            (TOKEN_ENDPOINT_ENV, token_endpoint.as_str()),
+            (JWKS_URI_ENV, jwks_uri.as_str()),
+        ]
+        .into_iter()
+        .filter(|(_, endpoint)| !carries_a_secret_safely(endpoint))
+        .map(|(name, _)| name)
+        .collect();
+
+        if !insecure.is_empty() {
+            return Err(ConfigRefusal::InsecureBackChannel { insecure });
+        }
+
         Ok(Self {
             issuer,
             authorization_endpoint,
@@ -302,6 +348,77 @@ impl OidcConfig {
     }
 }
 
+/// Whether this host will send its client secret — and trust a key set — over `endpoint`.
+///
+/// # The judgment call X-17 had to make: cleartext is refused, except on loopback
+///
+/// `https` is the answer, and the question is only what to do about `http`. Refusing it outright
+/// is the tidier rule and the wrong one: **a local test identity provider is a real workflow**, it
+/// is how somebody exercises this flow before they have a certificate for anything, and a rule that
+/// forbids it pushes them towards the two worse habits — disabling verification somewhere, or
+/// testing against a production provider.
+///
+/// So `http` is permitted **only on loopback**, and the reason is not leniency: those packets do
+/// not reach a network interface. There is no path to be on. Anybody positioned to read them is
+/// already inside this process's own machine, where the secret is readable from the environment
+/// anyway, so the transport was never what was protecting it.
+///
+/// Everything else is refused, including an `http` address on a private range. "It is only the
+/// internal network" is precisely the assumption that makes a cleartext client secret interesting
+/// to an attacker who has got that far, and this host cannot tell a private range from a public one
+/// by looking at a string in any case. A scheme this function does not recognise is refused too —
+/// **refuse; never repair**: a value with a typo'd scheme, or none at all, is not a channel whose
+/// safety this host has established, and guessing `https` for it would be repairing.
+///
+/// `localhost` is accepted by name. It resolves through the operator's own machine, and an operator
+/// who has pointed it somewhere else has made a decision this host is not positioned to second-guess.
+fn carries_a_secret_safely(endpoint: &str) -> bool {
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return false;
+    };
+
+    match scheme.to_ascii_lowercase().as_str() {
+        "https" => true,
+        "http" => is_loopback(host_in(rest)),
+        _ => false,
+    }
+}
+
+/// The host of a URL, given everything after its `://`.
+///
+/// Hand-rolled rather than parsed, because this crate carries no URL parser and adding one to
+/// answer "is this loopback" would be a dependency taken for a nine-line function. It is
+/// deliberately **conservative**: anything it does not understand comes out as a string that is not
+/// a loopback address, and the endpoint is refused. A parser bug here can therefore refuse a
+/// working configuration, which an operator sees immediately, but cannot admit a cleartext one.
+fn host_in(rest: &str) -> &str {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+
+    // `user:password@host`. Everything before the last `@` is userinfo, not the host — reading the
+    // wrong side of it is how `http://127.0.0.1@evil.example/` would pass for loopback.
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host)) => host,
+        None => authority,
+    };
+
+    // `[::1]:8080` — a bracketed IPv6 literal, whose own colons are not the port separator.
+    match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => authority.split(':').next().unwrap_or_default(),
+    }
+}
+
+/// Whether `host` names this machine.
+///
+/// `IpAddr::is_loopback` rather than a prefix test on the string, so the whole of `127.0.0.0/8` and
+/// `::1` are covered without this module deciding what those ranges are.
+fn is_loopback(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 /// Why this host will not federate sign-in.
 ///
 /// Hand-written rather than derived: `thiserror` is the library's convention and this binary does
@@ -321,6 +438,17 @@ pub enum ConfigRefusal {
     UnusableTenant {
         /// Why it was refused.
         source: TenantError,
+    },
+
+    /// A back-channel endpoint is not on a channel this host will use.
+    ///
+    /// See [`carries_a_secret_safely`] for what is permitted and why. Refused at startup rather
+    /// than at the first sign-in, because by the time a sign-in has failed the client secret has
+    /// already crossed the network in cleartext.
+    InsecureBackChannel {
+        /// Every offending variable, in [`BACK_CHANNEL`]'s order. Names only the variables — the
+        /// value is the operator's own and does not need repeating back at them.
+        insecure: Vec<&'static str>,
     },
 }
 
@@ -353,6 +481,18 @@ impl fmt::Display for ConfigRefusal {
                 f,
                 "{TENANT_ENV} names an unusable tenant: {source}. OIDC sign-in will not be offered",
             ),
+            // Says what is wrong, what the rule is, and what the loopback exception is for — an
+            // operator meeting this at startup is very often the one running a local test provider.
+            Self::InsecureBackChannel { insecure } => write!(
+                f,
+                "{} {} not on a channel this host will use. {} must each name an https URL — or an \
+                 http one on loopback, for a local test provider: the first carries \
+                 {CLIENT_SECRET_ENV} as HTTP Basic credentials, and the second decides which keys \
+                 can mint a session here. OIDC sign-in will not be offered",
+                insecure.join(", "),
+                if insecure.len() > 1 { "are" } else { "is" },
+                BACK_CHANNEL.join(" and "),
+            ),
         }
     }
 }
@@ -360,7 +500,7 @@ impl fmt::Display for ConfigRefusal {
 impl std::error::Error for ConfigRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Unset { .. } => None,
+            Self::Unset { .. } | Self::InsecureBackChannel { .. } => None,
             Self::UnusableTenant { source } => Some(source),
         }
     }
@@ -569,6 +709,135 @@ mod tests {
             environment.len(),
             "every variable in REQUIRED must have a distinguishable value here: {REQUIRED:?}",
         );
+    }
+
+    /// **X-17.** A cleartext back channel is refused **at startup**, naming the variable.
+    ///
+    /// At startup and not at the first sign-in, because the failure it prevents is irreversible:
+    /// by the time a sign-in has gone wrong, the client secret has already crossed the network as
+    /// HTTP Basic credentials, and the remedy is rotating it rather than fixing a URL.
+    #[test]
+    fn a_cleartext_back_channel_is_refused_at_startup_by_name() {
+        for (variable, cleartext) in [
+            (
+                TOKEN_ENDPOINT_ENV,
+                "http://accounts.example.com/oauth/token",
+            ),
+            (JWKS_URI_ENV, "http://keys.example.com/jwks.json"),
+        ] {
+            let mut environment = complete();
+            environment.insert(variable, cleartext.to_string());
+
+            let refusal = read(&environment).expect_err(&format!(
+                "a cleartext {variable} must be refused at startup"
+            ));
+
+            assert_eq!(
+                refusal,
+                ConfigRefusal::InsecureBackChannel {
+                    insecure: vec![variable],
+                },
+                "and refused for its transport, not for something else",
+            );
+
+            let message = refusal.to_string();
+            assert!(
+                message.contains(variable),
+                "the operator must be told which variable to fix: {message}",
+            );
+            // The rule, and the exception, so the operator running a local test provider is not
+            // left guessing that loopback would have been allowed.
+            assert!(message.contains("https"), "{message}");
+            assert!(message.contains("loopback"), "{message}");
+        }
+    }
+
+    /// Both at once, following `Unset`: an operator who got one wrong very likely got both wrong.
+    #[test]
+    fn a_refusal_names_every_cleartext_back_channel_at_once() {
+        let mut environment = complete();
+        environment.insert(
+            TOKEN_ENDPOINT_ENV,
+            "http://accounts.example.com/t".to_string(),
+        );
+        environment.insert(JWKS_URI_ENV, "http://keys.example.com/j".to_string());
+
+        let refusal = read(&environment).expect_err("both are refused");
+
+        assert_eq!(
+            refusal,
+            ConfigRefusal::InsecureBackChannel {
+                insecure: BACK_CHANNEL.to_vec(),
+            },
+            "one restart, not two",
+        );
+    }
+
+    /// The judgment call, pinned: **loopback http is permitted, everything else is not.**
+    ///
+    /// A local test identity provider is a real workflow and the rule has to leave room for it —
+    /// see [`carries_a_secret_safely`], which carries the whole argument. The refused half of this
+    /// table is the part that matters: a private range is still a network, an unrecognised scheme
+    /// is not a channel whose safety this host has established, and `127.0.0.1` appearing as
+    /// *userinfo* is a host that is not on loopback at all.
+    #[test]
+    fn cleartext_is_permitted_on_loopback_and_nowhere_else() {
+        for permitted in [
+            "https://accounts.example.com/token",
+            "HTTPS://accounts.example.com/token",
+            "http://localhost:8080/token",
+            "http://LOCALHOST:8080/token",
+            "http://127.0.0.1:8080/token",
+            "http://127.9.9.9/token",
+            "http://[::1]:8080/token",
+            "http://user:pass@127.0.0.1:8080/token",
+        ] {
+            assert!(
+                carries_a_secret_safely(permitted),
+                "{permitted} must be permitted",
+            );
+        }
+
+        for refused in [
+            "http://accounts.example.com/token",
+            // "It is only the internal network" is exactly the assumption that makes a cleartext
+            // client secret worth having, to an attacker who has got that far.
+            "http://10.0.0.7/token",
+            "http://192.168.1.10/token",
+            // The host is `evil.example`; `127.0.0.1` is userinfo. A check that read the wrong side
+            // of the `@` would call this loopback.
+            "http://127.0.0.1@evil.example/token",
+            "http://localhost.evil.example/token",
+            // Refuse; never repair: a scheme this host does not recognise, or none at all.
+            "htps://accounts.example.com/token",
+            "accounts.example.com/token",
+            "ftp://accounts.example.com/token",
+            "",
+        ] {
+            assert!(
+                !carries_a_secret_safely(refused),
+                "{refused} must be refused",
+            );
+        }
+    }
+
+    /// Every variable [`BACK_CHANNEL`] claims is checked is actually checked.
+    ///
+    /// The constant is what the refusal message tells an operator the rule applies to, so a
+    /// variable listed there and not enforced would be a promise this module does not keep.
+    #[test]
+    fn every_back_channel_variable_is_actually_enforced() {
+        for variable in BACK_CHANNEL {
+            let mut environment = complete();
+            environment.insert(variable, "http://not-loopback.example/x".to_string());
+
+            assert_eq!(
+                read(&environment).expect_err(&format!("{variable} is enforced")),
+                ConfigRefusal::InsecureBackChannel {
+                    insecure: vec![variable],
+                },
+            );
+        }
     }
 
     /// Sign-in is not connecting. This host asks to learn who the human is and nothing else — any
