@@ -430,6 +430,15 @@ mod tests {
             // The catalogue: what this binary *could* run, never what a caller may run.
             ("catalogue", "/api/catalogue/connectors"),
             ("catalogue", "/api/catalogue/connectors/{id}/operations"),
+            // What a connector *declares* — X-46's widening, and the narrowest one on this list.
+            // It reads `Provider::auth`, the same `&'static` vendor data the two routes above
+            // read, and it publishes names and nothing a value could occupy. Crucially it is the
+            // **declaration and never a tenant's state**: whether anyone holds one of these is
+            // `GET /api/connections`, which is `Principal` and stays there. Before this route the
+            // only place the service stated a declaration was a `422`, so a console read a
+            // capability fact out of an error body — `catalogue::view::ConnectorCredentials`
+            // carries the long form.
+            ("catalogue", "/api/catalogue/connectors/{id}/credentials"),
             // Sign-in, and the callback it returns through. X-04's widening, and the argument the
             // identity design asked this story to make in its own words rather than inherit.
             //

@@ -35,6 +35,7 @@ import { createSSRApp } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
 import {
+  CONNECTORS_ENDPOINT,
   connect,
   connectionEndpoint,
   credentialEndpoint,
@@ -52,13 +53,25 @@ const consoleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 // up would let the console and the service drift while this file stayed green.
 // ---------------------------------------------------------------------------------------------
 
-/** `POST /api/connections/slack` with no values — the refusal that publishes the declaration. */
+/**
+ * `GET /api/catalogue/connectors/slack/credentials` — the declaration, published.
+ *
+ * Until X-46 this fixture was the `422` body of a deliberately-empty
+ * `POST /api/connections/slack`, and the console discovered a declaration by asking to create a
+ * connection it knew would be refused. The refusal still exists and still says the same thing; it
+ * is simply no longer the only place the service states this.
+ */
 const SLACK_DECLARATION = {
   connector: 'slack',
-  declared: ['slack.bot_token', 'slack.signing_secret'],
-  error:
-    'a connection to `slack` carries at least one credential value; it declares `slack.bot_token`, `slack.signing_secret`',
+  authority: 'com.slack.api',
+  credentials: [
+    { name: 'slack.bot_token', leaf: 'bot_token' },
+    { name: 'slack.signing_secret', leaf: 'signing_secret' },
+  ],
 }
+
+/** The names in that declaration, in the connector's own order. */
+const SLACK_DECLARED = SLACK_DECLARATION.credentials.map((credential) => credential.name)
 
 /** `POST /api/connections/zendesk` answering `201`: addresses and `held`, never a value. */
 const ZENDESK_CONNECTION = {
@@ -152,7 +165,7 @@ function appSourcesWithoutComments() {
 test('a_connect_form_offers_one_input_per_credential_the_connector_declares', async () => {
   const html = await form({
     chosen: 'slack',
-    declaration: declared('slack', SLACK_DECLARATION.declared),
+    declaration: declared('slack', SLACK_DECLARED),
   })
 
   assert.match(
@@ -164,13 +177,13 @@ test('a_connect_form_offers_one_input_per_credential_the_connector_declares', as
   const inputs = elementsWith(html, 'data-credential').map((match) => match[1])
   assert.deepEqual(
     inputs,
-    SLACK_DECLARATION.declared,
+    SLACK_DECLARED,
     'the form must offer exactly the credentials the connector declares, in the order the service declared them'
   )
 
   // Named on the page as well as in an attribute: the operator has to know which secret goes in
   // which box, and `slack.bot_token` and `slack.signing_secret` are not interchangeable.
-  for (const name of SLACK_DECLARATION.declared) {
+  for (const name of SLACK_DECLARED) {
     assert.ok(html.includes(name), `the form does not name the \`${name}\` credential; got: ${html}`)
   }
 })
@@ -208,24 +221,68 @@ test('a_credential_this_console_never_heard_of_still_gets_an_input', async () =>
   }
 })
 
-test('the_declaration_is_read_from_the_service_and_the_read_sends_no_value', async () => {
-  const service = answering(422, SLACK_DECLARATION)
+/**
+ * **X-46's failing-first test.** Rendering a connect form must cost no write at all.
+ *
+ * X-44 had no choice: nothing published a declaration, so `loadDeclaration` issued
+ * `POST /api/connections/{connector}` with `{"credentials": {}}` and read the names out of the
+ * `422`. It wrote nothing and it carried no value — the implementor verified both and argued it in
+ * the open — but it coupled the console to an error body, so rewording that refusal would have
+ * rendered every connector unreadable. The fact is a field now, and this asserts the shape of that
+ * rather than only its content: **no `POST`**, on the catalogue surface, once.
+ */
+test('the_declaration_is_read_from_the_catalogue_and_the_console_issues_no_post', async () => {
+  const service = answering(200, SLACK_DECLARATION)
   const state = await loadDeclaration('slack', { fetch: service.fetch })
+
+  assert.equal(service.asked.length, 1, 'the declaration must cost exactly one request')
+  const [{ url, init }] = service.asked
+
+  const method = init?.method ?? 'GET'
+  assert.equal(
+    method,
+    'GET',
+    `rendering a connect form issued a ${method}, so the console still asks to do something it will be refused`
+  )
+  assert.equal(
+    url,
+    `${CONNECTORS_ENDPOINT}/slack/credentials`,
+    'the declaration is a catalogue fact and must be read from the catalogue, not from the per-tenant connections surface'
+  )
+  assert.notEqual(
+    url,
+    connectionEndpoint('slack'),
+    'the declaration must not be read from the route that creates a connection'
+  )
+  assert.equal(
+    init?.body,
+    undefined,
+    'asking what a connector declares must carry no body at all, let alone a credential value'
+  )
 
   assert.equal(state.status, 'ready', `the declaration was not read; got: ${JSON.stringify(state)}`)
   assert.deepEqual(
     state.declaration.credentials,
-    SLACK_DECLARATION.declared,
+    SLACK_DECLARED,
     'the declaration must be exactly what the service published, unfiltered and unreordered'
   )
+})
 
-  assert.equal(service.asked.length, 1, 'the declaration must cost exactly one request')
-  const [{ url, init }] = service.asked
-  assert.equal(url, connectionEndpoint('slack'))
-  assert.deepEqual(
-    JSON.parse(init.body),
-    { credentials: {} },
-    'asking what a connector declares must carry no credential value at all'
+/**
+ * The other half of the same property, at the source: nothing on the path that renders a form may
+ * reach for the connections surface at all.
+ *
+ * The test above proves it for one stubbed connector. This proves there is no second branch — a
+ * retry, a fallback for an older service — that would put the empty `POST` back for some other
+ * one, which is exactly the kind of thing a reviewer cannot see in a passing test.
+ */
+test('no_source_still_asks_for_a_declaration_by_provoking_a_refusal', async () => {
+  const { code } = appSourcesWithoutComments().find((source) => source.name === 'service.mts')
+  assert.ok(code, '`src/service.mts` was renamed or removed')
+
+  assert.ok(
+    !/credentials:\s*\{\s*\}/.test(code),
+    'a source still sends an empty credential map, which is the refusal-provoking workaround X-46 removed'
   )
 })
 
@@ -285,11 +342,11 @@ test('no_credential_value_reaches_a_url_the_console_keeps_or_the_page_that_follo
 test('the_inputs_are_secrets_and_hold_nothing_that_could_be_rendered_back', async () => {
   const html = await form({
     chosen: 'slack',
-    declaration: declared('slack', SLACK_DECLARATION.declared),
+    declaration: declared('slack', SLACK_DECLARED),
   })
 
   const inputs = elementsWith(html, 'data-credential').map((match) => match[0])
-  assert.equal(inputs.length, SLACK_DECLARATION.declared.length)
+  assert.equal(inputs.length, SLACK_DECLARED.length)
 
   for (const input of inputs) {
     assert.match(input, /type="password"/, `a credential input is not a password field: ${input}`)
@@ -405,7 +462,7 @@ test('a_declaration_that_could_not_be_read_is_not_a_connector_with_no_credential
   })
 
   assert.equal(state.status, 'failed')
-  assert.equal(state.failure.endpoint, connectionEndpoint('slack'))
+  assert.equal(state.failure.endpoint, `${CONNECTORS_ENDPOINT}/slack/credentials`)
   assert.equal(
     state.declaration,
     undefined,
@@ -414,7 +471,7 @@ test('a_declaration_that_could_not_be_read_is_not_a_connector_with_no_credential
 
   const html = await form({ chosen: 'slack', declaration: state })
   assert.ok(
-    html.includes(connectionEndpoint('slack')),
+    html.includes(`${CONNECTORS_ENDPOINT}/slack/credentials`),
     `a failed read must name the endpoint that did not answer; got: ${html}`
   )
   assert.ok(

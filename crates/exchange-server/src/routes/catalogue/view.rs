@@ -15,13 +15,16 @@
 //! the JSON a client reads *is* the value a `Selector` is evaluated over, and it deserialises back
 //! into the same type the host decides with.
 //!
-//! # Three honesty rules this module keeps
+//! # Four honesty rules this module keeps
 //!
 //! 1. **Nothing is enumerated here.** Connectors and operations come from `catalog::providers()`, so
 //!    a connector added upstream is served the day the dependency moves, with no edit here.
 //! 2. **A derived fact is never presented as a declared one** — see [`effects`].
 //! 3. **Nothing is filtered.** The catalogue answers *what exists*; it is not a permission answer.
 //!    See [`OperationView::admitted`].
+//! 4. **A declaration is never a holding.** What a connector declares is a vendor fact; whether a
+//!    tenant has stored one is per-principal state, and it is not on this surface at all. See
+//!    [`ConnectorCredentials`].
 
 use std::collections::BTreeSet;
 
@@ -44,7 +47,7 @@ pub struct ConnectorList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectorEntry {
     /// The connector id, as the catalogue spells it — the segment
-    /// `/api/catalogue/connectors/{id}/operations` takes.
+    /// `/api/catalogue/connectors/{id}/operations` and `…/{id}/credentials` take.
     pub id: String,
     /// How many operations it publishes. A count, not the operations: the listing is a directory,
     /// and a client that wants the metadata asks for the connector it is interested in.
@@ -97,6 +100,61 @@ pub struct OperationView {
     /// an agent that cannot see an operation it lacks cannot report that it was refused — it can
     /// only report that the operation does not exist, which is false.
     pub admitted: Option<bool>,
+}
+
+/// The body of `GET /api/catalogue/connectors/{id}/credentials`.
+///
+/// **What a connector declares, and never what anyone holds.** There is no `held`, no `address` and
+/// no tenant anywhere in this type, and that absence is the whole reason this fact can live on the
+/// anonymous catalogue at all: "`slack` declares a bot token" is a vendor fact identical in every
+/// deployment, while "this tenant has one" is per-principal state and belongs on
+/// `GET /api/connections`, which is `Access::Principal` and stays there.
+///
+/// # Why its own path, and not a field on the operations body
+///
+/// A credential is declared at **provider** level upstream — `Provider::auth`, not
+/// `Operation::credentials`, which only *references* these names — so hanging it off the operations
+/// resource would nest a connector fact inside an answer about operations, and a client wanting
+/// only the declaration would pay for 299 operations to get two names. Putting it on
+/// [`ConnectorList`] instead would turn a directory of 53 entries into a payload for every caller
+/// that only wanted the ids.
+///
+/// So it is a sibling of `/operations` under the same connector, which also makes the last
+/// Acceptance item true by construction: **existing catalogue answers are byte-identical**, because
+/// nothing was added to them. X-43 took the same shape one layer down for the same reason — a
+/// capability fact is a field of its own, not something inferred from a refusal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConnectorCredentials {
+    /// The connector these belong to, echoed so the body stands on its own.
+    pub connector: String,
+    /// The reverse-DNS authority the connector publishes under — `com.slack.api`.
+    ///
+    /// Present because it is half of *why a declaration may be unconnectable*: a credential address
+    /// is composed from the authority and the leaf, so a connector that declares credentials but no
+    /// authority has no address for any of them and every connect attempt refuses. `null` says that
+    /// in the catalogue, where a client can read it, instead of leaving it to be discovered by
+    /// being refused — which is the same lesson this whole story is.
+    pub authority: Option<String>,
+    /// Every credential the connector declares, in the connector's own declaration order.
+    ///
+    /// Unsorted and unfiltered: the order is the connector's, and a catalogue that sorted them
+    /// would be publishing its own opinion of a declaration as the declaration.
+    pub credentials: Vec<CredentialView>,
+}
+
+/// One declared credential, as the wire carries it.
+///
+/// **No value, and no field one could occupy.** That is a property of the source rather than a
+/// habit here: `connector_catalog::Credential` is `&'static` data compiled from the IR, and its own
+/// documentation makes the same promise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CredentialView {
+    /// The flat-namespace name — `slack.bot_token`. **The key `POST /api/connections/{connector}`
+    /// takes**, which is what makes this answer enough to build a connect form from.
+    pub name: String,
+    /// The last segment of the credential's address — `bot_token`, not `slack.bot_token`. The
+    /// address already carries the authority, so the vendor prefix would be said twice.
+    pub leaf: String,
 }
 
 /// The body served when the connector id names nothing.
@@ -152,6 +210,40 @@ pub fn connector_operations(connector: &str) -> Option<ConnectorOperations> {
         // lookup ever stops being.
         connector: provider.id.to_string(),
         operations: provider.operations.iter().map(view).collect(),
+    })
+}
+
+/// One connector's declared credentials, or `None` when the catalogue carries no such connector.
+///
+/// `catalog::provider(…)` for the reason [`connector_operations`] gives: an unknown id must be a
+/// `404` naming it, never an empty `200` that reads as "this connector declares nothing". Those are
+/// different answers, and `freshdesk` — which really does declare none — is why the difference is
+/// not academic here.
+///
+/// # What is deliberately not published
+///
+/// `catalog::Credential` also carries `place` and `acquire`: where a value goes on the outgoing
+/// request, and how stored material becomes it. Both are vendor facts and neither holds a secret,
+/// so neither is *withheld* — they are simply not this answer. They describe how this host composes
+/// a request at invoke time, which is `exchange_host`'s business and no part of what a caller needs
+/// in order to know what to store. Publishing them would put two more upstream enums on this wire
+/// contract, to be kept in step for nobody. If something needs them, that is a story with a reader
+/// attached.
+pub fn connector_credentials(connector: &str) -> Option<ConnectorCredentials> {
+    let provider = catalog::provider(catalog::ProviderKey::id(connector))?;
+
+    Some(ConnectorCredentials {
+        // The catalogue's spelling, not the caller's, for the reason `connector_operations` gives.
+        connector: provider.id.to_string(),
+        authority: provider.authority.map(str::to_string),
+        credentials: provider
+            .auth
+            .iter()
+            .map(|credential| CredentialView {
+                name: credential.name.to_string(),
+                leaf: credential.leaf.to_string(),
+            })
+            .collect(),
     })
 }
 
@@ -505,6 +597,177 @@ mod tests {
                 .is_some_and(|d| !d.is_empty()),
             "the description is what a model reads; an empty one is a broken tool",
         );
+    }
+
+    /// Every connector's declaration is the catalogue's, whole and in the connector's own order.
+    ///
+    /// Over the *whole* catalogue rather than one connector, for the reason
+    /// `every_operation_carries_risk_effects_and_idempotency` gives: a mapping that is wrong for
+    /// one connector cannot hide behind a well-chosen example.
+    #[test]
+    fn every_connector_publishes_exactly_what_it_declares() {
+        let mut seen = 0usize;
+
+        for provider in catalog::providers() {
+            let published = connector_credentials(provider.id)
+                .unwrap_or_else(|| panic!("the catalogue carries `{}`", provider.id));
+
+            assert_eq!(published.connector, provider.id);
+            assert_eq!(published.authority.as_deref(), provider.authority);
+            assert_eq!(
+                published.credentials.len(),
+                provider.auth.len(),
+                "connector `{}` published a different number of credentials than it declares",
+                provider.id,
+            );
+
+            for (view, declared) in published.credentials.iter().zip(provider.auth) {
+                assert_eq!(view.name, declared.name);
+                assert_eq!(view.leaf, declared.leaf);
+                seen += 1;
+            }
+        }
+
+        assert!(seen > 0, "an empty catalogue would vacuously pass");
+    }
+
+    /// **The declaration, never a tenant's state**, asserted on the bytes rather than on the type.
+    ///
+    /// The type has no field a holding could occupy, which is the real guarantee; this is what
+    /// fails if somebody later adds one. `held`, an address or a tenant on this body would move a
+    /// per-principal fact onto the anonymous surface, which is the one thing this route must not
+    /// do.
+    #[test]
+    fn the_declaration_never_says_whether_anyone_holds_it() {
+        for provider in catalog::providers() {
+            let body = serde_json::to_value(
+                connector_credentials(provider.id).expect("every listed connector answers"),
+            )
+            .expect("serialises");
+
+            let mut keys: Vec<&str> = body
+                .as_object()
+                .expect("an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["authority", "connector", "credentials"]);
+
+            for credential in body["credentials"].as_array().expect("an array") {
+                let mut keys: Vec<&str> = credential
+                    .as_object()
+                    .expect("an object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(
+                    keys,
+                    ["leaf", "name"],
+                    "connector `{}` published a credential field that is not a declaration",
+                    provider.id,
+                );
+            }
+        }
+    }
+
+    /// A connector that declares nothing answers `200` with an empty list — and an unknown one
+    /// still answers `404`. Collapsing the two would tell an operator that a typo is a connector
+    /// needing no credential, which is the `404`-into-empty-`200` failure the operations route
+    /// already refuses.
+    #[test]
+    fn a_connector_that_declares_nothing_is_not_an_unknown_connector() {
+        let declares_nothing = catalog::providers()
+            .iter()
+            .find(|provider| provider.auth.is_empty())
+            .expect("the catalogue carries a connector that declares no credential");
+
+        let published = connector_credentials(declares_nothing.id)
+            .expect("a declared-nothing connector answers");
+        assert!(published.credentials.is_empty());
+
+        assert_eq!(connector_credentials("no-such-vendor"), None);
+    }
+
+    /// The response contract, pinned against the connector the console is written against.
+    #[test]
+    fn the_wire_shape_of_a_declaration_is_the_agreed_contract() {
+        let body = serde_json::to_value(
+            connector_credentials("slack").expect("the catalogue carries slack"),
+        )
+        .expect("serialises");
+
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "connector": "slack",
+                "authority": "com.slack.api",
+                "credentials": [
+                    { "name": "slack.bot_token", "leaf": "bot_token" },
+                    { "name": "slack.signing_secret", "leaf": "signing_secret" },
+                ],
+            }),
+        );
+    }
+
+    /// The last Acceptance item, made mechanical: adding this route added **nothing** to the
+    /// answers that existed before it, so a caller that does not ask for the declaration sees the
+    /// same bytes it saw yesterday.
+    #[test]
+    fn the_existing_catalogue_answers_gained_no_field() {
+        let listing = serde_json::to_value(connectors()).expect("serialises");
+        for entry in listing["connectors"].as_array().expect("an array") {
+            let mut keys: Vec<&str> = entry
+                .as_object()
+                .expect("an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["id", "operation_count"]);
+        }
+
+        for provider in catalog::providers() {
+            let body = serde_json::to_value(
+                connector_operations(provider.id).expect("every listed connector answers"),
+            )
+            .expect("serialises");
+
+            let mut keys: Vec<&str> = body
+                .as_object()
+                .expect("an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["connector", "operations"]);
+
+            for operation in body["operations"].as_array().expect("an array") {
+                let mut keys: Vec<&str> = operation
+                    .as_object()
+                    .expect("an object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(
+                    keys,
+                    [
+                        "admitted",
+                        "description",
+                        "effects",
+                        "effects_derived",
+                        "id",
+                        "idempotency",
+                        "risk",
+                        "service",
+                    ],
+                    "an operation of `{}` gained or lost a field",
+                    provider.id,
+                );
+            }
+        }
     }
 
     /// The listing's own shape.

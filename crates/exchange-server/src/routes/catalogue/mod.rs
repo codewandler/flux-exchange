@@ -1,14 +1,19 @@
 //! The connector catalogue, served.
 //!
-//! `GET /api/catalogue/connectors` lists what this binary was compiled with, and
+//! `GET /api/catalogue/connectors` lists what this binary was compiled with,
 //! `GET /api/catalogue/connectors/{id}/operations` returns one connector's operations with the
-//! `risk`, `effects` and `idempotency` a [`Selector`](exchange_host::Selector) is written over.
+//! `risk`, `effects` and `idempotency` a [`Selector`](exchange_host::Selector) is written over, and
+//! `GET /api/catalogue/connectors/{id}/credentials` returns what that connector **declares** it
+//! needs in order to be connected.
 //!
-//! # Two things this answers, and one it does not
+//! # Three things this answers, and two it does not
 //!
-//! It answers **what exists** and **what each operation declares**. It does *not* answer what the
-//! caller may run: every operation carries `admitted: null`, and nothing is ever filtered out for
-//! want of a grant. [`view::OperationView::admitted`] has the argument.
+//! It answers **what exists**, **what each operation declares** and **what each connector
+//! declares**. It does *not* answer what the caller may run: every operation carries
+//! `admitted: null`, and nothing is ever filtered out for want of a grant
+//! ([`view::OperationView::admitted`] has the argument). Nor does it answer whether anyone *holds*
+//! a declared credential — that is per-tenant state, it lives on `GET /api/connections`, and
+//! [`view::ConnectorCredentials`] is where the line is drawn.
 //!
 //! [`view`] holds the whole response contract as pure data, so the shape is tested without a
 //! transport. The handlers below are a thin projection of it, and have only a status code to get
@@ -16,18 +21,19 @@
 //!
 //! # Why these routes are anonymous
 //!
-//! Both are [`Access::Anonymous`], which makes them the first routes besides `/health` that answer
-//! a caller this host has not identified. That is a decision, not an oversight, so here is the
-//! argument — and `super::tests::the_anonymous_surface_is_only_what_was_declared_anonymous` is what
-//! holds anyone to it.
+//! All three are [`Access::Anonymous`], which made them the first routes besides `/health` that
+//! answer a caller this host has not identified. That is a decision, not an oversight, so here is
+//! the argument — and `super::tests::the_anonymous_surface_is_only_what_was_declared_anonymous` is
+//! what holds anyone to it.
 //!
 //! The catalogue is `&'static` data compiled in from `codewandler-connector-catalog`, a published
 //! crates.io package. It is byte-identical in every deployment of this version, and anyone who can
-//! run `cargo add` already has all of it. It names no tenant, no principal, no connection and no
-//! credential — this module serves an operation's id, service, description and declared metadata,
-//! and nothing else. Most of all it is **structurally incapable** of leaking a permission: it never
-//! reads a principal, never consults a grant and never filters, which is the same property
-//! `admitted: null` states on the wire.
+//! run `cargo add` already has all of it. It names no tenant, no principal and no connection, and
+//! it carries no credential **value** — this module serves an operation's id, service, description
+//! and declared metadata, and a connector's declared credential *names*, and nothing else. Most of
+//! all it is **structurally incapable** of leaking a permission: it never reads a principal, never
+//! consults a grant and never filters, which is the same property `admitted: null` states on the
+//! wire.
 //!
 //! What it does disclose is which catalogue this deployment was built against. That is a
 //! fingerprint, and an operator who wants it closed should be able to close it — but that is a
@@ -64,6 +70,11 @@ pub(super) const MODULE: Module = Module {
             access: Access::Anonymous,
             method_router: operations_route,
         },
+        Route {
+            path: "/api/catalogue/connectors/{id}/credentials",
+            access: Access::Anonymous,
+            method_router: credentials_route,
+        },
     ],
 };
 
@@ -73,6 +84,10 @@ fn connectors_route() -> MethodRouter<AppState> {
 
 fn operations_route() -> MethodRouter<AppState> {
     get(operations)
+}
+
+fn credentials_route() -> MethodRouter<AppState> {
+    get(credentials)
 }
 
 /// Every connector this binary carries.
@@ -94,6 +109,26 @@ async fn operations(Path(connector): Path<String>) -> Response {
     }
 }
 
+/// One connector's declared credentials, or a refusal naming the id that was asked for.
+///
+/// **The declaration, never a tenant's state.** This says which credentials `slack` declares; it
+/// says nothing about whether anyone has stored one, which is `GET /api/connections` and is
+/// `Access::Principal`. See [`view::ConnectorCredentials`] for why that distinction is what keeps
+/// this route on the anonymous surface, and for why it is a sibling of `/operations` rather than a
+/// field on it.
+async fn credentials(Path(connector): Path<String>) -> Response {
+    match view::connector_credentials(&connector) {
+        Some(credentials) => Json(credentials).into_response(),
+        // The same `404`, and for the same reason: "no such connector" and "a connector that
+        // declares nothing" are different answers, and `freshdesk` is genuinely the second.
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(view::UnknownConnector::new(&connector)),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,7 +140,12 @@ mod tests {
 
     /// Drive one `GET` through the **assembled app** — not this module's router in isolation, so
     /// that the entry in `super::MODULES` is part of what these tests prove.
-    async fn get_json(path: &str) -> (StatusCode, Value) {
+    ///
+    /// The status is returned beside the raw bytes rather than beside a parsed body, because a path
+    /// nothing is mounted at answers `404` with no body at all: a helper that parsed first would
+    /// report an unmounted route as "the body is not JSON", which is a true sentence about the
+    /// wrong thing.
+    async fn get_raw(path: &str) -> (StatusCode, Vec<u8>) {
         let response = crate::routes::app(AppState::without_identity())
             .oneshot(
                 Request::builder()
@@ -120,6 +160,13 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("the body is fully readable");
+
+        (status, body.to_vec())
+    }
+
+    /// [`get_raw`], with the body parsed — every route in this module answers JSON.
+    async fn get_json(path: &str) -> (StatusCode, Value) {
+        let (status, body) = get_raw(path).await;
 
         (
             status,
@@ -170,6 +217,62 @@ mod tests {
                 operation["admitted"],
                 Value::Null,
                 "{id} answered a permission question nothing here can ask",
+            );
+        }
+    }
+
+    /// **The story's failing-first test.** A caller can read what a connector declares by asking
+    /// for it, rather than by asking to do something it knows will be refused.
+    ///
+    /// Before this route existed the only place the service stated a declaration was the `422` a
+    /// deliberately-empty `POST /api/connections/{connector}` returns, so the console read a
+    /// capability fact out of an error body. Asserted over the transport, and against the
+    /// catalogue rather than against a fixture, so a connector that gains a credential upstream is
+    /// published the day the dependency moves.
+    #[tokio::test]
+    async fn a_connectors_declared_credentials_are_published() {
+        let (status, body) = get_raw("/api/catalogue/connectors/slack/credentials").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "nothing publishes what a connector declares, so it can only be read out of a refusal",
+        );
+
+        let body: Value = serde_json::from_slice(&body).expect("a JSON body");
+        assert_eq!(body["connector"], "slack");
+
+        let published: Vec<&str> = body["credentials"]
+            .as_array()
+            .expect("an array")
+            .iter()
+            .map(|credential| credential["name"].as_str().expect("a name"))
+            .collect();
+        let declared: Vec<&str> =
+            connector_catalog::provider(connector_catalog::ProviderKey::id("slack"))
+                .expect("the catalogue carries slack")
+                .auth
+                .iter()
+                .map(|credential| credential.name)
+                .collect();
+
+        assert!(
+            !declared.is_empty(),
+            "an empty declaration would pass every assertion here vacuously",
+        );
+        assert_eq!(
+            published, declared,
+            "the published declaration must be the catalogue's, in the connector's own order",
+        );
+
+        // The declaration, and never a tenant's state. This is the anonymous catalogue: it does
+        // not know who is asking, so it must not carry a field that would only make sense if it
+        // did.
+        let serialised = body.to_string();
+        for holding in ["held", "address", "tenant", "connection"] {
+            assert!(
+                !serialised.contains(holding),
+                "the catalogue answered `{holding}`, which is a tenant's state and not a \
+                 declaration: {serialised}",
             );
         }
     }
