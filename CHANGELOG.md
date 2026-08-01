@@ -8,6 +8,29 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A sign-in a victim did not start cannot become a session in their browser** (X-15). Server-side
+  `state` closes a *forged* callback, not login-CSRF: an attacker who starts a sign-in here honestly,
+  authenticates at the provider as themselves and stops at the redirect holds a genuine `code` and a
+  still-unspent `state`, and walking a victim into that callback passed every check X-04 had. The
+  victim came away holding the attacker's session, inside the attacker's tenant — the north star
+  inverted from the other end: the credential does not cross the boundary, the *human* does.
+
+  A **`__Host-` binder cookie** planted at `/api/signin` is the missing tie — 256 bits from the one
+  entropy path, `Secure` + `HttpOnly`, redacted in `Debug` like a session token, and never a URL
+  parameter. `PendingAuthorizations::claim(state, binder)` **replaces** `take(state)` rather than
+  sitting beside it: a method that spends an authorization on `state` alone *is* the hole, so the
+  reliable way to stop a later story reaching for it is for it not to exist.
+
+  A binder mismatch leaves the authorization **unspent** — the browser with the wrong binder is more
+  likely the victim than the perpetrator, and a hostile callback must not cancel someone else's
+  sign-in. A missing binder is refused *before* the pending store is consulted, so omitting the
+  cookie neither falls through to the state-only path nor probes whether a `state` is live.
+  `UnknownState`, `NoBinder` and `AnotherBrowser` are three log lines and not one, and deliberately
+  indistinguishable to the caller.
+
+  The binder is `SameSite=Lax` where the session cookie is `Strict` — deliberate, and documented at
+  the definition: its whole job is to survive exactly one cross-site-initiated navigation, the
+  provider's redirect back, which a `Strict` cookie would never arrive for.
 - **Connections, addressed by a tenant the caller cannot name** (X-08, X-10). Create, list and
   delete a connection, scoped to the caller's tenant. The credential address is **derived** —
   `tenants/<tenant>/<authority>/<credential>`, with the tenant from the resolved principal and the
