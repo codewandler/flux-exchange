@@ -1,7 +1,7 @@
 ---
 id: X-63
 title: "A site exists, builds, and publishes"
-status: ready
+status: in-progress
 priority: 1
 epic: public-docs-site
 design: docs/designs/public-docs-site.md

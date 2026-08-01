@@ -1,7 +1,7 @@
 ---
 id: X-57
 title: "\"Sign-in is available\" stops meaning \"OIDC is configured\""
-status: ready
+status: in-progress
 priority: 0
 epic: local-identity
 design: docs/designs/local-identity.md

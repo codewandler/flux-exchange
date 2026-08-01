@@ -31,12 +31,14 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 ## Now (in progress)
 - [X-42 — An agent can fetch what it needs instead of reading a page](X-42-agent-descriptor.md) · the other half of onboarding: a page is a human artifact, and the charter's primary caller does not read pages. One truth, two renderings — and a test that they agree
 - [X-49 — The branches X-46 opened are pinned](X-49-pin-the-branches-x46-opened.md) · found by X-46's review, 2026-08-01: publishing declarations changed how a connector that declares nothing renders, and nothing tests the branch it now takes
+- [X-57 — \"Sign-in is available\" stops meaning \"OIDC is configured\"](X-57-signin-availability-means-what-it-says.md) · the shared prerequisite for every local-identity story: SignIn::available() returns true only for SignIn::Oidc, so a host with a working development identity tells the console it cannot sign anyone in
+- [X-62 — An operator can grant something without editing a file by hand](X-62-an-operator-can-grant.md) · X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable
+- [X-63 — A site exists, builds, and publishes](X-63-a-site-that-publishes.md) · the scaffold and the pipeline, matched to flux-connectors/web: VitePress in web/, pages.yml with SHA-pinned actions, building on PRs as a gate and deploying only from main
 
 ## Next (ready — take the top one unless the user named a story)
 
 ### the primary caller can authenticate
 _Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
-- [X-62 — An operator can grant something without editing a file by hand](X-62-an-operator-can-grant.md) · X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable
 - [X-35 — Agent access (epic)](X-35-agent-access-epic.md) · EPIC — the vision's primary caller cannot authenticate. PrincipalKind::Agent exists as a type and appears in the loopback dev roster; nothing mints or verifies an agent's token. Not blocked by X-11, unlike everything else downstream
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
@@ -50,13 +52,11 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 
 ### signing in without an identity provider
 _**You cannot use this console without standing up an OIDC provider.** That is the whole problem, and_
-- [X-57 — \"Sign-in is available\" stops meaning \"OIDC is configured\"](X-57-signin-availability-means-what-it-says.md) · the shared prerequisite for every local-identity story: SignIn::available() returns true only for SignIn::Oidc, so a host with a working development identity tells the console it cannot sign anyone in
 - [X-58 — An operator can define users in a config file and sign in on their own network](X-58-static-users-from-a-config-file.md) · the axis that actually unblocks the console: a local identity with a real secret, so it may bind a reachable address — unlike DevIdentity, whose roster handle is a name anybody can guess
 - [X-59 — A deployment can hold one tenant and stop asking which](X-59-single-tenant-deployment.md) · the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it
 
 ### a public documentation site
 _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
-- [X-63 — A site exists, builds, and publishes](X-63-a-site-that-publishes.md) · the scaffold and the pipeline, matched to flux-connectors/web: VitePress in web/, pages.yml with SHA-pinned actions, building on PRs as a gate and deploying only from main
 - [X-64 — Every page's \"is this built\" is derived, not written](X-64-status-is-derived-not-written.md) · the mechanism that makes a large speculative site safe — status badges read the same descriptor artifact whose live flags are held to the route table by X-42/X-52's tests
 - [X-65 — The whole intended surface is on the page, including what is not built](X-65-the-whole-surface-is-on-the-page.md) · channels, subscribe, leases, workflows — the brief's \"scaffold the whole future surface\", safe to write only once X-64 makes status derived
 - [X-66 — The credential-boundary argument is readable by someone who has never seen this repository](X-66-the-boundary-argument-in-public.md) · the page that justifies the platform existing: the credential never crosses the boundary, the authority does — written for an evaluator rather than for a contributor
