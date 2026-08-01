@@ -35,11 +35,21 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.7.0. The service serves health, the catalogue, a session, a complete OIDC sign-in, and — since
-X-12 — `POST /api/operations/{operation}/invoke`, which runs one catalogue operation for the
-caller's tenant.** `cargo run` binds
-loopback and refuses to start on a reachable address with no identity provider configured. What exists beyond
-that is still the vocabulary and the rules as tested types. The [README](README.md) carries the
+**v0.8.0. The service serves health, the catalogue, a session, a complete OIDC sign-in,
+`POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
+tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
+`GET /api/onboarding`, an anonymous machine-readable descriptor of what this build can and cannot
+do.** `cargo run` binds loopback and refuses to start on a reachable address with no identity
+provider configured. What exists beyond that is still the vocabulary and the rules as tested types.
+
+⚠ **You cannot sign in to the console without an OIDC provider.** The development identity
+(`FLUX_EXCHANGE_DEV_IDENTITY`) mints principals and is loopback-only, but `SignIn::available()`
+reports `false` for it, so the console hides its sign-in affordance. That is the `local-identity`
+epic (X-57, X-58, X-59) and X-57 is priority 0.
+
+⚠ **Invocation is gated by identity alone.** There is no grant model in this build, so any principal
+this host resolves may run any operation in the catalogue against its own tenant's connections.
+`GET /api/onboarding` publishes this fact rather than hiding it; X-13 is the story that changes it. The [README](README.md) carries the
 itemized inventory of what is *not* built, and keeping it accurate is part of the job — a page that
 implies a working service costs more than an honest gap.
 

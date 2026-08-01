@@ -6,6 +6,20 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **The agent descriptor's guard checks what its name claims** (X-52). X-42's liveness test compared
+  a capability's `live` flag against *does the mapped route exist*, and never against the endpoint the
+  capability itself publishes — so republishing `be-minted` at `/api/session` passed 253 tests. And
+  `call.method` was pinned by nothing: changing the catalogue's `GET` to `DELETE` left the whole gate
+  green. Both are held now, and both were demonstrated by mutation before being fixed.
+
+  ⚠ **The obvious test for the method does not work, which is worth knowing.** Driving each endpoint
+  anonymously and asserting the answer is not `405` fails to distinguish anything: on a guarded route
+  axum's `route_layer` runs *before* the method router, so an anonymous request answers `401` first.
+  That test would have passed for `DELETE /api/agents` — the exact defect. It was caught by the
+  test's own control rather than by review.
+
 ## [0.8.0] - 2026-08-01
 
 ### Changed

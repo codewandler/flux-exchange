@@ -1,8 +1,7 @@
 ---
 id: X-52
 title: "The descriptor's guard checks what its name claims"
-status: in-progress
-priority: 1
+status: done
 epic: agent-onboarding
 areas: [exchange-server, console]
 note: "found by X-42's review, 2026-08-01: two published fields are pinned by nothing — the method, and which route a live capability points at. Demonstrated: republishing be-minted at /api/session keeps all 251 Rust tests green"
@@ -113,3 +112,38 @@ console 72 pass and `npm run build` clean.
   `NOT_A_CAPABILITY` are lists somebody maintains, mechanically checked in both directions so the
   maintenance is forced rather than remembered — **but a wrong *argument* in a `NOT_A_CAPABILITY`
   line is invisible to a test.**
+
+## Closed 2026-08-01 — and the test shape the story specified would not have worked
+
+Gate green: 348 Rust, 72 console. **Falsified at integration**: republishing `be-minted` at
+`/api/session` — green at the base across 253 tests — now fails naming both paths.
+
+**The story told the implementor to "drive each published endpoint and assert the answer is not
+`405`". That does not work, and finding out why is the durable part.** On a guarded route axum's
+`route_layer` runs *before* the method router, so an anonymous `PATCH /api/agents` answers **401, not
+405** — an anonymous probe cannot tell a served method from an unserved one, and the test would have
+passed for `DELETE /api/agents`, which is the exact defect it exists to catch.
+
+It was found by **the test's own control**, not by reading the diff. That is the argument for
+controls: a test asserting a negative needs something that proves it can fail, or it proves nothing.
+The probe now drives the weakest caller that gets past both guards, and nothing is minted, stored or
+dispatched — no agent store, no credential store, no body.
+
+**The endpoint check went inside the existing test rather than into a new one, because it was that
+test's *name* that over-claimed.** Written as a total `match`, so `(served, no call)` and
+`(unserved, has call)` panic rather than being skipped by an `if let`.
+
+### Carried, and honest about it
+
+- `UNSERVED = Method::PATCH` is the control. A later story giving any capability endpoint a `PATCH`
+  handler turns this red **for the right reason** — pick another method, do not drop the control.
+  The failure message says so.
+- The probe binds a development identity. If `DevIdentity::from_roster` or `MAY_MINT` changes so
+  `alice` no longer resolves, this fails as a 401 that is not 405 — passing `assert_ne!` while
+  proving less than it claims. **That is the weakest joint in the new test** and its doc names it.
+- `Call::method` proves the method reaches *a* handler. An endpoint serving two methods makes the
+  published one free to be either.
+- **`NOT_A_CAPABILITY`'s arguments remain unheld.** A wrong sentence there is still invisible; only
+  its staleness — a route that no longer exists — is checked. Predicted by this story's own Notes.
+- `descriptor.test.mjs` stays green under the method mutation. Console-green is not evidence about
+  `method`; the Rust probe is the only check.
