@@ -245,11 +245,20 @@ export const STEPS: readonly Step[] = [
       'minted, in that agent’s tenant.',
     surface: null,
     call: null,
+    // The last sentence used to read "The only principals a deployment resolves today are humans
+    // who signed in through its identity provider", and that is false on a composition this
+    // repository ships: a host armed with the development identity resolves whatever its roster
+    // names, which may be an `agent:` or a `service:` handle —
+    // `dev_identity::tests::a_handle_resolves_to_the_principal_the_roster_armed` drives one. The
+    // operative claim, that a token this host minted resolves nowhere, was and is true; the
+    // sentence around it was not, on the document whose whole argument is honesty (X-52).
     pending:
       'No route on this host accepts an agent token. Minting stores a verifier and hands you the ' +
       'token, and nothing yet resolves one back to a principal — so an agent holding a token is ' +
-      'not a caller this service can identify. The only principals a deployment resolves today are ' +
-      'humans who signed in through its identity provider.',
+      'not a caller this service can identify. What a deployment does resolve is whatever its ' +
+      'identity port was handed: the humans an identity provider signed in, or — on a development ' +
+      'host — the handles its own roster names, which may be agents but are names rather than ' +
+      'tokens this service minted.',
   },
   {
     id: 'invoke',

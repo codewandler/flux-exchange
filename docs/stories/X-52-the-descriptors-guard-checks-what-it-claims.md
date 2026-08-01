@@ -1,7 +1,7 @@
 ---
 id: X-52
 title: "The descriptor's guard checks what its name claims"
-status: ready
+status: in-progress
 priority: 1
 epic: agent-onboarding
 areas: [exchange-server, console]
@@ -59,14 +59,53 @@ It is still a published sentence that is false on a real composition, on the doc
 argument is honesty.
 
 ## Acceptance
-- [ ] **Failing-first test** — republishing a capability at a route that exists but does not serve it
+- [x] **Failing-first test** — republishing a capability at a route that exists but does not serve it
       is refused. Demonstrate with `be-minted` at `/api/session`, which is green today.
-- [ ] `call.method` is either held by something or the document says it is not. **If it cannot be
+- [x] `call.method` is either held by something or the document says it is not. **If it cannot be
       held, say so where it is published**, rather than leaving a reader to assume every field is
       guarded because most are.
-- [ ] The `authenticate` sentence is true of every composition this repository ships, including the
+- [x] The `authenticate` sentence is true of every composition this repository ships, including the
       development identity.
-- [ ] No test's name claims more than the test checks — reread the two new ones against their names.
+- [x] No test's name claims more than the test checks — reread the two new ones against their names.
+
+## Progress
+
+**2026-08-01 — done, all four items.** Both defects reproduced by mutation at the merge base
+(`1225dd2`) before anything was written, and both go red against the fix.
+
+1. **The endpoint.** `a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it`
+   (`crates/exchange-server/src/routes/onboarding.rs:641`, the `match` at `:682`) now compares each capability's own
+   `call.endpoint` against the `SERVED_BY` path as well as measuring liveness against it, over a
+   total `match` so `(served, no call)` and `(unserved, has call)` panic rather than passing
+   silently. Kept in that test rather than split out, because it is that test's *name* that
+   over-claimed. Base: republishing `be-minted` at `/api/session` left all 253 Rust tests green;
+   now it fails there, naming both spellings.
+
+2. **The method.** New `every_published_call_reaches_a_handler_for_the_method_it_names`
+   (`onboarding.rs:768`): drives every published `method endpoint` through the assembled app and
+   asserts the answer is neither `405` nor `404`, plus a per-endpoint control (`PATCH`) that must
+   be `405`. The second of the two shapes the story weighed — a `method` field on `Route` would
+   have pinned the document to a declaration and left the declaration pinned to nothing. **Two
+   things a reader has to know**, both written on `Call::method` and in the design: it proves the
+   method reaches *a* handler and not that it is the only one the route serves, and it must drive a
+   **resolved** caller — on a guarded route the `route_layer` runs before the method router, so an
+   anonymous probe answers `401` for every method. The first spelling of this test was anonymous
+   and would have passed for `DELETE /api/agents`; its own control is what caught that.
+
+3. **The sentence.** `console/src/onboarding.mts` `authenticate.pending` no longer claims humans are
+   the only principals a deployment resolves; the artifact is regenerated. The fact that made the
+   old sentence false is already driven by
+   `dev_identity::tests::a_handle_resolves_to_the_principal_the_roster_armed`, which resolves an
+   `agent:` roster handle. **This one is not held by a test and the design says so** — a wrong
+   argument inside a withholding is invisible to the gate, which is the risk the Notes name.
+
+4. **Names.** Both X-42 tests reread. The first is now accurate rather than over-claiming, and the
+   second (`every_published_route_is_a_capability_or_is_argued_not_to_be`) is strengthened for free:
+   its "is a capability" now means "is the route a published capability names", not merely "is a
+   path some `SERVED_BY` row mentions".
+
+No existing test was weakened. Gate: `cargo build/test/clippy/fmt` green (254 server tests, up one),
+console 72 pass and `npm run build` clean.
 
 ## Notes
 - Do not weaken the existing tests to make room. They are the reason X-42 passed.
