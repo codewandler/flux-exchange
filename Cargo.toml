@@ -16,6 +16,19 @@ authors = ["codewandler"]
 exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exchange-host", version = "0.0.1" }
 
 async-trait = "0.1"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The connector crates. `connector-catalog` has no dependencies at all and `connector-secrets`
+# defaults to no features (its Vault client and reqwest sit behind `vault`). `connector-pack` is
+# deliberately ABSENT: it requires flux-runtime ^0.41 while flux is at 0.45, so it cannot link here
+# yet. See X-11.
+connector-catalog = { package = "codewandler-connector-catalog", version = "0.8" }
+connector-secrets = { package = "codewandler-connector-secrets", version = "0.8" }
+connector-spec = { package = "codewandler-connector-spec", version = "0.8" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
