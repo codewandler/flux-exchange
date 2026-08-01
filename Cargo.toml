@@ -5,7 +5,7 @@ members = ["crates/exchange-host", "crates/exchange-server"]
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/codewandler/flux-exchange"
 authors = ["codewandler"]

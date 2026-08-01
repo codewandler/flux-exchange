@@ -52,7 +52,7 @@ cargo fmt --all
 cd console && npm install && npm test && npm run build
 ```
 
-Rust 1.87 or newer. The console is a separate Node build and does not participate in the Cargo
+Rust 1.88 or newer — that is the floor `jsonwebtoken` and `time` impose, not a number we chose. The console is a separate Node build and does not participate in the Cargo
 workspace.
 
 ## The dependency situation, which will bite you

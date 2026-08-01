@@ -6,6 +6,28 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **`rust-version` was wrong, and shipped wrong in three releases** (X-30). The manifest declared
+  `1.87`. It has never been true: `jsonwebtoken`, `time`, `time-core` and `time-macros` each require
+  `1.88.0`, and cargo refuses before compiling anything — so `cargo +1.87 build` has failed since
+  X-04 introduced `jsonwebtoken`, on the day 0.1.0 was cut. `v0.1.0`, `v0.2.0` and `v0.3.0` all
+  carry the false floor.
+
+  **`rust-version` is now `1.88`.** This is a *correction*, not a raise: no consumer can have been
+  building on 1.87, because it never worked. The alternative — pinning `jsonwebtoken` and `time`
+  backwards — would downgrade the library doing id-token signature verification in order to preserve
+  a number nobody had verified. [X-33](docs/stories/X-33-msrv-job.md) adds the CI job that keeps it
+  honest, reading the number from the manifest rather than repeating it.
+
+### Added
+
+- **CI checks the action pins and the version pairing** (X-30). Both checkers **self-test before
+  they scan**, so one that has stopped catching violations cannot report there are none. The pin
+  scanner classifies YAML rather than grepping, because a comment or a `run:` block containing an
+  example pin will fool a line-wise grep — and the sibling repository's own error hint is such a
+  line.
+
 ## [0.3.0] - 2026-08-01
 
 ### Added

@@ -41,8 +41,7 @@ _None._
 
 ### Serve
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
-- [X-30 — CI proves the pins and the MSRV, not just the tests](X-30-ci-supply-chain-and-msrv.md) · found by X-28's implementor, 2026-08-01: ../flux fails CI when an unpinned action reappears and checks crate versions at PR time; this repo enforces both by review only, and `rust-version = 1.87` is a promise to consumers that nothing verifies
-- [X-31 — A new exchange error cannot silently inherit a refusal's status](X-31-error-to-refusal-edge.md) · found by X-26's implementor in the guard it had just written, 2026-08-01: every_refusal_states_the_status_it_answers_with pins the refusal→status edge, and nothing pins the error→refusal edge, so a new ExchangeError folded into an existing refusal would undo X-17's split without touching status()
+- [X-33 — CI proves the MSRV the crate promises](X-33-msrv-job.md) · split from X-30, 2026-08-01: the job could not land while rust-version was false. The number is now 1.88 (observed, not chosen), so the job can be written against a promise that holds
 
 ## Blocked
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · BLOCKER — connector-pack 0.8.0 requires flux-runtime ^0.41 (i.e. <0.42); flux is at 0.45.0. Two flux-runtime versions are two incompatible types. Not fixable from this repo
@@ -78,6 +77,8 @@ _None._
 - [X-26 — A sign-in refusal carries its own status](X-26-refusal-status.md) · found by X-24's implementor, 2026-08-01: the refusal-to-status table lives inline in routes::signin::callback and is unreachable from any other module, so a test that wants to state 'this refusal, and this status' has to be written at the route instead of beside the refusal
 - [X-27 — Configuration is read by name, not by position](X-27-config-read-by-name.md) · raised by X-04's review and again by X-23's implementor, 2026-08-01: REQUIRED, the positional reads in OidcConfig::read, and TRANSPORT_CHECKED are three lists describing one set of variables, and the drift they permit has already shipped once
 - [X-28 — The gate runs on every push, not only at a release](X-28-ci-gate.md) · the crates.io workflow runs the gate inline because there is no ci.yml at all — so a red main is only discovered when someone tries to release, and the console's Node build is never run by CI
+- [X-30 — CI proves the pins and the MSRV, not just the tests](X-30-ci-supply-chain-and-msrv.md) · found by X-28's implementor, 2026-08-01: ../flux fails CI when an unpinned action reappears and checks crate versions at PR time; this repo enforces both by review only, and `rust-version = 1.87` is a promise to consumers that nothing verifies
+- [X-31 — A new exchange error cannot silently inherit a refusal's status](X-31-error-to-refusal-edge.md) · found by X-26's implementor in the guard it had just written, 2026-08-01: every_refusal_states_the_status_it_answers_with pins the refusal→status edge, and nothing pins the error→refusal edge, so a new ExchangeError folded into an existing refusal would undo X-17's split without touching status()
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

@@ -74,6 +74,15 @@ issuer in the token endpoint, and the host starts up and behaves wrongly.
   a line (`issuer: reader.value(CLIENT_SECRET_ENV)`). It is local, glaring, and caught by
   `every_configured_value_lands_in_its_own_field` — but it is not a compile error, and making it one
   would need a dependency.
-- Also carried: the quoted order now rests on Rust evaluating struct fields in written order. That is
-  guaranteed, but it is implicit; `an_empty_environment_names_every_variable_the_read_consumes` is
-  what would notice if it ever were not.
+- Also carried: the quoted order rests on Rust evaluating struct fields in written order.
+  **Correction, from X-27's review:** the note here originally named
+  `an_empty_environment_names_every_variable_the_read_consumes` as the guard. It is not — it asserts
+  `unset: required()`, and `required()` derives from the same read, so both sides move together. A
+  reorder leaves the module green. What actually catches one is
+  `the_refusal_names_every_unset_variable`, which pins two variables by name. Pre-existing gap, not
+  introduced by the refactor: the same reorder passes at the base too.
+- **Reviewed PASS.** The "behaviour unchanged" claim was verified *mechanically* rather than by eye:
+  18 refusal scenarios rendered on both revisions, `sha256` identical (`c5a41e70…5142b`, 12027
+  bytes, `diff` exit 0). The silent-failure base proof was reproduced independently in a fresh
+  clone. `ClientSecret`'s single-source claim was proved rather than read — adding a `Debug` format
+  to `Supplied` fails to compile.
