@@ -14,6 +14,7 @@
 //! routes as data and its `Router` is *derived* from them, so [`published`] is the whole surface by
 //! construction. The seam is the same; only the direction of the dependency changed.
 
+mod agents;
 mod catalogue;
 mod connections;
 mod health;
@@ -41,6 +42,7 @@ const MODULES: &[Module] = &[
     identity::MODULE,
     signin::MODULE,
     connections::MODULE,
+    agents::MODULE,
 ];
 
 /// A feature module's contribution to the surface.
@@ -246,6 +248,34 @@ mod tests {
             .status()
     }
 
+    /// Drive one anonymous `POST` through a fully assembled app and report what it answered, body
+    /// included — a refusal is only worth anything if what it says can be read.
+    async fn anonymous_post(app: Router, path: &str) -> (StatusCode, String) {
+        let mut service = app.into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("a router is always ready");
+
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri(path)
+            .body(Body::empty())
+            .expect("a well-formed request");
+
+        let response = service
+            .call(request)
+            .await
+            .expect("a router is infallible")
+            .into_response();
+
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a response body");
+
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// A path a request can actually be sent to: `/x/{id}` matches nothing literally, and a route
     /// that 404s would be miscounted as unreachable. Later stories will add parameterised paths;
     /// this keeps the enumeration total when they do.
@@ -375,6 +405,45 @@ mod tests {
             tenant_addressed.is_empty(),
             "these routes take a tenant in the path, which is a vector a caller controls; the \
              tenant must come from the resolved principal: {tenant_addressed:?}",
+        );
+    }
+
+    /// **X-36.** This surface publishes a route that mints an agent principal, and it requires one.
+    ///
+    /// `docs/vision.md`'s second sentence names an agent as the primary caller, and until this
+    /// route existed nothing in this binary could create one: an agent became a principal only
+    /// through the development identity, a roster of secretless handles that forces a loopback
+    /// bind. So this is the gap stated as an enumeration over the published surface rather than as
+    /// a claim about one module — a mint route that stopped being published, or that quietly became
+    /// [`Access::Anonymous`], is the same regression either way.
+    ///
+    /// The second half is the Acceptance's own: an anonymous caller is refused, and the refusal
+    /// names nothing about what exists. It is checked here rather than in the module because the
+    /// thing that decides it is the declared access, which lives in this file's guard.
+    #[tokio::test]
+    async fn the_surface_mints_an_agent_principal_and_refuses_an_anonymous_caller() {
+        let minting: Vec<_> = published()
+            .filter(|(module, _)| module.name == "agents")
+            .map(|(_, route)| (route.path, route.access))
+            .collect();
+
+        assert_eq!(
+            minting,
+            vec![("/api/agents", Access::Principal)],
+            "nothing on this surface mints an agent principal, so the primary caller the vision \
+             names can become one only through the development identity",
+        );
+
+        let (status, body) = anonymous_post(app(AppState::without_identity()), "/api/agents").await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "minting requires an authenticated principal",
+        );
+        assert!(
+            !body.contains("agent"),
+            "the refusal must name nothing about what exists: {body}",
         );
     }
 
