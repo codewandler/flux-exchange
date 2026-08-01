@@ -28,7 +28,10 @@ declared `risk`, `effects` and `idempotency`.
 - (not started)
 
 ## Notes
-- `use catalog::…` — the crate's lib name is `catalog`, not `connector_catalog`.
+- **The import is `connector_catalog`, not `catalog`** — corrected 2026-08-01 after it cost an
+  implementor time. The crate does set `[lib] name = "catalog"`, but this workspace declares it under
+  the dependency key `connector-catalog`, and a renamed key is what Cargo links it as. Either alias
+  it (`use connector_catalog as catalog;`) or spell it out.
 - `ConnectorSurface` in `crates/exchange-host/src/lib.rs` is the host-side view; it is a *view* of
   the catalogue, never a second model of one.
 - **`catalog::Operation` declares `risk` and `idempotency` but has no `effects` field** (checked
