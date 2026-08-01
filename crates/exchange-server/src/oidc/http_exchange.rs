@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use exchange_host::async_trait;
 use jsonwebtoken::jwk::{AlgorithmParameters, Jwk, JwkSet};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 
 use super::config::OidcConfig;
@@ -141,10 +141,9 @@ impl HttpTokenExchange {
             )));
         }
 
-        let keys: JwkSet = response
-            .json()
-            .await
-            .map_err(|source| ExchangeError::Unreachable(format!("unreadable key set: {source}")))?;
+        let keys: JwkSet = response.json().await.map_err(|source| {
+            ExchangeError::Unreachable(format!("unreadable key set: {source}"))
+        })?;
 
         let mut cache = self.keys.lock().unwrap_or_else(|poisoned| {
             self.keys.clear_poison();
@@ -356,5 +355,575 @@ impl Audience {
             Self::One(one) => vec![one],
             Self::Many(many) => many,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use axum::extract::State;
+    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, post};
+    use axum::Router;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+
+    use crate::oidc::pkce::{base64url, Verifier};
+
+    /// The provider these tests stand in for, and this host's registration at it.
+    const ISSUER: &str = "https://accounts.example.com";
+    const CLIENT_ID: &str = "flux-exchange";
+    const TENANT: &str = "acme";
+
+    /// The `kid` the stub provider publishes. A token naming anything else is a stranger's.
+    const KID: &str = "x04-test-key";
+
+    /// A 2048-bit RSA keypair generated for these tests and used nowhere else.
+    ///
+    /// Embedded rather than generated per run for two reasons: the workspace carries no RSA
+    /// key-generation crate, and a fixed key makes a failure reproducible rather than something that
+    /// happened once on somebody's machine. It signs nothing outside this module and is worthless if
+    /// it leaks — which is the only safe kind of private key to check in.
+    const PRIVATE_KEY: &str = r"-----BEGIN PRIVATE KEY-----
+MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCOSzjxbi1XQlL4
+dvJPiFCOPd3w7esMZ5aragucD0P7hjQAaOD2m/pq8kPkJyUl0GaIMWWe0aeBu5OS
+vX+d36erLkKP+WX+pJ4J/qD3qXGtzj6RQdjpg2bwas7JuTxUFLhbX1THjR3cU0Mt
+zJW6O3SQdErewvTj/MMV6UGi6h6GvPnlDV/0rzudXsXL4vjfhK0SMuGtitHUvbHR
+lCGZEvXG+859ZJ1hgyBkiNEDTO22opgNd7r5UrFfcyMn3BfdvqDF64FStJV0tlt7
+J4tZxaen/3CEbPhZ/MeVe8Ivx+yDVbvSb5nvQthUsUZoZvh6CiQzsIpva4kRkWaL
+UX9TF//fAgMBAAECggEAAm5u830mTC/ncAnERoSgmmrx4GczACbC+yctj0Xu1keV
+muOFOIwzbAwQtJTQpy6XmesnfokRkNTDhvCIU4pvTdcABIAb9I0b4DWCyvM7wd8H
+ev7s4GyXioh2A8S6Waty96i6L6C4f7vH0ZVbLO/4JBcV8mwoDWnpFsuXYgZtwsVF
+r6NRdSjJh6oeYhuhIypKZTKpQDCVGk2aNe8Bc02oEOAJvEsfw6RBAF7+wJ4eXpKN
+tf8nCk6u0PET1i9OE3H+yElsb6yZs2unG3twSyE7sGds+nA8rnJHwk9qkoOzXM/T
+In6SuBypDgI6mJN0QfPKeaS+p8hG+WDLjBb9Ydrs2QKBgQDDVCnUjcBhZSI7gURH
+4ChEQp6E3qRIzoTfOa691h5esGmi+ONc54V+rA7zT5RjhW0TKKTKPOtuaNqq8cAb
+qhLhxp5QjB2PTu7pg45AgczBykBUCfHwQkLRXb174uSINayWpFj2VNkmcXqPhaxk
+QbjiR3Oj9Y6T/xtm3CaBMHhoxwKBgQC6feniskdbDMR5K6QVcLpGtpKLoVT2BOEv
++G6xm3Vc8F6/HvXAUg6NzakyfSbYSyKh6k27LN1FG0XhHpGUxuBjOVH6dae9owMa
+1nDEJCsBADOc1VcTNt0U+4q2fDkvYNveqJLMmHWLVDG8wnvnJiHWpUgl3qfJOHZS
+FbBj8C8IKQKBgQCe5Vt19q5WTJAxefHSyo3XIZ6Ulg1s0NuUP/dfpMxl2PrGQdOr
+YwfcyRkMY2NiJktZ94k+n5oh4hhoUWsm1g6wLgPhoGn3h42g1o0k+rJXvzDfbIut
+GCoE6U3YdvXTvF4e2akpElLoDA5YrLRVhoVhRiDTc1G+IRvobBTCqWx6RwKBgHNh
+Yan7CQDBFnGtWXhWZTlIzcQLzcfkXvpR5xKFjwgwQz5Vxk/1tMFxA4SUP8tEOSoa
+D3uFl2ShKgvM4N8+aCebmCewUVaXm10oXV5MzjpxSH141MWzhPbtZfXfR3YTpBTP
+EPv6O4c3UQpq/UOWqQrm+YtMhVyOTU4d0yMRv9d5AoGBAKEZXq+xvJ5EjA5D1OQ7
+CqRIjIU4/SyJI/Lyd+qycLbEHmzOOWD8qUR6hUovXiV87VHgxTzJs3svs8eCgK8M
+PN4IR7r37FnmBdDZ6ONCJr7u4KtrUM5ud8GlPAHID/+OPfZyM7E1eO1tT2/anu+u
+ZADuam86Y2DQEywnzwYrY/F1
+-----END PRIVATE KEY-----
+";
+
+    /// [`PRIVATE_KEY`]'s public half, exactly as a provider publishes it.
+    ///
+    /// The confusion attack's "secret": public by construction, which is the whole point of it.
+    const PUBLIC_KEY: &str = r"-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjks48W4tV0JS+HbyT4hQ
+jj3d8O3rDGeWq2oLnA9D+4Y0AGjg9pv6avJD5CclJdBmiDFlntGngbuTkr1/nd+n
+qy5Cj/ll/qSeCf6g96lxrc4+kUHY6YNm8GrOybk8VBS4W19Ux40d3FNDLcyVujt0
+kHRK3sL04/zDFelBouoehrz55Q1f9K87nV7Fy+L434StEjLhrYrR1L2x0ZQhmRL1
+xvvOfWSdYYMgZIjRA0zttqKYDXe6+VKxX3MjJ9wX3b6gxeuBUrSVdLZbeyeLWcWn
+p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
+3wIDAQAB
+-----END PUBLIC KEY-----
+";
+
+    /// [`PUBLIC_KEY`]'s modulus and exponent, base64url, as the JWK spells them.
+    const MODULUS: &str = "jks48W4tV0JS-HbyT4hQjj3d8O3rDGeWq2oLnA9D-4Y0AGjg9pv6avJD5CclJdBmiDFlntGngbuTkr1_nd-nqy5Cj_ll_qSeCf6g96lxrc4-kUHY6YNm8GrOybk8VBS4W19Ux40d3FNDLcyVujt0kHRK3sL04_zDFelBouoehrz55Q1f9K87nV7Fy-L434StEjLhrYrR1L2x0ZQhmRL1xvvOfWSdYYMgZIjRA0zttqKYDXe6-VKxX3MjJ9wX3b6gxeuBUrSVdLZbeyeLWcWnp_9whGz4WfzHlXvCL8fsg1W70m-Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F_Uxf_3w";
+    const EXPONENT: &str = "AQAB";
+
+    /// The `exp` every test token carries: far enough out that nothing here turns on the clock.
+    /// `verify` does not check it anyway — `Oidc::admit` does — so this only has to parse.
+    const EXPIRES_AT: i64 = 4_102_444_800;
+
+    /// One request the stub provider was asked at `/token`.
+    #[derive(Clone)]
+    struct TokenRequest {
+        /// The `Authorization` header, which is where the client secret must be.
+        authorization: Option<String>,
+        /// The form body verbatim, which is where it must not be.
+        body: String,
+    }
+
+    /// What the stub answers at `/token`.
+    struct Answer {
+        status: StatusCode,
+        body: String,
+    }
+
+    /// The stub's shared state: what to answer, and what it has been asked.
+    struct Stub {
+        token: Answer,
+        jwks: String,
+        received: Mutex<Vec<TokenRequest>>,
+    }
+
+    /// A provider on loopback, over real HTTP.
+    ///
+    /// A real socket rather than a stubbed `TokenExchange`, because the seam under test *is* the
+    /// HTTP one: which header the secret went in, what a 500 means as against a 400, and what a
+    /// connection refused turns into are all invisible to a test that calls `verify` directly.
+    struct StubProvider {
+        base: String,
+        received: Arc<Stub>,
+        server: JoinHandle<std::io::Result<()>>,
+    }
+
+    impl Drop for StubProvider {
+        /// The server holds a port and a task; a test that finished with it is done with both.
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl StubProvider {
+        /// Start a provider answering `token` at `/token` and publishing `jwks` at `/jwks`.
+        async fn serving(token: Answer, jwks: String) -> Self {
+            let stub = Arc::new(Stub {
+                token,
+                jwks,
+                received: Mutex::new(Vec::new()),
+            });
+
+            let app = Router::new()
+                .route("/token", post(token_endpoint))
+                .route("/jwks", get(jwks_endpoint))
+                .with_state(Arc::clone(&stub));
+
+            // Port 0, for the same reason `health_answers_over_a_socket_on_the_default_interface`
+            // uses it: several of these run at once and none of them may depend on a free fixed port.
+            let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .await
+                .expect("loopback is bindable");
+            let local = listener
+                .local_addr()
+                .expect("a bound listener has an address");
+
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+            Self {
+                base: format!("http://{local}"),
+                received: stub,
+                server,
+            }
+        }
+
+        /// Every request the token endpoint was asked, in order.
+        fn token_requests(&self) -> Vec<TokenRequest> {
+            self.received
+                .received
+                .lock()
+                .expect("no test panics holding this lock")
+                .clone()
+        }
+    }
+
+    async fn token_endpoint(
+        State(stub): State<Arc<Stub>>,
+        headers: HeaderMap,
+        body: String,
+    ) -> Response {
+        stub.received
+            .lock()
+            .expect("no test panics holding this lock")
+            .push(TokenRequest {
+                authorization: headers
+                    .get(AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string),
+                body,
+            });
+
+        (
+            stub.token.status,
+            [(CONTENT_TYPE, "application/json")],
+            stub.token.body.clone(),
+        )
+            .into_response()
+    }
+
+    async fn jwks_endpoint(State(stub): State<Arc<Stub>>) -> Response {
+        ([(CONTENT_TYPE, "application/json")], stub.jwks.clone()).into_response()
+    }
+
+    /// An address on loopback with nothing behind it.
+    ///
+    /// Bound to learn a port the OS considers free, then released, so dialling it is refused at once
+    /// rather than hanging until [`HTTP_TIMEOUT`].
+    async fn nobody_listening() -> String {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("loopback is bindable");
+        let local = listener
+            .local_addr()
+            .expect("a bound listener has an address");
+
+        drop(listener);
+
+        format!("http://{local}")
+    }
+
+    /// The key set the stub publishes: one RSA key, named [`KID`].
+    fn published_keys() -> String {
+        json!({
+            "keys": [{
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": KID,
+                "n": MODULUS,
+                "e": EXPONENT,
+            }],
+        })
+        .to_string()
+    }
+
+    /// The claims every token in these tests carries.
+    ///
+    /// `aud` is the **list** spelling and `email` is absent: both are the shapes a host that only
+    /// modelled the common case gets wrong, and the happy path asserts they survive the round trip.
+    fn claims() -> serde_json::Value {
+        json!({
+            "iss": ISSUER,
+            "aud": [CLIENT_ID, "another-audience"],
+            "sub": "the-operator",
+            "exp": EXPIRES_AT,
+            "nonce": "the-bound-nonce",
+        })
+    }
+
+    /// [`claims`], signed with `algorithm` under `key` and labelled with `kid`.
+    fn signed_with(algorithm: Algorithm, kid: &str, key: &EncodingKey) -> String {
+        let mut header = Header::new(algorithm);
+        header.kid = Some(kid.to_string());
+
+        encode(&header, &claims(), key).expect("the test claims encode")
+    }
+
+    /// [`claims`], signed by the key the stub publishes.
+    fn genuine_token() -> String {
+        let signing =
+            EncodingKey::from_rsa_pem(PRIVATE_KEY.as_bytes()).expect("the test key is a valid PEM");
+
+        signed_with(Algorithm::RS256, KID, &signing)
+    }
+
+    /// A successful token response carrying `id_token`.
+    fn answering_with(id_token: &str) -> Answer {
+        Answer {
+            status: StatusCode::OK,
+            body: json!({
+                "access_token": "an-access-token",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+                "id_token": id_token,
+            })
+            .to_string(),
+        }
+    }
+
+    /// Redeem a code at `base`, with a configuration pointed at it.
+    async fn redeem_against(base: &str) -> Result<SignedClaims, ExchangeError> {
+        let config = OidcConfig::for_test_against(ISSUER, CLIENT_ID, TENANT, base);
+        let exchange = HttpTokenExchange::new(&config).expect("the HTTP client builds");
+        let verifier = Verifier::generate().expect("the OS supplies entropy");
+
+        exchange
+            .redeem(Redemption {
+                code: "an-authorization-code",
+                verifier: &verifier,
+                redirect_uri: config.redirect_uri(),
+                client_id: config.client_id(),
+                client_secret: config.client_secret(),
+            })
+            .await
+    }
+
+    /// Redeem a code at `provider`.
+    async fn redeem_at(provider: &StubProvider) -> Result<SignedClaims, ExchangeError> {
+        redeem_against(&provider.base).await
+    }
+
+    /// RFC 7617 `basic-credentials`: `user:password`, standard base64 with padding.
+    ///
+    /// Derived from [`base64url`] rather than written a second time — the two alphabets differ only
+    /// in the final two characters, and in whether the result is padded.
+    fn basic_credentials(user: &str, password: &str) -> String {
+        let mut encoded = base64url(format!("{user}:{password}").as_bytes())
+            .replace('-', "+")
+            .replace('_', "/");
+
+        while !encoded.len().is_multiple_of(4) {
+            encoded.push('=');
+        }
+
+        encoded
+    }
+
+    /// The whole of the happy path over a socket: the code is spent, the id token comes back, its
+    /// signature verifies against the published key, and every claim this host carries forward
+    /// arrives intact.
+    ///
+    /// `aud` is a list and `email` is absent deliberately: those are the two shapes a provider is
+    /// free to send and a host is tempted not to model.
+    #[tokio::test]
+    async fn a_correctly_signed_id_token_is_redeemed() {
+        let provider =
+            StubProvider::serving(answering_with(&genuine_token()), published_keys()).await;
+
+        let claims = redeem_at(&provider)
+            .await
+            .expect("a token signed by the published key is redeemed");
+
+        assert_eq!(
+            claims,
+            SignedClaims {
+                issuer: ISSUER.to_string(),
+                audience: vec![CLIENT_ID.to_string(), "another-audience".to_string()],
+                subject: "the-operator".to_string(),
+                nonce: Some("the-bound-nonce".to_string()),
+                expires_at: EXPIRES_AT,
+                email: None,
+            },
+        );
+    }
+
+    /// The attack this module's documentation claims to close, spelled out.
+    ///
+    /// The forger has the provider's **public** key — it is published, that is what public means —
+    /// and hands those bytes to HMAC as a shared secret, betting that the verifier reads `alg` off
+    /// the header and then looks up "the key for this `kid`". A verifier that does both computes an
+    /// HMAC with a value the attacker also has, and every claim in the token is the attacker's to
+    /// choose.
+    ///
+    /// It is refused here before any signature is computed, because
+    /// [`permitted_algorithms`] reads the JWK and an RSA key can never name `HS256`.
+    ///
+    /// Both spellings of "the public key" are tried, because a vulnerable verifier passes whatever
+    /// bytes it happens to be holding: the PEM, if the provider publishes one, or the JWK's modulus,
+    /// if it publishes a key set. An attacker has both — so a guard that only stopped one of them
+    /// would not be a guard.
+    #[tokio::test]
+    async fn a_token_signed_with_the_public_key_as_an_hmac_secret_is_refused() {
+        for (spelling, secret) in [
+            ("the published PEM", PUBLIC_KEY.as_bytes()),
+            ("the JWK's modulus", MODULUS.as_bytes()),
+        ] {
+            let forged = EncodingKey::from_secret(secret);
+            let provider = StubProvider::serving(
+                answering_with(&signed_with(Algorithm::HS256, KID, &forged)),
+                published_keys(),
+            )
+            .await;
+
+            let refusal = redeem_at(&provider).await;
+
+            assert!(
+                matches!(refusal, Err(ExchangeError::Rejected)),
+                "a token MAC'd with {spelling} must be refused, not {refusal:?}",
+            );
+        }
+    }
+
+    /// `alg: none`: the signature is empty and the token says not to check it.
+    ///
+    /// Hand-assembled, because no honest signer will produce one — which is the point. Nothing in
+    /// this module may treat the header as an instruction.
+    #[tokio::test]
+    async fn a_token_claiming_alg_none_is_refused() {
+        let header = json!({ "alg": "none", "typ": "JWT", "kid": KID }).to_string();
+        let unsigned = format!(
+            "{}.{}.",
+            base64url(header.as_bytes()),
+            base64url(claims().to_string().as_bytes()),
+        );
+
+        let provider = StubProvider::serving(answering_with(&unsigned), published_keys()).await;
+
+        let refusal = redeem_at(&provider).await;
+
+        assert!(
+            matches!(refusal, Err(ExchangeError::Rejected)),
+            "an unsigned token must be refused, not {refusal:?}",
+        );
+    }
+
+    /// A `kid` the provider never published is refused, rather than sent looking for a key that
+    /// happens to verify.
+    ///
+    /// The token here is **correctly signed** by the only key the provider publishes, and differs
+    /// from the happy path in nothing but the `kid` it names. So this fails the moment key selection
+    /// falls back to "try the ones we have" — which is the bug, because that turns an attacker's
+    /// choice of `kid` into a verifier that shops for a key.
+    #[tokio::test]
+    async fn a_token_naming_an_unpublished_kid_is_refused() {
+        let signing =
+            EncodingKey::from_rsa_pem(PRIVATE_KEY.as_bytes()).expect("the test key is a valid PEM");
+        let provider = StubProvider::serving(
+            answering_with(&signed_with(
+                Algorithm::RS256,
+                "a-kid-nobody-published",
+                &signing,
+            )),
+            published_keys(),
+        )
+        .await;
+
+        let refusal = redeem_at(&provider).await;
+
+        assert!(
+            matches!(refusal, Err(ExchangeError::Rejected)),
+            "a token naming an unpublished kid must be refused, not {refusal:?}",
+        );
+    }
+
+    /// The provider saying no and the provider being broken are different events.
+    ///
+    /// Load-bearing rather than tidy: `routes::signin` turns one into a 401 and the other into a
+    /// 503, and `a_refusal_tells_the_caller_nothing_about_the_provider` reads that split. Collapsing
+    /// them sends an operator to reset a password during an outage.
+    #[tokio::test]
+    async fn a_refused_grant_and_an_unreachable_provider_do_not_collapse() {
+        // The provider refusing the code: the one case that is genuinely the caller's credential.
+        let refusing = StubProvider::serving(
+            Answer {
+                status: StatusCode::BAD_REQUEST,
+                body: json!({ "error": "invalid_grant" }).to_string(),
+            },
+            published_keys(),
+        )
+        .await;
+
+        let refused = redeem_at(&refusing).await;
+        assert!(
+            matches!(refused, Err(ExchangeError::Rejected)),
+            "a 400 invalid_grant is the provider refusing the code, not {refused:?}",
+        );
+
+        // The provider broken. Not the caller's credential, and not the caller's problem.
+        let broken = StubProvider::serving(
+            Answer {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                body: json!({ "error": "server_error" }).to_string(),
+            },
+            published_keys(),
+        )
+        .await;
+
+        let unreachable = redeem_at(&broken).await;
+        assert!(
+            matches!(unreachable, Err(ExchangeError::Unreachable(_))),
+            "a 500 is the provider being broken, not {unreachable:?}",
+        );
+
+        // A 200 whose body is not a token response: a proxy's error page, most plausibly. Nothing
+        // about the caller's code is known to be wrong, so this is not their refusal either.
+        let babbling = StubProvider::serving(
+            Answer {
+                status: StatusCode::OK,
+                body: "<html>the gateway would like a word</html>".to_string(),
+            },
+            published_keys(),
+        )
+        .await;
+
+        let unreadable = redeem_at(&babbling).await;
+        assert!(
+            matches!(unreadable, Err(ExchangeError::Unreachable(_))),
+            "an unreadable 200 is not a refusal of the code, not {unreadable:?}",
+        );
+
+        // Nothing listening at all.
+        let absent = redeem_against(&nobody_listening().await).await;
+        assert!(
+            matches!(absent, Err(ExchangeError::Unreachable(_))),
+            "a connection refused is not a refusal of the code, not {absent:?}",
+        );
+    }
+
+    /// A successful OAuth exchange with no id token is a failed OIDC sign-in.
+    ///
+    /// The provider has issued an access token and said nothing about who the human is. There is no
+    /// identity to bind a session to, so there is nothing to do but refuse.
+    #[tokio::test]
+    async fn a_successful_exchange_carrying_no_id_token_is_refused() {
+        let provider = StubProvider::serving(
+            Answer {
+                status: StatusCode::OK,
+                body: json!({ "access_token": "an-access-token", "token_type": "Bearer" })
+                    .to_string(),
+            },
+            published_keys(),
+        )
+        .await;
+
+        let refusal = redeem_at(&provider).await;
+
+        assert!(
+            matches!(refusal, Err(ExchangeError::Rejected)),
+            "an exchange with no id token establishes no identity, not {refusal:?}",
+        );
+    }
+
+    /// `client_secret_basic`, asserted at the provider rather than at the call site.
+    ///
+    /// The header is where a secret is least likely to be logged; the form body is where request
+    /// logging, access logs and error reporters all pick it up. Asserted by inspecting what the stub
+    /// actually received, because the difference between the two is invisible from this side.
+    #[tokio::test]
+    async fn the_client_secret_travels_as_http_basic_and_never_in_the_body() {
+        let provider =
+            StubProvider::serving(answering_with(&genuine_token()), published_keys()).await;
+
+        redeem_at(&provider)
+            .await
+            .expect("the happy path, so the request is the thing under test");
+
+        let config = OidcConfig::for_test_against(ISSUER, CLIENT_ID, TENANT, &provider.base);
+        let secret = config.client_secret().expose();
+
+        let requests = provider.token_requests();
+        let [request] = requests.as_slice() else {
+            panic!("exactly one token request, got {}", requests.len());
+        };
+
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some(format!("Basic {}", basic_credentials(CLIENT_ID, secret)).as_str()),
+            "the secret goes to the token endpoint as HTTP Basic",
+        );
+
+        assert!(
+            !request.body.contains(secret),
+            "and never in the form body: {}",
+            request.body,
+        );
+        assert!(
+            !request.body.contains("client_secret"),
+            "not even under its own name: {}",
+            request.body,
+        );
+
+        // What the body *must* carry, so this test fails if the secret left it by the request
+        // losing its body rather than by the secret moving to the header.
+        assert!(
+            request.body.contains("grant_type=authorization_code"),
+            "{}",
+            request.body,
+        );
+        assert!(
+            request.body.contains("code=an-authorization-code"),
+            "{}",
+            request.body
+        );
+        assert!(request.body.contains("code_verifier="), "{}", request.body);
     }
 }

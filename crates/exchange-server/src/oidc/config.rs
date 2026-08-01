@@ -373,12 +373,24 @@ mod tests {
     use std::collections::HashMap;
 
     /// A complete, well-formed environment.
+    ///
+    /// Every value is distinguishable from every other, so a test asserting where one landed cannot
+    /// pass on a coincidence. `every_configured_value_lands_in_its_own_field` is what depends on
+    /// that; the rest only need this map to satisfy `REQUIRED`.
     fn complete() -> HashMap<&'static str, String> {
         HashMap::from([
             (ISSUER_ENV, "https://accounts.example.com".to_string()),
             (
                 AUTHORIZATION_ENDPOINT_ENV,
                 "https://accounts.example.com/authorize".to_string(),
+            ),
+            (
+                TOKEN_ENDPOINT_ENV,
+                "https://accounts.example.com/oauth/token".to_string(),
+            ),
+            (
+                JWKS_URI_ENV,
+                "https://keys.example.com/jwks.json".to_string(),
             ),
             (CLIENT_ID_ENV, "flux-exchange".to_string()),
             (CLIENT_SECRET_ENV, "s3cr3t-value".to_string()),
@@ -515,6 +527,47 @@ mod tests {
         assert!(
             whole.contains("flux-exchange"),
             "while still being useful about everything that is not a secret: {whole}",
+        );
+    }
+
+    /// [`REQUIRED`] and the positional reads in [`OidcConfig::read`] are one list written twice, and
+    /// this is what keeps the two spellings in step.
+    ///
+    /// `read` consumes the supplied values **in `REQUIRED`'s order**, so a variable added to one
+    /// list and not the other shifts every value after it — silently, into a config that is
+    /// well-formed and wrong. A host whose token endpoint holds its JWKS URI does not fail at
+    /// startup; it fails at somebody's first sign-in.
+    ///
+    /// Every value here is distinguishable, so this fails on any shift rather than only on a shift
+    /// between two fields that happened to differ.
+    #[test]
+    fn every_configured_value_lands_in_its_own_field() {
+        let environment = complete();
+        let config = read(&environment).expect("a complete environment configures OIDC");
+
+        // Read back through the accessors, since those are what the flow uses. Each assertion names
+        // the variable it came from, so a shift reads as "the token endpoint holds the JWKS URI"
+        // rather than as an opaque inequality.
+        let expected = |name: &'static str| environment[name].clone();
+
+        assert_eq!(config.issuer(), expected(ISSUER_ENV));
+        assert_eq!(
+            config.authorization_endpoint(),
+            expected(AUTHORIZATION_ENDPOINT_ENV),
+        );
+        assert_eq!(config.token_endpoint(), expected(TOKEN_ENDPOINT_ENV));
+        assert_eq!(config.jwks_uri(), expected(JWKS_URI_ENV));
+        assert_eq!(config.client_id(), expected(CLIENT_ID_ENV));
+        assert_eq!(config.client_secret().expose(), expected(CLIENT_SECRET_ENV));
+        assert_eq!(config.redirect_uri(), expected(REDIRECT_URI_ENV));
+        assert_eq!(config.tenant().as_str(), expected(TENANT_ENV));
+
+        // The other half of "in step": a variable this test does not account for is one whose value
+        // nothing above would notice going astray.
+        assert_eq!(
+            REQUIRED.len(),
+            environment.len(),
+            "every variable in REQUIRED must have a distinguishable value here: {REQUIRED:?}",
         );
     }
 

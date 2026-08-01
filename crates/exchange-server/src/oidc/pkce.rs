@@ -97,7 +97,12 @@ impl Challenge {
 /// Written out for the same reason the cookie parser in [`session`](crate::session) is: the
 /// workspace carries no base64 crate, and this direction of the transform is a 20-line table
 /// lookup with published vectors rather than a grammar with edge cases.
-fn base64url(bytes: &[u8]) -> String {
+///
+/// `pub(super)` so [`http_exchange`](super::http_exchange)'s tests hand-assemble a JWT with the one
+/// encoder this module already proves against RFC 4648's vectors. A second copy in a test module
+/// would be a second thing to keep correct, and a forgery test built on a broken encoder passes for
+/// the wrong reason.
+pub(super) fn base64url(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
     let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
