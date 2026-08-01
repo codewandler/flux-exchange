@@ -16,8 +16,9 @@
 use std::sync::{Arc, Mutex};
 
 use exchange_host::{
-    admit_runtime, ConnectorSurface, Contexts, Deployment, Egress, InvokeRefusal, Invoker,
-    MemoryConfig, Principal, PrincipalKind, Runtime, Secret, SecretStore, Sent, Tenant,
+    admit_runtime, ConnectorSurface, Contexts, Deployment, Egress, Grant, GrantRefusal, Grants,
+    InvokeRefusal, Invoker, MemoryConfig, Principal, PrincipalKind, Risk, Runtime, Secret,
+    SecretStore, Selector, Sent, Tenant,
 };
 use flux_runtime::{Tool, ToolContext};
 use serde_json::{json, Value};
@@ -205,17 +206,59 @@ fn caller() -> Principal {
     )
 }
 
-/// An invoker over a store, an egress and an empty configuration.
+/// The grants a tenant holds, as the port, so a test says what this tenant may run in one place.
+///
+/// A local type rather than something published from the crate: `exchange-host` deliberately ships
+/// no in-memory grant store, for the reason `AGENTS.md` refuses a credential store that falls back
+/// to memory — a store that forgets what a tenant may run is a host that refuses everything after a
+/// restart, and publishing one would put that composition one line away.
+struct Held(Vec<Grant>);
+
+impl Grants for Held {
+    fn held(&self, _: &Tenant) -> Vec<Grant> {
+        self.0.clone()
+    }
+
+    fn set(&self, _: &Tenant, _: &[Grant]) -> Result<(), GrantRefusal> {
+        unreachable!(
+            "these tests hold grants rather than editing them; `grant.rs` drives the store"
+        )
+    }
+}
+
+/// An invoker over a store, an egress, an empty configuration and `grants`.
 ///
 /// `MultiTenant` throughout, because that is the deployment the invariants are about — and because
 /// a test that quietly ran single-tenant would be exercising the permissive branch of every gate.
-fn invoker(credentials: Arc<dyn SecretStore>, egress: Egress) -> Invoker {
+fn invoker_granting(
+    credentials: Arc<dyn SecretStore>,
+    egress: Egress,
+    grants: Vec<Grant>,
+) -> Invoker {
     Invoker::new(
         Deployment::MultiTenant,
         egress,
         credentials,
         Arc::new(MemoryConfig::new()),
+        Arc::new(Held(grants)),
         contexts(),
+    )
+}
+
+/// An invoker whose tenant may run anything github and zendesk publish.
+///
+/// The grant is what the tests below that are **not** about the grant gate need: since X-13 an
+/// invocation is admitted by a grant, so a helper that granted nothing would make every one of them
+/// refuse for a reason that has nothing to do with what it asserts. It is still connector-scoped —
+/// there is no wildcard grant, deliberately, and a test helper is not the place to invent one.
+fn invoker(credentials: Arc<dyn SecretStore>, egress: Egress) -> Invoker {
+    invoker_granting(
+        credentials,
+        egress,
+        vec![
+            Grant::for_connector("github", Selector::any()),
+            Grant::for_connector("zendesk", Selector::any()),
+        ],
     )
 }
 
@@ -373,6 +416,7 @@ async fn a_templated_host_is_still_not_the_callers_to_name() {
             egress,
             zendesk_store(SENTINEL).await,
             Arc::new(settings.clone()),
+            Arc::new(Held(vec![Grant::for_connector("zendesk", Selector::any())])),
             contexts(),
         );
 
@@ -557,6 +601,223 @@ async fn a_credential_too_short_to_redact_is_refused_rather_than_sent() {
     assert_eq!(refusal.sent(), Sent::No);
     assert!(!refusal.retryable());
     assert_eq!(wire.lock().expect("the wire lock").calls.len(), 0);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The grant gate (X-13)
+// ---------------------------------------------------------------------------------------------
+
+/// A write github publishes, with every parameter its own Flux declares.
+///
+/// Complete on purpose: an incomplete parameter object is refused by the *pack*, one gate later, so
+/// a test driving one would pass whether or not the grant gate existed. This is the call that runs
+/// when nothing refuses it — which is exactly what it did at this story's merge base.
+fn a_github_write() -> Value {
+    json!({
+        "owner": "codewandler",
+        "repo": "flux-exchange",
+        "title": "no",
+        "body": "no",
+        "labels": [],
+        "assignees": [],
+    })
+}
+
+/// **Failing-first, Acceptance line 2.** A read-only grant admits a connector's reads and refuses
+/// its writes — **with no operation named anywhere in the grant.**
+///
+/// One grant, `risk <= low`, and two invocations of the same connector with the same credential:
+/// the read runs and reaches the wire, the `high`-risk write is refused before anything is
+/// resolved. Nothing here enumerates an id, and nothing in the grant does either — the difference
+/// between the two calls is entirely what the *catalogue* declares about them, which is what makes
+/// this a test of the rule rather than of a list.
+///
+/// At the merge base this test failed on its second half: the write ran, and the recorder held the
+/// `POST` it dispatched.
+#[tokio::test]
+async fn a_read_only_grant_admits_the_reads_of_a_connector_and_refuses_its_writes() {
+    let read_only = || vec![Grant::for_connector("github", Selector::at_most(Risk::Low))];
+
+    let (wire, egress) = silent_egress();
+    let invoker = invoker_granting(github_store(Some(SENTINEL)).await, egress, read_only());
+
+    invoker
+        .invoke(
+            &caller(),
+            "github-repo-get",
+            json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+        )
+        .await
+        .expect("`github-repo-get` is declared `low`, and a `risk <= low` grant admits it");
+    assert_eq!(
+        wire.lock().expect("the wire lock").calls.len(),
+        1,
+        "the read must actually run, or this test is only about refusals",
+    );
+
+    let (wire, egress) = silent_egress();
+    let invoker = invoker_granting(github_store(Some(SENTINEL)).await, egress, read_only());
+
+    let refusal = invoker
+        .invoke(&caller(), "github-issue-create", a_github_write())
+        .await
+        .expect_err("`github-issue-create` is declared `high`, and no grant here admits it");
+
+    assert_eq!(refusal.label(), "not_granted", "{refusal}");
+    assert_eq!(refusal.operation(), Some("github-issue-create"));
+    assert_eq!(refusal.sent(), Sent::No);
+    assert!(
+        !refusal.retryable(),
+        "a grant is not something time supplies"
+    );
+
+    let message = refusal.to_string();
+    assert!(
+        message.contains("triage-bot") && message.contains("github-issue-create"),
+        "the refusal must name the principal and the operation: {message}",
+    );
+    assert_eq!(
+        wire.lock().expect("the wire lock").calls.len(),
+        0,
+        "a refused invocation must leave nothing dispatched",
+    );
+}
+
+/// **Failing-first, Acceptance line 3.** A grant for one connector does not reach another.
+///
+/// The grant is `Selector::any()` — every predicate satisfied — so the only thing standing between
+/// this caller and github is the connector the grant names. A grant that reached every connector
+/// would re-admit whatever the next connection added, without anyone deciding to.
+#[tokio::test]
+async fn a_grant_for_one_connector_does_not_reach_another() {
+    let (wire, egress) = silent_egress();
+    let invoker = invoker_granting(
+        github_store(Some(SENTINEL)).await,
+        egress,
+        vec![Grant::for_connector("zendesk", Selector::any())],
+    );
+
+    let refusal = invoker
+        .invoke(
+            &caller(),
+            "github-repo-get",
+            json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+        )
+        .await
+        .expect_err("a grant for zendesk admits nothing of github's");
+
+    assert_eq!(refusal.label(), "not_granted", "{refusal}");
+    assert_eq!(refusal.sent(), Sent::No);
+    assert_eq!(wire.lock().expect("the wire lock").calls.len(), 0);
+}
+
+/// **Acceptance line 4.** An explicit `deny` beats an explicit `allow`, end to end.
+///
+/// Both halves are driven, because only the pair says anything: the `allow` really does admit an
+/// operation the predicate refuses — a `high`-risk write under `risk <= low`, which runs and
+/// reaches the wire — and adding a `deny` for the same id refuses it again. Without the first, a
+/// grant that admitted nothing at all would pass the second.
+#[tokio::test]
+async fn an_explicit_deny_beats_an_explicit_allow_end_to_end() {
+    let (wire, egress) = silent_egress();
+    let allowed = invoker_granting(
+        github_store(Some(SENTINEL)).await,
+        egress,
+        vec![Grant::for_connector(
+            "github",
+            Selector::at_most(Risk::Low).allow("github-issue-create"),
+        )],
+    );
+
+    allowed
+        .invoke(&caller(), "github-issue-create", a_github_write())
+        .await
+        .expect("an explicit allow admits an operation the predicate would refuse");
+    assert_eq!(
+        wire.lock().expect("the wire lock").calls.len(),
+        1,
+        "the allow must really admit, or the deny below is refusing something already refused",
+    );
+
+    let (wire, egress) = silent_egress();
+    let denied = invoker_granting(
+        github_store(Some(SENTINEL)).await,
+        egress,
+        vec![Grant::for_connector(
+            "github",
+            Selector::at_most(Risk::Low)
+                .allow("github-issue-create")
+                .deny("github-issue-create"),
+        )],
+    );
+
+    let refusal = denied
+        .invoke(&caller(), "github-issue-create", a_github_write())
+        .await
+        .expect_err("an operator who has explicitly denied an operation means it");
+
+    assert_eq!(refusal.label(), "not_granted", "{refusal}");
+    assert_eq!(refusal.sent(), Sent::No);
+    assert_eq!(wire.lock().expect("the wire lock").calls.len(), 0);
+}
+
+/// A tenant that holds nothing runs nothing — the state a composition is in before anybody grants
+/// anything, and the one a fail-closed gate has to get right.
+#[tokio::test]
+async fn a_tenant_holding_no_grant_runs_nothing() {
+    let (wire, egress) = silent_egress();
+    let invoker = invoker_granting(github_store(Some(SENTINEL)).await, egress, Vec::new());
+
+    let refusal = invoker
+        .invoke(
+            &caller(),
+            "github-repo-get",
+            json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+        )
+        .await
+        .expect_err("no grant, nothing runs");
+
+    assert_eq!(refusal.label(), "not_granted", "{refusal}");
+    assert_eq!(wire.lock().expect("the wire lock").calls.len(), 0);
+}
+
+/// The gate sits **before** the credential store, which is where the design puts it.
+///
+/// Driven against a store that holds nothing: an ungranted call refuses with `not_granted` rather
+/// than with the address refusal a granted one gets, and the two statuses from one store are what
+/// says the order is this way round. A refusal that happened *after* a secret had been read would
+/// have moved that secret into this process's memory for a call that was never going to be made.
+#[tokio::test]
+async fn a_call_no_grant_admits_is_refused_before_the_credential_store_is_read() {
+    let (_, egress) = silent_egress();
+    let ungranted = invoker_granting(github_store(None).await, egress, Vec::new());
+
+    let refusal = ungranted
+        .invoke(
+            &caller(),
+            "github-repo-get",
+            json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+        )
+        .await
+        .expect_err("no grant, nothing runs");
+    assert_eq!(refusal.label(), "not_granted", "{refusal}");
+
+    let (_, egress) = silent_egress();
+    let granted = invoker(github_store(None).await, egress);
+
+    let refusal = granted
+        .invoke(
+            &caller(),
+            "github-repo-get",
+            json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+        )
+        .await
+        .expect_err("nothing is stored at github's address for this tenant");
+    assert_eq!(
+        refusal.label(),
+        "refused",
+        "the same call, granted, reaches the store and refuses by address: {refusal}",
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

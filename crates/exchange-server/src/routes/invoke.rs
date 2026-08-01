@@ -37,12 +37,19 @@
 //! redundant name is a name that can *disagree*, which needs a reconciliation rule, and a
 //! reconciliation rule is a decision procedure over caller input about which connector to use.
 //!
-//! # This route is gated by identity alone
+//! # This route is gated by identity **and by grant** (X-13)
 //!
-//! [`Access::Principal`]: a caller this host cannot identify cannot run anything. **It is not gated
-//! by grant** — that is X-13, and `docs/designs/invoke.md` §6 records it as *a stated gap rather
-//! than a position*. There is deliberately no interim scheme here, because a half-grant is worse
-//! than a stated gap: the next story would have to unpick it.
+//! [`Access::Principal`] is the first half: a caller this host cannot identify cannot run anything.
+//! The second half is `exchange_host`'s, and it is not this module's to apply — an operation runs
+//! only if one of the caller's tenant's grants admits it, decided from the operation's own declared
+//! `risk`, `effects` and `idempotency` rather than from a list of ids. A refusal arrives here as
+//! [`InvokeRefusal::NotGranted`] and leaves as `403`.
+//!
+//! `403` rather than `404`, deliberately. Hiding the existence of an operation a caller may not run
+//! would contradict the surface next door: the catalogue is anonymous and publishes every operation
+//! in the build, so a `404` here would be a fiction any stranger can disprove — and an agent that
+//! cannot tell "you may not" from "there is no such thing" reports the wrong one to whoever has to
+//! fix it.
 //!
 //! # `sent` and `retryable` are fields, not inferences
 //!
@@ -68,6 +75,19 @@ use tracing::warn;
 
 use super::{Access, Module, Route};
 use crate::state::AppState;
+
+/// The setting that names the grant store, quoted when no invoker is bound.
+///
+/// Spelled through the host's own constant, and cfg-gated for the reason
+/// [`connections::STORE_SETTING`](super::connections) is: only the *file* binding of
+/// `exchange_host::Grants` is `#[cfg(unix)]`, because a planted grant decides what this host will
+/// run and the file mode is what keeps that to this process's user. The port is not gated, so a
+/// composition on another platform binds its own store and still needs a name to quote.
+#[cfg(unix)]
+const GRANT_SETTING: &str = exchange_host::GRANT_STORE_SETTING;
+/// The same, where the file store does not exist.
+#[cfg(not(unix))]
+const GRANT_SETTING: &str = "FLUX_EXCHANGE_GRANTS";
 
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
@@ -141,6 +161,9 @@ fn refuse(refusal: InvokeRefusal) -> Response {
         // This deployment will not serve that runtime, ever, for anyone. `409` rather than `403`:
         // it is not about who is asking.
         InvokeRefusal::Runtime(_) => StatusCode::CONFLICT,
+        // No grant admits it. `403` rather than `401`: the caller was identified, and presenting a
+        // different token is not the remedy — somebody who holds the tenant has to grant it.
+        InvokeRefusal::NotGranted { .. } => StatusCode::FORBIDDEN,
         // The request could not be composed or authenticated as declared. The body was
         // well-formed; what it asks for cannot be built from what this tenant has connected.
         InvokeRefusal::Refused { .. } => StatusCode::UNPROCESSABLE_ENTITY,
@@ -182,18 +205,25 @@ fn supply_at(refusal: &InvokeRefusal) -> Option<String> {
 
 /// No invoker is bound, so nothing can run.
 ///
-/// `503` and the setting's name, in the shape [`connections`](super::connections) already uses:
-/// this is a host that cannot serve the request, not a request that was wrong. An invoker exists
-/// exactly when a credential store is bound, because an operation without one would send every
-/// request unauthenticated.
+/// `503` and the settings' names, in the shape [`connections`](super::connections) already uses:
+/// this is a host that cannot serve the request, not a request that was wrong.
+///
+/// An invoker exists exactly when **both** a credential store and a grant store are bound. Without
+/// the first, every request would go out unauthenticated; without the second (X-13) there is
+/// nowhere for a grant to live, so nothing could admit an operation — and the alternative reading,
+/// that an absent grant store admits everything, is the exposure that story closed. Both settings
+/// are named because this host does not say which one is missing: that is a fact about the
+/// composition, and a caller who is not the operator learns nothing useful from it.
 fn no_invoker() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
             "error": format!(
-                "this host runs no operations: no credential store is bound ({}), so no \
-                 credential could be resolved and nothing would be sent authenticated",
+                "this host runs no operations: it needs a credential store ({}) to resolve a \
+                 credential with and a grant store ({}) to admit an operation from, and it is \
+                 missing at least one of them",
                 crate::routes::connections::STORE_SETTING,
+                GRANT_SETTING,
             ),
         })),
     )
@@ -248,6 +278,49 @@ mod tests {
         ) -> Result<(), exchange_host::StoreError> {
             unreachable!("no test here destroys a credential")
         }
+    }
+
+    /// A bound grant store holding a fixed set, for [`EmptyStore`]'s reason: a local type rather
+    /// than a memory store published from `exchange-host`.
+    ///
+    /// It takes what to hold rather than admitting everything, because both answers are needed
+    /// here — a tenant with a grant and a tenant without one are the two sides of what this route
+    /// now decides, and a helper that could only produce one of them would leave the `403` untested.
+    struct HeldGrants(Vec<exchange_host::Grant>);
+
+    impl exchange_host::Grants for HeldGrants {
+        fn held(&self, _: &exchange_host::Tenant) -> Vec<exchange_host::Grant> {
+            self.0.clone()
+        }
+
+        fn set(
+            &self,
+            _: &exchange_host::Tenant,
+            _: &[exchange_host::Grant],
+        ) -> Result<(), exchange_host::GrantRefusal> {
+            unreachable!("no test here edits a grant through the port")
+        }
+    }
+
+    /// An invoker over a store that holds nothing and the grants a test wants held.
+    fn invoker_holding(grants: Vec<exchange_host::Grant>) -> Arc<exchange_host::Invoker> {
+        Arc::new(
+            crate::execution::invoker(
+                Arc::new(EmptyStore),
+                // No connection settings bound: these tests drive connectors that need none.
+                Arc::new(exchange_host::MemoryConfig::new()),
+                Arc::new(HeldGrants(grants)),
+            )
+            .expect("a usable workspace root"),
+        )
+    }
+
+    /// Everything github publishes, which is what a test that is not about the grant gate needs.
+    fn all_of_github() -> Vec<exchange_host::Grant> {
+        vec![exchange_host::Grant::for_connector(
+            "github",
+            exchange_host::Selector::any(),
+        )]
     }
 
     /// Drive one `POST` through a fully assembled app and report the status and the parsed body.
@@ -333,14 +406,7 @@ mod tests {
     /// caller cannot derive from the status.
     #[tokio::test]
     async fn an_unknown_operation_is_a_404_that_says_it_was_never_sent() {
-        let state = identified().with_invoker(Arc::new(
-            crate::execution::invoker(
-                Arc::new(EmptyStore),
-                // No connection settings bound: these tests drive connectors that need none.
-                Arc::new(exchange_host::MemoryConfig::new()),
-            )
-            .expect("a usable workspace root"),
-        ));
+        let state = identified().with_invoker(invoker_holding(all_of_github()));
 
         let (status, body) =
             post_json(state, "/api/operations/no-such-operation/invoke", json!({})).await;
@@ -359,14 +425,9 @@ mod tests {
     /// and the two fields are this module's decision rather than the host's.
     #[tokio::test]
     async fn a_missing_credential_is_a_422_that_names_the_address_and_is_terminal() {
-        let state = identified().with_invoker(Arc::new(
-            crate::execution::invoker(
-                Arc::new(EmptyStore),
-                // No connection settings bound: these tests drive connectors that need none.
-                Arc::new(exchange_host::MemoryConfig::new()),
-            )
-            .expect("a usable workspace root"),
-        ));
+        // Granted, so what this observes is the credential refusal rather than the grant gate one
+        // step earlier — the order is the design's, and this test is about the later step.
+        let state = identified().with_invoker(invoker_holding(all_of_github()));
 
         let (status, body) = post_json(
             state,
@@ -386,5 +447,85 @@ mod tests {
                 .contains("tenants/acme/com.github.api/token"),
             "the refusal must name the address an operator has to go and put a value at: {body}",
         );
+    }
+
+    /// **X-13, at the route.** A principal whose tenant holds no grant is refused with `403`, and
+    /// the body carries the same two fields every other refusal does.
+    ///
+    /// `403` rather than `404`: the catalogue is anonymous and publishes this operation to
+    /// strangers, so hiding it here would be a fiction the surface next door disproves.
+    #[tokio::test]
+    async fn an_ungranted_operation_is_a_403_that_says_it_was_never_sent() {
+        let state = identified().with_invoker(invoker_holding(Vec::new()));
+
+        let (status, body) = post_json(
+            state,
+            "/api/operations/github-repo-get/invoke",
+            json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["refusal"], "not_granted");
+        assert_eq!(body["operation"], "github-repo-get");
+        assert_eq!(body["sent"], "no");
+        assert_eq!(body["retryable"], false);
+
+        let message = body["message"]
+            .as_str()
+            .expect("a refusal carries a message");
+        assert!(
+            message.contains("triage-bot") && message.contains("github-repo-get"),
+            "the refusal must name the principal and the operation: {body}",
+        );
+        assert!(
+            !message.contains("com.github.api"),
+            "a caller with no grant learns nothing about the connection behind it: {body}",
+        );
+    }
+
+    /// The gate reads the operation's declared risk, not its name.
+    ///
+    /// One grant, `risk <= low`, naming no operation: github's read runs as far as the credential
+    /// store — a `422` about an address, which is the refusal *after* this gate — and github's
+    /// `high`-risk write is refused at it. Two statuses from one grant is what "decided from
+    /// declared metadata" looks like from outside.
+    #[tokio::test]
+    async fn a_read_only_grant_is_read_off_the_catalogue_and_not_off_a_list_of_names() {
+        let read_only = || {
+            vec![exchange_host::Grant::for_connector(
+                "github",
+                exchange_host::Selector::at_most(exchange_host::Risk::Low),
+            )]
+        };
+
+        let (status, body) = post_json(
+            identified().with_invoker(invoker_holding(read_only())),
+            "/api/operations/github-repo-get/invoke",
+            json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "the read is admitted and refuses one step later, for want of a credential: {body}",
+        );
+        assert_eq!(body["refusal"], "refused");
+
+        let (status, body) = post_json(
+            identified().with_invoker(invoker_holding(read_only())),
+            "/api/operations/github-issue-create/invoke",
+            json!({
+                "owner": "codewandler",
+                "repo": "flux-exchange",
+                "title": "no",
+                "body": "no",
+                "labels": [],
+                "assignees": [],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["refusal"], "not_granted");
     }
 }

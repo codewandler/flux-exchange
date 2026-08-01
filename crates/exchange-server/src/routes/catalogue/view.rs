@@ -19,16 +19,15 @@
 //!
 //! 1. **Nothing is enumerated here.** Connectors and operations come from `catalog::providers()`, so
 //!    a connector added upstream is served the day the dependency moves, with no edit here.
-//! 2. **A derived fact is never presented as a declared one** — see [`effects`].
+//! 2. **A derived fact is never presented as a declared one** — the catalogue declares no effects,
+//!    so [`OperationFacts::of`] derives them and [`OperationView::effects_derived`] says it did.
 //! 3. **Nothing is filtered.** The catalogue answers *what exists*; it is not a permission answer.
 //!    See [`OperationView::admitted`].
 //! 4. **A declaration is never a holding.** What a connector declares is a vendor fact; whether a
 //!    tenant has stored one is per-principal state, and it is not on this surface at all. See
 //!    [`ConnectorCredentials`].
 
-use std::collections::BTreeSet;
-
-use exchange_host::{Effect, Idempotency, OperationFacts, Risk};
+use exchange_host::OperationFacts;
 use serde::Serialize;
 
 // The dependency is keyed `connector-catalog` in the workspace manifest, so Cargo links the crate
@@ -76,7 +75,7 @@ pub struct OperationView {
     ///
     /// One caveat, and it is the reason [`effects_derived`](Self::effects_derived) exists beside it:
     /// the field is documented upstream as the operation's *declared* effects, and the catalogue
-    /// declares none. See [`effects`].
+    /// declares none. See [`OperationFacts::of`].
     #[serde(flatten)]
     pub facts: OperationFacts,
     /// The service this operation belongs to — `default` for a connector with one API surface.
@@ -85,7 +84,7 @@ pub struct OperationView {
     pub description: String,
     /// **Always `true`, and it is not decoration.** `effects` above was inferred by this host, not
     /// declared by the connector. A client that treats an inferred effect as a declared one is
-    /// trusting a guess; this field is how it can tell. See [`effects`].
+    /// trusting a guess; this field is how it can tell. See [`OperationFacts::of`].
     pub effects_derived: bool,
     /// Whether *this* principal may call the operation — and `null` is a third state, not a `false`.
     ///
@@ -248,14 +247,17 @@ pub fn connector_credentials(connector: &str) -> Option<ConnectorCredentials> {
 }
 
 /// One catalogue operation, as the wire carries it.
+///
+/// The facts are [`OperationFacts::of`]'s, **not** a projection of this module's own (X-13). They
+/// used to be: `risk`, `idempotency` and `effects` were mapped here, and the grant model had
+/// nothing behind it, so there was one derivation and it happened to live next to the route that
+/// published it. Now `exchange_host` decides admission on these same three fields, and two
+/// projections would be two answers to *"what is this operation's risk"* — with the published one
+/// being the one that is **not** deciding. A client could then predict admission correctly from
+/// this body and still be refused, which is worse than not publishing the metadata at all.
 fn view(operation: &catalog::Operation) -> OperationView {
     OperationView {
-        facts: OperationFacts {
-            id: operation.id.to_string(),
-            risk: risk(operation.risk),
-            idempotency: idempotency(operation.idempotency),
-            effects: effects(operation),
-        },
+        facts: OperationFacts::of(operation),
         service: operation.service.to_string(),
         description: operation.description.to_string(),
         // Every effect above was inferred by `effects`, and saying so is not optional.
@@ -265,66 +267,13 @@ fn view(operation: &catalog::Operation) -> OperationView {
     }
 }
 
-/// The catalogue's risk vocabulary in the host's.
-///
-/// An exhaustive `match` rather than a `_ =>` arm, in both directions: the two enums are
-/// independent mirrors of flux's vocabulary, and a variant added to either must be a compile error
-/// here. A catch-all would answer a risk it had never heard of with a plausible wrong level, and a
-/// `Selector::at_most` evaluated against that admits an operation nobody decided to admit.
-fn risk(risk: catalog::Risk) -> Risk {
-    match risk {
-        catalog::Risk::Low => Risk::Low,
-        catalog::Risk::Medium => Risk::Medium,
-        catalog::Risk::High => Risk::High,
-        catalog::Risk::Destructive => Risk::Destructive,
-    }
-}
-
-/// The catalogue's idempotency vocabulary in the host's.
-///
-/// The two spell one variant differently — the catalogue's `NonIdempotent` is the host's
-/// `NotIdempotent` — which is precisely why this is a `match` and not a string passed through.
-/// Exhaustive for the reason [`risk`] is.
-fn idempotency(idempotency: catalog::Idempotency) -> Idempotency {
-    match idempotency {
-        catalog::Idempotency::Idempotent => Idempotency::Idempotent,
-        catalog::Idempotency::NonIdempotent => Idempotency::NotIdempotent,
-        catalog::Idempotency::Conditional => Idempotency::Conditional,
-    }
-}
-
-/// What an operation touches — **derived here, not declared upstream**.
-///
-/// `catalog::Operation` has no `effects` field (checked against 0.8.0): the catalogue declares
-/// `risk`, `idempotency`, `credentials` and `hosts`, and nothing else that bears on this. A
-/// `Selector` selects on effects, so serving the catalogue without them would leave a client unable
-/// to evaluate one of the three axes it decides by — hence a derivation, and hence
-/// [`OperationView::effects_derived`] marking every answer as one.
-///
-/// The rule is the most the source data supports and not one step further: **an operation the
-/// catalogue gives a host to reach touches the network.** `workspace_write` and `process` are never
-/// emitted, because nothing in the catalogue speaks to either — every operation it carries is an
-/// HTTP call against a declared `base_url`. Inferring them from an operation's name or description
-/// would be a guess wearing the clothes of a declaration, and a grant would then be decided against
-/// fiction.
-///
-/// If the catalogue ever declares effects, this function is what is deleted, and `effects_derived`
-/// becomes `false` rather than disappearing — a client that learned to check it should keep
-/// getting an answer.
-fn effects(operation: &catalog::Operation) -> BTreeSet<Effect> {
-    let mut effects = BTreeSet::new();
-
-    if !operation.hosts.is_empty() {
-        effects.insert(Effect::Network);
-    }
-
-    effects
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
+
+    use exchange_host::{Effect, Idempotency, Risk};
     use serde_json::{Map, Value};
 
     /// Serialise `connector`'s operations and hand back the array, so a test asserts against the
@@ -442,70 +391,48 @@ mod tests {
         );
     }
 
-    /// The one spelling the two vocabularies disagree on. The catalogue says `non_idempotent` and
-    /// the host says `not_idempotent`; the wire speaks the host's, because that is the token a
-    /// `Selector` round-trips through.
+    /// **X-13.** What this route publishes is what the grant gate decides on — the same projection,
+    /// asserted on the bytes.
+    ///
+    /// The three mapping functions this module used to own moved into `exchange_host::grant` when
+    /// invocation started being gated by them, and their tests moved with them:
+    /// `risk_keeps_the_catalogues_own_spelling`, `idempotency_is_spelled_this_crates_way` and
+    /// `effects_are_derived_from_hosts_and_never_claim_more_than_that` now live beside the
+    /// derivation they check. What belongs *here* is this: the published body carries those facts
+    /// and not a second opinion. A client that reads `risk` off this surface and predicts admission
+    /// must be right, and it can only be right while the two are one derivation.
     #[test]
-    fn idempotency_is_spelled_the_hosts_way() {
-        assert_eq!(
-            catalog::Idempotency::NonIdempotent.as_str(),
-            "non_idempotent"
-        );
+    fn the_catalogue_publishes_the_facts_the_gate_decides_on() {
+        let mut seen = 0usize;
 
-        let mapped = serde_json::to_value(idempotency(catalog::Idempotency::NonIdempotent))
-            .expect("serialises");
-        assert_eq!(mapped, Value::String("not_idempotent".into()));
+        for provider in catalog::providers() {
+            for published in operation_objects(provider.id) {
+                let id = published
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .expect("every served operation carries its id");
+                let entry = catalog::operation(catalog::OperationKey::id(id))
+                    .unwrap_or_else(|| panic!("`{id}` is served and must be in the catalogue"));
 
-        for (from, to) in [
-            (catalog::Idempotency::Idempotent, "idempotent"),
-            (catalog::Idempotency::NonIdempotent, "not_idempotent"),
-            (catalog::Idempotency::Conditional, "conditional"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(idempotency(from)).expect("serialises"),
-                Value::String(to.into()),
-            );
+                let Value::Object(decided) =
+                    serde_json::to_value(OperationFacts::of(entry)).expect("serialises")
+                else {
+                    panic!("`OperationFacts` serialises to an object");
+                };
+
+                for field in ["id", "risk", "idempotency", "effects"] {
+                    assert_eq!(
+                        published.get(field),
+                        decided.get(field),
+                        "`{id}` publishes a `{field}` the gate does not decide on",
+                    );
+                }
+
+                seen += 1;
+            }
         }
-    }
 
-    #[test]
-    fn risk_keeps_the_catalogues_own_spelling() {
-        for (from, to) in [
-            (catalog::Risk::Low, "low"),
-            (catalog::Risk::Medium, "medium"),
-            (catalog::Risk::High, "high"),
-            (catalog::Risk::Destructive, "destructive"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(risk(from)).expect("serialises"),
-                Value::String(to.into()),
-            );
-            assert_eq!(from.as_str(), to, "and the catalogue agrees");
-        }
-    }
-
-    /// The derivation, stated as a rule rather than as today's answer: an operation reaches the
-    /// network exactly when the catalogue gives it a host to reach. Nothing in the catalogue speaks
-    /// to `workspace_write` or `process`, so neither may ever appear — claiming an effect the source
-    /// data cannot support is worse than omitting it.
-    #[test]
-    fn effects_are_derived_from_hosts_and_never_claim_more_than_that() {
-        for operation in catalog::operations() {
-            let derived = effects(operation);
-
-            assert_eq!(
-                derived.contains(&Effect::Network),
-                !operation.hosts.is_empty(),
-                "`{}` reaches {:?}; the derived effects were {derived:?}",
-                operation.id,
-                operation.hosts,
-            );
-            assert!(
-                !derived.contains(&Effect::WorkspaceWrite) && !derived.contains(&Effect::Process),
-                "`{}` claims an effect the catalogue cannot support: {derived:?}",
-                operation.id,
-            );
-        }
+        assert!(seen > 0, "an empty catalogue would vacuously pass");
     }
 
     /// A derived fact must never be readable as a declared one.

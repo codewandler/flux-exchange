@@ -16,7 +16,9 @@
 
 use std::sync::Arc;
 
-use exchange_host::{ConfigStore, Contexts, Deployment, Egress, Invoker, SecretStore, ToolContext};
+use exchange_host::{
+    ConfigStore, Contexts, Deployment, Egress, Grants, Invoker, SecretStore, ToolContext,
+};
 use flux_system::sandbox::{Sandbox, SandboxMode, SandboxSettings};
 use flux_system::{System, Workspace};
 use flux_web::http::HttpRequestTool;
@@ -52,6 +54,13 @@ impl Contexts for GuardedSystem {
 /// quoting the field and the service, and the other thirty-seven run. That is the honest gap rather
 /// than a fallback — nothing is served from somewhere else.
 ///
+/// `grants` is **not** optional in the same way, and the difference is the whole of X-13. A missing
+/// settings store costs a tenant thirteen connectors; a missing grant store would cost the gate that
+/// decides what may run at all, and the only plausible thing to do without one is to admit
+/// everything — which is the exposure this story closed. So there is no empty default here: the
+/// binary binds a store or builds no invoker, and `POST /api/operations/{operation}/invoke` refuses
+/// with `503` naming the setting.
+///
 /// # Errors
 ///
 /// When the process's working directory cannot be made into a flux workspace. That is the only
@@ -60,6 +69,7 @@ impl Contexts for GuardedSystem {
 pub fn invoker(
     credentials: Arc<dyn SecretStore>,
     settings: Arc<dyn ConfigStore>,
+    grants: Arc<dyn Grants>,
 ) -> Result<Invoker, String> {
     let options = WebOptions {
         // **Deny-all**, explicitly. `None` here does not mean "no secrets": it means "fall back to
@@ -105,6 +115,11 @@ pub fn invoker(
         // which tenant is read: `Invoker::invoke` binds this port and the credential port to one
         // tenant, in one expression, off the resolved principal.
         settings,
+        // **What each tenant may run** (X-13), as the port. Read at the same tenant, off the same
+        // resolved principal, and consulted before anything reads a credential — so a call this
+        // tenant holds no grant for is refused without a secret having been moved into this
+        // process's memory for it.
+        grants,
         Arc::new(GuardedSystem {
             system: Arc::new(guarded_system(workspace)),
         }),

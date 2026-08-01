@@ -154,6 +154,20 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A grant store was named and could not be bound.
+    ///
+    /// A separate variant from the three above for their reason, and this one's is the sharpest: an
+    /// operator fixes it in a different file again, and what is in *that* file is the decision about
+    /// what each tenant may run. A refusal that read like the credential store's would send somebody
+    /// looking for a leak; this one is about a policy that could not be loaded, and a host that
+    /// started anyway would either run nothing or — if anybody ever "helpfully" defaulted it — run
+    /// everything. Rendered rather than typed, matching its siblings, because `GrantStoreError` is
+    /// `#[cfg(unix)]` too.
+    GrantStore {
+        /// The store's own refusal.
+        reason: String,
+    },
+
     /// The composition could not build the thing that runs operations.
     ///
     /// A separate variant for the reason the two stores are separate: an operator fixes this
@@ -205,7 +219,8 @@ impl fmt::Display for StartupRefusal {
             Self::DevIdentity { source } => write!(f, "{source}"),
             Self::CredentialStore { reason }
             | Self::AgentStore { reason }
-            | Self::SettingsStore { reason } => {
+            | Self::SettingsStore { reason }
+            | Self::GrantStore { reason } => {
                 write!(f, "{reason}")
             }
             Self::Invoker { reason } => write!(
@@ -225,6 +240,7 @@ impl std::error::Error for StartupRefusal {
             | Self::CredentialStore { .. }
             | Self::AgentStore { .. }
             | Self::SettingsStore { .. }
+            | Self::GrantStore { .. }
             | Self::Invoker { .. } => None,
             Self::DevIdentity { source } => Some(source),
             Self::UnreadableBind { source, .. } => Some(source),

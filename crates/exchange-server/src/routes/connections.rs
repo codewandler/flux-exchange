@@ -2390,6 +2390,10 @@ mod tests {
     /// staying quiet would be a weaker statement than the one this host answers with. What says a
     /// request was never sent is `sent`, which `exchange_host::Sent` decides from where the failure
     /// happened rather than from anything a test arranged.
+    ///
+    /// Since X-13 it also holds a real grant store, and `acme` is granted zendesk **widely** — the
+    /// grant gate is not what these tests are about, and a tenant with no grant would refuse every
+    /// invocation below with `403` before the settings refusal they exist to observe.
     fn dispatching_app() -> (
         Router,
         Arc<TestStore>,
@@ -2402,8 +2406,24 @@ mod tests {
             exchange_host::SettingsStore::bind(scratch.join("settings"))
                 .expect("a fresh settings store"),
         );
+        // The port, in the narrowest scope that can name it: `set` is a method on it, and this
+        // helper is the only place in this module with a grant to store.
+        use exchange_host::Grants as _;
+
+        let grants = Arc::new(
+            exchange_host::GrantStore::bind(scratch.join("grants")).expect("a fresh grant store"),
+        );
+        grants
+            .set(
+                &Tenant::new("acme").expect("a plain tenant id"),
+                &[exchange_host::Grant::for_connector(
+                    "zendesk",
+                    exchange_host::Selector::any(),
+                )],
+            )
+            .expect("a store outside a working tree takes a write");
         let invoker = Arc::new(
-            crate::execution::invoker(store.clone(), settings.clone())
+            crate::execution::invoker(store.clone(), settings.clone(), grants)
                 .expect("a usable workspace root"),
         );
 

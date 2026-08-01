@@ -120,16 +120,25 @@ grant-shaped one, so it belongs to X-13 rather than to a widened route table.
 
 ## What this epic deliberately does not do
 
-- **It does not gate anything by grant.** That is X-13. Until it lands, an agent token authorises
-  what any principal may do, **less four things this host decided by *kind* rather than by grant**:
-  it may not create a principal (X-40), supply a connection setting (X-47), or supply or rotate a
-  credential (X-54). Every one of those is a caller deciding *what a tenant's operations run under*,
-  which is the credential position whether or not a value is ever seen.
+- **It no longer leaves invocation ungated.** This bullet used to say *"it does not gate anything by
+  grant — that is X-13, blocked upstream"*, and before that it said the only exception to what an
+  agent may do was creating a principal. **X-13 has landed**, and both sentences are superseded. What
+  is true now:
 
-  ⚠ *This bullet used to say the only exception was creating a principal. That stopped being true at
-  X-47 and is corrected here rather than rewritten away — a design that quietly grows exceptions is
-  how the list stops being read.* The rest remains a **stated gap**, not a position, and the same one
-  `invoke` will inherit.
+  An agent token authorises what any principal **of its tenant** may do, bounded twice over —
+  by the **grants that tenant holds**, which `Invoker::invoke` consults before any credential is
+  read; and by **four things this host decides by *kind* rather than by grant**: it may not create a
+  principal (X-40), supply a connection setting (X-47), or supply or rotate a credential (X-54).
+  Those four are each a caller deciding *what a tenant's operations run under* — the credential
+  position, whether or not a value is ever seen — which is a different question from *which
+  operations may run*, and is why they are kind-shaped rather than grant-shaped.
+
+  ⚠ *Both superseded sentences are recorded rather than rewritten away. This bullet has now been
+  wrong twice in the same direction — claiming a narrower set of exceptions than the code enforced —
+  and a design that quietly grows exceptions is how the list stops being read.*
+
+  **What is left is a gap of a different shape**: no surface edits a grant. See
+  `docs/designs/invoke.md` §6.
 - **It does not add a second identity port.** `Identity` already exists and both current providers
   bind it. A third binding is the shape; a parallel mechanism is not.
 - **It does not mint tokens for humans.** Sign-in exists and works. An agent principal is a different
