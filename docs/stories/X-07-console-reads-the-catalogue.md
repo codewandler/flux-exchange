@@ -2,7 +2,6 @@
 id: X-07
 title: "The console reads the live catalogue"
 status: done
-priority: 7
 epic: catalogue
 note: "the fixture banner must come out in the SAME change that makes it untrue — a banner that outlives its condition teaches readers to ignore banners"
 ---

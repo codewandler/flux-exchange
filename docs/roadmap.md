@@ -38,7 +38,7 @@ X-11 tracks the alignment. The work is upstream, in flux-connectors.
 
 ## Epics
 
-### The HTTP surface — X-01 · 🔄 **READY (X-02…X-04)**
+### The HTTP surface — X-01 · ✅ **DONE**
 
 Turn the binary that prints a matrix into a service. The load-bearing story is **X-02**, and it is
 load-bearing for one reason: a credential-holding service that starts on a reachable address without
@@ -50,7 +50,7 @@ an open listener is RCE. Substitute credentials for tools and the argument is un
 and from nothing a caller controls, and the story asks for that asserted three times — once for a
 path segment, once for a body field, once for a header.
 
-### The catalogue surface — X-05 · 🔄 **READY (X-06, X-07)**
+### The catalogue surface — X-05 · ✅ **DONE** (X-46 open on the same slug)
 
 Serve what exists, so the console stops rendering fixtures. Unblocked by construction:
 `connector-catalog` is static data with no dependencies, no IO and no runtime.
@@ -60,7 +60,7 @@ Two decisions worth making deliberately rather than by accident. **The catalogue
 admits, and the grant model becomes folklore. And **it must not be silently filtered by grant**: an
 agent that cannot see an operation it lacks cannot report that it was refused.
 
-### Connections and credentials — X-08 · 🔄 **READY (X-09, X-10)**
+### Connections and credentials — X-08 · ✅ **DONE** (X-14, X-21 open on the same slug)
 
 An operator connects a provider; a tenant's credentials are reachable only by that tenant.
 
@@ -70,6 +70,22 @@ inside the working directory is refused, a bad store configuration is a startup 
 fallback to memory. The last one matters most — a host that fell back would start successfully,
 serve every route correctly, look exactly like a working one, and lose everything on the next
 restart.
+
+### Agent access — X-35 · 🔄 **X-36, X-40 done; X-37, X-38, X-45 open**
+
+The charter's second sentence calls the agent the **primary caller**, and for most of this project's
+life `PrincipalKind::Agent` existed as a type that nothing could produce: the only ways to become a
+principal were federated sign-in (a human) and the loopback development roster.
+
+X-36 made minting real — a token shown once, with the store keeping only a digest — and then found
+the hole in itself: nothing gated *who* may mint, so a leaked agent token would mint successors and
+revocation would stop being a remedy invisibly. X-40 closed that before X-37 could make it
+reachable, and refused `Service` as well as `Agent`, because the property holds only if every minter
+is itself revocable by this operator.
+
+**Still open, and stated plainly rather than implied:** an agent token **authenticates nothing yet**
+(X-37), and it authorises nothing beyond any principal until grants land (X-13). See
+[`docs/designs/agent-access.md`](designs/agent-access.md).
 
 ### Agent onboarding — X-41, X-42 · 🔄 **READY**
 
@@ -89,7 +105,7 @@ be issued an identity and cannot yet use it*.
 account, learn what it can and cannot do today, and fetch the same facts in a parseable form. See
 [`docs/designs/agent-onboarding.md`](designs/agent-onboarding.md).
 
-### Invoke — X-11…X-13 · ⛔ **BLOCKED on the engine line**
+### Invoke — X-11…X-13 · 🔄 **UNBLOCKED, X-12 in progress**
 
 Where the confused-deputy answer becomes code: the caller names an operation id, and nothing else
 about the request is theirs to choose. Not the host — the URL comes from the operation's own compiled
@@ -140,3 +156,15 @@ Deliberately, because filing a story that cannot be started manufactures work ra
   its lockfile*. The unblock is real, it is upstream, and it reaches the connector compiler on a
   flux-web bump and not before.
 - **Execution records** — after X-12, since there is nothing to record until something executes.
+
+**Unblocked 2026-08-01.** flux-connectors published 0.9.0: `connector-pack` requires
+`flux-runtime ^0.46` where it required `^0.41` against a flux line at 0.45. X-11 landed the upgrade
+and proved `connector-pack` **links** — `crates/exchange-host/tests/engine_line.rs` packs a real
+connector into a `flux_runtime::ToolRegistry` through `flux_web`'s `HttpRequestTool`. X-12 is in
+progress; X-13 follows it, and X-14 (per-instance addresses) unblocked with it because the same
+release carries the instance dimension.
+
+Two decisions X-11 made that the rest of the epic inherits: `connector-pack` is a **dev-dependency**
+until X-12 promotes it, so a published crate does not carry the flux engine to satisfy a proof; and
+the engine line is pinned at **0.46, not the newest** — `flux-runtime` 0.47 exists and taking it
+would recreate the two-incompatible-types failure that blocked this epic in the first place.

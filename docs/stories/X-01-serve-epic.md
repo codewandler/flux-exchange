@@ -1,8 +1,7 @@
 ---
 id: X-01
 title: "The HTTP surface (epic)"
-status: ready
-priority: 1
+status: done
 epic: serve
 note: "EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate"
 ---
@@ -17,7 +16,7 @@ serves authenticated requests, without ever offering a reachable bind to an unau
 - [x] X-02 — an HTTP server with health, and a **refusal** rather than a default when a reachable
       bind has no way to authenticate.
 - [x] X-03 — the `Identity` port bound, with a session a request carries.
-- [ ] X-04 — OIDC sign-in behind that port.
+- [x] X-04 — OIDC sign-in behind that port.
 - [x] No route reads the tenant from anything a caller controls. Asserted, not intended.
 
 ## Progress
@@ -39,3 +38,12 @@ serves authenticated requests, without ever offering a reachable bind to an unau
 ## Notes
 - `crates/exchange-host/src/lib.rs` already defines the `Identity` port and states the tenant rule.
 - Deliberately no framework choice yet — X-02 makes it and records why.
+
+## Closed 2026-08-01
+
+Every Acceptance item is met. X-04 landed earlier in the same session that closed this epic and its
+checkbox was simply never ticked — found by a backlog sync, not by anyone reading the story.
+
+**The `serve` slug outlived this tracker**, and that is fine rather than a bookkeeping error: X-15
+through X-43 group under it and are additional work on the same surface, not children of this
+epic's Acceptance. An epic tracker is done when *its* stated Acceptance is, and grouping is a view.

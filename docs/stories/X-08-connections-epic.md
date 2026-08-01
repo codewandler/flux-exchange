@@ -2,7 +2,6 @@
 id: X-08
 title: "Connections and credentials (epic)"
 status: done
-priority: 4
 epic: connections
 note: "connector-secrets and connector-spec carry NO flux dependency, so this epic is unblocked too — only invoke waits on the engine line"
 ---

@@ -149,6 +149,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Every `ExchangeError` is pinned against the refusal it becomes** (X-31). The status mapping was
+  guarded variant by variant, but nothing guarded the edge *before* it — a new exchange error folded
+  into an existing refusal would have inherited its status and silently undone the operator-vs-caller
+  split, without touching the mapping any test was watching.
+
 - **CI checks the action pins and the version pairing** (X-30). Both checkers **self-test before
   they scan**, so one that has stopped catching violations cannot report there are none. The pin
   scanner classifies YAML rather than grepping, because a comment or a `run:` block containing an

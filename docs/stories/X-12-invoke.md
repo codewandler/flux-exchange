@@ -1,9 +1,8 @@
 ---
 id: X-12
 title: "Invoke an operation"
-status: ready
+status: in-progress
 epic: invoke
-priority: 1
 areas: [exchange-host, exchange-server]
 design: docs/designs/invoke.md
 note: "the caller names an operation id and nothing else about the request is theirs — not the host, not the credential, not the tenant. That is the whole confused-deputy answer"
@@ -28,7 +27,9 @@ A caller names an operation and gets a result. This host resolves the credential
       `Deployment::admits`, not executed.
 
 ## Progress
-- (blocked on X-11)
+- **In progress 2026-08-01** — dispatched to an implementor after X-11 unblocked the engine
+  line. The story promotes `connector-pack` from a dev-dependency to a dependency, which is the
+  decision X-11 deliberately left to it.
 
 ## Notes
 - `crates/exchange-host/src/runtime.rs` already carries the refusal and its tested message.

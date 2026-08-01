@@ -2,7 +2,6 @@
 id: X-10
 title: "Connections addressed by a tenant the caller cannot name"
 status: done
-priority: 5
 epic: connections
 design: docs/designs/connections.md
 note: "Tenant::new already refuses a traversing spelling at construction; this story is where that validated value becomes the ONLY way an address is built"

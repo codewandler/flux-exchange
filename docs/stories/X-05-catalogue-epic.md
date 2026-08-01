@@ -2,7 +2,6 @@
 id: X-05
 title: "The catalogue surface (epic)"
 status: done
-priority: 3
 epic: catalogue
 note: "connector-catalog has ZERO dependencies — no flux coupling, no IO, no runtime. This epic is unblocked by construction"
 ---

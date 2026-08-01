@@ -2,7 +2,6 @@
 id: X-03
 title: "Bind the Identity port, with a dev identity and a session"
 status: done
-priority: 2
 epic: serve
 design: docs/designs/identity-and-session.md
 note: "the tenant must come from the resolved principal and from NOTHING a caller controls — not a path segment, not a body field, not a header"
