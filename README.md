@@ -8,7 +8,7 @@ happened; agents are what call operations all day. That inverts the usual assump
 everything below.
 
 > [!WARNING]
-> **Status: v0.7.0 — a charter, a type system, and an HTTP surface a human can sign in to.**
+> **Status: v0.9.0 — credentials, a gated invoke, and an anonymous descriptor of what this build can do.**
 >
 > `cargo run` binds `127.0.0.1:8080` and serves health, the connector catalogue, a session, and a
 > **complete** OIDC sign-in. It refuses to start on a reachable address while no identity provider
@@ -154,11 +154,13 @@ refuse and name the setting rather than pretending a store exists.
 
 ```bash
 cargo run                       # binds 127.0.0.1:8080; health, catalogue, session, sign-in
-cargo test --workspace          # 167 tests
+cargo test --workspace          # 366 tests
 cd console && npm install && npm run dev
 ```
 
-Rust 1.87 or newer.
+Rust 1.88 or newer — the floor `Cargo.toml`'s `rust-version` states. ⚠ *This said 1.87 through
+three releases and was false the whole time; `jsonwebtoken` and `time` both require 1.88. X-30
+corrected the manifest and this line was missed.*
 
 ## Embedding it in your own product
 

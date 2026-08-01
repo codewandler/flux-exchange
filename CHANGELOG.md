@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **A public documentation site** (X-63). VitePress in `web/`, published to GitHub Pages by a
+  workflow that builds on every pull request and deploys only from `main` — so a broken site cannot
+  reach the URL. A dead internal link fails the build.
+
+  Three pages, deliberately. The epic is ordered around the mechanism rather than the volume: this
+  repository corrected **five renderings of one false claim** in a single week, and a documentation
+  site is a factory for that failure. So these pages claim nothing about what is or is not live —
+  they route that question to `GET /api/onboarding`, and per-capability status arrives with X-64,
+  derived from the same descriptor whose `live` flags are held to the route table.
+
+  Eight guards run over the **built** site — base-prefix drift, an IP address on a page, a
+  token-shaped string, the contributor readme rendering — each verified against a real violation.
+
+  ⚠ One repository setting is still required and no workflow can perform it: **Settings → Pages →
+  Source = GitHub Actions.**
+
 ## [0.9.0] - 2026-08-01
 
 ### Added

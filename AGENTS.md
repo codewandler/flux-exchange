@@ -35,7 +35,7 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.8.0. The service serves health, the catalogue, a session, a complete OIDC sign-in,
+**v0.9.0. The service serves health, the catalogue, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
 `GET /api/onboarding`, an anonymous machine-readable descriptor of what this build can and cannot
@@ -47,9 +47,12 @@ provider configured. What exists beyond that is still the vocabulary and the rul
 reports `false` for it, so the console hides its sign-in affordance. That is the `local-identity`
 epic (X-57, X-58, X-59) and X-57 is priority 0.
 
-⚠ **Invocation is gated by identity alone.** There is no grant model in this build, so any principal
-this host resolves may run any operation in the catalogue against its own tenant's connections.
-`GET /api/onboarding` publishes this fact rather than hiding it; X-13 is the story that changes it. The [README](README.md) carries the
+⚠ **Invocation is gated by identity *and by grant*** (X-13, v0.9.0). An operation runs only if a
+grant the caller's tenant holds admits it, decided from what the operation declares — its risk, its
+effects, its idempotency — never from a list of names. **This is fail-closed and it will look like an
+outage**: a deployment runs nothing until `FLUX_EXCHANGE_GRANTS` names a file and grants are written
+into it, and **no surface writes one yet** (X-62, priority 0). Expect `503` with no store bound,
+`403 not_granted` with one bound and the tenant empty. The [README](README.md) carries the
 itemized inventory of what is *not* built, and keeping it accurate is part of the job — a page that
 implies a working service costs more than an honest gap.
 

@@ -1,8 +1,7 @@
 ---
 id: X-63
 title: "A site exists, builds, and publishes"
-status: in-progress
-priority: 1
+status: done
 epic: public-docs-site
 design: docs/designs/public-docs-site.md
 areas: [web]
@@ -98,3 +97,44 @@ The URL will be `https://codewandler.github.io/flux-exchange/`, which is why `ba
 `'/flux-exchange/'`. No `CNAME` is committed — flipping `base` to `'/'` is warranted only once
 `gh api repos/codewandler/flux-exchange/pages --jq .cname` reports a domain, and that value is pinned
 in the test as well as the config so the flip takes two deliberate edits.
+
+## Closed 2026-08-01 — done as far as a diff reaches, and one box left honestly unticked
+
+Gate green: site builds, **8/8** site guards, 366 Rust, 16 actions pinned.
+
+**One Acceptance item is not ticked and should not be**: *the site is reachable at its published URL*.
+That needs a push to `main` **plus a repository admin setting Settings → Pages → "Build and
+deployment" → Source = GitHub Actions**, which no workflow can do for itself. The instruction lives in
+`pages.yml`'s header — the only place it can — and a test asserts the header survives. The implementor
+declined to tick the box on the strength of intending it, which is the right call.
+
+⚠ **Still to be clicked, once, by an admin:** Settings → Pages → Source = **GitHub Actions**. Until
+then `build` runs and still fails on a broken site, but `deploy` errors with *"Get Pages site failed"*.
+The site will serve at `https://codewandler.github.io/flux-exchange/`.
+
+**Each of the eight guards was verified against a real violation rather than merely written** — base-
+prefix drift (`404.html links to /assets/… which is outside the deployed base`), an IP address on a
+page, a token-shaped string, and `srcExclude` removed so the contributor readme renders. That is the
+discipline this epic needs, since the site's whole justification is not repeating the five renderings.
+
+**The three pages claim nothing about what is live.** They route that to `GET /api/onboarding` and say
+per-capability status arrives with [[X-64]] — the ordering the design insists on.
+
+### Found on the way, and fixed at integration rather than filed
+
+`README.md` carried **three** stale claims on the page a visitor reads first: `Status: v0.7.0`,
+`# 167 tests`, and `Rust 1.87 or newer`. The last is the sharpest — **1.87 was false through three
+releases**, which is exactly what X-30 corrected in the manifest, and this line was missed. All three
+corrected, with the MSRV one carrying its own history so it is not quietly re-broken.
+
+`AGENTS.md` said `v0.8.0` and still described invocation as *gated by identity alone, no grant model*,
+which X-13 changed in v0.9.0 — and it is the file every agent reads first.
+
+### Carried
+- **`deploy` is untested and untestable from here.** Its first real run is the first push to `main`
+  after the Pages source is set; if it fails it will be the environment or `path: web/.vitepress/dist`.
+- **`npm test` alone is meaningless** — the guards read `dist/`, so the suite must follow
+  `npm run build`. It fails loudly rather than silently, but the ordering is now in `AGENTS.md` and
+  `pages.yml` for a reason.
+- The off-site link allow-list is `github.com` only; a page linking to `vitepress.dev` fails the
+  suite. Deliberate, one line to widen, and it will surprise whoever hits it first.
