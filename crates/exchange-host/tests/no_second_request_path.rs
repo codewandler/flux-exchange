@@ -123,11 +123,26 @@ const ALLOWED: &[(&str, &str)] = &[
          transport failure means matching on that enum, and matching on it means naming the crate.",
     ),
     (
+        "flux-flow",
+        "the authored-flow analyzer, interpreter and value store. It dispatches only through a \
+         `flux-runtime` Executor supplied with tools; it owns no connector transport or HTTP client.",
+    ),
+    (
+        "flux-lang",
+        "the parser and host-neutral editor projection. It transforms source and graph values and \
+         reaches no transport.",
+    ),
+    (
         "flux-runtime",
         "`Tool`, `ToolContext` and `ToolRegistry` — the seam the pack hands tools out through. It \
          reaches `flux-system` transitively, which is what lock 2's source rules cover; it is not \
          itself a client.",
     ),
+    (
+        "flux-spec",
+        "flux's stable ToolSpec and intent vocabulary. It is pure data and owns no IO.",
+    ),
+    ("schemars", "derives the versioned editor JSON Schema. No IO."),
     ("serde", "derives. No IO."),
     ("serde_json", "a parser. No IO."),
     ("thiserror", "a proc macro. No IO."),

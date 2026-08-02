@@ -25,6 +25,7 @@ mod routes;
 mod session;
 mod state;
 mod traffic;
+mod workflow_runs;
 
 use std::ffi::OsStr;
 use std::net::SocketAddr;
@@ -278,8 +279,69 @@ fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
     if let Some(store) = agent_store()? {
         state = state.with_agents(store);
     }
+    if let Some((workflows, pure, runs)) = workflow_store()? {
+        state = state.with_workflows(workflows, pure, runs);
+    }
 
     Ok(state)
+}
+
+/// Bind workflow definitions and the audited pure cognition pack, or bind neither.
+#[cfg(unix)]
+fn workflow_store() -> Result<
+    Option<(
+        Arc<exchange_host::WorkflowStore>,
+        Arc<exchange_host::PureEditorTools>,
+        Arc<crate::workflow_runs::WorkflowRunStore>,
+    )>,
+    StartupRefusal,
+> {
+    let Ok(configured) = std::env::var(exchange_host::WORKFLOW_STORE_SETTING) else {
+        warn!(
+            "no workflow store is bound ({} is unset), so workflow authoring and runs refuse",
+            exchange_host::WORKFLOW_STORE_SETTING
+        );
+        return Ok(None);
+    };
+    let store =
+        exchange_host::WorkflowStore::bind_configured(Some(&configured)).map_err(|error| {
+            StartupRefusal::WorkflowStore {
+                reason: error.to_string(),
+            }
+        })?;
+    let mut registry = exchange_host::ToolRegistry::new();
+    flux_tools::cognition::try_register_cognition(&mut registry).map_err(|error| {
+        StartupRefusal::WorkflowStore {
+            reason: error.to_string(),
+        }
+    })?;
+    let pure = exchange_host::PureEditorTools::new(registry).map_err(|error| {
+        StartupRefusal::WorkflowStore {
+            reason: error.to_string(),
+        }
+    })?;
+    let run_path = store
+        .path()
+        .parent()
+        .expect("a bound definitions file has a parent")
+        .join("runs.sqlite");
+    let runs = crate::workflow_runs::WorkflowRunStore::bind(&run_path)
+        .map_err(|reason| StartupRefusal::WorkflowStore { reason })?;
+    info!(path = %store.path().display(), "workflow definitions: owner-only atomic file store");
+    info!(path = %run_path.display(), "workflow activity: SQLite run store");
+    Ok(Some((Arc::new(store), Arc::new(pure), Arc::new(runs))))
+}
+
+#[cfg(not(unix))]
+fn workflow_store() -> Result<
+    Option<(
+        Arc<exchange_host::WorkflowStore>,
+        Arc<exchange_host::PureEditorTools>,
+        Arc<crate::workflow_runs::WorkflowRunStore>,
+    )>,
+    StartupRefusal,
+> {
+    Ok(None)
 }
 
 /// Bind the agent store the environment names, or bind none.

@@ -174,6 +174,12 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A configured workflow directory could not be bound, or its pure tool pack was invalid.
+    WorkflowStore {
+        /// The store or registry refusal.
+        reason: String,
+    },
+
     /// The composition could not build the thing that runs operations.
     ///
     /// A separate variant for the reason the two stores are separate: an operator fixes this
@@ -227,7 +233,8 @@ impl fmt::Display for StartupRefusal {
             Self::CredentialStore { reason }
             | Self::AgentStore { reason }
             | Self::SettingsStore { reason }
-            | Self::GrantStore { reason } => {
+            | Self::GrantStore { reason }
+            | Self::WorkflowStore { reason } => {
                 write!(f, "{reason}")
             }
             Self::Invoker { reason } => write!(
@@ -249,6 +256,7 @@ impl std::error::Error for StartupRefusal {
             | Self::AgentStore { .. }
             | Self::SettingsStore { .. }
             | Self::GrantStore { .. }
+            | Self::WorkflowStore { .. }
             | Self::Invoker { .. } => None,
             Self::DevIdentity { source } => Some(source),
             Self::UnreadableBind { source, .. } => Some(source),

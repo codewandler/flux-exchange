@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use exchange_host::{ConnectionSettings, Identity, Invoker, SecretStore};
+use exchange_host::{
+    ConnectionSettings, Identity, Invoker, PureEditorTools, SecretStore, WorkflowStore,
+};
 
 use crate::agent::AgentStore;
 use crate::bind::IdentityBinding;
@@ -10,6 +12,7 @@ use crate::connection_guard::ConnectionGuard;
 use crate::dev_identity::DevIdentity;
 use crate::oidc::Oidc;
 use crate::traffic::{InvocationClaim, Traffic, TrafficRefusal};
+use crate::workflow_runs::WorkflowRunStore;
 
 /// The state the router hands to every route.
 ///
@@ -63,6 +66,12 @@ pub struct AppState {
     /// composition that runs nothing, and `POST /api/operations/{operation}/invoke` refuses rather
     /// than pretending — see [`crate::routes::invoke`].
     invoker: Option<Arc<Invoker>>,
+    /// Tenant-scoped mutable drafts and immutable workflow versions.
+    workflows: Option<Arc<WorkflowStore>>,
+    /// The validated pure cognition registry shared by validation and execution.
+    pure_editor_tools: Option<Arc<PureEditorTools>>,
+    /// Durable redacted workflow activity and in-flight cancellation handles.
+    workflow_runs: Option<Arc<WorkflowRunStore>>,
     /// Process-wide bounds around anonymous sign-in allocation and operation execution.
     traffic: Traffic,
 }
@@ -189,6 +198,9 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            workflows: None,
+            pure_editor_tools: None,
+            workflow_runs: None,
             traffic: Traffic::default(),
         }
     }
@@ -211,6 +223,9 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            workflows: None,
+            pure_editor_tools: None,
+            workflow_runs: None,
             traffic: Traffic::default(),
         }
     }
@@ -230,6 +245,9 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            workflows: None,
+            pure_editor_tools: None,
+            workflow_runs: None,
             traffic: Traffic::default(),
         }
     }
@@ -252,6 +270,9 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            workflows: None,
+            pure_editor_tools: None,
+            workflow_runs: None,
             traffic: Traffic::default(),
         }
     }
@@ -271,6 +292,9 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            workflows: None,
+            pure_editor_tools: None,
+            workflow_runs: None,
             traffic: Traffic::default(),
         }
     }
@@ -369,6 +393,34 @@ impl AppState {
     /// class through it — the only thing it can do is name an operation and hand over a principal.
     pub fn invoker(&self) -> Option<&Arc<Invoker>> {
         self.invoker.as_ref()
+    }
+
+    /// Bind workflow definitions and the only built-in registry the editor admits.
+    pub fn with_workflows(
+        mut self,
+        workflows: Arc<WorkflowStore>,
+        pure_editor_tools: Arc<PureEditorTools>,
+        workflow_runs: Arc<WorkflowRunStore>,
+    ) -> Self {
+        self.workflows = Some(workflows);
+        self.pure_editor_tools = Some(pure_editor_tools);
+        self.workflow_runs = Some(workflow_runs);
+        self
+    }
+
+    /// Tenant-scoped workflow definitions, when configured.
+    pub fn workflows(&self) -> Option<&Arc<WorkflowStore>> {
+        self.workflows.as_ref()
+    }
+
+    /// Validated cognition operations used for workflow validation and execution.
+    pub fn pure_editor_tools(&self) -> Option<&Arc<PureEditorTools>> {
+        self.pure_editor_tools.as_ref()
+    }
+
+    /// Durable workflow activity and cancellation coordinator.
+    pub fn workflow_runs(&self) -> Option<&Arc<WorkflowRunStore>> {
+        self.workflow_runs.as_ref()
     }
 
     /// The claims on connection changes in flight.

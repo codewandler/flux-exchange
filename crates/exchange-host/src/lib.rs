@@ -69,6 +69,8 @@ mod paths;
 mod principal;
 mod runtime;
 mod settings;
+#[cfg(unix)]
+mod workflow;
 
 /// Re-exported so a composing binary can implement [`Identity`] without taking its own dependency
 /// on `async-trait`.
@@ -110,6 +112,7 @@ pub use connector_secrets::{CredentialRef, Secret, SecretStore, StoreError, TENA
 /// to call it.
 pub use connector_pack::{ConfigStore, Egress, Field, MemoryConfig};
 
+pub use flux_lang::editor::{EditorTraceEvent, EditorTraceObserver};
 /// The context an invocation runs in, re-exported for the same reason [`Egress`] is.
 ///
 /// [`Contexts`] is a port a composition implements, and its one method returns this type. A
@@ -117,7 +120,7 @@ pub use connector_pack::{ConfigStore, Egress, Field, MemoryConfig};
 /// — and a `ToolContext` from a different one is a different type with an identical name, which
 /// surfaces as an error about mismatched types where the real problem is a dependency line. The
 /// engine line is pinned once, in the workspace manifest; this is the doorway to the one it names.
-pub use flux_runtime::ToolContext;
+pub use flux_runtime::{ToolContext, ToolRegistry};
 
 pub use acquisition::AuthHazard;
 pub use connections::{
@@ -134,7 +137,7 @@ pub use grant::{
 pub use grant::{GrantStore, GrantStoreError, GRANT_STORE_SETTING};
 pub use invoke::{
     admit_runtime, operation_input_schema, Contexts, InputSchemaError, Invocation, InvokeRefusal,
-    Invoker, Sent,
+    Invoker, Sent, WorkflowInvocation, WorkflowInvokeRefusal,
 };
 pub use lease::{Lease, LeaseId, LeaseState};
 pub use principal::{Principal, PrincipalKind, Tenant, TenantError};
@@ -145,6 +148,12 @@ pub use settings::{
 };
 #[cfg(unix)]
 pub use settings::{SettingsStore, SettingsStoreError, CONNECTION_SETTINGS_SETTING};
+#[cfg(unix)]
+pub use workflow::{
+    editor_catalog, editor_schema, validate_workflow, EditorOperation, FrozenOperation,
+    PureEditorTools, ValidatedWorkflow, WorkflowDraft, WorkflowEdit, WorkflowRefusal,
+    WorkflowStore, WorkflowVersion, EDITOR_SCHEMA_VERSION, WORKFLOW_STORE_SETTING,
+};
 
 /// Errors the host raises. Every variant refuses; none repairs.
 #[derive(Debug, thiserror::Error)]

@@ -54,13 +54,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # engine crate `exchange-host` may name without weakening lock 1 — telling a refusal that precedes
 # dispatch from a transport failure means matching on that enum, and matching on it means naming it.
 flux-core = { package = "codewandler-flux-core", version = "0.52" }
+flux-flow = { package = "codewandler-flux-flow", version = "0.52" }
+flux-lang = { package = "codewandler-flux-lang", version = "0.52" }
 flux-runtime = { package = "codewandler-flux-runtime", version = "0.52" }
+# Stable Flux contract vocabulary. Unlike the 0.52 engine crates this follows its own 1.x line;
+# workflow execution names `IntentSet` only to implement the host-neutral interpreter port.
+flux-spec = { package = "codewandler-flux-spec", version = "1.2.1" }
 # flux's guarded-IO facade. Named here only because `flux_runtime::ToolContext::new` takes an
 # `Arc<System>` and there is no other constructor — so a composition that wants to invoke an
 # operation has to build one. It is **not** in `exchange-host`'s `[dependencies]`: it carries
 # `flux_system::net`, which dials, and the crate that dispatches holds no transport (X-12, lock 1).
 flux-system = { package = "codewandler-flux-system", version = "0.52" }
 flux-web = { package = "codewandler-flux-web", version = "0.52" }
+flux-tools = { package = "codewandler-flux-tools", version = "0.52" }
 
 # The connector crates, all on the 0.16 line. `connector-catalog` has no dependencies at all and
 # `connector-secrets` defaults to no features (its Vault client and reqwest sit behind `vault`).
@@ -103,11 +109,13 @@ reqwest = { version = "0.13", default-features = false, features = [
     "http2",
     "charset",
 ] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # Replaces the hand-written `oidc/sha256.rs`, which existed only because no digest crate was allowed
 # in. It was checked exhaustively against hashlib before it was trusted; it is deleted now rather
 # than kept as a second implementation nobody exercises.
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }

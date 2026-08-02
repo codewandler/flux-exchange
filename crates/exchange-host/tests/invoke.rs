@@ -18,9 +18,9 @@ use std::sync::{Arc, Mutex};
 use exchange_host::{
     admit_runtime, ConnectorSurface, Contexts, Deployment, Egress, Grant, GrantRefusal, Grants,
     InvokeRefusal, Invoker, MemoryConfig, Principal, PrincipalKind, Risk, Runtime, Secret,
-    SecretStore, Selector, Sent, Tenant,
+    SecretStore, Selector, Sent, Tenant, WorkflowEdit, WorkflowInvokeRefusal, WorkflowVersion,
 };
-use flux_runtime::{Tool, ToolContext};
+use flux_runtime::{Tool, ToolContext, ToolRegistry};
 use serde_json::{json, Value};
 
 /// The tenant every test invokes as. Which one it is does not matter; that it comes off the
@@ -260,6 +260,130 @@ fn invoker(credentials: Arc<dyn SecretStore>, egress: Egress) -> Invoker {
             Grant::for_connector("zendesk", Selector::any()),
         ],
     )
+}
+
+fn pure_tools() -> exchange_host::PureEditorTools {
+    let mut registry = ToolRegistry::new();
+    flux_tools::cognition::try_register_cognition(&mut registry).unwrap();
+    exchange_host::PureEditorTools::new(registry).unwrap()
+}
+
+fn github_workflow(pure: &exchange_host::PureEditorTools) -> WorkflowVersion {
+    let checked = exchange_host::validate_workflow(
+        WorkflowEdit::Source {
+            source: "flow triage\n  $repo = github.repo.get({ owner: \"codewandler\", repo: \"flux-exchange\" })\n  return $repo\n".into(),
+        },
+        None,
+        pure,
+    )
+    .expect("the connector call validates against the editor catalogue");
+    WorkflowVersion {
+        workflow_id: "triage".into(),
+        version: 1,
+        title: "Triage".into(),
+        source: checked.source,
+        graph: checked.graph,
+        node_map: checked.node_map,
+        operations: checked.operations,
+        input_schema: checked.input_schema,
+    }
+}
+
+#[derive(Default)]
+struct Trace(Mutex<Vec<exchange_host::EditorTraceEvent>>);
+
+impl exchange_host::EditorTraceObserver for Trace {
+    fn event(&self, event: &exchange_host::EditorTraceEvent) {
+        self.0.lock().unwrap().push(event.clone());
+    }
+}
+
+#[tokio::test]
+async fn a_workflow_requires_its_entry_grant_and_its_nested_connector_grant() {
+    let pure = pure_tools();
+    let version = github_workflow(&pure);
+
+    for (grants, expected) in [
+        (
+            vec![Grant::for_connector("github", Selector::any())],
+            "entry",
+        ),
+        (
+            vec![Grant::for_connector("workflow.triage", Selector::any())],
+            "nested",
+        ),
+    ] {
+        let (wire, egress) = silent_egress();
+        let invoker = invoker_granting(github_store(Some(SENTINEL)).await, egress, grants);
+        let refusal = invoker
+            .invoke_workflow(
+                &caller(),
+                &version,
+                json!({}),
+                &pure,
+                expected,
+                Arc::new(Trace::default()),
+            )
+            .await
+            .expect_err("both independent grants are required");
+        assert!(matches!(refusal, WorkflowInvokeRefusal::NotGranted(_)));
+        assert_eq!(wire.lock().unwrap().calls.len(), 0);
+    }
+
+    let (wire, egress) = silent_egress();
+    let invoker = invoker_granting(
+        github_store(Some(SENTINEL)).await,
+        egress,
+        vec![
+            Grant::for_connector("workflow.triage", Selector::any()),
+            Grant::for_connector("github", Selector::any()),
+        ],
+    );
+    let trace = Arc::new(Trace::default());
+    let invocation = invoker
+        .invoke_workflow(
+            &caller(),
+            &version,
+            json!({}),
+            &pure,
+            "success",
+            trace.clone(),
+        )
+        .await
+        .expect("both grants admit the immutable version");
+    assert!(!invocation.is_error);
+    assert_eq!(wire.lock().unwrap().calls.len(), 1);
+    assert!(!trace.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn contract_drift_refuses_before_any_connector_dispatch() {
+    let pure = pure_tools();
+    let mut version = github_workflow(&pure);
+    version.operations[0].contract.push(' ');
+    let (wire, egress) = silent_egress();
+    let invoker = invoker_granting(
+        github_store(Some(SENTINEL)).await,
+        egress,
+        vec![
+            Grant::for_connector("workflow.triage", Selector::any()),
+            Grant::for_connector("github", Selector::any()),
+        ],
+    );
+
+    let refusal = invoker
+        .invoke_workflow(
+            &caller(),
+            &version,
+            json!({}),
+            &pure,
+            "drift",
+            Arc::new(Trace::default()),
+        )
+        .await
+        .expect_err("a changed frozen contract must be republished");
+    assert!(matches!(refusal, WorkflowInvokeRefusal::ContractChanged(_)));
+    assert_eq!(wire.lock().unwrap().calls.len(), 0);
 }
 
 // ---------------------------------------------------------------------------------------------

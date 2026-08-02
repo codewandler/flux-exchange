@@ -272,10 +272,11 @@ fn flux_pins(manifest: &str) -> impl Iterator<Item = (&str, &str)> {
         .filter(|line| !line.contains("path = "))
         .filter_map(|line| {
             let package = value_of(line, "package")?;
-            package
-                .starts_with("codewandler-flux-")
-                .then(|| Some((package, value_of(line, "version")?)))
-                .flatten()
+            let version = value_of(line, "version")?;
+            // Stable vocabulary crates follow independent 1.x lines. Only 0.x packages are engine
+            // traits whose minor version is a compatibility boundary.
+            (package.starts_with("codewandler-flux-") && version.starts_with("0."))
+                .then_some((package, version))
         })
 }
 

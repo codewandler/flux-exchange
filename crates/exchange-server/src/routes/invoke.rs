@@ -116,6 +116,14 @@ async fn run(
     Path(operation): Path<String>,
     Json(params): Json<Value>,
 ) -> Response {
+    if let Some(workflow) = operation
+        .strip_prefix("workflow.")
+        .and_then(|operation| operation.strip_suffix(".run"))
+        .filter(|workflow| !workflow.is_empty() && !workflow.contains('.'))
+    {
+        return super::workflows::invoke_published(state, principal, workflow.to_owned(), params)
+            .await;
+    }
     let Some(invoker) = state.invoker() else {
         return no_invoker();
     };

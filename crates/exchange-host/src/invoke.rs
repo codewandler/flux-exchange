@@ -39,15 +39,27 @@
 //! which dials. A crate whose safety argument is "there is no transport here" does not take a
 //! dependency that contains one in order to save a composition four lines.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use connector_pack::{ConfigStore, Configuration, Credentials, Egress};
-use flux_runtime::{Tool, ToolContext};
+use flux_lang::ast::SymbolName;
+use flux_lang::editor::{EditorExecutionTrace, EditorTraceObserver};
+use flux_lang::host::{ApprovalChoice, OpHost, OpOutcome};
+use flux_lang::opspec::OpCatalog;
+use flux_lang::sink::FlowSink;
+use flux_runtime::{AllowApprover, Executor, PermissionManager, Tool, ToolContext};
+use flux_spec::IntentSet;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::workflow::{
+    catalog as workflow_catalog, connector_entry_for_tool, Catalog as WorkflowCatalog,
+};
 use crate::{
-    admit_grant, Admitted, ConnectorSurface, Deployment, Granted, Grants, OperationFacts,
-    Principal, Runtime, RuntimeRefusal, SecretStore,
+    admit_grant, Admitted, ConnectorSurface, Deployment, Granted, Grants, Idempotency,
+    OperationFacts, Principal, PureEditorTools, Risk, Runtime, RuntimeRefusal, SecretStore,
+    WorkflowVersion,
 };
 
 /// Why an operation's declared input contract could not be projected for a caller.
@@ -178,6 +190,20 @@ impl Granted {
         settings: Configuration,
     ) -> flux_core::Result<Arc<dyn Tool>> {
         connector_pack::resolve(entry, egress, credentials, settings)
+    }
+
+    /// Consume the entry grant for a virtual workflow operation.
+    ///
+    /// There is no connector-pack tool to resolve at this layer: the immutable Flux body is the
+    /// operation. Keeping this as a receiver still makes reaching that body require the same
+    /// runtime → grant witness chain as a connector operation.
+    fn admit_workflow(self, operation: &str) -> Result<(), WorkflowInvokeRefusal> {
+        if self.operation() != operation {
+            return Err(WorkflowInvokeRefusal::Invalid(
+                "workflow grant witness names a different operation".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -368,6 +394,267 @@ impl Invoker {
             is_error: result.is_error,
         })
     }
+
+    /// Run one immutable tenant-local workflow through Flux's ordinary dispatcher.
+    ///
+    /// The virtual workflow grant is checked first. Every referenced connector then repeats the
+    /// real connector runtime and tenant-grant gates before a credential port is constructed. The
+    /// frozen `ToolSpec` contract is compared before either port exists, so connector drift cannot
+    /// turn an already-approved publication into a different request.
+    pub async fn invoke_workflow(
+        &self,
+        principal: &Principal,
+        version: &WorkflowVersion,
+        params: Value,
+        pure: &PureEditorTools,
+        run_id: &str,
+        observer: Arc<dyn EditorTraceObserver>,
+    ) -> Result<WorkflowInvocation, WorkflowInvokeRefusal> {
+        let operation = format!("workflow.{}.run", version.workflow_id);
+        let connector = format!("workflow.{}", version.workflow_id);
+        let facts = workflow_facts(&operation, version)?;
+        let surface = ConnectorSurface {
+            connector: connector.clone(),
+            runtime: Runtime::Http,
+            operations: vec![facts.clone()],
+        };
+        let admitted = admit_runtime(self.deployment, &surface)
+            .map_err(|error| WorkflowInvokeRefusal::Runtime(error.to_string()))?;
+        admit_grant(
+            admitted,
+            principal,
+            &connector,
+            &facts,
+            &self.grants.held(principal.tenant()),
+        )
+        .map_err(|error| WorkflowInvokeRefusal::NotGranted(error.to_string()))?
+        .admit_workflow(&operation)?;
+
+        let catalog = workflow_catalog(pure)
+            .map_err(|error| WorkflowInvokeRefusal::Invalid(error.to_string()))?;
+        for frozen in &version.operations {
+            let current = catalog
+                .contract(&frozen.id)
+                .ok_or_else(|| WorkflowInvokeRefusal::ContractChanged(frozen.id.clone()))?;
+            if current != frozen.contract || catalog.kind(&frozen.id) != Some(frozen.kind.as_str())
+            {
+                return Err(WorkflowInvokeRefusal::ContractChanged(frozen.id.clone()));
+            }
+        }
+
+        // All drift checks and nested gates run before these tenant-bound ports are constructed.
+        let grants = self.grants.held(principal.tenant());
+        let mut nested = Vec::new();
+        for frozen in version
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == "connector")
+        {
+            let entry = connector_entry_for_tool(&frozen.id)
+                .ok_or_else(|| WorkflowInvokeRefusal::ContractChanged(frozen.id.clone()))?;
+            let provider =
+                connector_catalog::provider(connector_catalog::ProviderKey::id(entry.provider))
+                    .ok_or_else(|| WorkflowInvokeRefusal::ContractChanged(frozen.id.clone()))?;
+            let admitted = admit_runtime(self.deployment, &ConnectorSurface::of(provider))
+                .map_err(|error| WorkflowInvokeRefusal::Runtime(error.to_string()))?;
+            let granted = admit_grant(
+                admitted,
+                principal,
+                provider.id,
+                &OperationFacts::of(entry),
+                &grants,
+            )
+            .map_err(|error| WorkflowInvokeRefusal::NotGranted(error.to_string()))?;
+            nested.push((entry, granted));
+        }
+
+        let tenant = principal.tenant().as_str();
+        let credentials = Credentials::new(self.credentials.clone(), tenant)
+            .map_err(|error| WorkflowInvokeRefusal::Invalid(error.to_string()))?;
+        let settings = Configuration::new(self.settings.clone(), tenant)
+            .map_err(|error| WorkflowInvokeRefusal::Invalid(error.to_string()))?;
+        let context = self.contexts.fresh();
+        let mut registry = pure.registry();
+        for (entry, granted) in nested {
+            let tool = granted
+                .resolve(
+                    entry,
+                    self.egress.clone(),
+                    credentials.clone(),
+                    settings.clone(),
+                )
+                .map_err(|error| WorkflowInvokeRefusal::Invalid(error.to_string()))?;
+            registry
+                .try_register_from("published workflow", tool)
+                .map_err(|error| WorkflowInvokeRefusal::Invalid(error.to_string()))?;
+        }
+
+        let ast = flux_lang::parse::parse(&version.source)
+            .map_err(|error| WorkflowInvokeRefusal::Invalid(error.to_string()))?;
+        flux_lang::analyze::lower(&ast, &catalog, &std::collections::HashSet::new()).map_err(
+            |diagnostics| {
+                WorkflowInvokeRefusal::Invalid(
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| diagnostic.message)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                )
+            },
+        )?;
+        let params = params.as_object().ok_or_else(|| {
+            WorkflowInvokeRefusal::Invalid("workflow input must be an object".into())
+        })?;
+        let declared: BTreeSet<_> = ast
+            .params
+            .iter()
+            .map(|param| param.name.0.as_str())
+            .collect();
+        if let Some(extra) = params.keys().find(|name| !declared.contains(name.as_str())) {
+            return Err(WorkflowInvokeRefusal::Invalid(format!(
+                "workflow input contains undeclared parameter `{extra}`"
+            )));
+        }
+        if let Some(missing) = declared.iter().find(|name| !params.contains_key(**name)) {
+            return Err(WorkflowInvokeRefusal::Invalid(format!(
+                "workflow input is missing parameter `{missing}`"
+            )));
+        }
+
+        let store = flux_flow::state::FlowStore::in_memory()
+            .map_err(|error| WorkflowInvokeRefusal::Invalid(error.to_string()))?;
+        for param in &ast.params {
+            store
+                .seed(
+                    run_id,
+                    &SymbolName(param.name.0.clone()),
+                    &params[&param.name.0],
+                )
+                .map_err(|error| WorkflowInvokeRefusal::Invalid(error.to_string()))?;
+        }
+
+        let allow = registry.names();
+        let permissions = PermissionManager::from_rules(&allow, &[]);
+        let executor = Executor::new(registry, permissions, Arc::new(AllowApprover), context);
+        let host = WorkflowHost { executor, catalog };
+        let trace = EditorExecutionTrace::new(version.node_map.clone(), observer);
+        let mut sink = SilentSink;
+        let outcome =
+            flux_lang::runtime::execute_flow_traced(&store, &host, run_id, &ast, &mut sink, &trace)
+                .await
+                .map_err(|error| {
+                    WorkflowInvokeRefusal::Execution(
+                        host.executor.context().redactor.redact(&error.to_string()),
+                    )
+                })?;
+        let redactor = &host.executor.context().redactor;
+        Ok(WorkflowInvocation {
+            operation,
+            workflow_id: version.workflow_id.clone(),
+            version: version.version,
+            content: redactor.redact(&outcome.result),
+            is_error: false,
+        })
+    }
+}
+
+fn workflow_facts(
+    operation: &str,
+    version: &WorkflowVersion,
+) -> Result<OperationFacts, WorkflowInvokeRefusal> {
+    let mut risk = Risk::Low;
+    let mut idempotency = Idempotency::Idempotent;
+    let mut effects = BTreeSet::new();
+    for frozen in version
+        .operations
+        .iter()
+        .filter(|operation| operation.kind == "connector")
+    {
+        let entry = connector_entry_for_tool(&frozen.id)
+            .ok_or_else(|| WorkflowInvokeRefusal::ContractChanged(frozen.id.clone()))?;
+        let facts = OperationFacts::of(entry);
+        risk = risk.max(facts.risk);
+        idempotency = idempotency.max(facts.idempotency);
+        effects.extend(facts.effects);
+    }
+    Ok(OperationFacts {
+        id: operation.into(),
+        risk,
+        idempotency,
+        effects,
+    })
+}
+
+struct WorkflowHost {
+    executor: Executor,
+    catalog: WorkflowCatalog,
+}
+
+#[async_trait::async_trait]
+impl OpHost for WorkflowHost {
+    async fn dispatch(&self, operation: &str, input: Value) -> OpOutcome {
+        let outcome = self.executor.dispatch_outcome(operation, input).await;
+        OpOutcome {
+            content: outcome.result.content,
+            view: outcome.result.view,
+            is_error: outcome.result.is_error,
+            denied: outcome.denied,
+            timing: Some(outcome.timing),
+        }
+    }
+
+    fn catalog(&self) -> &dyn OpCatalog {
+        &self.catalog
+    }
+
+    async fn request_approval(&self, _label: &str, _intents: &IntentSet) -> ApprovalChoice {
+        // The API has no interactive approval channel. Explicit `confirm` therefore refuses;
+        // connector risk approval has already been expressed durably by both grant layers.
+        ApprovalChoice::Deny
+    }
+
+    fn trim_output(&self, view: String, _operation: &str) -> String {
+        view
+    }
+}
+
+struct SilentSink;
+
+impl FlowSink for SilentSink {}
+
+/// A redacted result from one immutable workflow version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowInvocation {
+    /// Virtual operation id.
+    pub operation: String,
+    /// Tenant-local workflow id.
+    pub workflow_id: String,
+    /// Immutable version that ran.
+    pub version: u64,
+    /// Redacted result content.
+    pub content: String,
+    /// Whether the workflow returned an ordinary error result.
+    pub is_error: bool,
+}
+
+/// Why an immutable workflow invocation refused.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkflowInvokeRefusal {
+    /// This deployment cannot run the workflow's declared runtime.
+    #[error("workflow runtime refused: {0}")]
+    Runtime(String),
+    /// The workflow or a nested connector lacks a tenant grant.
+    #[error("workflow grant refused: {0}")]
+    NotGranted(String),
+    /// A referenced operation no longer has the contract publication froze.
+    #[error("operation `{0}` changed since this workflow version was published; republish it")]
+    ContractChanged(String),
+    /// The immutable source or caller input is invalid.
+    #[error("workflow invocation refused: {0}")]
+    Invalid(String),
+    /// Flux execution failed; the message has passed the invocation redactor.
+    #[error("workflow execution failed: {0}")]
+    Execution(String),
 }
 
 /// What an operation answered with.

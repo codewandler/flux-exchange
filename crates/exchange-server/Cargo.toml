@@ -29,9 +29,11 @@ connector-catalog.workspace = true
 # This crate deliberately never names `connector_pack`: the crate that can build a request cannot
 # name the pack, and the crate that names the pack cannot build a request. A test asserts it.
 flux-system.workspace = true
+flux-tools.workspace = true
 flux-web.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

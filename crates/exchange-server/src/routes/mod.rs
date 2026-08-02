@@ -23,6 +23,7 @@ mod identity;
 mod invoke;
 mod onboarding;
 mod signin;
+mod workflows;
 
 use std::path::Path;
 
@@ -52,6 +53,7 @@ const MODULES: &[Module] = &[
     invoke::MODULE,
     grants::MODULE,
     onboarding::MODULE,
+    workflows::MODULE,
 ];
 
 /// A feature module's contribution to the surface.
