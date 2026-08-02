@@ -75,12 +75,54 @@ How it is wired, for whoever picks up [[X-65]]:
 - **Two pages, deliberately.** `invoke` (live) and `subscribe` (not), so both branches of the badge
   are rendered by a real page rather than by a component nobody has executed. That is the mechanism's
   floor, not the intended set; X-65 writes the volume.
-- `FLUX_EXCHANGE_DESCRIPTOR_FIXTURE` is test-only plumbing that swaps the document badges derive
-  from. It deliberately does **not** swap the one `assertDescriptorIsCurrent()` reads, so a fixture
-  build can never switch off the staleness guard.
+- **There is no way to point a real build at a different descriptor.** `readDescriptor()` reads the
+  committed artifact and nothing else. The hypothetical builds the two demonstrations need are
+  injected in-process, through VitePress's `onAfterConfigResolve` hook, which the CLI does not
+  expose — see the rework note below for why an environment variable was the wrong answer.
 - The web tests went in a **new file**, `web/test/status.test.mjs`, rather than into
   `site.test.mjs` — different question (where did this come from, not what may this publish), and it
   keeps the conflict surface off a file other stories are editing.
+- **Adding a page requires nothing of you.** `web/test/rendered.mjs` is the one enumerator every
+  suite scans through, and `web/test/coverage.test.mjs` fails if it stops covering something the
+  site publishes. Do not write a second enumerator.
+
+## Rework — what independent review found after the first merge
+
+Both findings were real and both are fixed on top of `c84c3dc`.
+
+1. **The capability pages escaped every content guard on the site, and the gate stayed green.**
+   `site.test.mjs` enumerated pages with a non-recursive `readdirSync(dist)`. That was total coverage
+   until this story published the first pages below the root of `dist` — after which
+   `capabilities/invoke.html` and `capabilities/subscribe.html` were read by *none* of: no
+   deployment-specific fact, nothing credential-shaped, the base-path check, and X-77's two
+   family-link guards. Demonstrated rather than deduced: an IP address, a `host:port` endpoint and a
+   bearer token injected into `capabilities/invoke.md` published to `dist` with **23/23 passing**.
+
+   A scanner given fewer files does not fail; it passes sooner. So the fix is not "recurse" — that is
+   only today's bug. There is now one enumerator (`web/test/rendered.mjs`) and `coverage.test.mjs`
+   measures it against the markdown sources VitePress actually publishes, so a page added at any
+   depth is covered by nobody remembering anything. The same non-recursive flaw was in
+   `status.test.mjs`, twice, and is gone with it.
+
+   Worse than the bug: this story's own commit *asserted* the enforcement it had just removed, in
+   `web/README.md` and `AGENTS.md`. Both now describe what is actually true, and say why.
+
+2. **The fixture escape hatch was a documented path around this story's central claim.**
+   `readDescriptor()` read `process.env[FLUX_EXCHANGE_DESCRIPTOR_FIXTURE] ?? artifactPath()` — in
+   production build code. A build with that set published badges derived from arbitrary JSON while
+   `assertDescriptorIsCurrent()` passed, because the guard checked the committed artifact and not
+   what the badges read. Not reachable from `pages.yml`, so not an incident, but the proposition here
+   is *a page cannot claim a capability is live without the route table agreeing*, and that was a way
+   around it shipping inside the mechanism.
+
+   Fixed by removing it: production code reads one file. The demonstrations drive VitePress in
+   process and override the resolved `transformPageData` through `onAfterConfigResolve`, a Node-API
+   hook the CLI does not expose. They still exercise the production `statusFor`, and the real config
+   still loads, so a hypothetical build proves the committed artifact current on the way past.
+
+Also: the Node floor is now stated in `web/package.json`'s `engines` and checked in
+`assertDescriptorIsCurrent` before the spawn, so an old runner gets a version message rather than a
+TypeScript syntax error out of a subprocess.
 
 **Two findings, neither fixed here:**
 

@@ -94,16 +94,15 @@ export function artifactPath(): string {
 export const CAPABILITIES_DIR = 'capabilities'
 
 /**
- * The environment variable `web/test/status.test.mjs` uses to build the site against a hypothetical
- * descriptor.
+ * The minimum Node this file's currency check needs, and why it is not the site's minimum.
  *
- * **Test-only, and narrower than it looks.** It replaces the document the *badges* derive from and
- * nothing else: [`assertDescriptorIsCurrent`] always reads the committed artifact, so pointing a
- * build at a fixture can never switch off the guard that the artifact is up to date. That
- * separation is the whole reason this is safe to have — a fixture is a claim about a build that
- * does not exist, and currency is a claim about the one that does.
+ * VitePress wants 22+. This wants 22.18, where type stripping runs `console/src/descriptor.mts`
+ * without a compiler or a dependency — the whole reason the site can re-derive the descriptor
+ * without `web/` taking on a build of its own. Below it the spawn fails with a TypeScript syntax
+ * error from a subprocess, which is a true statement about the wrong thing, so this says the real
+ * one first.
  */
-const FIXTURE = 'FLUX_EXCHANGE_DESCRIPTOR_FIXTURE'
+const NODE_FLOOR = [22, 18]
 
 /**
  * Fail the build unless the committed artifact is what `console/src/descriptor.mts` derives today.
@@ -118,6 +117,16 @@ export function assertDescriptorIsCurrent(): void {
   const artifact = artifactPath()
   if (!existsSync(artifact)) {
     throw new Error(`${artifact} is missing: this site derives every capability status from it`)
+  }
+
+  const [major, minor] = process.versions.node.split('.').map(Number)
+  if (major < NODE_FLOOR[0] || (major === NODE_FLOOR[0] && minor < NODE_FLOOR[1])) {
+    throw new Error(
+      `this site needs Node ${NODE_FLOOR.join('.')}+ and is running ${process.versions.node}.\n` +
+        'The status badges are checked against `console/src/descriptor.mts`, which is TypeScript ' +
+        "run by Node's own type stripping — unavailable below that version, where this would " +
+        'instead fail as a syntax error from a subprocess.'
+    )
   }
 
   let derived: string
@@ -145,13 +154,27 @@ export function assertDescriptorIsCurrent(): void {
   }
 }
 
-/** The document the badges derive from: the committed artifact, or a test fixture standing in. */
+/**
+ * The document the badges derive from: the committed artifact, and nothing else.
+ *
+ * **There is deliberately no override here.** An earlier draft let an environment variable name a
+ * different file, so that `web/test/status.test.mjs` could render the site against a hypothetical
+ * build. Review found what that actually was: a build with the variable set publishes badges
+ * derived from arbitrary JSON while [`assertDescriptorIsCurrent`] goes on passing, because the
+ * guard checks the committed artifact rather than what the badges read. The story's whole
+ * proposition is that a page cannot claim a capability is live without the route table agreeing,
+ * and that was a documented-as-safe path around it living in production code.
+ *
+ * The hypothetical builds those tests need now come from `web/test/fixtures/hypothetical-build.mts`
+ * — a separate config passed on the command line, which `npm run build` and `pages.yml` have no way
+ * to load. In a real build the badges read this artifact, and this artifact is checked current.
+ */
 export function readDescriptor(): Descriptor {
-  const source = process.env[FIXTURE] ?? artifactPath()
-  if (!existsSync(source)) {
-    throw new Error(`${source} is missing: this site derives every capability status from it`)
+  const artifact = artifactPath()
+  if (!existsSync(artifact)) {
+    throw new Error(`${artifact} is missing: this site derives every capability status from it`)
   }
-  return JSON.parse(readFileSync(source, 'utf-8')) as Descriptor
+  return JSON.parse(readFileSync(artifact, 'utf-8')) as Descriptor
 }
 
 /**

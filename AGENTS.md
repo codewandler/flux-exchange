@@ -87,6 +87,15 @@ base path plus the two content rules the site publishes under — no deployment-
 credential-shaped. It is a third Node tree: `web/`, `console/` and the Cargo workspace share nothing,
 including lockfiles.
 
+⚠ **Those content rules are loops over the built pages, and what they loop over is enumerated in one
+place — `web/test/rendered.mjs`.** Do not re-implement that enumeration in a new suite. X-64 added
+the site's first pages below the root of `dist` while the enumerator was a non-recursive
+`readdirSync`, and every content rule silently stopped covering them: an IP address, a `host:port`
+endpoint and a bearer token reached the live public site with the whole gate green, because a
+scanner given fewer files passes sooner rather than failing. `web/test/coverage.test.mjs` now holds
+the enumerator to what the site actually publishes, so a page added at any depth is covered without
+anybody remembering to check.
+
 **Since X-64 no page on that site states whether a capability is built.** Pages under
 `web/capabilities/` name a capability in their frontmatter and the status is derived from the
 committed agent descriptor — the same artifact whose `live` flags `routes::onboarding`'s tests hold

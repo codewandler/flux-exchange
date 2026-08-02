@@ -102,6 +102,19 @@ second is review's job, and the test says so in place rather than implying cover
 have. The fourth has a mechanism and a gap, and the gap is stated below because assuming it is
 covered is worse than knowing it is not.
 
+**Every one of those rules is a loop over the built pages, so which pages get looped over is itself
+load-bearing.** `test/rendered.mjs` is the single enumerator all the suites share, and
+`test/coverage.test.mjs` holds it to finding everything the site actually publishes — by comparing
+what is scanned against the markdown sources, and by running the walker against a tree with a page
+nested two directories deep.
+
+That is not defensive tidying. X-64 added `capabilities/`, the first pages this site ever published
+below the root, and the enumerator was a single non-recursive `readdirSync(dist)`. Those two pages
+were scanned by *none* of the rules above — an IP address, a `host:port` endpoint and a bearer token
+went to the live public site with the full gate green, because a scanner given fewer files does not
+fail, it passes sooner. **Adding a page anywhere under `web/` now requires nothing of you**; if it
+renders and the suite is not reading it, `coverage.test.mjs` goes red.
+
 ## The status badge is derived
 
 This repository corrected **five separate renderings** of one false claim in a single week — that
