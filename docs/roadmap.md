@@ -86,6 +86,38 @@ mode in which authentication is a name anybody can guess.
 Design: [`docs/designs/local-identity.md`](designs/local-identity.md).
 
 
+### A deployment a stranger can reach
+
+Everything this platform does can only be seen on `127.0.0.1`. [[X-69]]'s page walks a reader through
+`cargo run`, a roster handle and a console on localhost, and that is the entire demonstrable surface;
+[[X-63]]'s site can now *describe* the platform to an evaluator and nothing lets them use it.
+
+Owner-raised 2026-08-02: deploy to fly.io so it can be used and tested end to end, remotely. Three
+things stand in the way and only one is packaging. **A reachable bind needs a bound identity**, and
+`main.rs:394` is the sole route to one — the development roster is refused by name, with its own
+refusal variant, because a roster handle is a name anybody can guess. Owner-decided the same day:
+stand up a real OIDC provider, which needs no Rust change at all. **The console has no production
+host**, and cannot be given one on another origin: it addresses the API by same-origin relative paths
+and the session cookie is `SameSite=Strict`, so a browser would never attach it cross-origin. That is
+[[X-83]] and it looks like a CORS problem while being nothing of the kind. **Nothing containerises
+this** — [[X-84]] — and no flux-family repository has ever deployed, so what that story writes is the
+precedent `flux` and `flux-connectors` copy.
+
+One machine, deliberately: the credential store fsyncs the whole file under a single mutex and a fly
+volume attaches to one machine, so two machines is two divergent credential stores with no
+reconciliation.
+
+The half most likely to be skipped is the operator's first five minutes. X-13's grant gate is
+fail-closed and **will look like an outage** — `503` with no store bound, `403 not_granted` with one
+bound and empty. A URL shipped without a path through that is a working platform that appears broken.
+
+Done looks like: a stranger opens the public URL, signs in, connects a connector, writes a grant,
+invokes an operation and reads the result — with no checkout, and with no fail-closed gate weakened to
+get there.
+
+Design: [`docs/designs/remote-deployment.md`](designs/remote-deployment.md).
+
+
 ### Credential acquisition, and a labelled weak one
 
 Every credential this service has ever held arrived the same way: **a human pasted it in.**

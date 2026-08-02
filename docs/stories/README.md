@@ -60,6 +60,12 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-65 — The whole intended surface is on the page, including what is not built](X-65-the-whole-surface-is-on-the-page.md) · channels, subscribe, leases, workflows — the brief's \"scaffold the whole future surface\", safe to write only once X-64 makes status derived
 - [X-66 — The credential-boundary argument is readable by someone who has never seen this repository](X-66-the-boundary-argument-in-public.md) · the page that justifies the platform existing: the credential never crosses the boundary, the authority does — written for an evaluator rather than for a contributor
 
+### a deployment a stranger can reach
+_Everything this platform does can only be seen on `127.0.0.1`. The getting-started page walks a_
+- [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — owner-raised 2026-08-02: everything this platform does can only be seen on 127.0.0.1. Three blockers, and only one is packaging: OIDC is the sole path to a reachable bind, the console has no production host and cannot be given one on another origin, and nothing containerises this
+- [X-83 — The console is served by the host it talks to](X-83-the-console-is-served-by-the-host-it-talks-to.md) · the console reaches the API only through the Vite dev proxy, which npm run build does not emit — and it cannot be hosted elsewhere, because SameSite=Strict means the browser never attaches the session cookie cross-origin. Ordered before X-84, which has nothing to put in an image until this exists
+- [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · the first deployment any flux-family repository has made, so it sets the precedent the siblings copy. One machine deliberately — the credential store fsyncs the whole file under one mutex and a fly volume is per-machine, so two machines is two divergent stores with no reconciliation
+
 ## Blocked
 _None._
 
