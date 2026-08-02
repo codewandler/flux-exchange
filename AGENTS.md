@@ -88,13 +88,20 @@ credential-shaped. It is a third Node tree: `web/`, `console/` and the Cargo wor
 including lockfiles.
 
 ⚠ **Those content rules are loops over the built pages, and what they loop over is enumerated in one
-place — `web/test/rendered.mjs`.** Do not re-implement that enumeration in a new suite. X-64 added
-the site's first pages below the root of `dist` while the enumerator was a non-recursive
-`readdirSync`, and every content rule silently stopped covering them: an IP address, a `host:port`
-endpoint and a bearer token reached the live public site with the whole gate green, because a
-scanner given fewer files passes sooner rather than failing. `web/test/coverage.test.mjs` now holds
-the enumerator to what the site actually publishes, so a page added at any depth is covered without
-anybody remembering to check.
+place — `web/test/rendered.mjs`.** Do not re-implement that enumeration, and **do not give it
+anything to skip**: `pages()` returns every `.html` in the output, at any depth, deliberately
+without exclusions. X-64 cost two rounds of review here. First it published the site's first pages
+below the root of `dist` while the enumerator was a non-recursive `readdirSync`; then the fix
+recursed but still shared a skip-list with the walk that predicts which pages *should* exist, so
+`dist/test/` and `dist/scripts/` went unread and the coverage check could not see it — both halves
+were blind in the same places, so they agreed. Each time, an IP address, a `host:port` endpoint and
+a bearer token reached the live public site with the whole gate green.
+
+The rule: **a claim about what should be published is never a licence to skip reading something that
+was.** What is content is stated once, in `web/.vitepress/content.mts`; the config's `srcExclude`
+and the test suite's prediction are both built from it, so contributor files never publish — and
+`web/test/coverage.test.mjs` checks that separately from checking that whatever does publish is
+scanned.
 
 **Since X-64 no page on that site states whether a capability is built.** Pages under
 `web/capabilities/` name a capability in their frontmatter and the status is derived from the

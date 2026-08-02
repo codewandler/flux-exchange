@@ -24,11 +24,14 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { pages, publishedSources, walk } from './rendered.mjs'
+import { NOT_CONTENT, SRC_EXCLUDE } from '../.vitepress/content.mts'
+
+const webRoot = path.resolve(import.meta.dirname, '..')
 
 test('every page this site publishes is one the suite scans', () => {
   // The load-bearing test of this file. Sources on one side, the enumeration on the other; a page
@@ -80,4 +83,89 @@ test('the page walker finds a page nested below the root', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('this site publishes nothing out of its own machinery', () => {
+  // The second defence, asserted against the real build rather than against the config that is
+  // supposed to produce it. `srcExclude` is a glob list and a glob that stops matching fails silently
+  // — the page simply appears. Until round two of X-64's review, a markdown file in `web/test/` or
+  // `web/scripts/` rendered to a public page, and the content rules were not reading that far either.
+  //
+  // Note what this does *not* rely on: if this ever regresses, the page still gets scanned, because
+  // `pages()` excludes nothing. Two independent defences, and this is the one that keeps contributor
+  // files off the public site at all.
+  for (const { name } of pages()) {
+    const directory = name.split('/')[0]
+    assert.ok(
+      !NOT_CONTENT.includes(directory),
+      `the site published ${name}. \`${directory}/\` is this site's own machinery, not content — ` +
+        '`srcExclude` in `.vitepress/config.mts` is no longer keeping it off the public site.'
+    )
+  }
+})
+
+test('the built site is read with no directory excluded, including the ones sources skip', () => {
+  // **Round two of X-64's review, as a test.** The walker took a list of directories to skip and it
+  // was shared: correct for the source walk, which is predicting what *should* publish, and a hole
+  // in the output walk, which is reading what *did*. `dist/test/` and `dist/scripts/` went unread,
+  // and `coverage.test.mjs` could not see it because the predicted set and the scanned set agreed —
+  // both omitted the page. An IP address, a `host:port` endpoint and a bearer token published to
+  // the live site with all 25 tests green.
+  //
+  // So this asserts the asymmetry directly, on the five names that were skipped. It fails against
+  // the implementation it replaced, which is the only thing that makes it evidence.
+  const dir = mkdtempSync(path.join(tmpdir(), 'flux-exchange-total-'))
+  try {
+    const expected = []
+    for (const directory of NOT_CONTENT) {
+      mkdirSync(path.join(dir, directory), { recursive: true })
+      writeFileSync(path.join(dir, directory, 'leak.html'), '<html></html>')
+      expected.push(`${directory}/leak.html`)
+    }
+    writeFileSync(path.join(dir, 'index.html'), '<html></html>')
+    expected.push('index.html')
+
+    assert.deepEqual(
+      pages(dir)
+        .map(({ name }) => name)
+        .sort(),
+      expected.sort(),
+      'the output walk skips a directory. Every content rule is a loop over `pages()`, so a page it ' +
+        'does not return is a page published with no rule applied to it — which is how a bearer ' +
+        'token reached the public site with this suite green. Excluding on the way in is a content ' +
+        'decision; excluding on the way out is a blind spot.'
+    )
+
+    // The other half of the asymmetry: the *source* walk does skip them, and must, or predicting
+    // which pages exist would mean walking `node_modules`.
+    assert.deepEqual(
+      walk(dir, '.html', { skip: NOT_CONTENT }),
+      ['index.html'],
+      'the source walk no longer honours its exclusions'
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('what the site refuses to publish is the same list the suite predicts from', () => {
+  // The drift this closes is not two lists disagreeing — it is two lists agreeing wrongly, which is
+  // the shape that survived a full round of review. `content.mts` states it once; the config builds
+  // `srcExclude` from it and `rendered.mjs` predicts from it. This asserts the config actually reads
+  // the constant rather than having quietly grown a literal beside it.
+  const config = readFileSync(path.join(webRoot, '.vitepress', 'config.mts'), 'utf-8')
+
+  assert.match(
+    config,
+    /srcExclude:\s*SRC_EXCLUDE\b/,
+    'the config no longer builds `srcExclude` from `content.mts` — what the site publishes and what ' +
+      'the suite predicts are now two lists, and they will fail by agreeing rather than by differing'
+  )
+  for (const directory of NOT_CONTENT) {
+    assert.ok(
+      SRC_EXCLUDE.includes(`${directory}/**`),
+      `\`${directory}\` is treated as non-content by the suite and is not excluded from publishing`
+    )
+  }
+  assert.ok(SRC_EXCLUDE.includes('README.md'), 'the contributor readme is no longer excluded')
 })

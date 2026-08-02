@@ -124,6 +124,39 @@ Also: the Node floor is now stated in `web/package.json`'s `engines` and checked
 `assertDescriptorIsCurrent` before the spawn, so an old runner gets a version message rather than a
 TypeScript syntax error out of a subprocess.
 
+### Round two — the same hole, one directory over
+
+The recursion fix carried a list of directories to skip, and `walk()` was shared. Correct for the
+walk that *predicts* which pages should exist — it must not descend into `node_modules` — and a hole
+in the walk that *reads* which pages do exist: `dist/test/` and `dist/scripts/` went unscanned.
+`coverage.test.mjs` could not see it, because both halves were blind in the same five places and so
+the predicted set and the scanned set agreed. A markdown file in `web/test/` published to a public
+page carrying a bearer token, with all 25 tests green.
+
+**The rule that came out of it, and the one to keep:** a claim about what should be published is
+never a licence to skip reading something that was. Excluding on the way in is a content decision;
+excluding on the way out is a blind spot.
+
+Two independent defences, because either alone has a failure mode:
+
+- `pages()` excludes **nothing** — every `.html` in the output, any depth, any directory. Anything
+  published is scanned, whatever else goes wrong.
+- Nothing outside the content directories publishes at all. `srcExclude` is built from
+  `.vitepress/content.mts`, which is also what the suite predicts from — **one** list, so the
+  publisher and the predictor cannot drift into agreeing wrongly, which was the actual defect rather
+  than a hypothetical one.
+
+`coverage.test.mjs` holds both, and its self-test now builds a fixture whose directories are named
+`test`, `scripts`, `node_modules`, `public` and `.vitepress`, so the output walk is proved to
+descend into the exact names the source walk skips. That test fails against the implementation it
+replaced.
+
+Two smaller things from the same round: the docstring arguing the escape hatch was shut cited
+`web/test/fixtures/hypothetical-build.mts`, a file abandoned when `--config` turned out not to exist
+in VitePress 1.6.4 — it now names the real mechanism, `onAfterConfigResolve`. And the Node check
+admitted 23.0–23.5, where type stripping is still flag-gated; it is two ranges now, matching
+`engines`.
+
 **Two findings, neither fixed here:**
 
 1. **X-65's Acceptance is not satisfiable as written.** It asks that every page in its list carry a
