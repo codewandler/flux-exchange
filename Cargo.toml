@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/exchange-host", "crates/exchange-server"]
 
 [workspace.package]
-version = "0.14.1"
+version = "0.14.2"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ authors = ["codewandler"]
 [workspace.dependencies]
 # The crates.io package carries the `codewandler-` vanity prefix (matching the flux family); the
 # alias key and the lib name stay bare, so `use exchange_host::…` is unaffected.
-exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exchange-host", version = "0.14.1" }
+exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exchange-host", version = "0.14.2" }
 
 async-trait = "0.1"
 axum = "0.8"
@@ -109,7 +109,9 @@ reqwest = { version = "0.13", default-features = false, features = [
     "http2",
     "charset",
 ] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+# Keep Exchange on Flux 0.52's Rust-1.88-compatible SQLite line. A second libsqlite3-sys line is
+# rejected by Cargo anyway, and 0.40's build script requires syntax newer than our declared MSRV.
+rusqlite = { version = "0.39", features = ["bundled"] }
 # Replaces the hand-written `oidc/sha256.rs`, which existed only because no digest crate was allowed
 # in. It was checked exhaustively against hashlib before it was trusted; it is deleted now rather
 # than kept as a second implementation nobody exercises.

@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-08-03
+
+### Fixed
+
+- **`cargo run -- --dev` builds on the declared Rust 1.88 MSRV again** (X-99). Exchange and the
+  published Flux 0.52.2 family now resolve one registry-only bundled-SQLite line whose build script
+  supports the promised compiler. The browser sign-in action from v0.14.1 is unchanged; this patch
+  repairs the dependency regression that kept its ordinary CI job red.
+
 ## [0.14.1] - 2026-08-02
 
 ### Fixed
