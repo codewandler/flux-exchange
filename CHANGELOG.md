@@ -19,6 +19,20 @@ All notable changes to this project are documented in this file. The format is b
   X-59 remains in progress for the orthogonal form that selects one tenant independently of OIDC or
   a future verified local-user provider.
 
+- **The repository has one labelled security posture and a ranked hardening roadmap** (X-89).
+  [`docs/security.md`](docs/security.md) maps protected assets, attackers and trust boundaries to
+  controls that are enforced in code, deployment-dependent assumptions and known limitations. It
+  covers OIDC/session handling, tenant and grant authorization, credential persistence, guarded
+  execution, browser policy, resource bounds, audit evidence and supply-chain provenance, and adds
+  an incident checklist plus a short operator gate to the Fly runbook.
+
+  A failing-first repository test keeps the posture linked from both indexes and anchored to the
+  authoritative identity, invoke, public-hardening and deployment designs. X-90 through X-97 now
+  track signed Google organization verification, explicit operators, private reporting and branch
+  protection, reviewed deployment provenance, tested recovery, durable audit evidence, fair traffic
+  controls and a managed credential backend. Runtime behaviour and the deployed release are
+  unchanged by this documentation-only tranche.
+
 ## [0.13.0] - 2026-08-02
 
 ### Added

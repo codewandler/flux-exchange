@@ -7,6 +7,9 @@ Its primary caller is an **agent**, not a human. People sign in to wire things u
 happened; agents are what call operations all day. That inverts the usual assumption and shapes
 everything below.
 
+The contributor and operator [security posture](docs/security.md) maps the threat model, enforced
+controls, deployment assumptions, known limitations, security roadmap and incident checklist.
+
 > [!WARNING]
 > **Status: v0.13.0 — credentials, a gated invoke, and a hardened public process.**
 >

@@ -13,6 +13,42 @@ the refusal is quoted.
 - **An OIDC provider.** This is not optional and it is not a preference — see below.
 - Docker, if you want to check the image locally before pushing it.
 
+## Operator security checklist
+
+Read the full [security posture](security.md) before exposing a machine. These checks are the short
+operational gate; they do not turn a known limitation into an enforced control.
+
+Before deploying:
+
+- [ ] Confirm the OIDC application is still organization-internal, its redirect URI is exact and
+      every configured endpoint is HTTPS. Until X-90 lands, record that organization admission is a
+      provider setting rather than an application-side signed-`hd` check.
+- [ ] Put only `FLUX_EXCHANGE_OIDC_CLIENT_SECRET` in Fly secrets. Keep credentials and tokens out of
+      `fly.toml`, shell history, tickets and logs.
+- [ ] Verify the actual Fly volume reports encryption enabled; do not infer this from `fly.toml`,
+      because the volume is created separately.
+- [ ] Verify there is exactly one machine and one attached volume. Do not scale this file-backed
+      deployment horizontally.
+- [ ] Verify the four store paths remain nested below `/data`, the image still runs as uid `10001`,
+      and no prior store directory or snapshot is being attached accidentally.
+- [ ] Inspect the commit and working-tree diff that `fly deploy` will build. Until X-93 lands, record
+      the commit and any uncommitted changes with the deployment record.
+- [ ] Confirm grants begin at the least metadata selector the intended work needs. A fresh store
+      admitting nothing is the safe state.
+- [ ] Confirm a recovery point exists and can be listed. Until X-94 lands, do not claim an RPO or RTO
+      that no isolated restore has demonstrated.
+
+After deploying:
+
+- [ ] Verify `/health` reports the intended version, sign-in completes, logout invalidates the
+      presented session, and an ungranted invocation refuses.
+- [ ] Verify the live console and API carry CSP, HSTS, `nosniff`, referrer and permissions headers;
+      verify API responses additionally carry `Cache-Control: no-store`.
+- [ ] Verify saturation answers `429` without taking health down, and inspect audit events for stable
+      action/actor/target fields with no token, credential, setting value or request body.
+- [ ] Record the machine, volume, release, source commit and verification time. Link an incident or
+      exception rather than weakening a check silently.
+
 ## Why a provider is required, before you spend time on anything else
 
 `admit_bind` refuses a reachable bind unless the identity binding is `Bound`, and

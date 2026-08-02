@@ -33,7 +33,9 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 - [X-59 — A deployment can hold one tenant and stop asking which](X-59-single-tenant-deployment.md) · the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it
 
 ## Next (ready — take the top one unless the user named a story)
+- [X-92 — Private reporting and protected main](X-92-private-reporting-and-protected-main.md) · Observed 2026-08-02: private vulnerability reporting, secret scanning, Dependabot security updates and main protection are all disabled.
 - [X-81 — Four places state this project's version and three of them are wrong](X-81-the-version-a-page-states-is-checked.md) · found by X-73's implementor, 2026-08-02: lib.rs says v0.7.0, AGENTS.md and README.md say v0.9.0, the manifest says 0.11.0. lib.rs's is the published crate's front-page doc comment, so docs.rs is serving the wrong one — and nothing in the gate compares any of them to the manifest
+- [X-95 — Audit evidence survives the process](X-95-audit-evidence-survives-the-process.md) · X-87 emits structured success events, but they have no correlation id, durable sink, retention target or alert policy.
 
 ### the primary caller can authenticate
 _Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
@@ -63,6 +65,12 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 ### a deployment a stranger can reach
 _Everything this platform does can only be seen on `127.0.0.1`. The getting-started page walks a_
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — owner-raised 2026-08-02: everything this platform does can only be seen on 127.0.0.1. Three blockers, and only one is packaging: OIDC is the sole path to a reachable bind, the console has no production host and cannot be given one on another origin, and nothing containerises this
+- [X-90 — Verify the Google organization in the signed token](X-90-verify-the-google-organization-in-the-signed-token.md) · The Google app is Internal, but this process accepts any token valid for its client; Google says a Workspace boundary must verify the signed hd claim, never an email suffix.
+- [X-91 — Signing in does not make every member an operator](X-91-signing-in-does-not-make-every-member-an-operator.md) · Preserve organization-wide authentication, but key administrative authority by immutable OIDC sub and fail closed when no operator is configured.
+- [X-93 — Production comes from a reviewed commit](X-93-production-comes-from-a-reviewed-commit.md) · v0.13.0 was manually built from a dirty working tree; the live version is known, but the image is not reproducibly attributable to a reviewed SHA.
+- [X-94 — Persistent state has a tested recovery path](X-94-persistent-state-has-a-tested-recovery-path.md) · The one production volume was encrypted but listed no snapshots on 2026-08-02; no recovery point or restore time has been demonstrated.
+- [X-96 — Traffic controls are fair as well as bounded](X-96-traffic-controls-are-fair-as-well-as-bounded.md) · The process-wide X-87 limiter bounds memory and concurrency but lets one caller spend the shared invocation budget and supplies no saturation metric.
+- [X-97 — Public credentials leave the file store](X-97-public-credentials-leave-the-file-store.md) · The file store is honest and mode-safe but application-plaintext; the existing SecretStore port is the seam for a managed Vault-class backend.
 
 ## Blocked
 _None._
@@ -146,6 +154,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-86 — One search bar over the catalogue this exchange actually serves](X-86-an-exchange-owned-catalogue-finder.md) · owner-directed 2026-08-02: retire the copied explorer; exchange owns one search bar with connector, service and operation tabs, and adds channels only when it has real channel data
 - [X-87 — The public service has an operational security boundary](X-87-harden-the-public-service.md) · Raised from the first review after public deployment. Organization-wide Google admission is intentional; this story hardens the service around that policy rather than narrowing it.
 - [X-88 — An operator can finish the job without translating the API](X-88-an-operator-can-finish-the-job.md) · owner-directed 2026-08-02: turn the ten highest-impact UX findings into one connect → grant → invoke journey and include it in v0.13.0
+- [X-89 — The security posture is discoverable and its gaps are tracked](X-89-document-and-extend-the-security-posture.md) · Document the controls X-87 hardened, label deployment assumptions and limitations honestly, and turn the remaining security work into ranked stories.
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
