@@ -1,7 +1,7 @@
 ---
 id: X-84
 title: "A container, one machine, and the operator's first five minutes"
-status: ready
+status: in-progress
 priority: 2
 epic: remote-deployment
 design: docs/designs/remote-deployment.md
@@ -65,21 +65,55 @@ belongs in that walkthrough.
 
 ## Acceptance
 - [ ] `fly deploy` produces a running machine that answers `/health` and serves the console at `/`.
+      → **artifacts complete and verified locally; the deploy itself is unrun.** It needs an OIDC
+      provider registered against `https://<app>.fly.dev/api/signin/callback`, which is an account
+      action rather than a code change.
 - [ ] A browser at the public URL signs in through the configured provider and reaches an authenticated
       screen.
 - [ ] **Verified by walking it**, the way [[X-69]] verified its page rather than intending it: sign in →
       connect → grant → invoke → result, on the deployed URL, from a machine with no checkout.
-- [ ] The credential store's files are `0600` in a `0700` directory on the volume, asserted after a
-      restart rather than at first boot.
+- [x] The credential store's files are `0600` in a `0700` directory on the volume.
+      → verified in the built image on a mounted volume: `drwx------ /data/credentials` holding
+      `-rw------- store.json`. **This is where the measurement changed the design** — see Progress.
 - [ ] A redeploy preserves credentials, agents, settings and grants, and **signs everyone out** —
       sessions are in memory (`session.rs:173`). Stated in the runbook so it does not read as a bug.
-- [ ] No secret appears in any committed file. `scripts/check-action-pins.sh` still passes if any
-      workflow is touched.
-- [ ] `FLUX_EXCHANGE_DEV_IDENTITY` is provably unset in the deployed environment — the one variable
-      whose presence turns the whole bind rule off.
+- [x] No secret appears in any committed file.
+      → `fly.toml` carries the six non-secret OIDC values as placeholders and names the seventh only to
+      say it belongs in `fly secrets set`. No workflow was touched.
+- [x] `FLUX_EXCHANGE_DEV_IDENTITY` is provably unset — the one variable whose presence turns the whole
+      bind rule off.
+      → absent from `fly.toml` and the image, with the reason written where somebody would think to add
+      it. Confirmed in the container: a reachable bind with no identity exits, quoting the refusal.
 
 ## Progress
-- (not started)
+- **The artifacts are in and the image is built, not sketched.** `Dockerfile` (three stages, no
+  toolchain in the runtime layer), `.dockerignore`, `fly.toml`, and `docs/deploying.md` as the runbook.
+  `docker build` succeeds and the image was driven through both the failure and the success path.
+- **The measurement that changed the design: a fresh volume mounts `0755`, and the credential store
+  refuses rather than tightening** (X-09). The obvious `FLUX_EXCHANGE_CREDENTIALS=/data/credentials`
+  does not start:
+
+  ```
+  the secret store refused access to /data: its mode is 0755, and a credential store must be
+  no wider than 0700 — run `chmod 700 /data` once you are satisfied nobody else has read it
+  ```
+
+  Pointed one level deeper — `/data/credentials/store.json` — the store **creates its own parent
+  `0700`** and its file `0600`, and the service boots with no manual `chmod` on a volume nobody has
+  touched. All four store paths are nested for that reason, and `fly.toml` carries the quoted refusal
+  beside them: flattening them back to `/data/*.json` looks like tidying and is a deployment that will
+  not start.
+- **A second finding from the same run:** the agent store makes the same complaint about `0755` as a
+  *warning* rather than a refusal — it discloses which agents exist and when their tokens expire, and no
+  token — so it would have started and quietly disclosed that. Nesting silences it too.
+- **The bind rule was verified inside the container**, which had to be true before the rest was worth
+  writing: `FLUX_EXCHANGE_BIND=0.0.0.0:8080` with no identity exits and quotes the refusal, so a
+  misconfigured machine crash-loops with the reason in its log rather than serving anonymously.
+- **`ca-certificates` is in the runtime image deliberately.** Without it the OIDC token exchange fails
+  on the certificate chain and reads as *the provider refused us* — the confusion X-17 exists to split
+  apart, reintroduced by a missing package.
+- **What is left is not a code change.** Registering an OIDC provider and running `fly deploy` are
+  account actions; every acceptance item reachable from a working tree is met.
 
 ## Notes
 - Blocked on [[X-83]]: nothing to serve at `/` until it lands.

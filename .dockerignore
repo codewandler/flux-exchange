@@ -1,0 +1,12 @@
+# Keep the build context to what the image is built from. `target/` alone is several gigabytes and
+# would be uploaded on every `fly deploy` only to be ignored by the build.
+target/
+**/node_modules/
+console/dist/
+web/
+docs/
+.git/
+.github/
+.claude/
+*.md
+!console/**/*.md

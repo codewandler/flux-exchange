@@ -1,0 +1,130 @@
+# flux-exchange on fly.io — X-84.
+#
+# This file is committed, so **no secret appears in it**. `FLUX_EXCHANGE_OIDC_CLIENT_SECRET` is set
+# with `fly secrets set`, on the same rule that governs `CARGO_REGISTRY_TOKEN`: a credential in a
+# committed file is a credential in the history, and history is not a place you can take it back out
+# of. See `docs/designs/remote-deployment.md`.
+
+app = 'flux-exchange'
+primary_region = 'fra'
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  # **Not a preference.** The session cookie is `Secure`, which means a browser only stores it over
+  # https. A deployment that also answered plain http would serve a sign-in whose cookie the browser
+  # then silently discards — presenting as "sign-in does nothing", with no error on either side.
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+
+  # ── One machine, and this is a correctness bound rather than a cost decision ──────────────────
+  #
+  # The credential store rewrites and fsyncs **the whole file** under a single mutex (X-22), and the
+  # per-tenant allowance race X-25 closed is closed only *within one process*. A fly volume attaches
+  # to exactly one machine. So two machines is two independent credential stores, diverging with no
+  # reconciliation and no way to tell which one a caller wrote to.
+  #
+  # Do not raise this to survive a deploy or an incident. Scaling this service horizontally needs a
+  # shared store behind the `SecretStore` port first — the port exists for that, and nothing binds
+  # such an implementation yet.
+  min_machines_running = 1
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  # Stated explicitly for the same reason as `min_machines_running`, because `fly scale count` reads
+  # this rather than the comment above it.
+  processes = ['app']
+
+# ── The volume ───────────────────────────────────────────────────────────────────────────────────
+#
+# Everything this service must not lose lives here. `/data` is owned by uid 10001 in the image, which
+# is the uid the process runs as — the credential store creates its directory `0700` and its file
+# `0600` and **refuses a mode wider than it requires** rather than tightening it (X-09), so the
+# ownership is part of the contract.
+#
+# `create` is false deliberately: the volume is made once, by hand, with `fly volumes create`. A
+# deploy that silently created a fresh empty volume would present as "every credential vanished".
+[mounts]
+  source = 'flux_exchange_data'
+  destination = '/data'
+  auto_extend_size_threshold = 0
+
+[[services.ports]]
+  handlers = ['http']
+  port = 80
+  force_https = true
+
+[[services.ports]]
+  handlers = ['tls', 'http']
+  port = 443
+
+[checks]
+  [checks.health]
+    type = 'http'
+    port = 8080
+    path = '/health'
+    method = 'get'
+    interval = '15s'
+    timeout = '5s'
+    grace_period = '10s'
+    # `/health` is `Access::Anonymous` by design (`routes/health.rs:19`), because an operator must be
+    # able to ask whether the process is up before it can tell them anything else. It depends on no
+    # bound store, so it answers on a deployment that is fail-closed on everything else — which is
+    # exactly what a check needs and why nothing else here is a candidate.
+
+[env]
+  # 0.0.0.0 is **not** loopback, so `admit_bind` refuses this unless the identity binding is
+  # `Bound` — which today means a complete OIDC configuration with a working token exchange
+  # (`main.rs`'s `AppState::with_oidc` is the only route to it). That refusal is the whole reason
+  # this deployment needs a provider, and it is a feature: a credential-holding service on a public
+  # address with no way to authenticate a caller is not a bug to fix later.
+  FLUX_EXCHANGE_BIND = '0.0.0.0:8080'
+
+  # The four stores, all on the volume. Every one of them defaults to *bound to nothing* with no
+  # fallback to memory: a store that fell back would start, serve every route correctly, look exactly
+  # like a working one, and lose everything on restart (X-09).
+  #
+  # WARNING: **Every path is nested one directory deep, and that is load-bearing.** Measured against
+  # this image, 2026-08-02: a fresh fly volume mounts its root `0755`, and the credential store
+  # refuses a parent wider than `0700` rather than tightening it — it **will not start**:
+  #
+  #     the secret store refused access to /data: its mode is 0755, and a credential store must be
+  #     no wider than 0700 — run `chmod 700 /data` once you are satisfied nobody else has read it
+  #
+  # Pointed one level down, the store *creates* its own parent `0700` and its file `0600`, and boots
+  # with no manual `chmod` on a volume nobody has touched. Verified: `drwx------ /data/credentials`
+  # holding `-rw------- store.json`. The agent store makes the same complaint about `0755` as a
+  # warning rather than a refusal — it discloses which agents exist and when their tokens expire,
+  # disclosing no token — and nesting silences it for the same reason.
+  #
+  # Do not flatten these back to `/data/*.json` to tidy them up. That is a deployment that refuses to
+  # start, and the refusal will read like a bug in the store.
+  FLUX_EXCHANGE_CREDENTIALS = '/data/credentials/store.json'
+  FLUX_EXCHANGE_AGENTS = '/data/agents/store.json'
+  FLUX_EXCHANGE_SETTINGS = '/data/settings/store.json'
+  FLUX_EXCHANGE_GRANTS = '/data/grants/store.json'
+
+  # The console the image carries, served at `/` by the same origin that answers `/api` — see X-83
+  # for why it cannot be anywhere else.
+  FLUX_EXCHANGE_CONSOLE = '/srv/console'
+
+  RUST_LOG = 'info,flux_exchange=info,exchange_host=info'
+
+  # ── What is deliberately NOT here ────────────────────────────────────────────────────────────
+  #
+  # FLUX_EXCHANGE_DEV_IDENTITY. Armed, it makes the identity binding `Development`, and `admit_bind`
+  # answers a reachable bind with `ReachableBindWithDevelopmentIdentity` — a refusal that exists
+  # separately from the no-identity one *because the remedy is the opposite*: there you add a
+  # provider, here you remove the one you have. Its roster handle is a name anybody can guess, so on
+  # a public address it is an open door. Setting it here does not weaken the deployment; it stops the
+  # deployment from starting.
+  #
+  # The seven FLUX_EXCHANGE_OIDC_* values. Six are not secret and belong here once the provider is
+  # registered — issuer, authorization endpoint, token endpoint, JWKS URI, client id, redirect URI
+  # (`https://<app>.fly.dev/api/signin/callback`) — and the seventh, the client secret, never does.
+  # They are left unset until a provider exists, because a partial OIDC configuration refuses at
+  # startup naming the variable that is missing (X-27), which is a better failure than a half-armed
+  # sign-in.

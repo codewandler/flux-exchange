@@ -8,6 +8,33 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A container, a fly.io configuration and a deployment runbook** (X-84). `Dockerfile` (three stages,
+  no toolchain in the runtime layer, the console built in and served from `/srv/console`), `fly.toml`,
+  `.dockerignore` and [`docs/deploying.md`](docs/deploying.md). **The first deployment any flux-family
+  repository has made**, so it is the precedent the siblings copy — `fly deploy` itself is unrun and
+  needs an OIDC provider, which is an account action rather than a code change.
+
+  **Two things were measured in the built image rather than reasoned about, and one changed the
+  configuration.** A fresh volume mounts its root `0755`, and the credential store refuses a parent
+  wider than `0700` rather than tightening it (X-09) — so the obvious
+  `FLUX_EXCHANGE_CREDENTIALS=/data/credentials` **does not start**. Pointed one level deeper the store
+  creates its own parent `0700` and its file `0600` and boots with no manual `chmod`. All four store
+  paths are nested for that reason, with the quoted refusal beside them in `fly.toml`, because
+  flattening them looks like tidying up. The same run found that the *agent* store makes that
+  complaint as a warning rather than a refusal — it discloses which agents exist and when their tokens
+  expire, and no token — so it would have started and quietly disclosed that.
+
+  The bind rule was confirmed inside the container: a reachable bind with no identity exits and quotes
+  its refusal, so a misconfigured machine crash-loops with the reason in its log rather than serving
+  anonymously. `ca-certificates` is installed deliberately — without it the OIDC token exchange fails
+  on the certificate chain and reads as *the provider refused us*, the confusion X-17 exists to split
+  apart. The entrypoint is exec form so the binary is pid 1 and `with_graceful_shutdown` sees fly's
+  `SIGTERM`, on a store that rewrites its whole file at once.
+
+  **One machine, as a correctness bound rather than a cost decision**, with the reason in the file: the
+  store fsyncs the whole file under one mutex (X-22), X-25's allowance race closes only in-process, and
+  a fly volume attaches to one machine — two machines is two credential stores diverging silently.
+
 - **The console is served by the host it talks to** (X-83). `crates/exchange-server` served no static
   files, and the console reached the API only through the Vite dev-server proxy — which
   `npm run build` does not emit. So the console was reachable exactly where a developer was running
