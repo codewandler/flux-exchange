@@ -31,8 +31,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # `exchange-host`'s `tests/engine_line.rs` reads this file and refuses a second one. Bumping the
 # engine is therefore editing this number and the pins beside it, in this file, and nothing else.
 #
-# **It is 0.49 because `connector-pack` 0.13.0 requires it** (X-85), and that ordering is the rule
-# rather than a coincidence. A `0.x` requirement is `>=0.49.0, <0.50.0` to Cargo, so the line *is*
+# **It is 0.52 because `connector-pack` 0.16.0 requires it** (X-98), and that ordering is the rule
+# rather than a coincidence. A `0.x` requirement is `>=0.52.0, <0.53.0` to Cargo, so the line *is*
 # the compatibility unit: `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, and two
 # `flux-runtime` versions in one graph are two distinct traits with identical names — Cargo resolves
 # both happily and `rustc` rejects them somewhere else entirely. **The engine line is set by what
@@ -47,22 +47,22 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # one line proves nothing about what **resolved**, and a transitive requirement a line behind is
 # invisible here.
 #
-# ENGINE_LINE = "0.49"
+# ENGINE_LINE = "0.52"
 #
 # flux's vocabulary crate: the `Error` and `Result` every `Tool::execute` answers with. Its own
 # dependencies are `serde`, `serde_json` and `thiserror` and nothing else, which is why it is the one
 # engine crate `exchange-host` may name without weakening lock 1 — telling a refusal that precedes
 # dispatch from a transport failure means matching on that enum, and matching on it means naming it.
-flux-core = { package = "codewandler-flux-core", version = "0.49" }
-flux-runtime = { package = "codewandler-flux-runtime", version = "0.49" }
+flux-core = { package = "codewandler-flux-core", version = "0.52" }
+flux-runtime = { package = "codewandler-flux-runtime", version = "0.52" }
 # flux's guarded-IO facade. Named here only because `flux_runtime::ToolContext::new` takes an
 # `Arc<System>` and there is no other constructor — so a composition that wants to invoke an
 # operation has to build one. It is **not** in `exchange-host`'s `[dependencies]`: it carries
 # `flux_system::net`, which dials, and the crate that dispatches holds no transport (X-12, lock 1).
-flux-system = { package = "codewandler-flux-system", version = "0.49" }
-flux-web = { package = "codewandler-flux-web", version = "0.49" }
+flux-system = { package = "codewandler-flux-system", version = "0.52" }
+flux-web = { package = "codewandler-flux-web", version = "0.52" }
 
-# The connector crates, all on the 0.13 line. `connector-catalog` has no dependencies at all and
+# The connector crates, all on the 0.16 line. `connector-catalog` has no dependencies at all and
 # `connector-secrets` defaults to no features (its Vault client and reqwest sit behind `vault`).
 #
 # `connector-address` is the **address vocabulary**, and it replaces `connector-spec` here.
@@ -74,10 +74,10 @@ flux-web = { package = "codewandler-flux-web", version = "0.49" }
 # vocabulary, so it names the vocabulary and no longer pulls a compiler it never called into.
 #
 # `connector-pack` is a **dev-dependency only**, deliberately — see `exchange-host`'s manifest.
-connector-address = { package = "codewandler-connector-address", version = "0.13" }
-connector-catalog = { package = "codewandler-connector-catalog", version = "0.13" }
-connector-pack = { package = "codewandler-connector-pack", version = "0.13" }
-connector-secrets = { package = "codewandler-connector-secrets", version = "0.13" }
+connector-address = { package = "codewandler-connector-address", version = "0.16" }
+connector-catalog = { package = "codewandler-connector-catalog", version = "0.16" }
+connector-pack = { package = "codewandler-connector-pack", version = "0.16" }
+connector-secrets = { package = "codewandler-connector-secrets", version = "0.16" }
 # The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family
 # precedent is sibling flux-connectors, which already uses reqwest and jsonwebtoken for exactly this
 # exchange; the alternative was hand-rolling signature verification, which nobody should do.
