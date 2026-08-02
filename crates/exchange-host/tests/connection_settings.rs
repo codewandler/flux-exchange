@@ -9,7 +9,7 @@
 //! Thirteen of the seventeen are made configurable here. **Four are refused on purpose** — see
 //! [`a_setting_cannot_become_the_destination_authority`], which is the whole of why.
 //!
-//! Re-measured against catalogue 0.10 by X-70: fifty-four connectors, nineteen declaring a
+//! Re-measured against catalogue 0.13 by X-85: fifty-four connectors, nineteen declaring a
 //! per-connection value, **three refused** — `docusign`, `freshdesk`, `okta` — and two whose host
 //! is a closed set of vendor region hostnames the catalogue publishes, which is
 //! [`only_an_exactly_declared_choice_may_be_supplied`].

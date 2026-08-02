@@ -10,7 +10,7 @@
 //! [`HostPinning`] — so the surface X-47 shipped was forty-nine of fifty-three, and the four that
 //! were left said so rather than looking broken.
 //!
-//! Re-measured against catalogue 0.10 (X-70): **fifty-four connectors, nineteen of which declare a
+//! Re-measured against catalogue 0.13 (X-85): **fifty-four connectors, nineteen of which declare a
 //! per-connection value, and three of those are refused** — `docusign`, `freshdesk` and `okta`,
 //! whose host is a bare placeholder with nothing declared to pick from. `intercom` and `newrelic`
 //! template their whole authority too and are *not* refused, because the catalogue publishes the

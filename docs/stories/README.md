@@ -30,6 +30,7 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 
 ## Now (in progress)
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · the first deployment any flux-family repository has made, so it sets the precedent the siblings copy. One machine deliberately — the credential store fsyncs the whole file under one mutex and a fly volume is per-machine, so two machines is two divergent stores with no reconciliation
+- [X-85 — Run the latest published connector line](X-85-run-the-latest-published-connector-line.md) · connector-pack 0.13.0 sets the compatible engine line to Flux 0.49; the exchange moves both pin sets together before its Fly machine is replaced
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-81 — Four places state this project's version and three of them are wrong](X-81-the-version-a-page-states-is-checked.md) · found by X-73's implementor, 2026-08-02: lib.rs says v0.7.0, AGENTS.md and README.md say v0.9.0, the manifest says 0.11.0. lib.rs's is the published crate's front-page doc comment, so docs.rs is serving the wrong one — and nothing in the gate compares any of them to the manifest

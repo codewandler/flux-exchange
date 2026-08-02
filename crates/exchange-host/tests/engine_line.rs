@@ -190,7 +190,7 @@ const WORKSPACE_LOCK: &str = include_str!("../../../Cargo.lock");
 ///
 /// The test above reads the *manifest*, because that is where a pin is authored and where a bump is
 /// done. This one reads the *lock*, because a manifest stating one line proves nothing about what
-/// resolved: a dependency requiring `^0.46` alongside this workspace's `0.47` puts both in the tree,
+/// resolved: a dependency requiring `^0.47` alongside this workspace's `0.49` puts both in the tree,
 /// Cargo writes both down without complaint, and the manifest is silent about it. That is the
 /// failure the `ENGINE_LINE` comment records having reasoned about by hand for `connector-pack`,
 /// and reasoning is what this replaces.
@@ -253,7 +253,7 @@ fn locked_flux_packages() -> impl Iterator<Item = (&'static str, &'static str)> 
     })
 }
 
-/// Whether `version` (`0.47.1`) falls inside `line` (`0.47`).
+/// Whether `version` (`0.49.0`) falls inside `line` (`0.49`).
 ///
 /// A prefix comparison rather than a semver parse, for the same reason [`value_of`] is not a TOML
 /// parse: the line *is* the recorded prefix, and nothing here needs to order two versions.

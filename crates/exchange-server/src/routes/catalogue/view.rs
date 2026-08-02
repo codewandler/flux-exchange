@@ -301,7 +301,7 @@ mod tests {
     /// server-only folklore.
     ///
     /// Asserted over the *whole* catalogue rather than one connector: **679 operations across 54
-    /// connectors** (measured on catalogue 0.10 in X-67) exercise every `risk` and every
+    /// connectors** (re-measured on catalogue 0.13 in X-85) exercise every `risk` and every
     /// `idempotency` variant, so a mapping arm that is wrong for one value cannot hide behind a
     /// well-chosen example. The count is scale rather than contract: the walk is derived from
     /// `catalog::providers()` and the only number asserted is that it equals
@@ -612,7 +612,7 @@ mod tests {
     /// X-49 pinned this render while the catalogue could not say *why* the list was empty. Upstream
     /// C-235 closed that: `Operation::credential_requirement` now distinguishes a positively-public
     /// operation ([`NoneRequired`](catalog::CredentialRequirement::NoneRequired)) from one whose
-    /// credential is deliberately **withheld**, and the measurement on catalogue 0.10 is one-sided —
+    /// credential is deliberately **withheld**, and the measurement on catalogue 0.13 is one-sided —
     /// every operation reaching this branch is `Withheld`, and the shipped catalogue contains **no**
     /// `NoneRequired` operation at all.
     ///

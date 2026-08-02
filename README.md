@@ -8,7 +8,7 @@ happened; agents are what call operations all day. That inverts the usual assump
 everything below.
 
 > [!WARNING]
-> **Status: v0.9.0 — credentials, a gated invoke, and an anonymous descriptor of what this build can do.**
+> **Status: v0.12.0 — credentials, a gated invoke, and an anonymous descriptor of what this build can do.**
 >
 > `cargo run` binds `127.0.0.1:8080` and serves health, the connector catalogue, a session, and a
 > **complete** OIDC sign-in. It refuses to start on a reachable address while no identity provider

@@ -105,7 +105,7 @@ impl OperationFacts {
     /// # `effects` is **derived**, and that is a measured gap rather than a detail
     ///
     /// `connector_catalog::Operation` publishes `risk`, `idempotency`, `credentials`, `hosts` and
-    /// the operation's Flux — and **no effects field** (re-checked against 0.10.0 in X-67; the one
+    /// the operation's Flux — and **no effects field** (re-checked against 0.13.0 in X-85; the one
     /// field that release did add to `Operation` is `credential_requirement`), even though the
     /// operation's own Flux source carries an `effects` declaration. So the rule here is the most
     /// the *readable* data supports and not one step further: **an operation the catalogue gives a
@@ -114,7 +114,7 @@ impl OperationFacts {
     ///
     /// The consequence for a grant, stated plainly because it is the direction that costs: a
     /// selector written `with_effects_within([Effect::Network])` is exact for every connector this
-    /// build carries — all **54** declare `http`, measured on catalogue 0.10 in X-67 rather than
+    /// build carries — all **54** declare `http`, re-measured on catalogue 0.13 in X-85 rather than
     /// carried over from 0.9 — and would silently admit an operation with an *unreported* effect
     /// the day one ships. What keeps that from being live today is the same fact that makes
     /// the runtime refusal undrivable through `invoke`, and it is asserted rather than assumed:
@@ -815,7 +815,7 @@ mod tests {
     /// Every operation in the catalogue projects, and into a level of each vocabulary that exists.
     ///
     /// Over the *whole* catalogue rather than one connector: **679 operations across 54 connectors**
-    /// (measured on catalogue 0.10 in X-67) exercise every `risk` and every `idempotency` variant,
+    /// (re-measured on catalogue 0.13 in X-85) exercise every `risk` and every `idempotency` variant,
     /// so a mapping arm that is wrong for one value cannot hide behind a well-chosen example. The
     /// count is scale rather than contract — nothing below asserts it, and the walk is derived from
     /// `connector_catalog::operations()` so a catalogue that grows is covered by growing. The

@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-02
+
+### Changed
+
+- **The deployed connector seam moves as one graph** (X-85). The four connector crates move from
+  0.10 to the newest published line, 0.13, and the Flux engine crates move with `connector-pack` from
+  0.47 to its required 0.49 line. The compile-time seam, manifest pin check and resolved-lock check
+  all pass, so the host cannot accidentally carry two identically named `flux_runtime::Tool` traits.
+
 ### Added
 
 - **A container, a fly.io configuration and a deployment runbook** (X-84). `Dockerfile` (three stages,

@@ -103,7 +103,7 @@ impl Deployment {
 ///
 /// What no link covers: a future edit that calls `Admitted::of(deployment, Runtime::Http)` with a
 /// hardcoded runtime instead of the connector's. Link 3's tests do not see it, because `Http` is
-/// the honest answer for all **54** shipped connectors — re-measured on catalogue 0.10 in X-67,
+/// the honest answer for all **54** shipped connectors — re-measured on catalogue 0.13 in X-85,
 /// where the 54th arrived declaring `http` like the rest — the same measured gap that makes the
 /// refusal undrivable through `invoke` at all. It is named here rather than left for the next
 /// reviewer to find.
