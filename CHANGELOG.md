@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-08-02
+
+### Fixed
+
+- **`--dev` sign-in is now a browser action instead of an instruction page** (X-59). Because the
+  shorthand fixes exactly one startup-derived principal, `/api/signin` offers a POST button that
+  opens that local session, returns to the console and exposes the token only as an HttpOnly cookie.
+  Explicit development rosters keep the bearer-handle exchange, including one-entry rosters; only
+  the single-tenant shorthand enables automatic local sign-in.
+
 ## [0.14.0] - 2026-08-02
 
 ### Added

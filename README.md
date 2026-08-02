@@ -11,7 +11,7 @@ The contributor and operator [security posture](docs/security.md) maps the threa
 controls, deployment assumptions, known limitations, security roadmap and incident checklist.
 
 > [!WARNING]
-> **Status: v0.14.0 — credentials, gated operations, and versioned tenant workflows.**
+> **Status: v0.14.1 — credentials, gated operations, and versioned tenant workflows.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
 > connector catalogue and a session without OIDC setup. The ordinary composition supports a
@@ -163,13 +163,15 @@ refuse and name the setting rather than pretending a store exists.
 
 ```bash
 cargo run -- --dev              # user:${USER}@dev on 127.0.0.1:8080; no OIDC setup
-cargo test --workspace          # 366 tests
+cargo test --workspace
 cd console && npm install && npm run dev
 ```
 
 `--dev` belongs to the binary, so Cargo's first `--` is the argument-forwarding boundary. An
 explicit `FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,...` roster remains available when local work
-needs named tenants or more than one principal.
+needs named tenants or more than one principal. With `--dev`, follow **Sign in** and choose
+**Continue as the local development user**; the host establishes the sole implied user's browser
+session and returns to the console.
 
 Rust 1.88 or newer — the floor `Cargo.toml`'s `rust-version` states. ⚠ *This said 1.87 through
 three releases and was false the whole time; `jsonwebtoken` and `time` both require 1.88. X-30
