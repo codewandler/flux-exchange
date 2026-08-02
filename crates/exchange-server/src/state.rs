@@ -115,7 +115,11 @@ pub enum SignIn {
     /// address but loopback. Whether a caller *can* sign in and whether this host may be *exposed*
     /// are two questions, and this variant answers only the first —
     /// `tests::available_says_whether_a_caller_can_become_a_principal` pins both at once.
-    Development,
+    Development {
+        /// `--dev` fixed exactly one principal at startup, so `/api/signin` may offer a local
+        /// one-click session action. Explicit rosters stay on the bearer exchange.
+        automatic: bool,
+    },
 
     /// A provider is bound and the flow can complete.
     Oidc(Arc<Oidc>),
@@ -159,7 +163,7 @@ impl SignIn {
     /// [`IdentityBinding::Development`]: crate::bind::IdentityBinding::Development
     pub fn available(&self) -> bool {
         match self {
-            SignIn::Oidc(_) | SignIn::Development => true,
+            SignIn::Oidc(_) | SignIn::Development { .. } => true,
             SignIn::Unconfigured | SignIn::NoTokenExchange => false,
         }
     }
@@ -239,7 +243,7 @@ impl AppState {
     pub fn with_development_identity(identity: Arc<DevIdentity>) -> Self {
         Self {
             identity: BoundIdentity::Development(identity),
-            sign_in: SignIn::Development,
+            sign_in: SignIn::Development { automatic: false },
             credentials: None,
             settings: None,
             connections: Arc::default(),
@@ -250,6 +254,13 @@ impl AppState {
             workflow_runs: None,
             traffic: Traffic::default(),
         }
+    }
+
+    /// A `--dev` composition with one startup-derived local user and a browser sign-in action.
+    pub fn with_automatic_development_identity(identity: Arc<DevIdentity>) -> Self {
+        let mut state = Self::with_development_identity(identity);
+        state.sign_in = SignIn::Development { automatic: true };
+        state
     }
 
     /// A composition that federates sign-in to an OIDC provider.
@@ -475,7 +486,7 @@ impl AppState {
     /// Close the session token this guarded request proved it holds.
     pub fn close_session(&self, presented: &str) {
         match &self.sign_in {
-            SignIn::Development => {
+            SignIn::Development { .. } => {
                 if let BoundIdentity::Development(identity) = &self.identity {
                     identity.close_session(presented);
                 }

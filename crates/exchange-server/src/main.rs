@@ -551,7 +551,11 @@ fn compose_identity(startup: &Startup) -> Result<AppState, StartupRefusal> {
          on any address but loopback while it is armed",
     );
 
-    Ok(AppState::with_development_identity(Arc::new(dev)))
+    if startup.development_roster().is_some() {
+        Ok(AppState::with_automatic_development_identity(Arc::new(dev)))
+    } else {
+        Ok(AppState::with_development_identity(Arc::new(dev)))
+    }
 }
 
 /// Offer OIDC sign-in, or say precisely why it is not on offer.
@@ -683,9 +687,9 @@ mod tests {
     use std::io::ErrorKind;
 
     use axum::body::Body;
-    use axum::http::{Request as HttpRequest, StatusCode};
+    use axum::http::{header, Request as HttpRequest, StatusCode};
     use tokio::net::TcpStream;
-    use tower::Service;
+    use tower::{Service, ServiceExt as _};
 
     use crate::oidc::config::AUTHORIZATION_ENDPOINT_ENV;
 
@@ -755,6 +759,75 @@ mod tests {
         assert_eq!(body["principal"]["kind"], "user", "{body}");
         assert_eq!(body["principal"]["tenant"], "dev", "{body}");
         assert!(!body.to_string().contains("attacker"), "{body}");
+    }
+
+    /// The `--dev` shorthand knows there is exactly one local principal, so the browser path must
+    /// complete the same session exchange as the bearer API without asking a human to construct an
+    /// Authorization header. The response carries the token only as an HttpOnly cookie.
+    #[tokio::test]
+    async fn dev_signin_is_a_real_browser_action_and_not_an_instruction_page() {
+        let startup = Startup::select(true, false, Some("timo")).expect("a development startup");
+        let state = compose_identity(&startup).expect("the implied roster is valid");
+        let app = routes::app(state);
+
+        let page = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/signin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let page_body = axum::body::to_bytes(page.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let page_body = String::from_utf8(page_body.to_vec()).unwrap();
+        assert!(page_body.contains("<form"), "{page_body}");
+        assert!(page_body.contains("method=\"post\""), "{page_body}");
+
+        let signed_in = app
+            .clone()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/signin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(signed_in.status(), StatusCode::OK);
+        let planted = signed_in
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let cookie = planted.split(';').next().unwrap().to_owned();
+        let signed_in_body = axum::body::to_bytes(signed_in.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&signed_in_body).contains("token"));
+
+        let session = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/session")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.status(), StatusCode::OK);
+        let session_body = axum::body::to_bytes(session.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let session: serde_json::Value = serde_json::from_slice(&session_body).unwrap();
+        assert_eq!(session["principal"]["id"], "timo");
+        assert_eq!(session["principal"]["tenant"], "dev");
     }
 
     /// Single-tenant changes runtime admission, never address layout. Rendering the default tenant

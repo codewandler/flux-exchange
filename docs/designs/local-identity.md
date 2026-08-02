@@ -190,6 +190,14 @@ into `dev`; doing either would silently authenticate a different principal than 
 The default `dev` address stays `tenants/dev/<authority>/<credential>`, byte-identical to the same
 principal under the multi-tenant composition, so removing `--dev` later does not strand stored data.
 
+Because `--dev` fixes exactly one principal together with the tenant, its `/api/signin` page offers
+one explicit POST action that opens that principal's browser session and returns to the console. The
+session token appears only in the Secure, HttpOnly, SameSite cookie, never in the page body. This is
+not inferred from a roster having one entry: an explicit development roster keeps the bearer-handle
+exchange even when it happens to contain one principal, so a browser form can never choose between
+rostered identities. The automatic action remains behind the development identity's loopback-only
+bind rule.
+
 ## Alternatives considered
 
 - **Let `DevIdentity` bind a reachable address.** Rejected, and this is the one to keep rejecting: a

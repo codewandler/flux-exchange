@@ -117,6 +117,17 @@ impl DevIdentity {
             .map(|(handle, principal)| (handle.as_str(), principal))
     }
 
+    /// The only declared principal, when this identity has exactly one.
+    ///
+    /// The `--dev` composition uses this after startup fixed the roster to one derived entry. An
+    /// explicit roster may contain one entry by coincidence, but never enables automatic sign-in;
+    /// that decision stays on [`crate::state::SignIn`] rather than being guessed from cardinality.
+    pub fn only_principal(&self) -> Option<Principal> {
+        (self.roster.len() == 1)
+            .then(|| self.roster.values().next().cloned())
+            .flatten()
+    }
+
     /// Open a session for an already-resolved principal.
     ///
     /// Takes the principal rather than a handle, so a session can only ever be opened for a caller

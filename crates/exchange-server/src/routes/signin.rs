@@ -91,7 +91,7 @@ pub(super) const MODULE: Module = Module {
 };
 
 fn signin_route() -> MethodRouter<AppState> {
-    get(signin)
+    get(signin).post(development_signin)
 }
 
 fn callback_route() -> MethodRouter<AppState> {
@@ -112,7 +112,7 @@ async fn signin(State(state): State<AppState>) -> Response {
         SignIn::NoTokenExchange => return no_token_exchange_page(),
         // Sign-in is *available* here and it is not a redirect, which is X-57's whole distinction.
         // There is no provider to send the browser to; the caller signs in against this host.
-        SignIn::Development => return development_page(),
+        SignIn::Development { automatic } => return development_page(*automatic),
     };
 
     if let Err(refusal) = state.admit_sign_in() {
@@ -143,6 +143,67 @@ async fn signin(State(state): State<AppState>) -> Response {
             refused(&refusal)
         }
     }
+}
+
+/// Complete the one-principal `--dev` browser flow without putting a token in a readable body.
+///
+/// This is deliberately unavailable to an explicit development roster, even when that roster
+/// happens to contain one entry. `--dev` is the stronger startup declaration: it fixed one local
+/// principal and selected a single-tenant deployment together. A cross-site form could at most
+/// establish that same sole local identity, and `SameSite=Strict` still prevents it from exercising
+/// the cookie; a multi-principal roster keeps requiring the explicit bearer handle so it cannot be
+/// used for login CSRF between identities.
+async fn development_signin(State(state): State<AppState>) -> Response {
+    if !matches!(state.sign_in(), SignIn::Development { automatic: true }) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Err(refusal) = state.admit_sign_in() {
+        return rate_limited(refusal);
+    }
+    let Some(identity) = state.development_identity() else {
+        error!("automatic development sign-in has no development identity");
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Sign-in refused",
+            "this host cannot open a session right now. Try again shortly",
+            None,
+        );
+    };
+    let Some(principal) = identity.only_principal() else {
+        error!("automatic development sign-in does not have exactly one principal");
+        return page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Sign-in refused",
+            "this host cannot open a session right now. Try again shortly",
+            None,
+        );
+    };
+    let token = match identity.open_session(principal.clone()) {
+        Ok(token) => token,
+        Err(error) => {
+            error!(%error, "cannot mint an automatic development session");
+            return page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Sign-in refused",
+                "this host cannot open a session right now. Try again shortly",
+                None,
+            );
+        }
+    };
+    crate::audit::signed_in(&principal);
+
+    planting(
+        (
+            StatusCode::OK,
+            Html(document(
+                "Signed in",
+                "You are signed in as the local development user. Returning to the console…",
+                Some(AFTER_SIGN_IN),
+            )),
+        )
+            .into_response(),
+        &[session::planted(&token)],
+    )
 }
 
 /// Whether this deployment can sign anyone in — as a field, not as a sentence.
@@ -209,7 +270,7 @@ async fn callback(
         // and never will, which is exactly [`SignInRefusal::UnknownState`] — the same `400` and the
         // same phrase a forged `state` gets on a federated host, so this route stays the oracle for
         // nothing that `a_callback_without_a_code_is_not_an_oracle_for_a_live_state` made it.
-        SignIn::Development => return refused(&SignInRefusal::UnknownState),
+        SignIn::Development { .. } => return refused(&SignInRefusal::UnknownState),
     };
 
     // The provider refused, or something walked a browser here with an `error` of its own. Either
@@ -389,18 +450,30 @@ fn no_token_exchange_page() -> Response {
 ///
 /// It names **no roster entry**. The mechanism is a property of this build; a handle is a principal
 /// this host would mint, and printing one would put a working credential on an anonymous page.
-fn development_page() -> Response {
-    page(
-        StatusCode::OK,
-        "Sign in with this host's development identity",
+fn development_page(automatic: bool) -> Response {
+    let detail = if automatic {
+        "This host was started with `--dev`, so it has exactly one local development user and can \
+         establish that browser session here. The identity remains deliberately unavailable on \
+         any address but loopback."
+    } else {
         "This host has no federated identity provider, and does not need one: it was started with \
          a development roster, so it can sign you in itself. Present the handle of a rostered \
          principal as a bearer token — `Authorization: Bearer <handle>` — and `POST /api/session` \
          exchanges it for a session cookie. The roster is the one the operator wrote at startup, \
          and this page does not name it. The development identity is deliberately unavailable on \
-         any address but loopback, because a handle is a name rather than a secret.",
-        None,
+         any address but loopback, because a handle is a name rather than a secret."
+    };
+    let action = automatic.then_some(("/api/signin", "Continue as the local development user"));
+    (
+        StatusCode::OK,
+        Html(document_with_action(
+            "Sign in with this host's development identity",
+            detail,
+            None,
+            action,
+        )),
     )
+        .into_response()
 }
 
 /// A small, self-contained HTML answer.
@@ -415,8 +488,27 @@ fn page(status: StatusCode, heading: &str, detail: &str, refresh_to: Option<&str
 /// provider said is ever interpolated here**, which is what makes the absence of escaping safe —
 /// and is the property to check before adding an argument to this function.
 fn document(heading: &str, detail: &str, refresh_to: Option<&str>) -> String {
+    document_with_action(heading, detail, refresh_to, None)
+}
+
+/// Build a page with one fixed host-owned form action when local sign-in can complete here.
+fn document_with_action(
+    heading: &str,
+    detail: &str,
+    refresh_to: Option<&str>,
+    action: Option<(&str, &str)>,
+) -> String {
     let refresh = refresh_to
         .map(|target| format!(r#"<meta http-equiv="refresh" content="0; url={target}">"#))
+        .unwrap_or_default();
+    let action = action
+        .map(|(target, label)| {
+            format!(
+                "<form method=\"post\" action=\"{target}\">\n\
+                 <button type=\"submit\">{label}</button>\n\
+                 </form>\n"
+            )
+        })
         .unwrap_or_default();
 
     format!(
@@ -432,6 +524,7 @@ fn document(heading: &str, detail: &str, refresh_to: Option<&str>) -> String {
          <main>\n\
          <h1>{heading}</h1>\n\
          <p>{detail}</p>\n\
+         {action}\
          </main>\n\
          </body>\n\
          </html>\n",
@@ -1971,7 +2064,8 @@ mod tests {
     /// printed one would be an anonymous page handing out a way in. See `development_page`.
     #[tokio::test]
     async fn the_development_signin_page_explains_how_and_names_nobody() {
-        let (status, headers, body) = call(super::super::app(development()), get(SIGNIN)).await;
+        let app = super::super::app(development());
+        let (status, headers, body) = call(app.clone(), get(SIGNIN)).await;
 
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.contains("<html"), "and is a page: {body}");
@@ -1983,6 +2077,25 @@ mod tests {
             body.contains("/api/session"),
             "the page must say how sign-in is done here, or the affordance leads to prose that \
              changes nothing: {body}",
+        );
+        assert!(
+            !body.contains("<form"),
+            "an explicit roster never becomes automatic merely because this fixture has one entry: {body}",
+        );
+
+        let (post_status, post_headers, post_body) = call(
+            app,
+            HttpRequest::builder()
+                .method("POST")
+                .uri(SIGNIN)
+                .body(Body::empty())
+                .expect("a well-formed request"),
+        )
+        .await;
+        assert_eq!(post_status, StatusCode::NOT_FOUND, "{post_body}");
+        assert!(
+            post_headers.get(SET_COOKIE).is_none(),
+            "an explicit roster POST planted a session: {post_body}",
         );
 
         for named in ["alice", "bob", "acme", "globex"] {

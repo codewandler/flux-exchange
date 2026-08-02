@@ -40,6 +40,10 @@ So: one tenant, **named once at startup**, and every principal is of it. The add
       principal as `user:${USER}@dev`; from Cargo the spelling is `cargo run -- --dev`, because Cargo
       forwards binary arguments only after `--`.
       → `tests::dev_declares_the_startup_user_and_one_dev_tenant` and the process-level smoke run.
+- [x] Following **Sign in** under `--dev` offers a real browser POST action for that sole implied
+      principal, establishes an HttpOnly session cookie and returns to the console; it never prints
+      the handle or puts the token in a readable body. Explicit rosters keep the bearer exchange.
+      → `tests::dev_signin_is_a_real_browser_action_and_not_an_instruction_page`.
 - [ ] A deployment declares one tenant at startup and every principal it resolves is of that tenant.
 - [x] **The credential address is byte-identical** to what a multi-tenant deployment renders for the
       same tenant. Assert it literally, the way `tests/engine_line.rs` asserts the rendered address —
@@ -75,3 +79,6 @@ So: one tenant, **named once at startup**, and every principal is of it. The add
   the API. The full Rust, console and public-site gates pass. What remains before the story itself is
   done is the broader, orthogonal deployment declaration: selecting one tenant independently of how
   that deployment authenticates, including OIDC and X-58's future verified local users.
+- **2026-08-02 — the browser dead end is closed in v0.14.1.** The sign-in page used to explain a
+  bearer request a browser link could not make. `--dev` now offers a POST button for its sole implied
+  principal; explicit rosters remain manual so a form cannot choose between local identities.
