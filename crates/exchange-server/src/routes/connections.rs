@@ -3429,7 +3429,10 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
-        assert_eq!(refusal["declared"], json!(["zendesk.api_token"]));
+        assert_eq!(
+            refusal["declared"],
+            json!(["zendesk.api_token", "zendesk.messaging_key"])
+        );
         assert!(store.addresses().is_empty());
     }
 
@@ -4979,6 +4982,54 @@ mod tests {
                 {
                     "service": "default",
                     "field": "username.zendesk.api_token",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "default",
+                    "field": "username.zendesk.messaging_key",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "help-center",
+                    "field": "endpoint.subdomain",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "help-center",
+                    "field": "username.zendesk.api_token",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "help-center",
+                    "field": "username.zendesk.messaging_key",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "messaging",
+                    "field": "endpoint.appId",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "messaging",
+                    "field": "endpoint.subdomain",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "messaging",
+                    "field": "username.zendesk.api_token",
+                    "set": false,
+                    "suppliable": true,
+                },
+                {
+                    "service": "messaging",
+                    "field": "username.zendesk.messaging_key",
                     "set": false,
                     "suppliable": true,
                 },

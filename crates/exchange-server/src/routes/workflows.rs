@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use super::{Access, Module, Route};
 use crate::state::AppState;
 
-const MAY_AUTHOR: &[PrincipalKind] = &[PrincipalKind::User];
+pub(super) const MAY_AUTHOR: &[PrincipalKind] = &[PrincipalKind::User];
 
 pub(super) const MODULE: Module = Module {
     name: "workflows",
@@ -285,10 +285,24 @@ async fn publish(
     Path(workflow): Path<String>,
     Json(request): Json<Revision>,
 ) -> Response {
-    let Some(store) = state.workflows() else {
+    let (Some(store), Some(pure)) = (state.workflows(), state.pure_editor_tools()) else {
         return unavailable();
     };
-    match store.publish(principal.tenant(), &workflow, request.revision) {
+    let draft = match store.get(principal.tenant(), &workflow) {
+        Ok(draft) => draft,
+        Err(error) => return refusal(error),
+    };
+    let validated = match validate_workflow(
+        WorkflowEdit::Source {
+            source: draft.source,
+        },
+        draft.graph.as_ref(),
+        pure,
+    ) {
+        Ok(validated) => validated,
+        Err(error) => return refusal(error),
+    };
+    match store.publish(principal.tenant(), &workflow, request.revision, validated) {
         Ok(version) => (StatusCode::CREATED, Json(version)).into_response(),
         Err(error) => refusal(error),
     }
@@ -420,7 +434,7 @@ async fn start_run(
     };
     let version = match requested_version(store, &principal, &workflow, request.version) {
         Ok(version) => version,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let (run, cancellation) = match runs.create(principal.tenant(), &workflow, version.version) {
         Ok(created) => created,
@@ -438,12 +452,17 @@ async fn start_run(
             request.params,
             &pure,
             &run_id,
-            observer,
+            observer.clone(),
         );
         tokio::select! {
             result = execution => match result {
                 Ok(invocation) => {
-                    let _ = runs.finish(&run_id, "succeeded", Some(&invocation.content), None);
+                    if let Some(error) = observer.failure() {
+                        let message = format!("workflow trace could not be persisted: {error}");
+                        let _ = runs.finish(&run_id, "failed", None, Some(&message));
+                    } else {
+                        let _ = runs.finish(&run_id, "succeeded", Some(&invocation.content), None);
+                    }
                 }
                 Err(error) => {
                     let message = error.to_string();
@@ -463,24 +482,26 @@ fn requested_version(
     principal: &Principal,
     workflow: &str,
     requested: Option<u64>,
-) -> Result<exchange_host::WorkflowVersion, Response> {
+) -> Result<exchange_host::WorkflowVersion, Box<Response>> {
     let version = match requested {
         Some(version) => version,
         None => store
             .get(principal.tenant(), workflow)
-            .map_err(refusal)?
+            .map_err(|error| Box::new(refusal(error)))?
             .published_version
             .ok_or_else(|| {
-                (
-                    StatusCode::CONFLICT,
-                    Json(json!({ "error": "workflow has no published version" })),
+                Box::new(
+                    (
+                        StatusCode::CONFLICT,
+                        Json(json!({ "error": "workflow has no published version" })),
+                    )
+                        .into_response(),
                 )
-                    .into_response()
             })?,
     };
     store
         .version(principal.tenant(), workflow, version)
-        .map_err(refusal)
+        .map_err(|error| Box::new(refusal(error)))
 }
 
 /// Invoke the latest published version through the existing principal operation route.
@@ -500,7 +521,7 @@ pub(super) async fn invoke_published(
     };
     let version = match requested_version(store, &principal, &workflow, None) {
         Ok(version) => version,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let (run, mut cancellation) = match runs.create(principal.tenant(), &workflow, version.version)
     {
@@ -508,10 +529,22 @@ pub(super) async fn invoke_published(
         Err(error) => return run_store_refusal(error),
     };
     let observer = runs.observer(&run.id);
-    let execution = invoker.invoke_workflow(&principal, &version, params, pure, &run.id, observer);
+    let execution = invoker.invoke_workflow(
+        &principal,
+        &version,
+        params,
+        pure,
+        &run.id,
+        observer.clone(),
+    );
     tokio::select! {
         result = execution => match result {
             Ok(invocation) => {
+                if let Some(error) = observer.failure() {
+                    let message = format!("workflow trace could not be persisted: {error}");
+                    let _ = runs.finish(&run.id, "failed", None, Some(&message));
+                    return run_store_refusal(message);
+                }
                 let _ = runs.finish(&run.id, "succeeded", Some(&invocation.content), None);
                 (StatusCode::OK, Json(invocation)).into_response()
             }
@@ -561,9 +594,10 @@ fn refusal(error: WorkflowRefusal) -> Response {
         WorkflowRefusal::UnknownWorkflow(_) | WorkflowRefusal::UnknownVersion { .. } => {
             StatusCode::NOT_FOUND
         }
-        WorkflowRefusal::AlreadyExists(_) | WorkflowRefusal::RevisionConflict { .. } => {
-            StatusCode::CONFLICT
-        }
+        WorkflowRefusal::AlreadyExists(_)
+        | WorkflowRefusal::RevisionConflict { .. }
+        | WorkflowRefusal::PublishedWorkflowCannotDelete(_)
+        | WorkflowRefusal::PublicationSourceChanged => StatusCode::CONFLICT,
         WorkflowRefusal::Unconfigured { .. }
         | WorkflowRefusal::InsideWorkingTree { .. }
         | WorkflowRefusal::Unusable { .. }

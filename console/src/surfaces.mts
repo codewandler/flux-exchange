@@ -140,16 +140,22 @@ export const SURFACES: readonly Surface[] = [
     absent: '',
   },
   {
+    id: 'workflows',
+    label: 'Workflows',
+    summary: 'Author, validate, publish and run immutable tenant-local Flux workflows.',
+    path: '/workflows',
+    built: true,
+    served: true,
+    absent: '',
+  },
+  {
     id: 'activity',
     label: 'Activity',
-    summary: 'Who asked, which grant admitted it, what was called and what came back.',
-    path: null,
-    built: false,
-    served: false,
-    absent:
-      'This service records nothing yet. There is no execution record to read, so there is no ' +
-      'Activity screen — an empty one would say that nothing has happened, which is a different ' +
-      'claim entirely.',
+    summary: 'Immutable workflow runs and value-free, node-addressed execution status.',
+    path: '/activity',
+    built: true,
+    served: true,
+    absent: '',
   },
   {
     id: 'invoke',
@@ -213,6 +219,10 @@ export function surfaceOfRoute(name: string): string | null {
       return 'grants'
     case 'invoke':
       return 'invoke'
+    case 'workflows':
+      return 'workflows'
+    case 'activity':
+      return 'activity'
     case 'explorer':
     case 'operation':
     case 'core':

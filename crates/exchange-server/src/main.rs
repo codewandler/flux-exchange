@@ -287,15 +287,14 @@ fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
 }
 
 /// Bind workflow definitions and the audited pure cognition pack, or bind neither.
+type WorkflowBinding = (
+    Arc<exchange_host::WorkflowStore>,
+    Arc<exchange_host::PureEditorTools>,
+    Arc<crate::workflow_runs::WorkflowRunStore>,
+);
+
 #[cfg(unix)]
-fn workflow_store() -> Result<
-    Option<(
-        Arc<exchange_host::WorkflowStore>,
-        Arc<exchange_host::PureEditorTools>,
-        Arc<crate::workflow_runs::WorkflowRunStore>,
-    )>,
-    StartupRefusal,
-> {
+fn workflow_store() -> Result<Option<WorkflowBinding>, StartupRefusal> {
     let Ok(configured) = std::env::var(exchange_host::WORKFLOW_STORE_SETTING) else {
         warn!(
             "no workflow store is bound ({} is unset), so workflow authoring and runs refuse",
@@ -333,14 +332,7 @@ fn workflow_store() -> Result<
 }
 
 #[cfg(not(unix))]
-fn workflow_store() -> Result<
-    Option<(
-        Arc<exchange_host::WorkflowStore>,
-        Arc<exchange_host::PureEditorTools>,
-        Arc<crate::workflow_runs::WorkflowRunStore>,
-    )>,
-    StartupRefusal,
-> {
+fn workflow_store() -> Result<Option<WorkflowBinding>, StartupRefusal> {
     Ok(None)
 }
 

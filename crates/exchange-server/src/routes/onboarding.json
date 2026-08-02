@@ -74,10 +74,16 @@
     {
       "id": "read-what-happened",
       "title": "Read back what you did",
-      "summary": "Who asked, which grant admitted it, what was called and what came back.",
-      "live": false,
-      "call": null,
-      "withheld": "This service records nothing yet. There is no execution record to read, so there is no Activity screen — an empty one would say that nothing has happened, which is a different claim entirely."
+      "summary": "Read immutable workflow run status and value-free node events without exposing arguments, results or credentials in the structural trace.",
+      "live": true,
+      "call": {
+        "method": "GET",
+        "endpoint": "/api/workflow-runs",
+        "caller": "A signed-in human. Runs are selected only from the tenant on the resolved principal; there is no tenant field or tenant-shaped path.",
+        "note": "The answer lists immutable workflow version, terminal status and editor node lifecycle events. Each event contains only node identity, source path, occurrence, phase and an optional selected branch. Invocation arguments and node values are never recorded there.",
+        "warn": ""
+      },
+      "withheld": ""
     }
   ]
 }

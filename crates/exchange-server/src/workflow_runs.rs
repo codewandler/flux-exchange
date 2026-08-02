@@ -1,6 +1,8 @@
 //! Durable, tenant-scoped workflow activity with value-free structural events.
 
 use std::collections::HashMap;
+use std::fs;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,10 +62,26 @@ impl std::fmt::Debug for WorkflowRunStore {
 impl WorkflowRunStore {
     /// Open/create the SQLite store and its schema.
     pub fn bind(path: &Path) -> Result<Self, String> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| error.to_string())?;
+        if file.metadata().map_err(|error| error.to_string())?.mode() & 0o077 != 0 {
+            return Err(format!(
+                "workflow run store `{}` permissions allow group or other access",
+                path.display()
+            ));
+        }
+        drop(file);
         let connection = Connection::open(path).map_err(|error| error.to_string())?;
         connection
             .execute_batch(
                 "PRAGMA journal_mode=WAL;
+                 PRAGMA foreign_keys=ON;
                  CREATE TABLE IF NOT EXISTS workflow_runs (
                    id TEXT PRIMARY KEY,
                    tenant TEXT NOT NULL,
@@ -248,10 +266,11 @@ impl WorkflowRunStore {
     }
 
     /// Observer that persists only upstream's value-free node identity/status event.
-    pub fn observer(self: &Arc<Self>, run_id: &str) -> Arc<dyn EditorTraceObserver> {
+    pub fn observer(self: &Arc<Self>, run_id: &str) -> Arc<RunObserver> {
         Arc::new(RunObserver {
             store: self.clone(),
             run_id: run_id.into(),
+            failure: Mutex::new(None),
         })
     }
 
@@ -284,16 +303,28 @@ impl WorkflowRunStore {
     }
 }
 
-struct RunObserver {
+pub(crate) struct RunObserver {
     store: Arc<WorkflowRunStore>,
     run_id: String,
+    failure: Mutex<Option<String>>,
+}
+
+impl RunObserver {
+    /// First durable trace refusal, if one occurred during synchronous observation.
+    pub(crate) fn failure(&self) -> Option<String> {
+        self.failure.lock().ok().and_then(|failure| failure.clone())
+    }
 }
 
 impl EditorTraceObserver for RunObserver {
     fn event(&self, event: &EditorTraceEvent) {
-        // The observer cannot make the interpreter await storage. A failed durable append is
-        // fail-closed for inspection: the run will still finish as failed by its route supervisor.
-        let _ = self.store.append(&self.run_id, event);
+        // SQLite append is synchronous, so the supervisor can refuse a nominally-successful run
+        // when its explanation did not become durable. Keep only the storage reason, never values.
+        if let Err(error) = self.store.append(&self.run_id, event) {
+            if let Ok(mut failure) = self.failure.lock() {
+                failure.get_or_insert(error);
+            }
+        }
     }
 }
 
@@ -304,4 +335,51 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    use super::*;
+
+    fn path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "flux-exchange-workflow-runs-{}-{}.sqlite",
+            std::process::id(),
+            NEXT_RUN.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn the_run_database_is_owner_only_and_widening_is_refused() {
+        let path = path();
+        drop(WorkflowRunStore::bind(&path).unwrap());
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o077, 0);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let refusal = WorkflowRunStore::bind(&path).unwrap_err();
+
+        assert!(refusal.contains("group or other access"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_trace_append_failure_is_visible_to_the_run_supervisor() {
+        let path = path();
+        let store = Arc::new(WorkflowRunStore::bind(&path).unwrap());
+        let observer = store.observer("missing-run");
+        let event: EditorTraceEvent = serde_json::from_value(serde_json::json!({
+            "node_id": "node-1",
+            "source_path": "flow.body[0]",
+            "occurrence": 1,
+            "phase": "entered"
+        }))
+        .unwrap();
+
+        observer.event(&event);
+
+        assert!(observer.failure().is_some());
+        let _ = std::fs::remove_file(path);
+    }
 }

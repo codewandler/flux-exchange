@@ -95,6 +95,25 @@ export function invocationEndpoint(operation: string): string {
   return `/api/operations/${encodeURIComponent(operation)}/invoke`
 }
 
+/** Tenant-derived workflow authoring collection. */
+export const WORKFLOWS_ENDPOINT = '/api/workflows'
+/** Tenant-derived durable workflow activity. */
+export const WORKFLOW_RUNS_ENDPOINT = '/api/workflow-runs'
+/** The upstream editor schema and executable palette. */
+export const EDITOR_CATALOG_ENDPOINT = `${WORKFLOWS_ENDPOINT}/editor-catalog`
+
+export function workflowEndpoint(workflow: string): string {
+  return `${WORKFLOWS_ENDPOINT}/${encodeURIComponent(workflow)}`
+}
+
+export function workflowRunsEndpoint(workflow: string): string {
+  return `${workflowEndpoint(workflow)}/runs`
+}
+
+export function workflowRunEndpoint(run: string): string {
+  return `${WORKFLOW_RUNS_ENDPOINT}/${encodeURIComponent(run)}`
+}
+
 // ---------------------------------------------------------------------------------------------
 // The served contract.
 //
@@ -1108,6 +1127,306 @@ export type GrantsState =
       editable: boolean
     }
   | { status: 'failed'; failure: ServiceFailure }
+
+// ---------------------------------------------------------------------------------------------
+// Workflows and activity. App.vue owns every read; the visual/editor views receive data as props.
+// ---------------------------------------------------------------------------------------------
+
+export interface EditorDiagnostic {
+  code: string
+  message: string
+  node_id?: string
+  path?: string
+  range?: { start: number; end: number }
+}
+
+export interface EditorGraph {
+  schema_version: number
+  name?: string
+  params: unknown[]
+  returns?: unknown
+  body: Array<Record<string, unknown>>
+}
+
+export interface WorkflowDraft {
+  id: string
+  title: string
+  revision: number
+  published_version: number | null
+  source: string
+  graph: EditorGraph | null
+  diagnostics: EditorDiagnostic[]
+  input_schema: Record<string, unknown>
+}
+
+export interface EditorOperation {
+  id: string
+  kind: 'connector' | 'cognition'
+  group: string
+  description: string
+  input_schema: Record<string, unknown>
+  risk: string
+  idempotency: string
+  effects: string[]
+  access: unknown[]
+}
+
+export interface EditorCatalog {
+  schemaVersion: number
+  schema: Record<string, unknown>
+  operations: EditorOperation[]
+}
+
+export interface WorkflowRunEvent {
+  sequence: number
+  event: {
+    node_id: string
+    source_path: string
+    occurrence: number
+    phase: 'entered' | 'branch_selected' | 'succeeded' | 'failed'
+    branch?: string
+  }
+}
+
+export interface WorkflowRun {
+  id: string
+  workflow_id: string
+  version: number
+  status: 'running' | 'succeeded' | 'failed' | 'cancelled'
+  result: string | null
+  error: string | null
+  created_at_ms: number
+  events: WorkflowRunEvent[]
+}
+
+export type WorkflowsState =
+  | { status: 'loading' }
+  | { status: 'ready'; workflows: WorkflowDraft[] }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export type EditorCatalogState =
+  | { status: 'loading' }
+  | { status: 'ready'; catalog: EditorCatalog }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export type ActivityState =
+  | { status: 'loading' }
+  | { status: 'ready'; runs: WorkflowRun[] }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export type WorkflowMutation =
+  | { status: 'saved'; workflow: WorkflowDraft }
+  | { status: 'published'; version: number }
+  | { status: 'started'; run: WorkflowRun }
+  | { status: 'validated'; id: string; workflow: Omit<WorkflowDraft, 'id' | 'title' | 'revision' | 'published_version'> }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+function readWorkflow(value: unknown): WorkflowDraft | string {
+  if (!isObject(value) || typeof value.id !== 'string' || typeof value.title !== 'string') {
+    return 'a workflow has no `id` or `title`'
+  }
+  if (typeof value.revision !== 'number' || typeof value.source !== 'string') {
+    return `workflow ${value.id} has no revision or source`
+  }
+  return {
+    id: value.id,
+    title: value.title,
+    revision: value.revision,
+    published_version: typeof value.published_version === 'number' ? value.published_version : null,
+    source: value.source,
+    graph: isObject(value.graph) ? value.graph as unknown as EditorGraph : null,
+    diagnostics: Array.isArray(value.diagnostics)
+      ? value.diagnostics.filter((item): item is EditorDiagnostic => isObject(item) && typeof item.code === 'string' && typeof item.message === 'string')
+      : [],
+    input_schema: isObject(value.input_schema) ? value.input_schema : {},
+  }
+}
+
+function readRun(value: unknown): WorkflowRun | string {
+  if (!isObject(value) || typeof value.id !== 'string' || typeof value.workflow_id !== 'string') {
+    return 'a workflow run has no `id` or `workflow_id`'
+  }
+  if (typeof value.version !== 'number' || typeof value.status !== 'string') {
+    return `workflow run ${value.id} has no version or status`
+  }
+  const statuses = ['running', 'succeeded', 'failed', 'cancelled'] as const
+  if (!statuses.includes(value.status as typeof statuses[number])) return `workflow run ${value.id} has an unknown status`
+  const phases = ['entered', 'branch_selected', 'succeeded', 'failed'] as const
+  const events: WorkflowRunEvent[] = []
+  if (Array.isArray(value.events)) {
+    for (const item of value.events) {
+      if (!isObject(item) || typeof item.sequence !== 'number' || !isObject(item.event)) continue
+      const event = item.event
+      if (
+        typeof event.node_id !== 'string' ||
+        typeof event.source_path !== 'string' ||
+        typeof event.occurrence !== 'number' ||
+        typeof event.phase !== 'string' ||
+        !phases.includes(event.phase as typeof phases[number])
+      ) continue
+      events.push({
+        sequence: item.sequence,
+        event: {
+          node_id: event.node_id,
+          source_path: event.source_path,
+          occurrence: event.occurrence,
+          phase: event.phase as WorkflowRunEvent['event']['phase'],
+          ...(typeof event.branch === 'string' ? { branch: event.branch } : {}),
+        },
+      })
+    }
+  }
+  return {
+    id: value.id,
+    workflow_id: value.workflow_id,
+    version: value.version,
+    status: value.status as WorkflowRun['status'],
+    result: typeof value.result === 'string' ? value.result : null,
+    error: typeof value.error === 'string' ? value.error : null,
+    created_at_ms: typeof value.created_at_ms === 'number' ? value.created_at_ms : 0,
+    events,
+  }
+}
+
+export async function loadWorkflows(options: LoadOptions = {}): Promise<WorkflowsState> {
+  const answered = await read(WORKFLOWS_ENDPOINT, options)
+  if (!answered.ok) return { status: 'failed', failure: answered.failure }
+  if (!isObject(answered.body) || !Array.isArray(answered.body.workflows)) {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint: WORKFLOWS_ENDPOINT, status: 200, detail: 'no `workflows` array' } }
+  }
+  const workflows: WorkflowDraft[] = []
+  for (const value of answered.body.workflows) {
+    const workflow = readWorkflow(value)
+    if (typeof workflow === 'string') return { status: 'failed', failure: { kind: 'unreadable', endpoint: WORKFLOWS_ENDPOINT, status: 200, detail: workflow } }
+    workflows.push(workflow)
+  }
+  return { status: 'ready', workflows }
+}
+
+export async function loadEditorCatalog(options: LoadOptions = {}): Promise<EditorCatalogState> {
+  const answered = await read(EDITOR_CATALOG_ENDPOINT, options)
+  if (!answered.ok) return { status: 'failed', failure: answered.failure }
+  if (!isObject(answered.body) || typeof answered.body.schema_version !== 'number' || !Array.isArray(answered.body.operations)) {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint: EDITOR_CATALOG_ENDPOINT, status: 200, detail: 'no editor schema version or operations' } }
+  }
+  const operations = answered.body.operations.filter((operation): operation is EditorOperation =>
+    isObject(operation) && typeof operation.id === 'string' && (operation.kind === 'connector' || operation.kind === 'cognition'))
+  if (operations.length !== answered.body.operations.length) {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint: EDITOR_CATALOG_ENDPOINT, status: 200, detail: 'an editor operation is unreadable' } }
+  }
+  return { status: 'ready', catalog: { schemaVersion: answered.body.schema_version, schema: isObject(answered.body.schema) ? answered.body.schema : {}, operations } }
+}
+
+export async function loadActivity(options: LoadOptions = {}): Promise<ActivityState> {
+  const answered = await read(WORKFLOW_RUNS_ENDPOINT, options)
+  if (!answered.ok) return { status: 'failed', failure: answered.failure }
+  if (!isObject(answered.body) || !Array.isArray(answered.body.runs)) {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint: WORKFLOW_RUNS_ENDPOINT, status: 200, detail: 'no `runs` array' } }
+  }
+  const runs: WorkflowRun[] = []
+  for (const value of answered.body.runs) {
+    const run = readRun(value)
+    if (typeof run === 'string') return { status: 'failed', failure: { kind: 'unreadable', endpoint: WORKFLOW_RUNS_ENDPOINT, status: 200, detail: run } }
+    runs.push(run)
+  }
+  return { status: 'ready', runs }
+}
+
+function mutationFailure(answered: Extract<Read, { ok: false }>): WorkflowMutation {
+  if (answered.failure.kind === 'refused') {
+    return { status: 'refused', refusal: { endpoint: answered.failure.endpoint, status: answered.failure.status ?? 0, error: serviceError(answered.body) ?? answered.failure.detail } }
+  }
+  return { status: 'failed', failure: answered.failure }
+}
+
+async function workflowWrite(endpoint: string, method: string, body: unknown, options: LoadOptions): Promise<Read> {
+  return read(endpoint, options, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+}
+
+export async function createWorkflow(id: string, title: string, source: string, options: LoadOptions = {}): Promise<WorkflowMutation> {
+  const answered = await workflowWrite(WORKFLOWS_ENDPOINT, 'POST', { id, title, edit: { mode: 'source', source } }, options)
+  if (!answered.ok) return mutationFailure(answered)
+  const workflow = readWorkflow(answered.body)
+  return typeof workflow === 'string'
+    ? { status: 'failed', failure: { kind: 'unreadable', endpoint: WORKFLOWS_ENDPOINT, status: 201, detail: workflow } }
+    : { status: 'saved', workflow }
+}
+
+export async function saveWorkflow(workflow: WorkflowDraft, source: string, options: LoadOptions = {}): Promise<WorkflowMutation> {
+  const endpoint = workflowEndpoint(workflow.id)
+  const answered = await workflowWrite(endpoint, 'PUT', { revision: workflow.revision, title: workflow.title, edit: { mode: 'source', source } }, options)
+  if (!answered.ok) return mutationFailure(answered)
+  const saved = readWorkflow(answered.body)
+  return typeof saved === 'string'
+    ? { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 200, detail: saved } }
+    : { status: 'saved', workflow: saved }
+}
+
+export async function saveWorkflowGraph(workflow: WorkflowDraft, graph: EditorGraph, options: LoadOptions = {}): Promise<WorkflowMutation> {
+  const endpoint = workflowEndpoint(workflow.id)
+  const answered = await workflowWrite(endpoint, 'PUT', { revision: workflow.revision, title: workflow.title, edit: { mode: 'graph', graph } }, options)
+  if (!answered.ok) return mutationFailure(answered)
+  const saved = readWorkflow(answered.body)
+  return typeof saved === 'string'
+    ? { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 200, detail: saved } }
+    : { status: 'saved', workflow: saved }
+}
+
+export async function validateWorkflowEdit(workflow: WorkflowDraft, source: string, options: LoadOptions = {}): Promise<WorkflowMutation> {
+  const endpoint = `${workflowEndpoint(workflow.id)}/validate`
+  const answered = await workflowWrite(endpoint, 'POST', { edit: { mode: 'source', source } }, options)
+  if (!answered.ok) return mutationFailure(answered)
+  if (!isObject(answered.body) || typeof answered.body.source !== 'string') {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 200, detail: 'validation returned no source' } }
+  }
+  return { status: 'validated', id: workflow.id, workflow: {
+    source: answered.body.source,
+    graph: isObject(answered.body.graph) ? answered.body.graph as unknown as EditorGraph : null,
+    diagnostics: Array.isArray(answered.body.diagnostics) ? answered.body.diagnostics as unknown as EditorDiagnostic[] : [],
+    input_schema: isObject(answered.body.input_schema) ? answered.body.input_schema : {},
+  } }
+}
+
+export async function validateWorkflowGraph(workflow: WorkflowDraft, graph: EditorGraph, options: LoadOptions = {}): Promise<WorkflowMutation> {
+  const endpoint = `${workflowEndpoint(workflow.id)}/validate`
+  const answered = await workflowWrite(endpoint, 'POST', { edit: { mode: 'graph', graph } }, options)
+  if (!answered.ok) return mutationFailure(answered)
+  if (!isObject(answered.body) || typeof answered.body.source !== 'string') {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 200, detail: 'validation returned no source' } }
+  }
+  return { status: 'validated', id: workflow.id, workflow: {
+    source: answered.body.source,
+    graph: isObject(answered.body.graph) ? answered.body.graph as unknown as EditorGraph : null,
+    diagnostics: Array.isArray(answered.body.diagnostics) ? answered.body.diagnostics as unknown as EditorDiagnostic[] : [],
+    input_schema: isObject(answered.body.input_schema) ? answered.body.input_schema : {},
+  } }
+}
+
+export async function publishWorkflow(workflow: WorkflowDraft, options: LoadOptions = {}): Promise<WorkflowMutation> {
+  const endpoint = `${workflowEndpoint(workflow.id)}/publish`
+  const answered = await workflowWrite(endpoint, 'POST', { revision: workflow.revision }, options)
+  if (!answered.ok) return mutationFailure(answered)
+  return isObject(answered.body) && typeof answered.body.version === 'number'
+    ? { status: 'published', version: answered.body.version }
+    : { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 201, detail: 'publication returned no version' } }
+}
+
+export async function startWorkflowRun(workflow: WorkflowDraft, params: unknown, options: LoadOptions = {}): Promise<WorkflowMutation> {
+  const endpoint = workflowRunsEndpoint(workflow.id)
+  const answered = await workflowWrite(endpoint, 'POST', { params }, options)
+  if (!answered.ok) return mutationFailure(answered)
+  const run = readRun(answered.body)
+  return typeof run === 'string'
+    ? { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 202, detail: run } }
+    : { status: 'started', run }
+}
+
+export async function cancelWorkflowRun(run: string, options: LoadOptions = {}): Promise<ServiceFailure | null> {
+  const endpoint = `${workflowRunEndpoint(run)}/cancel`
+  const answered = await read(endpoint, options, { method: 'POST' })
+  return answered.ok ? null : answered.failure
+}
 
 /**
  * What the console knows about a grant that does not exist yet.

@@ -321,9 +321,22 @@ export const STEPS: readonly Step[] = [
   {
     id: 'read-what-happened',
     title: 'Read back what you did',
-    summary: 'Who asked, which grant admitted it, what was called and what came back.',
+    summary:
+      'Read immutable workflow run status and value-free node events without exposing arguments, ' +
+      'results or credentials in the structural trace.',
     surface: 'activity',
-    call: null,
+    call: {
+      method: 'GET',
+      endpoint: '/api/workflow-runs',
+      caller:
+        'A signed-in human. Runs are selected only from the tenant on the resolved principal; ' +
+        'there is no tenant field or tenant-shaped path.',
+      note:
+        'The answer lists immutable workflow version, terminal status and editor node lifecycle ' +
+        'events. Each event contains only node identity, source path, occurrence, phase and an ' +
+        'optional selected branch. Invocation arguments and node values are never recorded there.',
+      warn: '',
+    },
     pending: '',
   },
 ]

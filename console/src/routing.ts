@@ -55,6 +55,8 @@ export type Route =
   | { name: 'agents'; anchor?: string }
   | { name: 'connections'; anchor?: string }
   | { name: 'grants'; connector?: string; anchor?: string }
+  | { name: 'workflows'; anchor?: string }
+  | { name: 'activity'; anchor?: string }
   | { name: 'invoke'; operation: string; anchor?: string }
   | { name: 'explorer'; view: SearchView; anchor?: string }
   | { name: 'operation'; id: string; returnView?: SearchView; anchor?: string }
@@ -110,6 +112,8 @@ export function parseRoute(hash: string): Route {
     const operation = new URLSearchParams(search).get('operation')?.trim() ?? ''
     return { name: 'invoke', operation, ...at }
   }
+  if (path === '/workflows') return { name: 'workflows', ...at }
+  if (path === '/activity') return { name: 'activity', ...at }
 
   // How to connect an agent. Deliberately not a surface of the platform — it is a reference an agent
   // author reaches for once rather than a place an operator works, so it is reached from the footer

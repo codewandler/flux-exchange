@@ -1170,6 +1170,58 @@ mod tests {
             // agent enumerate which selector admits which operation is the same disclosure the
             // read above is closed for, reached one step sideways.
             ("grants", "/api/grants/preview", grants::MAY_GRANT),
+            // Workflow definitions, immutable versions and run inspection are tenant policy and
+            // operator state. Agents receive a published workflow only as the ordinary virtual
+            // operation admitted through `invoke`; they cannot rewrite it, inspect another run or
+            // cancel one. Keeping the whole module at `User` also prevents an agent learning a
+            // tenant's authored program through the editor catalogue and version routes.
+            ("workflows", "/api/workflows", workflows::MAY_AUTHOR),
+            (
+                "workflows",
+                "/api/workflows/editor-catalog",
+                workflows::MAY_AUTHOR,
+            ),
+            (
+                "workflows",
+                "/api/workflows/{workflow}",
+                workflows::MAY_AUTHOR,
+            ),
+            (
+                "workflows",
+                "/api/workflows/{workflow}/validate",
+                workflows::MAY_AUTHOR,
+            ),
+            (
+                "workflows",
+                "/api/workflows/{workflow}/publish",
+                workflows::MAY_AUTHOR,
+            ),
+            (
+                "workflows",
+                "/api/workflows/{workflow}/versions",
+                workflows::MAY_AUTHOR,
+            ),
+            (
+                "workflows",
+                "/api/workflows/{workflow}/versions/{version}",
+                workflows::MAY_AUTHOR,
+            ),
+            (
+                "workflows",
+                "/api/workflows/{workflow}/runs",
+                workflows::MAY_AUTHOR,
+            ),
+            ("workflows", "/api/workflow-runs", workflows::MAY_AUTHOR),
+            (
+                "workflows",
+                "/api/workflow-runs/{run}",
+                workflows::MAY_AUTHOR,
+            ),
+            (
+                "workflows",
+                "/api/workflow-runs/{run}/cancel",
+                workflows::MAY_AUTHOR,
+            ),
         ];
 
         let gated: Vec<_> = published()

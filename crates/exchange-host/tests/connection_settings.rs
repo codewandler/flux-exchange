@@ -9,10 +9,10 @@
 //! Thirteen of the seventeen are made configurable here. **Four are refused on purpose** — see
 //! [`a_setting_cannot_become_the_destination_authority`], which is the whole of why.
 //!
-//! Re-measured against catalogue 0.13 by X-85: fifty-four connectors, nineteen declaring a
-//! per-connection value, **three refused** — `docusign`, `freshdesk`, `okta` — and two whose host
-//! is a closed set of vendor region hostnames the catalogue publishes, which is
-//! [`only_an_exactly_declared_choice_may_be_supplied`].
+//! Re-measured against catalogue 0.16 by X-98: the exact refusal and closed-choice sets are pinned
+//! below. `asterisk` joins the whole-authority refusals; two region-host fields remain closed sets
+//! published by the vendor catalogue. [`only_an_exactly_declared_choice_may_be_supplied`] drives the
+//! latter rather than trusting their labels.
 //!
 //! This file is the whole of that claim, driven the way `invoke.rs` drives its own: through a
 //! transport that records instead of sending, so "the request went to the origin this tenant
@@ -931,12 +931,13 @@ fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
     }
 
     // Pinned exactly, so that a catalogue change in either direction is a failing test rather than
-    // a silent hole: a fourth connector arriving unpinned, or one of these three gaining a suffix
+    // a silent hole: a fifth connector arriving unpinned, or one of these four gaining a suffix
     // upstream and staying refused for no reason. It has already fired once for real — `intercom`
     // arrived here when catalogue 0.10 moved its host, and this assertion is how anybody found out.
     assert_eq!(
         refused,
         vec![
+            "asterisk/endpoint.host ({host}:8089)".to_owned(),
             "docusign/endpoint.account_host ({account_host})".to_owned(),
             "freshdesk/endpoint.domain ({domain})".to_owned(),
             "okta/endpoint.domain ({domain})".to_owned(),
@@ -1324,8 +1325,16 @@ fn the_declared_surface_is_read_from_the_connector_rather_than_from_its_base_url
         vec![
             "default/endpoint.subdomain".to_owned(),
             "default/username.zendesk.api_token".to_owned(),
+            "default/username.zendesk.messaging_key".to_owned(),
+            "help-center/endpoint.subdomain".to_owned(),
+            "help-center/username.zendesk.api_token".to_owned(),
+            "help-center/username.zendesk.messaging_key".to_owned(),
+            "messaging/endpoint.appId".to_owned(),
+            "messaging/endpoint.subdomain".to_owned(),
+            "messaging/username.zendesk.api_token".to_owned(),
+            "messaging/username.zendesk.messaging_key".to_owned(),
         ],
-        "zendesk needs both a subdomain and the non-secret user half of its Basic credential",
+        "every service-specific Zendesk binding comes from compiled Flux rather than base URL guessing",
     );
 
     // The variable that does not appear in the base URL at all — the case a `base_url` scan misses.

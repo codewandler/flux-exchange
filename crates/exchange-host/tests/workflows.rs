@@ -1,3 +1,5 @@
+use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use exchange_host::{
@@ -21,6 +23,37 @@ fn pure_tools() -> PureEditorTools {
     flux_tools::cognition::try_register_cognition(&mut tools)
         .expect("the upstream cognition pack registers");
     PureEditorTools::new(tools).expect("the cognition pack is pure")
+}
+
+#[test]
+fn a_widened_workflow_directory_is_refused() {
+    let bound = store();
+    let root = bound.path().parent().unwrap().to_owned();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();
+
+    let refusal = WorkflowStore::bind(&root).unwrap_err();
+
+    assert!(refusal.to_string().contains("group or other access"));
+}
+
+#[test]
+fn a_widened_workflow_file_is_refused() {
+    let bound = store();
+    let tenant = Tenant::new("acme").unwrap();
+    bound
+        .create(
+            &tenant,
+            "triage",
+            "Triage",
+            valid("flow triage\n  return true\n"),
+        )
+        .unwrap();
+    let path = bound.path().to_owned();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+    let refusal = WorkflowStore::bind(path.parent().unwrap()).unwrap_err();
+
+    assert!(refusal.to_string().contains("group or other access"));
 }
 
 fn valid(source: &str) -> exchange_host::ValidatedWorkflow {
@@ -109,7 +142,9 @@ fn publication_is_immutable_while_the_draft_keeps_moving() {
         )
         .unwrap();
 
-    let first = store.publish(&tenant, "triage", 1).unwrap();
+    let first = store
+        .publish(&tenant, "triage", 1, valid("flow triage\n  return true\n"))
+        .unwrap();
     store
         .save(
             &tenant,
@@ -129,7 +164,9 @@ fn publication_is_immutable_while_the_draft_keeps_moving() {
         .source
         .contains("return false"));
 
-    let second = store.publish(&tenant, "triage", 2).unwrap();
+    let second = store
+        .publish(&tenant, "triage", 2, valid("flow triage\n  return false\n"))
+        .unwrap();
     assert_eq!(second.version, 2);
     assert!(second.source.contains("return false"));
     assert!(store
@@ -137,6 +174,9 @@ fn publication_is_immutable_while_the_draft_keeps_moving() {
         .unwrap()
         .source
         .contains("return true"));
+
+    let refusal = store.delete(&tenant, "triage", 2).unwrap_err();
+    assert!(refusal.to_string().contains("published versions"));
 }
 
 #[test]

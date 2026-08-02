@@ -20,11 +20,9 @@ storage, routes, execution and console. The exchange deliberately carries no loc
 projection logic and no sibling `path`/`git` override: either would make the shipped service depend
 on code outside its reviewed dependency graph.
 
-The target line is Flux 0.52. Flux 0.52.0 is already published and flux-connectors has a fully gated,
-unpublished 0.49 → 0.52 bridge. The local L-126 editor patch was authored on an older 0.51.1 Flux
-tree, so it must first be integrated and gated on current Flux main, then published on the 0.52 line.
-Exchange must not move its manifest until the compatible connector release is visible in the
-registry too.
+That sequence completed on Flux 0.52: L-126 shipped in the engine line, flux-connectors 0.16.0
+published the compatible pack, and the exchange moved both pin sets atomically. The registry-only
+dependency graph is retained deliberately; no sibling checkout is part of the shipped build.
 
 ## Catalogue and authority
 
@@ -51,10 +49,12 @@ route once grants admit it. Tenant is always read from the resolved principal.
 
 ## Console
 
-`Workflows` is an operator surface and `Activity` becomes live once run records exist. The canvas uses
-Vue Flow for pan/zoom/selection and a deterministic local tree layout. Graph edits go to the server
-for lowering and validation; TypeScript never implements Flux semantics. Published runs are polled,
-cancellable and painted onto nodes by the upstream node map.
+`Workflows` and `Activity` are operator surfaces. The canvas uses Vue Flow for pan/zoom/selection and
+a deterministic local tree layout. Graph projections and source edits go to the server for lowering
+and validation; TypeScript never implements Flux semantics. Published runs are polled, cancellable
+and painted onto nodes by the upstream node map. Freeform dragging changes local arrangement only;
+persisted execution order remains the Flux source, which the console states rather than implying a
+second interpreter.
 
 ## Authoring and publication sequence
 

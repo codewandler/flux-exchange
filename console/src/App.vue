@@ -20,31 +20,47 @@
 // states the platform's surfaces instead, including the three that are not built, and `surfaces.mts`
 // is the single statement of which is which.
 
-import { computed, onMounted, shallowRef, watch } from 'vue'
+import { computed, onMounted, onUnmounted, shallowRef, watch } from 'vue'
 import { fragmentPath, useRoute } from './routing'
 import {
   CONNECTORS_ENDPOINT,
   SIGNIN_ENDPOINT,
   connect,
+  cancelWorkflowRun,
+  createWorkflow,
   loadCatalogue,
   loadConnections,
+  loadActivity,
+  loadEditorCatalog,
   loadDeclaration,
   loadGrants,
   loadSession,
+  loadWorkflows,
+  publishWorkflow,
   previewGrant,
   replaceGrants,
   rotateCredential,
+  saveWorkflow,
+  saveWorkflowGraph,
   signOut,
+  startWorkflowRun,
+  validateWorkflowEdit,
+  validateWorkflowGraph,
+  type ActivityState,
   type CatalogueState,
   type ConnectionsState,
   type ConnectOutcome,
   type DeclarationState,
+  type EditorCatalogState,
   type GrantOutcome,
   type GrantsState,
   type PreviewState,
   type ProposedGrant,
   type RotationOutcome,
   type SessionState,
+  type WorkflowDraft,
+  type WorkflowMutation,
+  type WorkflowsState,
 } from './service.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { AGENTS_PATH } from './minting.mts'
@@ -53,6 +69,7 @@ import { surfaceOfRoute } from './surfaces.mts'
 import { isDark, toggleTheme } from './theme'
 
 import AgentOnboarding from './AgentOnboarding.mts'
+import Activity from './Activity.vue'
 import Agents from './Agents.mts'
 import CatalogueFinder from './CatalogueFinder.mts'
 import CatalogueFailure from './CatalogueFailure.mts'
@@ -63,12 +80,18 @@ import ConsoleShell from './ConsoleShell.mts'
 import Grants from './Grants.mts'
 import Invoke from './Invoke.mts'
 import Journey from './Journey.mts'
+import Workflows from './Workflows.vue'
 
 // `shallowRef` rather than `ref`: each of these is replaced wholesale and never edited, so making
 // every operation in a catalogue deeply reactive would buy nothing and cost a walk of the document.
 const catalogue = shallowRef<CatalogueState>({ status: 'loading' })
 const session = shallowRef<SessionState>({ status: 'loading' })
 const connections = shallowRef<ConnectionsState>({ status: 'loading' })
+const workflows = shallowRef<WorkflowsState>({ status: 'loading' })
+const editorCatalog = shallowRef<EditorCatalogState>({ status: 'loading' })
+const activity = shallowRef<ActivityState>({ status: 'loading' })
+const workflowOutcome = shallowRef<WorkflowMutation | null>(null)
+const workflowBusy = shallowRef(false)
 
 const route = useRoute()
 
@@ -91,6 +114,26 @@ async function reloadConnections() {
   connections.value = await loadConnections()
 }
 
+async function reloadWorkflows() {
+  workflows.value = { status: 'loading' }
+  workflows.value = await loadWorkflows()
+}
+
+async function reloadEditorCatalog() {
+  editorCatalog.value = { status: 'loading' }
+  editorCatalog.value = await loadEditorCatalog()
+}
+
+async function reloadActivity() {
+  activity.value = { status: 'loading' }
+  activity.value = await loadActivity()
+}
+
+async function reloadWorkflowSurface() {
+  workflowOutcome.value = null
+  await Promise.all([reloadWorkflows(), reloadEditorCatalog(), reloadActivity()])
+}
+
 onMounted(async () => {
   // Both at once. The catalogue is anonymous and the session is not, so neither waits on the other
   // — and a slow identity provider must not delay the one view that never needed a principal.
@@ -102,8 +145,83 @@ onMounted(async () => {
 // until one resolves. That is what keeps `ConnectionsState` at three states: a signed-out reader is
 // never shown a listing that failed, because none was attempted — the gate below is shown instead.
 watch(signedIn, async (resolved) => {
-  if (resolved) await reloadConnections()
+  if (resolved) {
+    await reloadConnections()
+    if (principal.value?.kind === 'user') await reloadWorkflowSurface()
+  }
 })
+
+async function createWorkflowDraft(id: string, title: string, source: string) {
+  if (workflowBusy.value) return
+  workflowBusy.value = true
+  workflowOutcome.value = await createWorkflow(id, title, source)
+  workflowBusy.value = false
+  if (workflowOutcome.value.status === 'saved') await reloadWorkflows()
+}
+
+async function saveWorkflowDraft(workflow: WorkflowDraft, source: string) {
+  if (workflowBusy.value) return
+  workflowBusy.value = true
+  workflowOutcome.value = await saveWorkflow(workflow, source)
+  workflowBusy.value = false
+  if (workflowOutcome.value.status === 'saved') await reloadWorkflows()
+}
+
+async function saveWorkflowVisual(workflow: WorkflowDraft, graph: NonNullable<WorkflowDraft['graph']>) {
+  if (workflowBusy.value) return
+  workflowBusy.value = true
+  workflowOutcome.value = await saveWorkflowGraph(workflow, graph)
+  workflowBusy.value = false
+  if (workflowOutcome.value.status === 'saved') await reloadWorkflows()
+}
+
+async function validateWorkflowDraft(workflow: WorkflowDraft, source: string) {
+  if (workflowBusy.value) return
+  workflowBusy.value = true
+  workflowOutcome.value = await validateWorkflowEdit(workflow, source)
+  workflowBusy.value = false
+}
+
+async function validateWorkflowVisual(workflow: WorkflowDraft, graph: NonNullable<WorkflowDraft['graph']>) {
+  if (workflowBusy.value) return
+  workflowBusy.value = true
+  workflowOutcome.value = await validateWorkflowGraph(workflow, graph)
+  workflowBusy.value = false
+}
+
+async function publishWorkflowDraft(workflow: WorkflowDraft) {
+  if (workflowBusy.value) return
+  workflowBusy.value = true
+  workflowOutcome.value = await publishWorkflow(workflow)
+  workflowBusy.value = false
+  if (workflowOutcome.value.status === 'published') await reloadWorkflows()
+}
+
+async function runWorkflow(workflow: WorkflowDraft, params: unknown) {
+  if (workflowBusy.value) return
+  workflowBusy.value = true
+  workflowOutcome.value = await startWorkflowRun(workflow, params)
+  workflowBusy.value = false
+  await reloadActivity()
+}
+
+async function cancelRun(run: { id: string }) {
+  if (workflowBusy.value) return
+  workflowBusy.value = true
+  await cancelWorkflowRun(run.id)
+  workflowBusy.value = false
+  await reloadActivity()
+}
+
+const activityPoll = window.setInterval(() => {
+  if (
+    principal.value?.kind === 'user' &&
+    (route.value.name === 'activity' || route.value.name === 'workflows') &&
+    activity.value.status === 'ready' &&
+    activity.value.runs.some((run) => run.status === 'running')
+  ) void reloadActivity()
+}, 1500)
+onUnmounted(() => window.clearInterval(activityPoll))
 
 // ---------------------------------------------------------------------------------------------
 // Wiring a connector up. The console's other job, and until X-44 the one it could not do.
@@ -279,7 +397,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
 </script>
 
 <template>
-  <div class="console">
+  <div class="console" :class="{ 'console--wide': route.name === 'workflows' || route.name === 'activity' }">
     <ConsoleShell :session="session" :active="active" @sign-out="endSession" @retry-session="reloadSession">
       <template #theme>
         <button type="button" :aria-pressed="isDark" @click="toggleTheme()">
@@ -431,6 +549,45 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         </template>
       </template>
 
+      <template v-else-if="route.name === 'workflows'">
+        <Workflows
+          v-if="principal?.kind === 'user'"
+          :state="workflows"
+          :catalog="editorCatalog"
+          :activity="activity"
+          :busy="workflowBusy"
+          :outcome="workflowOutcome"
+          @retry="reloadWorkflowSurface"
+          @create="createWorkflowDraft"
+          @save="saveWorkflowDraft"
+          @save-graph="saveWorkflowVisual"
+          @validate="validateWorkflowDraft"
+          @validate-graph="validateWorkflowVisual"
+          @publish="publishWorkflowDraft"
+          @run="runWorkflow"
+        />
+        <section v-else class="gate">
+          <h1>Sign in as a user to author workflows</h1>
+          <p>Workflow drafts and versions belong to the tenant on the resolved user principal.</p>
+          <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
+        </section>
+      </template>
+
+      <template v-else-if="route.name === 'activity'">
+        <Activity
+          v-if="principal?.kind === 'user'"
+          :state="activity"
+          :busy="workflowBusy"
+          @retry="reloadActivity"
+          @cancel="cancelRun"
+        />
+        <section v-else class="gate">
+          <h1>Sign in as a user to inspect workflow activity</h1>
+          <p>Run records are tenant data and are never selected by a tenant field on this page.</p>
+          <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
+        </section>
+      </template>
+
       <!-- Everything below is the catalogue: reference material, and no longer the front door. -->
 
       <!-- Named, so a request that never comes back is visibly a request and not a blank page. -->
@@ -499,6 +656,10 @@ const active = computed(() => surfaceOfRoute(route.value.name))
   max-width: 1104px;
   margin: 0 auto;
   padding: 0 24px 64px;
+}
+
+.console--wide {
+  max-width: 1560px;
 }
 
 .console__loading {

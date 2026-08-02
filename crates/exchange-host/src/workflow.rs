@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -534,9 +534,11 @@ impl WorkflowStore {
                 path: root.display().to_string(),
                 reason: error.to_string(),
             })?;
+        admit_owner_only(&root)?;
         let path = root.join("definitions.json");
         let definitions = match fs::read(&path) {
             Ok(bytes) => {
+                admit_owner_only(&path)?;
                 serde_json::from_slice(&bytes).map_err(|error| WorkflowRefusal::Unusable {
                     path: path.display().to_string(),
                     reason: error.to_string(),
@@ -589,7 +591,8 @@ impl WorkflowStore {
         admit_id(id)?;
         admit_title(title)?;
         let mut definitions = self.write()?;
-        let records = definitions.entry(tenant.to_string()).or_default();
+        let mut next = definitions.clone();
+        let records = next.entry(tenant.to_string()).or_default();
         if records.contains_key(id) {
             return Err(WorkflowRefusal::AlreadyExists(id.to_owned()));
         }
@@ -602,7 +605,8 @@ impl WorkflowStore {
                 versions: BTreeMap::new(),
             },
         );
-        self.persist(&definitions)?;
+        self.persist(&next)?;
+        *definitions = next;
         Ok(draft)
     }
 
@@ -617,14 +621,16 @@ impl WorkflowStore {
     ) -> Result<WorkflowDraft, WorkflowRefusal> {
         admit_title(title)?;
         let mut definitions = self.write()?;
-        let record = self.record_mut(&mut definitions, tenant, id)?;
+        let mut next = definitions.clone();
+        let record = self.record_mut(&mut next, tenant, id)?;
         check_revision(expected, record.draft.revision)?;
         let revision = record.draft.revision.saturating_add(1);
         let published = record.draft.published_version;
         record.draft = draft(id, title, revision, published, &validated);
         record.validated = validated;
         let answer = record.draft.clone();
-        self.persist(&definitions)?;
+        self.persist(&next)?;
+        *definitions = next;
         Ok(answer)
     }
 
@@ -634,24 +640,31 @@ impl WorkflowStore {
         tenant: &Tenant,
         id: &str,
         expected: u64,
+        validated: ValidatedWorkflow,
     ) -> Result<WorkflowVersion, WorkflowRefusal> {
         let mut definitions = self.write()?;
-        let record = self.record_mut(&mut definitions, tenant, id)?;
+        let mut next = definitions.clone();
+        let record = self.record_mut(&mut next, tenant, id)?;
         check_revision(expected, record.draft.revision)?;
+        if validated.source != record.draft.source {
+            return Err(WorkflowRefusal::PublicationSourceChanged);
+        }
         let version = record.versions.keys().next_back().copied().unwrap_or(0) + 1;
         let published = WorkflowVersion {
             workflow_id: id.to_owned(),
             version,
             title: record.draft.title.clone(),
-            source: record.validated.source.clone(),
-            graph: record.validated.graph.clone(),
-            node_map: record.validated.node_map.clone(),
-            operations: record.validated.operations.clone(),
-            input_schema: record.validated.input_schema.clone(),
+            source: validated.source.clone(),
+            graph: validated.graph.clone(),
+            node_map: validated.node_map.clone(),
+            operations: validated.operations.clone(),
+            input_schema: validated.input_schema.clone(),
         };
         record.versions.insert(version, published.clone());
         record.draft.published_version = Some(version);
-        self.persist(&definitions)?;
+        record.validated = validated;
+        self.persist(&next)?;
+        *definitions = next;
         Ok(published)
     }
 
@@ -690,20 +703,24 @@ impl WorkflowStore {
             })
     }
 
-    /// Delete a draft and all of its versions with a revision precondition.
+    /// Delete an unpublished draft with a revision precondition.
     pub fn delete(&self, tenant: &Tenant, id: &str, expected: u64) -> Result<(), WorkflowRefusal> {
         let mut definitions = self.write()?;
-        let records = definitions
+        let mut next = definitions.clone();
+        let records = next
             .get_mut(tenant.as_str())
             .ok_or_else(|| WorkflowRefusal::UnknownWorkflow(id.into()))?;
-        let current = records
+        let record = records
             .get(id)
-            .ok_or_else(|| WorkflowRefusal::UnknownWorkflow(id.into()))?
-            .draft
-            .revision;
-        check_revision(expected, current)?;
+            .ok_or_else(|| WorkflowRefusal::UnknownWorkflow(id.into()))?;
+        check_revision(expected, record.draft.revision)?;
+        if !record.versions.is_empty() {
+            return Err(WorkflowRefusal::PublishedWorkflowCannotDelete(id.into()));
+        }
         records.remove(id);
-        self.persist(&definitions)
+        self.persist(&next)?;
+        *definitions = next;
+        Ok(())
     }
 
     fn record<'a>(
@@ -753,10 +770,23 @@ impl WorkflowStore {
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .mode(0o600)
             .open(&temporary)
             .map_err(|error| self.unwritable(error))?;
+        if file
+            .metadata()
+            .map_err(|error| self.unwritable(error))?
+            .mode()
+            & 0o077
+            != 0
+        {
+            return Err(WorkflowRefusal::Unwritable {
+                path: temporary.display().to_string(),
+                reason: "permissions allow group or other access".into(),
+            });
+        }
+        file.set_len(0).map_err(|error| self.unwritable(error))?;
         file.write_all(&encoded)
             .map_err(|error| self.unwritable(error))?;
         file.sync_all().map_err(|error| self.unwritable(error))?;
@@ -770,6 +800,20 @@ impl WorkflowStore {
             reason: error.to_string(),
         }
     }
+}
+
+fn admit_owner_only(path: &Path) -> Result<(), WorkflowRefusal> {
+    let metadata = fs::metadata(path).map_err(|error| WorkflowRefusal::Unusable {
+        path: path.display().to_string(),
+        reason: error.to_string(),
+    })?;
+    if metadata.mode() & 0o077 != 0 {
+        return Err(WorkflowRefusal::Unusable {
+            path: path.display().to_string(),
+            reason: "permissions allow group or other access".into(),
+        });
+    }
+    Ok(())
 }
 
 fn draft(
@@ -868,6 +912,12 @@ pub enum WorkflowRefusal {
         /// Current durable revision.
         current: u64,
     },
+    /// Published versions are permanent and cannot be removed through draft deletion.
+    #[error("workflow `{0}` has published versions and cannot be deleted")]
+    PublishedWorkflowCannotDelete(String),
+    /// Publication validation did not describe the current exact draft source.
+    #[error("publication validation does not match the current draft source")]
+    PublicationSourceChanged,
     /// No workflow directory was configured.
     #[error("{setting} is not configured")]
     Unconfigured {

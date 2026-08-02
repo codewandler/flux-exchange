@@ -551,8 +551,8 @@ mod tests {
         // route on this surface, and `every_published_route_is_a_capability_or_is_argued_not_to_be`
         // is what notices on the day one lands.
         ("subscribe", None),
-        // Nothing records an execution, so there is nothing to read back.
-        ("read-what-happened", None),
+        // Workflow runs are durable and tenant-scoped; the collection is the capability's entry.
+        ("read-what-happened", Some("/api/workflow-runs")),
     ];
 
     /// Every published route that backs **no** capability, and why it is not one.
@@ -627,6 +627,35 @@ mod tests {
             "what a proposed grant would admit, before it is saved. The same caller and the same \
              argument as the line above; it is a console affordance for the human editing a \
              policy, not a step in what an agent does.",
+        ),
+        (
+            "/api/workflows",
+            "workflow authoring is a signed-in human's job. Agents receive the published workflow \
+             as an ordinary operation and never mutate its stored program.",
+        ),
+        ("/api/workflows/editor-catalog", "as above."),
+        ("/api/workflows/{workflow}", "as above."),
+        ("/api/workflows/{workflow}/validate", "as above."),
+        ("/api/workflows/{workflow}/publish", "as above."),
+        (
+            "/api/workflows/{workflow}/versions",
+            "immutable publication history is an authoring and inspection affordance for a \
+             signed-in human, not authority granted to an agent.",
+        ),
+        ("/api/workflows/{workflow}/versions/{version}", "as above."),
+        (
+            "/api/workflows/{workflow}/runs",
+            "a signed-in human's workflow-specific run control. An agent invokes the published \
+             workflow through the ordinary operation route and its ordinary grant.",
+        ),
+        (
+            "/api/workflow-runs/{run}",
+            "the detail page of the read-what-happened capability, not a separate thing an agent \
+             does.",
+        ),
+        (
+            "/api/workflow-runs/{run}/cancel",
+            "a signed-in human's control over a live run, not authority handed to an agent.",
         ),
         (
             "/api/onboarding",
