@@ -263,5 +263,5 @@ invariant `AGENTS.md` names is unmoved.
 refusal undrivable in the first place.
 
 **Carried out as stories:** [[X-55]] (lock 2 scans `exchange-host/src` only, and the composition-level
-backstop sits outside it) and [[X-56]] (`docs/designs/invoke.md` §3 still describes lock 2 as X-12
+backstop sits outside it) and [[X-56]] (`docs/designs/invoke.md` §2 still describes lock 2 as X-12
 shipped it). Still open from round 1: the `Sent::Maybe` re-measure through a transport error.

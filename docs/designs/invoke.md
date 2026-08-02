@@ -59,7 +59,7 @@ compiled Flux, and a member the operation does not declare has nowhere to land. 
 is produced by `Operation::execute` evaluating the operation's own `CompositeOpDecl` — the parsed
 module, not a re-lowering of the IR — so the destination is the connector author's, fixed at
 compile time. And behind *that*: the crate holding this path has no HTTP client in its dependencies
-(§3, lock 1), so a URL that did arrive would have nothing to consume it. Three independent reasons,
+(§2, lock 1), so a URL that did arrive would have nothing to consume it. Three independent reasons,
 and the third is the one that survives a refactor of the other two.
 
 The honest residual: a **parameter value** can be interpolated into a path segment or a query, and
@@ -186,19 +186,20 @@ What lock 1 does *not* cover: `flux-system` is reachable transitively (it is whe
 lives) and `flux-runtime`'s `ToolContext` is how the pack is called at all. The claim is therefore
 "no transport is a *direct* dependency", plus lock 2 for the reachable ones.
 
-**Lock 2 — one seam, counted.** A scanner over `crates/exchange-host/src/**/*.rs` asserts:
-
-- `connector_pack::pack` is named in exactly **one** file;
-- `Egress` appears in exactly **two** places — the field that holds it and the call that hands it to
-  `pack`. The host never calls `Egress::tool()`, and never calls `Tool::execute` on anything but the
-  operation the pack registered;
-- no source names `flux_system::net`, `std::net` or `tokio::net`.
+**Lock 2 — one seam, counted.** A scanner over `crates/exchange-host/src/**/*.rs` enforces nine
+rules. Each is one string: some no source in that crate may write, some only a named file may. They
+are listed below, under "What lock 2 is, and what it is not", with what each catches **and what it
+cannot** — a list rather than a summary at this point, because the summary that used to sit here
+described the three rules X-12 shipped and was still describing them once there were nine.
 
 Source scanning is a blunt instrument and it is used here because the repository already runs one and
 already knows how to keep it honest: `console/test/components.test.mjs` is guarded by a test that
 runs the scanner against sources it *must reject* and sources it *must accept*. This scanner gets the
 same treatment, and without it the scanner is worth nothing — a regex that matches nothing passes
-every file.
+every file. Since X-56 the same treatment runs one step further out:
+`the_design_says_what_every_lock_2_rule_is` reads the rule list out of the test and fails if *this
+document* has stopped naming one of them — which is the drift above, and it went unnoticed because
+nothing was measuring the distance between the two.
 
 **Lock 3 — a counting transport, for what the other two cannot see.** Tests construct the host with
 an `Egress` wrapping a `Tool` that records every call and its URL. Then:
@@ -211,7 +212,74 @@ an `Egress` wrapping a `Tool` that records every call and its URL. Then:
 
 Lock 3's limit, stated because it is the one most likely to be over-read: it proves things about the
 paths a test drives, never about paths it does not know exist. Locks 1 and 2 are what speak to
-absence. Keep all three; they fail differently.
+absence. Keep all three; they fail differently, and "Three mechanisms, and they fail differently"
+below is where that is set out.
+
+#### What lock 2 is, and what it is not
+
+**Lock 2 checks names, not values.** Every rule is a string, and each refuses — or bounds to named
+files — a source that writes that string. It cannot see a capability arriving under a name nobody
+listed, and it cannot see what a value *is*: a host in a `const` is text like any other text. Two
+independent review rounds each worked this out from the test because this document did not say it,
+which is a cost paid per review rather than once, and it is stated before the table because it
+decides how to read every row.
+
+The rules as they stand, each with its edge. The scan is over code — whole-line comments are
+stripped first, so documenting a rule is not a violation of it.
+
+| Rule | Where it may appear | What it catches | What it cannot |
+|---|---|---|---|
+| `connector_pack::resolve` | exactly one file — and *exactly*, not *at most* | a second file resolving an operation, and equally the deletion of the only one, which would otherwise satisfy every other rule here | a second seam reaching the pack under an alias (`use connector_pack::resolve as go`) or through a re-export |
+| `connector_pack::pack` | nowhere | the pack's **model-facing** entry point, which installs a whole provider's tools into a registry. An execute route wants `resolve`; `pack` would be a second way in, and would silently withhold every `expose = false` operation from a caller entitled to run it | the same, aliased |
+| `connector_pack::Rehearsal` | `settings.rs` | the pack's **third** entry point turning up somewhere new. It takes no `Egress`, holds no transport and has no `execute`, so nothing reached through it can dispatch — this is a count, not a refusal, and the point of the count is that `resolve` and `pack` were once believed to be the whole list | a *fourth* entry point. The rule knows the three that exist; a new one is invisible until upstream ships it and somebody reads the changelog |
+| `.tool()` | nowhere | unwrapping the transport out of its `Egress` — the second request path, in one line | the same unwrap through some other accessor, or a binding that never spells the call |
+| `.execute(` | the seam only | a tool dispatched from anywhere but the file that resolved it | call syntax only: the same dispatch spelled `Tool::execute(tool, …)` is a different string |
+| `Egress` | `invoke.rs`, `lib.rs` | the transport port travelling to a third file, from where it is one refactor away from `.tool()`. **Not** "exactly two occurrences", which is what this section claimed until X-56 and was never what the scanner counted — the rule bounds *which files* may name it, not how often | a transport that is neither an `Egress` nor named as one |
+| `ToolContext` | `invoke.rs`, `lib.rs` | **possession** of the handle every guarded IO capability hangs off — process spawn, the workspace filesystem, the worktree ops. A file that cannot name the handle cannot take one, store one or return one, so it has nothing to call an accessor on, whatever the accessors are called this release | a context obtained without naming the type. That needs a public accessor for `Invoker`'s private `contexts` field and there is none; add one and this rule is back to being one accessor behind |
+| `.system(` | nowhere | the shortest spelling of "give me the guarded `System`", caught cheaply | `.workspace_context().active()`, which is a different public accessor returning the same `Arc<System>` — see the demonstration below. Read this as the spelling somebody reaches for by accident, not as a boundary; the boundary is the row above |
+| `flux_system`, `std::net`, `tokio::net`, `reqwest`, `hyper`, `ureq`, `isahc`, `attohttpc`, `TcpStream`, `UdpSocket` | nowhere | a transport or a socket named in a source, including the ones lock 1 cannot refuse because they arrive transitively — `flux-system` is reachable through `flux-runtime`, which is exactly why naming it is refused here rather than only in the manifest | a client whose crate nobody listed. This is the one deny-list among the three locks, and it is *why* lock 1 is an allow-list: this row can only ever name the clients that already exist |
+
+**The demonstration, which is worth more than the argument.** X-48's second review round added one
+file to the dispatching crate:
+
+```rust
+let handle = ctx.workspace_context().active();
+handle.run(&argv, Duration::from_secs(5)).await
+```
+
+That reaches `System::run` — a process spawn — naming nothing on the forbidden row, no `.tool()`,
+and not even `.system(`, which had been written believing it was the only spelling. The whole
+workspace stayed green. **A rule that chases accessor spellings will always be one accessor behind**,
+because the set of ways to get a value out of a public type is not a set a scanner can enumerate.
+
+So the instrument changed rather than the string list growing: the `ToolContext` rule bounds
+possession instead of use, which is the same shape as the `Egress` rule — a capability that travels
+to a bounded, readable set of places. That is a real narrowing, and it is still a name check. Which
+is the sentence this subsection opens with, and the reason it opens with it.
+
+#### Three mechanisms, and they fail differently
+
+None of them is the argument on its own. They are set out here once, and
+`crates/exchange-host/tests/no_second_request_path.rs` points at this subsection rather than
+restating it — the argument lived in both until X-56, and two copies is how the paragraph above
+drifted in the first place.
+
+- **Lock 1 is not a name check.** It fails on a name it has *never heard of*, which is the property
+  a deny-list cannot have. Its scope is the dispatching crate's normal dependency tables —
+  `[dependencies]`, `[dependencies.name]`, and both of those under `[target.…]`; `dev-` and
+  `build-dependencies` are deliberately out, with the reasons on `header_of`. Its blind spot is the
+  mirror of lock 2's: a capability reached *transitively*, through a crate already on the list,
+  which is how `flux-system` is reachable at all.
+- **Lock 2 is a name check over sources**, with each rule's edge in the table above. What it
+  contributes that no test can is a statement about *absence* across the whole crate.
+- **Lock 3 is behavioural** — a counting transport, one dispatch per invoke and zero for every
+  refusal. It proves things about the paths its tests drive and nothing about paths nobody wrote a
+  test for.
+
+**Three, and not four.** The fourth this argument used to count was the deployed composition's
+sandbox posture. X-55 struck it from the count — not because it is untrue, but because it lives
+outside the boundary the locks bound, so it is not a property of the crate that ships. That is the
+next subsection.
 
 #### Where the locks stop
 

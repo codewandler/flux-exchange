@@ -91,7 +91,7 @@ pub use connector_secrets::{CredentialRef, Secret, SecretStore, StoreError, TENA
 ///
 /// The version argument applies with more force here than anywhere else in this file. **A
 /// composition that named `connector-pack` itself would be a second crate in this workspace that
-/// can reach the pack** — and the whole of `docs/designs/invoke.md` §3 lock 1 is that the crate
+/// can reach the pack** — and the whole of `docs/designs/invoke.md` §2 lock 1 is that the crate
 /// which can build a request cannot name the pack, and the crate which names the pack cannot build
 /// a request. `exchange-server` holds `flux_web`'s `HttpRequestTool`; it reaches the pack through
 /// this doorway and through nothing else, and `tests/no_second_request_path.rs` asserts it.

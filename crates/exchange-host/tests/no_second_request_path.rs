@@ -13,69 +13,27 @@
 //! and can say nothing about paths nobody wrote a test for. **This file is what speaks to absence**,
 //! and it does so twice:
 //!
-//! - **Lock 1** — the dispatching crate's own **normal** dependency tables are an **allow-list**.
-//!   Not a deny-list: a deny-list only catches the transports somebody thought of, and passes for
-//!   `ureq`, `isahc`, `attohttpc` and whatever ships next year. An allow-list fails on any new
-//!   dependency *in the tables it reads* — see [`header_of`] for which those are and why the rest
-//!   are out — and whoever adds one has to write down why it is not a transport.
+//! - **Lock 1** — the dispatching crate's own **normal** dependency tables are an **allow-list**,
+//!   not a deny-list. See [`header_of`] for which tables those are and why the rest are out.
 //! - **Lock 2** — one seam, counted, over this crate's sources.
 //!
 //! # What lock 2 is, and what it is not
 //!
-//! Stated here rather than discovered later, because a guard that overstates its reach is worse
-//! than one that admits its edge — this repository has had to correct exactly that more than once.
+//! **In `docs/designs/invoke.md` §2, in a subsection of this name.** Every rule below with what it
+//! catches *and what it cannot*, the demonstration that decided the shape of
+//! [`rules::HOLDS_A_TOOL_CONTEXT`], and the argument these locks rest on. There, and not here:
+//! until X-56 it was in both, the two copies drifted, and the design is the one a reviewer reads
+//! first. [`the_design_says_what_every_lock_2_rule_is`] fails if that subsection stops naming a
+//! rule declared in [`rules`], so the pointer cannot rot into a pointer at nothing.
 //!
-//! **Lock 2 checks names, not values.** Every rule below is a string, and it refuses a source that
-//! writes that string. It cannot see a capability that arrives under a name nobody listed, and a
-//! previous attempt at this section got that wrong twice in the same paragraph, so the corrections
-//! are recorded rather than quietly applied.
+//! One sentence is repeated here rather than pointed at, because every rule below is read under it
+//! and a reader of this file may never open the other one: **Lock 2 checks names, not values.**
+//! Each rule is a string, and it refuses a source that writes that string; a capability arriving
+//! under a name nobody listed is not visible to it. Each rule's own doc comment carries its own
+//! edge, and the design's table gathers them.
 //!
-//! The demonstration, which is worth more than the argument. X-48's review added one file to this
-//! crate:
-//!
-//! ```ignore
-//! let handle = ctx.workspace_context().active();
-//! handle.run(&argv, Duration::from_secs(5)).await
-//! ```
-//!
-//! That reaches `System::run` — a process spawn — naming nothing in [`rules::FORBIDDEN`], no
-//! `.tool()`, and not even [`rules::REACHES_THE_SYSTEM`], which was written believing `.system(`
-//! was the only spelling. It is not: `ToolContext::workspace_context` is public, and
-//! `WorkspaceContext::active` returns the same `Arc<System>` under a different name. The whole
-//! workspace stayed green. **A rule that chases accessor spellings will always be one accessor
-//! behind**, because the set of ways to get a value out of a public type is not a set this file
-//! can enumerate.
-//!
-//! So the instrument changed rather than the string list growing. [`rules::HOLDS_A_TOOL_CONTEXT`]
-//! bounds **possession** instead of use: a `ToolContext` is the handle every IO capability hangs
-//! off, and only the seam and the crate root may hold one — the same two files that may hold an
-//! `Egress`, and the same shape of rule. A file that cannot name the handle cannot call anything on
-//! it, whatever the accessor is called this release. [`rules::REACHES_THE_SYSTEM`] stays underneath
-//! it as a second, narrower net.
-//!
-//! That is a real narrowing and it is still a name check. What it does not catch: a `ToolContext`
-//! obtained without naming the type — which today requires a public accessor for `Invoker`'s
-//! private `contexts` field, and there is none. If one is ever added, this rule is back to being
-//! one accessor behind.
-//!
-//! So what covers the rest, in the order it bites:
-//!
-//! - **Lock 1**, above, is not a name check — it fails on a *name it has never heard of*. Its scope
-//!   is this crate's normal dependency tables: `[dependencies]`, `[dependencies.name]`, and both
-//!   under `[target.…]`. That list is narrower than the "any entry" this section used to claim: the
-//!   review appended `[dependencies.reqwest]` and lock 1 reported `5 passed`, because the parser
-//!   matched one spelling of the header. [`the_manifest_parser_reads_every_shape_cargo_allows`] is
-//!   the test that was missing, and `dev-`/`build-dependencies` remain deliberately out of scope
-//!   with reasons on [`header_of`]. Its standing blind spot is the mirror of lock 2's: a capability
-//!   reached *transitively*, through a crate already on the list — which is exactly how
-//!   `flux-system` is reachable at all.
-//! - **Lock 3** (`tests/invoke.rs`) is behavioural: a counting transport, one dispatch per invoke,
-//!   and zero for every refusal. It proves things about the paths its tests drive and nothing about
-//!   paths nobody wrote a test for.
-//!
-//! Three mechanisms, and they fail differently. None of them is the argument on its own, and all
-//! three are inside the crate that ships — which was a claim worth checking rather than assuming,
-//! and is the next section.
+//! Three mechanisms, listed and argued in that same section — and all three inside the crate that
+//! ships, which was a claim worth checking rather than assuming, and is the next section.
 //!
 //! # Where the locks stop (X-55)
 //!
@@ -110,7 +68,7 @@
 //!
 //! That is the intended cost, and the failure mode is deletion. **Add your dependency to
 //! [`ALLOWED`] with its reason, or your file to the seam rules below — do not delete the rule.** A
-//! diff that removes one of these is a blocker; `docs/designs/invoke.md` §3 says so in as many
+//! diff that removes one of these is a blocker; `docs/designs/invoke.md` §2 says so in as many
 //! words.
 //!
 //! # Why the manifest and not `cargo metadata`
@@ -264,8 +222,16 @@ mod rules {
         "UdpSocket",
     ];
 
-    /// Files allowed to name `Egress`: the seam that hands it over, and the crate root that
-    /// re-exports it so a composition need not name `connector-pack`.
+    /// **The transport port, as a name.** The thing a composition binds and the pack calls; a file
+    /// that can name one can hold one, and a file that holds one is one refactor from
+    /// [`UNWRAPS_THE_TRANSPORT`].
+    ///
+    /// A literal until X-56 needed the rule list as data — the design has to be able to say what
+    /// every rule is, and a rule spelled at its own call site is one the list cannot see.
+    pub const TRANSPORT_PORT: &str = "Egress";
+
+    /// Files allowed to name [`TRANSPORT_PORT`]: the seam that hands it over, and the crate root
+    /// that re-exports it so a composition need not name `connector-pack`.
     pub const MAY_NAME_EGRESS: &[&str] = &["invoke.rs", "lib.rs"];
 }
 
@@ -292,6 +258,24 @@ mod claim {
     /// works: a paraphrase is where a claim drifts back to the wider one it was narrowed from, and
     /// a document that has to carry this exact string is a document somebody read before changing.
     pub const THE_DECISION: &str = "The locks bound the published crate, not the deployed binary.";
+
+    /// **Where the argument these locks rest on lives** — one copy, and this is it.
+    pub const THE_DESIGN: &str = "docs/designs/invoke.md";
+
+    /// **The section of [`THE_DESIGN`] that has to describe lock 2** (X-56).
+    ///
+    /// Spelled the same in both places on purpose: this file keeps a heading of the same name whose
+    /// body is a pointer, `crates/exchange-server/src/execution.rs` cites it by that name, and a
+    /// rename that broke either is a dangling pointer rather than a compile error.
+    pub const THE_LOCK_2_SECTION: &str = "What lock 2 is, and what it is not";
+
+    /// **Lock 2's own limit, in the document a reviewer reads first.**
+    ///
+    /// It lived only in this file's module doc until X-56, and two independent review rounds each
+    /// spent effort rediscovering it — which is a cost paid per review rather than once. Required
+    /// verbatim for the same reason [`THE_DECISION`] is: a paraphrase is where "it checks names"
+    /// drifts back into "it checks for a transport".
+    pub const THE_NAME_LIMIT: &str = "Lock 2 checks names, not values.";
 
     /// The documents that say what the locks reach, and therefore the ones that can overstate it.
     ///
@@ -351,7 +335,7 @@ fn the_dispatching_crate_declares_only_dependencies_that_are_not_transports() {
              second request with, and a deny-list would pass for any client nobody listed.\n\n\
              The cheapest correct fix is to add `{name}` to `ALLOWED` in this file **with a \
              sentence saying why it is not a transport**. Deleting this test is a blocker — see \
-             `docs/designs/invoke.md` §3, lock 1.",
+             `docs/designs/invoke.md` §2, lock 1.",
         );
     }
 }
@@ -500,7 +484,7 @@ fn the_crate_that_holds_a_transport_never_names_the_pack() {
             !code_of(source).contains("connector_pack"),
             "`{path}` names `connector_pack`, and it is the crate that holds an HTTP client.\n\n\
              Bind the pack's ports through `exchange_host`'s re-exports (`exchange_host::Egress`, \
-             `exchange_host::ConfigStore`) instead. See `docs/designs/invoke.md` §3, lock 1.",
+             `exchange_host::ConfigStore`) instead. See `docs/designs/invoke.md` §2, lock 1.",
         );
     }
 }
@@ -951,6 +935,218 @@ fn paragraphs(prose: &str) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The design says what the rules are (X-56)
+// ---------------------------------------------------------------------------------------------
+
+/// **Every rule of [`rules`] is described in the design, and described where it can be found.**
+///
+/// The drift this catches is the one X-56 was filed for, and it is the mirror of
+/// [`no_document_claims_more_than_the_locks_reach`]: that test refuses a document claiming *more*
+/// than the locks reach, and this one refuses a document that has stopped describing what they
+/// reach at all. `docs/designs/invoke.md` listed lock 2 as X-12 shipped it — three bullets — and
+/// was still listing those three once [`rules`] held nine, while this file was the accurate copy
+/// and nobody reading the design could tell.
+///
+/// It is a presence check over one section, and openly that: it asserts the design **names** every
+/// rule, not that what it says about one is true. What makes it worth having anyway is the failure
+/// it produces — a rule added here without a sentence in the design is a red test at the moment the
+/// rule is written, which is the only moment anybody knows what it catches and what it does not.
+#[test]
+fn the_design_says_what_every_lock_2_rule_is() {
+    let path = workspace_path(claim::THE_DESIGN);
+    let design = fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "`{}` is where lock 2's rules are described and must be readable: {error} (looked at \
+             `{}`)",
+            claim::THE_DESIGN,
+            path.display(),
+        )
+    });
+
+    let found = undescribed_rules(&design);
+    assert!(found.is_empty(), "{}", found.join("\n\n"));
+}
+
+/// **The design check, proved against a section it must reject and one it must accept.**
+///
+/// Same treatment as [`the_scanner_catches_what_it_claims_to`] and
+/// [`the_claim_scanner_catches_what_it_claims_to`], and here the direction that matters most is the
+/// last one: several of these markers — `ToolContext`, `reqwest`, `Egress` — already appear
+/// elsewhere in the design, so a check over the whole file would report `1 passed` while the
+/// section that is supposed to describe the rules said nothing at all.
+#[test]
+fn the_design_check_catches_what_it_claims_to() {
+    let section = |limit: &str, markers: &[&str], after: &str| {
+        format!(
+            "## 2. The dispatch path\n\n\
+             #### {}\n\n\
+             {limit}\n\n\
+             {}\n\n\
+             #### Three mechanisms, and they fail differently\n\n\
+             {after}\n",
+            claim::THE_LOCK_2_SECTION,
+            markers
+                .iter()
+                .map(|marker| format!("- `{marker}` — what it catches, and what it cannot."))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    };
+
+    let every = lock_2_markers();
+
+    assert!(
+        undescribed_rules(&section(claim::THE_NAME_LIMIT, &every, "Elsewhere.")).is_empty(),
+        "the check rejects the shape it exists to permit",
+    );
+
+    // Wrapped at column 100, which is how the sentence actually arrives in the design.
+    let (head, tail) = claim::THE_NAME_LIMIT.split_at(14);
+    assert!(
+        undescribed_rules(&section(
+            &format!("**{head}\n{tail}**"),
+            &every,
+            "Elsewhere."
+        ))
+        .is_empty(),
+        "the check refuses a design that states the limit across a line break, which is how a \
+         document wrapped at 100 columns states it",
+    );
+
+    assert!(
+        !undescribed_rules("# Design\n\nNo section by that name.\n").is_empty(),
+        "the check accepted a design with no section describing lock 2 at all",
+    );
+
+    assert!(
+        !undescribed_rules(&section("Lock 2 is thorough.", &every, "Elsewhere.")).is_empty(),
+        "the check accepted a design that never states the name-versus-value limit, which is the \
+         thing two review rounds each had to rediscover",
+    );
+
+    // Every rule on its own, so a failure names the rule the design stopped describing.
+    for marker in &every {
+        let rest: Vec<&str> = every
+            .iter()
+            .copied()
+            .filter(|other| other != marker)
+            .collect();
+        let found = undescribed_rules(&section(claim::THE_NAME_LIMIT, &rest, "Elsewhere."));
+        assert!(
+            found.iter().any(|violation| violation.contains(marker)),
+            "the check accepted a design that never names `{marker}`, so that rule can be added, \
+             changed or deleted without the design noticing",
+        );
+    }
+
+    // The direction this check exists for: named in the file, absent from the section.
+    let markers = every
+        .iter()
+        .map(|marker| format!("`{marker}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        !undescribed_rules(&section(claim::THE_NAME_LIMIT, &[], &markers)).is_empty(),
+        "the check read the whole design rather than the section that describes the rules, so a \
+         marker mentioned anywhere at all satisfies it",
+    );
+}
+
+/// **Every string lock 2 bounds**, as the list the design has to be able to name.
+///
+/// Built from [`rules`] rather than written out again, so a rule added there without a sentence in
+/// the design fails [`the_design_says_what_every_lock_2_rule_is`] rather than quietly widening the
+/// distance between the two documents.
+fn lock_2_markers() -> Vec<&'static str> {
+    let mut markers = vec![
+        rules::SEAM,
+        rules::MODEL_FACING_SEAM,
+        rules::REHEARSAL,
+        rules::UNWRAPS_THE_TRANSPORT,
+        rules::DISPATCH,
+        rules::TRANSPORT_PORT,
+        rules::HOLDS_A_TOOL_CONTEXT,
+        rules::REACHES_THE_SYSTEM,
+    ];
+    markers.extend_from_slice(rules::FORBIDDEN);
+    markers
+}
+
+/// What [`claim::THE_LOCK_2_SECTION`] of `design` does not say, as human-readable violations.
+///
+/// A pure function over the design's text, so [`the_design_check_catches_what_it_claims_to`] can
+/// drive the identical code over fixtures rather than over the document it guards.
+fn undescribed_rules(design: &str) -> Vec<String> {
+    let Some(section) = section_of(design, claim::THE_LOCK_2_SECTION) else {
+        return vec![format!(
+            "`{}` has no section headed \"{}\", so nothing in it describes lock 2's rules.\n\n\
+             That section is where each rule is stated with what it catches **and what it cannot**, \
+             and this file's module doc points at it by that name — as does \
+             `crates/exchange-server/src/execution.rs`. Renaming it is fine; renaming it without \
+             changing `claim::THE_LOCK_2_SECTION` leaves two dangling pointers.",
+            claim::THE_DESIGN,
+            claim::THE_LOCK_2_SECTION,
+        )];
+    };
+
+    // Flattened, because a document wrapped at 100 columns puts "not" and "values." on different
+    // lines and a rule that matched line by line would miss every marker unlucky enough to straddle
+    // a wrap.
+    let flat = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut found = Vec::new();
+
+    if !flat.contains(claim::THE_NAME_LIMIT) {
+        found.push(format!(
+            "`{}` describes lock 2 without stating its limit.\n\n\
+             Write it verbatim, in that section:\n\n    {}\n\n\
+             Every rule below is a string, and it refuses a source that writes that string; it \
+             cannot see a capability arriving under a name nobody listed. Two review rounds each \
+             worked that out from the test because the design did not say it, which is a cost paid \
+             per review rather than once.",
+            claim::THE_DESIGN,
+            claim::THE_NAME_LIMIT,
+        ));
+    }
+
+    for marker in lock_2_markers() {
+        if !flat.contains(marker) {
+            found.push(format!(
+                "`{}` is a rule of lock 2 and \"{}\" does not name it.\n\n\
+                 A rule the design does not list is one a reviewer cannot check the code against, \
+                 and it is how that section came to be describing three rules while this file \
+                 enforced nine. Add it with **what it catches and what it cannot** — the second \
+                 half is the one worth the words.",
+                marker,
+                claim::THE_LOCK_2_SECTION,
+            ));
+        }
+    }
+
+    found
+}
+
+/// The body of `design`'s `#… <heading>` section, up to the next heading of any level.
+///
+/// Deliberately not a markdown parse: a heading is a line whose first non-space character is `#`,
+/// which is the whole of the syntax this needs, and the alternative is a dependency on the crate
+/// whose entire safety argument is that its dependency list is short.
+fn section_of(design: &str, heading: &str) -> Option<String> {
+    let is_heading = |line: &&str| line.trim_start().starts_with('#');
+    let names_it = |line: &&str| line.trim_start().trim_start_matches('#').trim() == heading;
+
+    let start = design.lines().position(|line| names_it(&line))? + 1;
+
+    Some(
+        design
+            .lines()
+            .skip(start)
+            .take_while(|line| !is_heading(line))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
 // The scanner itself
 // ---------------------------------------------------------------------------------------------
 
@@ -1021,20 +1217,21 @@ fn violations(sources: &[(String, String)]) -> Vec<String> {
         for path in naming(needle) {
             found.push(format!(
                 "`{path}` names `{needle}`. This crate reaches the network through the `Egress` a \
-                 composition bound and through nothing else — see `docs/designs/invoke.md` §3, \
+                 composition bound and through nothing else — see `docs/designs/invoke.md` §2, \
                  lock 2.",
             ));
         }
     }
 
-    for path in naming("Egress") {
+    for path in naming(rules::TRANSPORT_PORT) {
         if !rules::MAY_NAME_EGRESS
             .iter()
             .any(|allowed| path.ends_with(allowed))
         {
             found.push(format!(
-                "`{path}` names `Egress`; the transport port belongs to the seam and to the \
-                 crate root that re-exports it, so that where it travels is readable in one place.",
+                "`{path}` names `{}`; the transport port belongs to the seam and to the crate root \
+                 that re-exports it, so that where it travels is readable in one place.",
+                rules::TRANSPORT_PORT,
             ));
         }
     }
