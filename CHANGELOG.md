@@ -8,6 +8,31 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **The console is served by the host it talks to** (X-83). `crates/exchange-server` served no static
+  files, and the console reached the API only through the Vite dev-server proxy — which
+  `npm run build` does not emit. So the console was reachable exactly where a developer was running
+  two processes, and a remote deployment had nowhere to put it.
+
+  **Hosting it on another origin cannot work, and it is worth knowing why before anybody tries.**
+  `console/src/service.mts` addresses every endpoint as a same-origin relative path, and the session
+  cookie is `SameSite=Strict` — so a browser never attaches it to a request originating from another
+  origin. Not blocked by a missing CORS header: not *sent*. Publishing the console beside the docs site
+  would look like it nearly worked. `Strict` was chosen by X-15 and X-40 and is untouched here.
+
+  `FLUX_EXCHANGE_CONSOLE` names a built console directory and `ServeDir` serves it at `/`, with a
+  fallback to `index.html` so a deep link survives a refresh. Unset means no static route, which is
+  what a checkout already did.
+
+  **The failing-first test earned its keep immediately, and after the fix was already written.** An
+  SPA fallback claims every unmatched path, so an unknown `/api/...` would answer `200` with a page of
+  HTML — which every client reads as success. A wildcard catch-all handles that, and the test still
+  went red: `/api/{*unmatched}` matches one segment *or more*, leaving `/api/` — trailing slash,
+  nothing after — falling through to the console. Three routes refuse now.
+
+  The surface's own guards are unaffected because `app()` is now `app_with_console(state, None)` and
+  `#[cfg(test)]`: the enumeration walks exactly the router a checkout serves, and a second test proves
+  every declared route answers the same status with a console bound as without one.
+
 - **Every capability page's status is derived from the route table, not written by an author** (X-64).
   This repository corrected **five renderings of one false claim** in a single week — that `invoke` was
   not built — each written honestly, each stale within a release, each caught by a review rather than a

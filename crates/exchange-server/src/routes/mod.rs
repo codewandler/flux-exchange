@@ -24,14 +24,17 @@ mod invoke;
 mod onboarding;
 mod signin;
 
+use std::path::Path;
+
 use axum::extract::{Request, State};
 use axum::http::{header, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::MethodRouter;
+use axum::routing::{any, MethodRouter};
 use axum::{Json, Router};
 use exchange_host::{IdentityError, PrincipalKind};
 use serde_json::json;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::warn;
 
@@ -151,15 +154,93 @@ pub fn published() -> impl Iterator<Item = (&'static Module, &'static Route)> {
         .flat_map(|module| module.routes.iter().map(move |route| (module, route)))
 }
 
-/// The assembled application.
+/// The assembled application, serving the API and nothing else.
+///
+/// **This is the surface every guard is written against**, and that is the whole reason it survives
+/// as its own function now that `main` calls [`app_with_console`]. A checkout serves exactly this —
+/// no console directory, no static route — so the enumeration in
+/// `tests::the_anonymous_surface_is_only_what_was_declared_anonymous` walks the same router a
+/// developer runs. `cfg(test)` because a deployment always answers through `app_with_console`, and a
+/// second production entry point differing only in what it omits is one somebody would eventually
+/// serve by mistake.
+#[cfg(test)]
 pub fn app(state: AppState) -> Router {
-    MODULES
-        .iter()
-        .fold(Router::new(), |app, module| {
-            app.merge(module.router(&state))
-        })
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+    app_with_console(state, None)
+}
+
+/// The assembled application, optionally serving a built console at `/`.
+///
+/// # Why the console is served by the host it talks to
+///
+/// `console/src/service.mts` addresses every endpoint as a **same-origin relative path**, and
+/// [`session::host_cookie`](crate::session::host_cookie) issues the session cookie
+/// `SameSite=Strict`. A browser does not attach a `Strict` cookie to a request that originated from
+/// another origin — not because a CORS header forbids it, but because the cookie is never sent. So
+/// hosting the console anywhere other than here cannot work, and the fix is not a CORS layer. X-15
+/// and X-40 chose `Strict` deliberately; relaxing it to split the origins would be a security
+/// decision wearing a deployment costume.
+///
+/// # `/api` is answered before the fallback, and that is load-bearing
+///
+/// A single-page application needs a fallback serving `index.html` so a deep link survives a
+/// refresh. Left to itself that fallback also answers **every unmatched `/api` path with `200` and
+/// a page of HTML**, which every client reads as success. So an explicit catch-all under `/api`
+/// refuses first, and `tests::an_unknown_api_path_refuses_rather_than_serving_the_console` is what
+/// keeps it there — the defect is silent, and a test is the only thing that sees it.
+///
+/// `None` is the shape a checkout runs in: no console built, no static route, and the surface is
+/// exactly what the guards enumerate.
+pub fn app_with_console(state: AppState, console: Option<&Path>) -> Router {
+    let api = MODULES.iter().fold(Router::new(), |app, module| {
+        app.merge(module.router(&state))
+    });
+
+    let app = match console {
+        // The catch-all is registered *before* the fallback so an unmatched `/api` path reaches a
+        // refusal rather than the page. Both must exist: without the catch-all the fallback claims
+        // `/api`, and without the fallback a refreshed deep link is a 404.
+        Some(directory) => api
+            .route(API_CATCH_ALL, any(no_such_api_route))
+            .route(API_ROOT, any(no_such_api_route))
+            .route(API_ROOT_SLASH, any(no_such_api_route))
+            .fallback_service(
+                ServeDir::new(directory)
+                    .fallback(ServeFile::new(directory.join(CONSOLE_ENTRY_POINT))),
+            ),
+        None => api,
+    };
+
+    app.layer(TraceLayer::new_for_http()).with_state(state)
+}
+
+/// The path patterns that keep the console's fallback off the API.
+///
+/// Spelled once, and read by the test that proves they work, so a rename cannot leave the test
+/// passing against a pattern nothing serves.
+///
+/// **Three patterns, and the third is why this is a test and not a review comment.** A wildcard
+/// matches one segment or more, so `/api/{*unmatched}` covers `/api/nope` and leaves both `/api`
+/// and — the one that is easy to miss — `/api/` falling through to the console's entry point with a
+/// `200`. X-83's failing-first test drove all three and found the trailing-slash case after the
+/// wildcard was already in place.
+pub(super) const API_CATCH_ALL: &str = "/api/{*unmatched}";
+
+/// The API prefix with nothing after it.
+pub(super) const API_ROOT: &str = "/api";
+
+/// The API prefix with a trailing slash and nothing after it — a distinct route to axum.
+pub(super) const API_ROOT_SLASH: &str = "/api/";
+
+/// The document a client-side router is served for any path it owns.
+pub(super) const CONSOLE_ENTRY_POINT: &str = "index.html";
+
+/// Refuse an `/api` path this host does not serve.
+///
+/// A `404` that says so, rather than the console's `index.html` with a `200`. The refusal names no
+/// path back to the caller: it is their own input, and echoing it is how a static surface becomes a
+/// reflection.
+async fn no_such_api_route() -> Response {
+    refuse(StatusCode::NOT_FOUND, "no such route on this host")
 }
 
 /// What [`require_principal`] logs when it identifies a caller and refuses it for its kind.
@@ -1527,5 +1608,162 @@ mod tests {
             "a refused grant must not have been stored, in any narrowed form: the caller asked for \
              something this surface does not express and is owed a refusal rather than a guess",
         );
+    }
+
+    /// A scratch directory holding a console just real enough to serve, removed on drop.
+    ///
+    /// Hand-rolled, following `credentials::tests::Scratch` and for the same stated reason: a
+    /// dependency is too much to pay for four lines of `create_dir_all`. Two files, because a
+    /// direct hit and the fallback are different paths through `ServeDir` and a one-file fixture
+    /// cannot tell them apart.
+    struct BuiltConsole(std::path::PathBuf);
+
+    impl BuiltConsole {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "exchange-console-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).expect("a scratch directory");
+            std::fs::write(
+                path.join(CONSOLE_ENTRY_POINT),
+                "<!doctype html><title>console</title>",
+            )
+            .expect("writing the entry point");
+            std::fs::write(path.join("app.js"), "// the bundle")
+                .expect("writing a bundle beside it");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for BuiltConsole {
+        fn drop(&mut self) {
+            // Best effort: a test that already removed it is not a test failure.
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn a_built_console() -> BuiltConsole {
+        BuiltConsole::new()
+    }
+
+    /// Drive one anonymous request through an app serving `console`, and report status and body.
+    async fn anonymous_request_to(
+        console: &Path,
+        method: Method,
+        path: &str,
+    ) -> (StatusCode, String) {
+        let app = app_with_console(AppState::without_identity(), Some(console));
+        let mut service = app.into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("a router is always ready");
+
+        let request = HttpRequest::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .expect("a well-formed request");
+
+        let response = service.call(request).await.expect("the router answers");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a readable body");
+
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// **X-83's failing-first test.** An `/api` path this host does not serve must refuse, rather
+    /// than being answered by the console's own entry point with a `200`.
+    ///
+    /// This is the defect a single-page fallback introduces and it is completely silent: the
+    /// fallback exists so a refreshed deep link resolves, and left to itself it also claims every
+    /// unmatched `/api` path. A client asking for a route this build does not have would receive a
+    /// page of HTML and a success status — which is worse than a `404`, because every layer above
+    /// treats it as an answer. Watched to fail before `API_CATCH_ALL` existed: it returned `200`
+    /// and `<!doctype html>`.
+    #[tokio::test]
+    async fn an_unknown_api_path_refuses_rather_than_serving_the_console() {
+        let console = a_built_console();
+
+        for path in [
+            "/api/definitely-not-a-route",
+            "/api/connections/../../etc/passwd",
+            "/api/",
+        ] {
+            let (status, body) = anonymous_request_to(console.path(), Method::GET, path).await;
+
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "GET {path} was answered {status} instead of refused — a client cannot tell a \
+                 missing route from a served one, and the body it got was: {body}"
+            );
+            assert!(
+                !body.contains("<!doctype html"),
+                "GET {path} was answered with the console's entry point: a caller asking for a \
+                 route this build does not serve received a page and a status that reads as success"
+            );
+        }
+    }
+
+    /// The console is served at `/`, and a deep link it owns survives a refresh.
+    ///
+    /// The second half is what the fallback is *for*: a client-side router owns paths this host
+    /// never declared, and a refresh on one of them is a real request that must answer with the
+    /// document rather than a `404`.
+    #[tokio::test]
+    async fn the_console_is_served_and_its_own_paths_survive_a_refresh() {
+        let console = a_built_console();
+
+        let (root, body) = anonymous_request_to(console.path(), Method::GET, "/").await;
+        assert_eq!(root, StatusCode::OK, "GET / did not serve the console");
+        assert!(body.contains("<title>console</title>"), "{body}");
+
+        let (asset, bundle) = anonymous_request_to(console.path(), Method::GET, "/app.js").await;
+        assert_eq!(asset, StatusCode::OK, "a real file beside the entry point");
+        assert!(bundle.contains("the bundle"), "{bundle}");
+
+        // A path the console's router owns and this host has never heard of.
+        let (deep, page) =
+            anonymous_request_to(console.path(), Method::GET, "/connections/zendesk").await;
+        assert_eq!(
+            deep,
+            StatusCode::OK,
+            "a deep link the console owns must survive a refresh, or every link is one-way"
+        );
+        assert!(page.contains("<title>console</title>"), "{page}");
+    }
+
+    /// Serving a console does not change what the API answers, on any declared route.
+    ///
+    /// The guard that matters is [`the_anonymous_surface_is_only_what_was_declared_anonymous`],
+    /// which walks [`app`] — and `app` is now `app_with_console(state, None)`, so it enumerates the
+    /// surface a checkout runs. This is the other half: with a console bound, every declared route
+    /// still answers exactly as it did, so the static service cannot have shadowed one.
+    #[tokio::test]
+    async fn a_bound_console_shadows_no_declared_route() {
+        let console = a_built_console();
+
+        for (module, route) in published() {
+            let with_console = anonymous_request_to(console.path(), Method::GET, route.path)
+                .await
+                .0;
+            let without = anonymous_get(app(AppState::without_identity()), route.path).await;
+
+            assert_eq!(
+                with_console, without,
+                "{}'s {} answered {with_console} with a console bound and {without} without one — \
+                 the static service is answering a declared route",
+                module.name, route.path
+            );
+        }
     }
 }

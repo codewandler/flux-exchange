@@ -77,6 +77,18 @@ cd console && npm install && npm test && npm run build
 cd web && npm ci && npm run build && npm test
 ```
 
+**Since X-83 the server can serve the built console itself**, at `/`, from the directory
+`FLUX_EXCHANGE_CONSOLE` names — so `FLUX_EXCHANGE_CONSOLE=console/dist cargo run` is one process
+answering both `/` and `/api`. Unset means no static route and the API only, which is what a checkout
+did before and still does; the Vite dev server remains the faster loop because it rebuilds on save.
+
+That the console **must** be same-origin is not a preference. `console/src/service.mts` addresses every
+endpoint by a relative path and the session cookie is `SameSite=Strict`, so a browser never attaches it
+to a request from another origin — hosting the console elsewhere fails in a way that looks like a CORS
+problem and is not one. `routes::app_with_console` carries the argument. **An SPA fallback must never
+claim `/api`**: three routes (`/api/{*unmatched}`, `/api` and `/api/`) refuse ahead of it, because a
+wildcard matches one segment or more and `/api/` otherwise reached the console with a `200`.
+
 **`web/` is the public documentation site (X-63), and its build is a gate rather than a formality.**
 `.vitepress/config.mts` sets `ignoreDeadLinks: false`, so a dead internal link fails `npm run build`
 instead of publishing a broken page — that failure is the whole reason a broken site cannot reach the

@@ -25,6 +25,7 @@ mod session;
 mod state;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -81,10 +82,50 @@ async fn serve() -> Result<(), StartupRefusal> {
 
     info!(%local, "flux-exchange is listening");
 
-    axum::serve(listener, routes::app(state))
-        .with_graceful_shutdown(stop_requested())
-        .await
-        .map_err(|source| StartupRefusal::Serving { source })
+    let console = configured_console();
+    match &console {
+        Some(directory) => info!(directory = %directory.display(), "serving the console at /"),
+        // Not a warning. A checkout runs this way deliberately: the dev server proxies `/api` and
+        // rebuilds on save, which is the faster loop. The console is a deployment concern.
+        None => info!(
+            "no console directory configured; serving the API only (set {})",
+            CONSOLE_SETTING
+        ),
+    }
+
+    axum::serve(
+        listener,
+        routes::app_with_console(state, console.as_deref()),
+    )
+    .with_graceful_shutdown(stop_requested())
+    .await
+    .map_err(|source| StartupRefusal::Serving { source })
+}
+
+/// Where the built console lives, if this deployment serves one.
+pub const CONSOLE_SETTING: &str = "FLUX_EXCHANGE_CONSOLE";
+
+/// The console directory this deployment was told to serve, or `None`.
+///
+/// Read by name, following X-27: one variable, one reader, and the name spelled once. Unset is the
+/// shape a checkout runs in and is not an error.
+///
+/// # Why an absent directory is not refused here
+///
+/// Every other store in this composition refuses at startup rather than starting degraded, and this
+/// deliberately does not follow them. The reason is what each protects: a missing credential store
+/// means a service that looks like it works and loses everything, while a missing console directory
+/// is a `404` at `/` with the whole API answering correctly. `ServeDir` reports it per request,
+/// which is where the operator will be looking, and refusing to start would make a mistyped path in
+/// a cosmetic setting take the platform down.
+///
+/// Empty counts as unset, for the reason `CREDENTIAL_STORE_SETTING` gives: `FLUX_EXCHANGE_CONSOLE=`
+/// in an environment file is an operator who has not chosen a path, not one who chose `""`.
+fn configured_console() -> Option<PathBuf> {
+    let value = std::env::var(CONSOLE_SETTING).ok()?;
+    let trimmed = value.trim();
+
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
 }
 
 /// Bind the ports this composition serves with: an identity provider, a credential store, and an

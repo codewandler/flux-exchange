@@ -18,7 +18,9 @@ exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exc
 async-trait = "0.1"
 axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
+# `fs` is X-83's: the console is served by the host it talks to, because the session cookie is
+# `SameSite=Strict` and a browser never attaches one cross-origin. See `routes::app_with_console`.
+tower-http = { version = "0.6", features = ["trace", "fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

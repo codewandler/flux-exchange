@@ -63,7 +63,6 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 ### a deployment a stranger can reach
 _Everything this platform does can only be seen on `127.0.0.1`. The getting-started page walks a_
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — owner-raised 2026-08-02: everything this platform does can only be seen on 127.0.0.1. Three blockers, and only one is packaging: OIDC is the sole path to a reachable bind, the console has no production host and cannot be given one on another origin, and nothing containerises this
-- [X-83 — The console is served by the host it talks to](X-83-the-console-is-served-by-the-host-it-talks-to.md) · the console reaches the API only through the Vite dev proxy, which npm run build does not emit — and it cannot be hosted elsewhere, because SameSite=Strict means the browser never attaches the session cookie cross-origin. Ordered before X-84, which has nothing to put in an image until this exists
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · the first deployment any flux-family repository has made, so it sets the precedent the siblings copy. One machine deliberately — the credential store fsyncs the whole file under one mutex and a fly volume is per-machine, so two machines is two divergent stores with no reconciliation
 
 ## Blocked
@@ -143,6 +142,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-71 — The console's dev server follows the address the service was told to bind](X-71-the-console-proxy-follows-the-bind.md) · found by X-69 while walking its own page, 2026-08-01: console/vite.config.ts hard-codes the default bind, so a reader who sets FLUX_EXCHANGE_BIND gets a console that cannot reach the service
 - [X-73 — A weakness in how a credential is obtained is a declared kind, not a rung on the risk ladder](X-73-a-hazard-is-a-kind-not-a-level.md) · the vocabulary the filter is written against: AuthHazard::ResourceOwnerSecretShared, citing RFC 9700 §2.4 and CWE-522. Not a fifth Risk value — a password grant buying a read-only token is Risk::Low and hazardous, so at_most(High) would admit it
 - [X-77 — A reader following a family link lands on a documentation site, not on a repository](X-77-the-family-links-go-to-the-family-sites.md) · owner-raised 2026-08-02, the day the site went live: index.md sends a reader to github.com for flux and flux-connectors, so following the family link drops them out of the docs and into a source tree. Both sibling sites are published and neither is linked
+- [X-83 — The console is served by the host it talks to](X-83-the-console-is-served-by-the-host-it-talks-to.md) · the console reaches the API only through the Vite dev proxy, which npm run build does not emit — and it cannot be hosted elsewhere, because SameSite=Strict means the browser never attaches the session cookie cross-origin. Ordered before X-84, which has nothing to put in an image until this exists
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
