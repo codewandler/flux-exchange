@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitepress'
 
+import { SRC_EXCLUDE } from './content.mts'
 import { assertDescriptorIsCurrent, statusFor } from './descriptor.mts'
 
 const repo = 'https://github.com/codewandler/flux-exchange'
@@ -46,9 +47,16 @@ export default defineConfig({
 
   cleanUrls: true,
 
-  // web/README.md documents how to build this site for a contributor; it is not a published page.
-  // Without this it renders at /README.
-  srcExclude: ['README.md'],
+  // What is not a page. `README.md` documents how to build this site for a contributor; without
+  // this it renders at /README. The directories are this site's own machinery — `test/`, `scripts/`
+  // and `.vitepress/` — and until round two of X-64's review, a markdown file dropped in any of them
+  // was published to the public site as a page that no content rule read.
+  //
+  // Read from `content.mts` rather than written here, so that this list and the one the test suite
+  // uses to predict which pages exist are the same list. Two copies would not fail by disagreeing;
+  // they would fail by agreeing wrongly, which is what makes it worth importing a constant to say
+  // five words.
+  srcExclude: SRC_EXCLUDE,
 
   // Dead internal links fail the build rather than shipping. Combined with the Pages workflow —
   // which builds on pull requests and deploys only from `main` — that means a broken site cannot

@@ -6,7 +6,7 @@
   "description": "The public documentation site for flux-exchange.",
   "license": "MIT OR Apache-2.0",
   "engines": {
-    "node": ">=22.18"
+    "node": ">=22.18 <23.0 || >=23.6"
   },
   "scripts": {
     "dev": "vitepress dev",

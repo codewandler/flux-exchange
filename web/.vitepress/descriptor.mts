@@ -94,15 +94,29 @@ export function artifactPath(): string {
 export const CAPABILITIES_DIR = 'capabilities'
 
 /**
- * The minimum Node this file's currency check needs, and why it is not the site's minimum.
+ * Whether this Node runs TypeScript without a flag, which is what the currency check needs.
  *
- * VitePress wants 22+. This wants 22.18, where type stripping runs `console/src/descriptor.mts`
- * without a compiler or a dependency — the whole reason the site can re-derive the descriptor
- * without `web/` taking on a build of its own. Below it the spawn fails with a TypeScript syntax
- * error from a subprocess, which is a true statement about the wrong thing, so this says the real
- * one first.
+ * VitePress wants 22+. This wants type stripping on by default, so that
+ * `console/src/descriptor.mts` runs with no compiler and no dependency — the whole reason the site
+ * can re-derive the descriptor without `web/` taking on a build of its own. Where that is available
+ * is **not** a single floor, and treating it as one is the bug review caught: it landed in 22.18,
+ * but the 23 line forked before that and only picked it up in 23.6, so 23.0–23.5 are *above* a
+ * naive `>= 22.18` and still cannot do it. Those runners would get the syntax error this check
+ * exists to replace.
+ *
+ * Stated as the two ranges that actually work. Node 23 is end-of-life, which makes this narrow
+ * rather than unimportant: a wrong version check is worst exactly when it is nearly right.
  */
-const NODE_FLOOR = [22, 18]
+function stripsTypesByDefault(version: string): boolean {
+  const [major, minor] = version.split('.').map(Number)
+  if (major > 23) return true
+  if (major === 23) return minor >= 6
+  if (major === 22) return minor >= 18
+  return false
+}
+
+/** What to tell somebody whose Node cannot, in the terms `web/package.json` and the README use. */
+const NODE_REQUIREMENT = '22.18+ (or 23.6+ on the 23 line, which is end-of-life)'
 
 /**
  * Fail the build unless the committed artifact is what `console/src/descriptor.mts` derives today.
@@ -119,13 +133,12 @@ export function assertDescriptorIsCurrent(): void {
     throw new Error(`${artifact} is missing: this site derives every capability status from it`)
   }
 
-  const [major, minor] = process.versions.node.split('.').map(Number)
-  if (major < NODE_FLOOR[0] || (major === NODE_FLOOR[0] && minor < NODE_FLOOR[1])) {
+  if (!stripsTypesByDefault(process.versions.node)) {
     throw new Error(
-      `this site needs Node ${NODE_FLOOR.join('.')}+ and is running ${process.versions.node}.\n` +
+      `this site needs Node ${NODE_REQUIREMENT} and is running ${process.versions.node}.\n` +
         'The status badges are checked against `console/src/descriptor.mts`, which is TypeScript ' +
-        "run by Node's own type stripping — unavailable below that version, where this would " +
-        'instead fail as a syntax error from a subprocess.'
+        "run by Node's own type stripping — unavailable on this version, where this would instead " +
+        'fail as a syntax error from a subprocess.'
     )
   }
 
@@ -165,9 +178,11 @@ export function assertDescriptorIsCurrent(): void {
  * proposition is that a page cannot claim a capability is live without the route table agreeing,
  * and that was a documented-as-safe path around it living in production code.
  *
- * The hypothetical builds those tests need now come from `web/test/fixtures/hypothetical-build.mts`
- * — a separate config passed on the command line, which `npm run build` and `pages.yml` have no way
- * to load. In a real build the badges read this artifact, and this artifact is checked current.
+ * The hypothetical builds those tests need are injected in-process instead, through VitePress's
+ * `onAfterConfigResolve` hook — see `buildWith` in `web/test/status.test.mjs`. That hook is a
+ * parameter of the Node API's `build()` and is not part of `UserConfig`, so a config file cannot
+ * set it and the CLI does not expose it: `npm run build` and `pages.yml` have no way to reach it.
+ * In a real build the badges read this artifact, and this artifact is checked current.
  */
 export function readDescriptor(): Descriptor {
   const artifact = artifactPath()
