@@ -67,6 +67,28 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **The invoke design says what lock 2 now checks, and what it cannot** (X-56). §2 described the locks
+  as X-12 shipped them — three rules — while `mod rules` had grown to nine. Two independent reviews
+  spent effort rediscovering that **lock 2 checks names, not values**, because that sentence lived only
+  in a test's module doc. That cost was being paid per review.
+
+  The design now carries a row per rule with what each catches and what it cannot, and the check that
+  holds it there builds its list **out of `mod rules`** rather than restating it — so a tenth rule
+  fails the test until the design describes it. The mechanism argument now appears once, in the design,
+  with 62 lines of restatement deleted from the test's module doc, which is the two-copies shape that
+  caused the drift.
+
+  **The section numbers were wrong in eight places.** The locks are §2; §3 is credential resolution and
+  redaction. `lib.rs`, `tests/invoke.rs`, four sites in `no_second_request_path.rs`, X-48's story and
+  X-56's own text all said §3. Corrected. `execution.rs` cited the section by *name* and was already
+  right, which is an argument for citing by name.
+
+  Note the design says **three** mechanisms, not four: X-55 struck the composition's sandbox posture
+  from the count, and this story did not restore it.
+
+  The check is a **presence** check — it asserts the design names every rule, not that what it says
+  about one is true. Its doc comment says so.
+
 - **The anonymous-surface guard probes declarations, not paths** (X-61). X-54 introduced a duplicated
   path with two declarations, and the guard that exists to make widening the anonymous surface a
   deliberate act probed every declaration with a `GET`. Both resolved to the same `GET` — served by

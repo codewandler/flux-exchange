@@ -1,7 +1,7 @@
 ---
 id: X-56
 title: "The invoke design says what the locks now do"
-status: in-progress
+status: done
 priority: 3
 epic: invoke
 areas: [exchange-host]

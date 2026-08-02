@@ -30,8 +30,10 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 
 ## Now (in progress)
 - [X-64 — Every page's \"is this built\" is derived, not written](X-64-status-is-derived-not-written.md) · the mechanism that makes a large speculative site safe — status badges read the same descriptor artifact whose live flags are held to the route table by X-42/X-52's tests
+- [X-73 — A weakness in how a credential is obtained is a declared kind, not a rung on the risk ladder](X-73-a-hazard-is-a-kind-not-a-level.md) · the vocabulary the filter is written against: AuthHazard::ResourceOwnerSecretShared, citing RFC 9700 §2.4 and CWE-522. Not a fifth Risk value — a password grant buying a read-only token is Risk::Low and hazardous, so at_most(High) would admit it
 
 ## Next (ready — take the top one unless the user named a story)
+- [X-81 — Four places state this project's version and three of them are wrong](X-81-the-version-a-page-states-is-checked.md) · found by X-73's implementor, 2026-08-02: lib.rs says v0.7.0, AGENTS.md and README.md say v0.9.0, the manifest says 0.11.0. lib.rs's is the published crate's front-page doc comment, so docs.rs is serving the wrong one — and nothing in the gate compares any of them to the manifest
 
 ### the primary caller can authenticate
 _Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
@@ -44,13 +46,9 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 ### the host acquires a credential, and a weak way of acquiring one is labelled
 _Every credential this service holds today arrived the same way: **a human pasted it in.**_
 - [X-72 — Credential acquisition, and a labelled weak one (epic)](X-72-credential-acquisition-epic.md) · EPIC — owner-raised 2026-08-01: every credential here arrived by a human pasting it in, so the connector with 389 operations is the one nobody can connect. babelforce's password grant is the weakest way to fix that, which is why the hazard is declared metadata a deployment filters on
-- [X-73 — A weakness in how a credential is obtained is a declared kind, not a rung on the risk ladder](X-73-a-hazard-is-a-kind-not-a-level.md) · the vocabulary the filter is written against: AuthHazard::ResourceOwnerSecretShared, citing RFC 9700 §2.4 and CWE-522. Not a fifth Risk value — a password grant buying a read-only token is Risk::Low and hazardous, so at_most(High) would admit it
 - [X-74 — A deployment refuses a hazardous way of authenticating unless it opted in](X-74-a-hazardous-acquisition-is-refused-unless-opted-in.md) · ordered BEFORE X-75 for the reason X-40 was ordered before X-37: X-75 is what makes the hole reachable, and a gate that lands after it has already shipped ungated once. Unset means refuse — the production default needs no configuration to be safe
 - [X-75 — The host trades a username and a password for a token, and keeps only the token](X-75-the-host-performs-the-password-grant.md) · the mechanism: a port in exchange-host, its HTTP binding in exchange-server beside the TokenExchange sign-in already uses. RFC 6749 §4.3 makes discarding the password a MUST for the client, and here the client is us
 - [X-76 — A vendor behaviour no document declares is a named quirk of one endpoint, never a field on the vocabulary](X-76-does-the-token-endpoint-take-a-lifetime.md) · owner-decided 2026-08-02: babelforce's token endpoint DOES take expires_in, with different semantics per grant, and account_id switches the account on refresh — neither is in the vendored spec. So it is a quirk of that endpoint, not a TTL field every acquisition inherits
-
-### `invoke` — the caller names an operation, and nothing else is theirs
-- [X-56 — The invoke design says what the locks now do](X-56-the-invoke-design-catches-up.md) · found by X-48 round 2: docs/designs/invoke.md §3 still describes lock 2 as X-12 shipped it. The design and the test have drifted, and the test is the accurate one
 
 ### signing in without an identity provider
 _**You cannot use this console without standing up an OIDC provider.** That is the whole problem, and_
@@ -128,6 +126,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-53 — The explorer stops badging operations this service runs as \"not live yet\"](X-53-the-explorer-says-nothing-can-be-invoked.md) · found by X-42's review, 2026-08-01: the fourth rendering of the invoke falsehood. service.mts sets works: false for every operation with the comment \"nothing in flux-exchange can be invoked yet\"
 - [X-54 — Who may create a connection and rotate a credential is decided, not inherited](X-54-who-may-touch-a-connection.md) · the ring-fenced half of X-47: the settings write is now gated to humans, but POST /api/connections and PUT .../credentials/{credential} are still Access::Principal, so an agent can create a connection and replace a credential
 - [X-55 — Lock 2 sees the crate that composes, or says why it does not](X-55-lock-2-sees-the-crate-that-composes.md) · found by X-48 round 2: lock 2 scans crates/exchange-host/src only. exchange-server gets one rule and is otherwise unscanned — including execution.rs, which holds this composition's transport and sandbox posture
+- [X-56 — The invoke design says what the locks now do](X-56-the-invoke-design-catches-up.md) · found by X-48 round 2: docs/designs/invoke.md §2 still describes lock 2 as X-12 shipped it. The design and the test have drifted, and the test is the accurate one
 - [X-57 — \"Sign-in is available\" stops meaning \"OIDC is configured\"](X-57-signin-availability-means-what-it-says.md) · the shared prerequisite for every local-identity story: SignIn::available() returns true only for SignIn::Oidc, so a host with a working development identity tells the console it cannot sign anyone in
 - [X-61 — A second declaration at one path cannot hide from the anonymous enumeration](X-61-a-duplicated-path-cannot-hide-an-access.md) · found by X-54's review, 2026-08-01: setting the POST entry at a duplicated path to Access::Anonymous leaves the_anonymous_surface_is_only_what_was_declared_anonymous green — the guard that exists to make widening deliberate cannot see it
 - [X-62 — An operator can grant something without editing a file by hand](X-62-an-operator-can-grant.md) · X-13 landed the grant gate fail-closed and no surface edits a grant, so a deployment now runs nothing until somebody hand-writes FLUX_EXCHANGE_GRANTS. Priority 0 alongside X-57: together they are what stands between this platform and being usable
