@@ -8,6 +8,38 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A weakness in how a credential is obtained is a declared kind** (X-73). `AuthHazard`, whose first
+  and only value is `ResourceOwnerSecretShared` — the resource owner's own password presented to this
+  host rather than to the authorization server. The doc comment carries what makes the name checkable
+  rather than a coinage: **RFC 9700 §2.4**, which says the resource owner password credentials grant
+  MUST NOT be used and gives the three reasons this vocabulary exists to record (the credentials reach
+  the client, they can then leak in more places than the authorization server, and the grant cannot
+  carry two-factor); **RFC 6749 §4.3**, which requires the client discard them once a token is
+  obtained; and **CWE-522**. A test pins the citations so a tidy-up cannot quietly drop one.
+
+  **It is deliberately not a fifth `Risk`.** `Risk` is an *ordered* ladder that `Selector::at_most`
+  compares against, and a password grant that buys a read-only token is `Risk::Low` **and** hazardous —
+  so a fifth rung would have silently admitted it to every grant already written. It is not on
+  `OperationFacts` either: a hazard is a property of an acquisition, which happens once per connection,
+  not of an operation, which happens per call.
+
+  The vocabulary is **closed**, and that is the whole point — a near-miss spelling refuses at
+  deserialization rather than reading as *no hazard declared*. An independent review drove 15 inputs
+  through four positions (bare, `Option`, `BTreeSet`, and a struct with `#[serde(default)]`); only the
+  exact spelling deserializes. It also proved the test discriminates rather than merely requiring the
+  type to exist: adding `#[serde(other)]` to the enum keeps everything compiling and turns the test red.
+
+  **Marked `#[non_exhaustive]` from the start**, unlike `HostPinning` and `SettingsRefusal`. That binds
+  consumers only — matches inside this crate stay exhaustive with no wildcard arm, per
+  `OperationFacts::of`'s rule, because a catch-all answers a value it never heard of with a plausible
+  wrong one.
+
+  Nothing consumes it yet; X-74 is the filter. Two limits worth knowing before it is written: the
+  citation guard pins `2.4` and `4.3` as bare substrings rather than adjacent to their RFC numbers —
+  tight today only because each occurs once — and the derived `Ord` (present because an allow-list
+  wants a `BTreeSet`, as `Effect` does) carries *declaration order and no severity*, a claim held by
+  prose rather than by a test.
+
 - **A tenant on intercom's or newrelic's non-US region can configure their connection** (X-70).
   Upstream C-225 changed both connectors' `base_url` to a bare `{host}` placeholder, and X-47's rule
   reads the template rather than the value — a bare placeholder **is** the whole destination

@@ -1,7 +1,7 @@
 ---
 id: X-73
 title: "A weakness in how a credential is obtained is a declared kind, not a rung on the risk ladder"
-status: in-progress
+status: done
 priority: 1
 epic: credential-acquisition
 design: docs/designs/credential-acquisition.md
