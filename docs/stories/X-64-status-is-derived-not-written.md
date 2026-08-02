@@ -1,7 +1,7 @@
 ---
 id: X-64
 title: "Every page's \"is this built\" is derived, not written"
-status: in-progress
+status: done
 priority: 1
 epic: public-docs-site
 design: docs/designs/public-docs-site.md

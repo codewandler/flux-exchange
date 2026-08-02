@@ -8,6 +8,29 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Every capability page's status is derived from the route table, not written by an author** (X-64).
+  This repository corrected **five renderings of one false claim** in a single week — that `invoke` was
+  not built — each written honestly, each stale within a release, each caught by a review rather than a
+  mechanism. A documentation site is a factory for that failure, and X-65 is about to add a page per
+  capability. Status badges now read the same descriptor artifact whose `live` flags X-42 and X-52 hold
+  to the route table, the build **fails** for a page naming a capability the descriptor does not know,
+  and the site build re-derives the artifact rather than assuming the console suite checked it.
+
+  ⚠ **Two review rounds found the same defect in different clothes, and both were invisible to a green
+  gate.** The capability pages were the first this site ever published below `dist/` root, and the
+  content guards enumerated non-recursively — an IP address and a bearer-token-shaped string reached a
+  published page with the suite reporting 23/23. The fix introduced a coverage check that *inherited
+  the blind spot of the thing it checked*: one `walk()` closed over a skip set, so the predicted set and
+  the scanned set agreed **by both omitting the page**, and `web/test/` and `web/scripts/` — which
+  VitePress publishes — leaked the same payload at 25/25 green.
+
+  The rule that came out of it is written in three places: **excluding on the way in is a content
+  decision; excluding on the way out is a blind spot.** The walk that reads the built site now excludes
+  nothing at all, and machinery directories no longer publish, from one `content.mts` that `srcExclude`
+  and the suite both read. The two defences are independent by construction — an independent review
+  planted `dist/test/leak.html` directly, simulating `srcExclude` failing entirely, and five guards
+  fired.
+
 - **A weakness in how a credential is obtained is a declared kind** (X-73). `AuthHazard`, whose first
   and only value is `ResourceOwnerSecretShared` — the resource owner's own password presented to this
   host rather than to the authorization server. The doc comment carries what makes the name checkable
