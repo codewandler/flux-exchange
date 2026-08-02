@@ -22,10 +22,14 @@
 //   descriptor with one capability deleted and asserts the build *fails*. A missing status rendering
 //   as blank is the exact failure this story exists to prevent: absence must not read as "fine".
 //
-// **`FLUX_EXCHANGE_DESCRIPTOR_FIXTURE` is how they do it**, and it is test-only plumbing — see
-// `.vitepress/descriptor.mts`, which reads it. It replaces the document the *badges* derive from and
-// deliberately does **not** replace the one the currency check reads, so pointing the build at a
-// hypothetical never disables the guard that the committed artifact is current.
+// **How they do it, and why not the obvious way.** Both drive VitePress in-process through its Node
+// API and override the resolved `transformPageData` via `onAfterConfigResolve` — see [`buildWith`].
+// The obvious way was an environment variable read by `.vitepress/descriptor.mts`, and review was
+// right to reject it: that put a switch in *production* code which made a real build publish badges
+// derived from arbitrary JSON while the currency guard went on passing, because the guard read the
+// committed artifact and not what the badges read. A story whose claim is "a page cannot say a
+// capability is live without the route table agreeing" cannot ship a documented way around itself.
+// The hook used here exists only in the Node API; `npm run build` and `pages.yml` run the CLI.
 //
 // **Run after `npm run build`**, like `site.test.mjs`: the first assertions read `.vitepress/dist`.
 // The two build-again tests render into their own temporary directories and leave `dist` alone.
@@ -33,14 +37,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, readdirSync, existsSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const repoRoot = path.resolve(webRoot, '..')
-const dist = path.join(webRoot, '.vitepress', 'dist')
+import { pages, walk, dist, webRoot, repoRoot } from './rendered.mjs'
 
 /** Where the *service* keeps the document it serves — the one the site's badges derive from. */
 const ARTIFACT = path.join(repoRoot, 'crates', 'exchange-server', 'src', 'routes', 'onboarding.json')
@@ -57,27 +58,28 @@ function descriptor() {
 /**
  * Every built capability page, as `{ id, name, html }`.
  *
+ * Built on the shared enumerator in `rendered.mjs` rather than reading `capabilities/` directly.
+ * This file had the same non-recursive flaw that let `site.test.mjs` publish an unscanned page — it
+ * listed one directory and stopped — so a page at `capabilities/<group>/<page>.md` would have taken
+ * a status from `statusFor` and been measured by neither suite. One walker, checked by
+ * `coverage.test.mjs`, and both suites inherit the fix.
+ *
  * Fails rather than returning nothing when the site publishes none. "There are no capability pages"
  * would otherwise make every assertion below vacuously true, which is the one way a suite about
  * derived status lies: it would stay green through the whole of X-65 adding pages that hardcode one.
  */
 function capabilityPages(root = dist) {
+  const found = pages(root)
+    .filter(({ name }) => name.startsWith('capabilities/'))
+    // The id is the path below `capabilities/`, so a grouped page is `grouped/deep` and cannot
+    // collide with a root-level one of the same basename.
+    .map((page) => ({ ...page, id: page.name.slice('capabilities/'.length).replace(/\.html$/, '') }))
+
   assert.ok(
-    existsSync(root),
-    `${root} does not exist — run \`npm run build\` before \`npm test\`; these assertions read the rendered site`
+    found.length > 0,
+    'the site publishes no `capabilities/` pages — there is nothing carrying a derived status, so nothing here proves the badge is derived (X-64)'
   )
-  const built = path.join(root, 'capabilities')
-  assert.ok(
-    existsSync(built),
-    `the site publishes no \`capabilities/\` pages — there is nothing carrying a derived status, so nothing here proves the badge is derived (X-64)`
-  )
-  const names = readdirSync(built).filter((name) => name.endsWith('.html'))
-  assert.ok(names.length > 0, `${built} holds no rendered page`)
-  return names.map((name) => ({
-    id: name.replace(/\.html$/, ''),
-    name: `capabilities/${name}`,
-    html: readFileSync(path.join(built, name), 'utf-8'),
-  }))
+  return found
 }
 
 /**
@@ -185,41 +187,66 @@ test('the descriptor the site derives from is the one the console derives today'
 // ---------------------------------------------------------------------------------------------
 
 /** A scratch directory that cleans up after itself, whatever the assertion inside does. */
-function scratch(use) {
+async function scratch(use) {
   const dir = mkdtempSync(path.join(tmpdir(), 'flux-exchange-site-'))
   try {
-    return use(dir)
+    return await use(dir)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 }
 
 /**
- * Build the whole site against `document` as its descriptor, into `outDir`.
+ * Build the whole site against `document` as its descriptor, into a temporary directory.
  *
  * Returns `{ ok, output }` rather than throwing, because one of the two callers is asserting that
  * the build *fails* and needs to read what it said while failing.
  *
- * **No page is edited and no file in the repository is written.** The fixture is a temporary file
- * and the output goes to a temporary directory, so a crashed run leaves a clean tree — which matters
- * more than it sounds: the alternative shape, writing over the committed artifact and restoring it
- * afterwards, leaves a repository claiming a build that does not exist if the process dies.
+ * **The hypothetical descriptor is injected here, in this process, and there is no way to inject one
+ * into a real build.** That is review's correction rather than a preference. An environment variable
+ * used to do this job, read by `.vitepress/descriptor.mts` — production code — which meant a real
+ * build could be pointed at arbitrary JSON and publish badges derived from it while
+ * `assertDescriptorIsCurrent()` went on passing, because that guard reads the committed artifact and
+ * not what the badges read. The story's whole claim is that a page cannot say a capability is live
+ * without the route table agreeing, and that was a documented way around it sitting in the shipped
+ * path.
+ *
+ * `readDescriptor()` now reads one file and nothing else. The hypothetical arrives through
+ * VitePress's own `onAfterConfigResolve` hook, which exists only in the Node API — `npm run build`
+ * and `pages.yml` run the CLI and have no way to reach it.
+ *
+ * **It is still the production derivation being exercised, not a copy of it.** The real
+ * `.vitepress/config.mts` is loaded and its `assertDescriptorIsCurrent()` runs, so even a
+ * hypothetical build proves the committed artifact is current; only the resolved
+ * `transformPageData` is replaced, and it is replaced with a call to the same `statusFor` the real
+ * config calls, given a different document to resolve against.
+ *
+ * **No page is edited and no file in the repository is written.** The output goes to a temporary
+ * directory, so a crashed run leaves a clean tree — which matters more than it sounds: the
+ * alternative shape, writing over the committed artifact and restoring it afterwards, leaves a
+ * repository claiming a build that does not exist if the process dies.
  */
-function buildWith(document, dir) {
-  const fixture = path.join(dir, 'onboarding.json')
-  writeFileSync(fixture, `${JSON.stringify(document, null, 2)}\n`, 'utf-8')
+async function buildWith(document, dir) {
   const out = path.join(dir, 'dist')
+  const { build } = await import('vitepress')
+  const { statusFor } = await import(path.join(webRoot, '.vitepress', 'descriptor.mts'))
 
   try {
-    const output = execFileSync('npx', ['vitepress', 'build', '--outDir', out], {
-      cwd: webRoot,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-      env: { ...process.env, FLUX_EXCHANGE_DESCRIPTOR_FIXTURE: fixture },
+    await build(webRoot, {
+      outDir: out,
+      onAfterConfigResolve(siteConfig) {
+        siteConfig.transformPageData = (pageData) => {
+          pageData.frontmatter.capabilityStatus = statusFor(
+            pageData.relativePath,
+            pageData.frontmatter,
+            document
+          )
+        }
+      },
     })
-    return { ok: true, output, out }
+    return { ok: true, output: '', out }
   } catch (failure) {
-    return { ok: false, output: `${failure.stdout ?? ''}${failure.stderr ?? ''}`, out }
+    return { ok: false, output: String(failure?.message ?? failure), out }
   }
 }
 
@@ -260,8 +287,8 @@ test("flipping a capability's served flag flips the rendered badge", { timeout: 
     'flipping `served` did not make the capability live in the derived document; the chain is broken before it reaches the site'
   )
 
-  scratch((dir) => {
-    const built = buildWith(hypothetical, dir)
+  await scratch(async (dir) => {
+    const built = await buildWith(hypothetical, dir)
     assert.ok(built.ok, `the site did not build against a descriptor where \`${SUBJECT}\` is live:\n${built.output}`)
 
     const html = readFileSync(path.join(built.out, 'capabilities', page), 'utf-8')
@@ -273,7 +300,7 @@ test("flipping a capability's served flag flips the rendered badge", { timeout: 
   })
 })
 
-test('a page for a capability the descriptor does not name fails the build', { timeout: 300_000 }, () => {
+test('a page for a capability the descriptor does not name fails the build', { timeout: 300_000 }, async () => {
   // The other half, and the one absence hides in. A page whose capability has left the descriptor
   // must stop the build; rendering it with a blank status tells a reader nothing is wrong, which is
   // the failure this story exists to prevent. `invoke` is the subject because it is the capability
@@ -294,8 +321,8 @@ test('a page for a capability the descriptor does not name fails the build', { t
     capabilities: document.capabilities.filter((capability) => capability.id !== SUBJECT),
   }
 
-  scratch((dir) => {
-    const built = buildWith(without, dir)
+  await scratch(async (dir) => {
+    const built = await buildWith(without, dir)
     assert.equal(
       built.ok,
       false,
@@ -322,8 +349,12 @@ test('every page under capabilities/ names the capability it is about', () => {
   // exist; this one measures the *rule*, so a page added later cannot opt out of a status by simply
   // omitting the frontmatter key — that omission is the quietest possible way back to a page whose
   // liveness is whatever its prose says.
+  //
+  // Walked recursively, for the reason `capabilityPages` is: a page at
+  // `capabilities/<group>/<page>.md` is still a page under `capabilities/`, `statusFor` will still
+  // give it a status, and a one-level listing would have left it holding one nothing checked.
   assert.ok(existsSync(CAPABILITIES), `${CAPABILITIES} is missing`)
-  const sources = readdirSync(CAPABILITIES).filter((name) => name.endsWith('.md'))
+  const sources = walk(CAPABILITIES, '.md')
   assert.ok(sources.length > 0, `${CAPABILITIES} holds no page`)
 
   const named = new Set(descriptor().capabilities.map((capability) => capability.id))

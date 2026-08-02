@@ -28,13 +28,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
-const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const repoRoot = path.resolve(webRoot, '..')
-const dist = path.join(webRoot, '.vitepress', 'dist')
+import { pages, dist, webRoot, repoRoot } from './rendered.mjs'
 
 // The base GitHub actually serves this project site under. Pinned as a literal rather than read out
 // of the config, so that flipping the config is a two-file change somebody has to mean.
@@ -45,16 +42,13 @@ const dist = path.join(webRoot, '.vitepress', 'dist')
 // served from the project URL.
 const DEPLOYED_BASE = '/flux-exchange/'
 
-/** Every built page, as `{ name, html }`. */
-function pages() {
-  assert.ok(
-    existsSync(dist),
-    `${dist} does not exist — run \`npm run build\` before \`npm test\`; these assertions read the rendered site`
-  )
-  const names = readdirSync(dist).filter((name) => name.endsWith('.html'))
-  assert.ok(names.length > 0, 'the build produced no HTML pages')
-  return names.map((name) => ({ name, html: readFileSync(path.join(dist, name), 'utf-8') }))
-}
+// `pages()` is imported rather than defined here, and that is X-64's rework rather than tidying.
+//
+// It used to be `readdirSync(dist)` — no recursion — which was total coverage while every page sat
+// at the root of `dist`, and stopped being so the moment `capabilities/` was added. Every rule below
+// is a loop over `pages()`, so the two pages one directory down were scanned by none of them, on a
+// live public site, with this suite green. One enumerator now, in `rendered.mjs`, and
+// `coverage.test.mjs` holds it to covering everything the site actually publishes.
 
 /** The entities this file's patterns care about, decoded. */
 function decode(html) {

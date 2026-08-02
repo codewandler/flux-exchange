@@ -5,6 +5,9 @@
   "type": "module",
   "description": "The public documentation site for flux-exchange.",
   "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
     "dev": "vitepress dev",
     "build": "vitepress build",

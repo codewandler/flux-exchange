@@ -18,7 +18,9 @@
 // shares no dependency and no lockfile with `console/`; it reads a source file, the way the Rust
 // crate reads the JSON.
 //
-// Requires Node 22.18+, where type stripping is on by default. `web/README.md` says Node 22+.
+// Requires Node 22.18+, where type stripping is on by default — the floor `web/README.md` and
+// `web/package.json`'s `engines` both state, and which `assertDescriptorIsCurrent` checks before
+// spawning this so that an older runner gets a version message rather than a syntax error.
 
 import path from 'node:path'
 
