@@ -30,7 +30,6 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 
 ## Now (in progress)
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · the first deployment any flux-family repository has made, so it sets the precedent the siblings copy. One machine deliberately — the credential store fsyncs the whole file under one mutex and a fly volume is per-machine, so two machines is two divergent stores with no reconciliation
-- [X-85 — Run the latest published connector line](X-85-run-the-latest-published-connector-line.md) · connector-pack 0.13.0 sets the compatible engine line to Flux 0.49; the exchange moves both pin sets together before its Fly machine is replaced
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-81 — Four places state this project's version and three of them are wrong](X-81-the-version-a-page-states-is-checked.md) · found by X-73's implementor, 2026-08-02: lib.rs says v0.7.0, AGENTS.md and README.md say v0.9.0, the manifest says 0.11.0. lib.rs's is the published crate's front-page doc comment, so docs.rs is serving the wrong one — and nothing in the gate compares any of them to the manifest
@@ -143,6 +142,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-73 — A weakness in how a credential is obtained is a declared kind, not a rung on the risk ladder](X-73-a-hazard-is-a-kind-not-a-level.md) · the vocabulary the filter is written against: AuthHazard::ResourceOwnerSecretShared, citing RFC 9700 §2.4 and CWE-522. Not a fifth Risk value — a password grant buying a read-only token is Risk::Low and hazardous, so at_most(High) would admit it
 - [X-77 — A reader following a family link lands on a documentation site, not on a repository](X-77-the-family-links-go-to-the-family-sites.md) · owner-raised 2026-08-02, the day the site went live: index.md sends a reader to github.com for flux and flux-connectors, so following the family link drops them out of the docs and into a source tree. Both sibling sites are published and neither is linked
 - [X-83 — The console is served by the host it talks to](X-83-the-console-is-served-by-the-host-it-talks-to.md) · the console reaches the API only through the Vite dev proxy, which npm run build does not emit — and it cannot be hosted elsewhere, because SameSite=Strict means the browser never attaches the session cookie cross-origin. Ordered before X-84, which has nothing to put in an image until this exists
+- [X-85 — Run the latest published connector line](X-85-run-the-latest-published-connector-line.md) · connector-pack 0.13.0 sets the compatible engine line to Flux 0.49; the exchange moves both pin sets together before its Fly machine is replaced
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

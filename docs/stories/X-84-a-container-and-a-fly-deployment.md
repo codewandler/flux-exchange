@@ -64,10 +64,9 @@ means. `POST /api/grants/preview` shows what a selector would admit before it is
 belongs in that walkthrough.
 
 ## Acceptance
-- [ ] `fly deploy` produces a running machine that answers `/health` and serves the console at `/`.
-      → **artifacts complete and verified locally; the deploy itself is unrun.** It needs an OIDC
-      provider registered against `https://<app>.fly.dev/api/signin/callback`, which is an account
-      action rather than a code change.
+- [x] `fly deploy` produces a running machine that answers `/health` and serves the console at `/`.
+      → deployed at `https://flux-exchange.fly.dev` and re-verified after X-85's v0.12.0 rollout:
+      Fly release v2 passes its machine check, `/health` names v0.12.0 and `/` serves the console.
 - [ ] A browser at the public URL signs in through the configured provider and reaches an authenticated
       screen.
 - [ ] **Verified by walking it**, the way [[X-69]] verified its page rather than intending it: sign in →
@@ -86,7 +85,7 @@ belongs in that walkthrough.
       it. Confirmed in the container: a reachable bind with no identity exits, quoting the refusal.
 
 ## Progress
-- **The artifacts are in and the image is built, not sketched.** `Dockerfile` (three stages, no
+- **The artifacts are deployed, not sketched.** `Dockerfile` (three stages, no
   toolchain in the runtime layer), `.dockerignore`, `fly.toml`, and `docs/deploying.md` as the runbook.
   `docker build` succeeds and the image was driven through both the failure and the success path.
 - **The measurement that changed the design: a fresh volume mounts `0755`, and the credential store
@@ -112,8 +111,9 @@ belongs in that walkthrough.
 - **`ca-certificates` is in the runtime image deliberately.** Without it the OIDC token exchange fails
   on the certificate chain and reads as *the provider refused us* — the confusion X-17 exists to split
   apart, reintroduced by a missing package.
-- **What is left is not a code change.** Registering an OIDC provider and running `fly deploy` are
-  account actions; every acceptance item reachable from a working tree is met.
+- **OIDC is registered and the service is deployed.** `/api/signin` redirects to Google with PKCE,
+  but the authenticated browser and sign-in → connect → grant → invoke walkthrough remain unverified;
+  those require completing the provider interaction as a real account, not another code change.
 
 ## Notes
 - Blocked on [[X-83]]: nothing to serve at `/` until it lands.

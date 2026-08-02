@@ -1,7 +1,7 @@
 ---
 id: X-85
 title: "Run the latest published connector line"
-status: in-progress
+status: done
 epic: invoke
 areas: [build, exchange-host, deployment]
 note: "connector-pack 0.13.0 sets the compatible engine line to Flux 0.49; the exchange moves both pin sets together before its Fly machine is replaced"
@@ -20,9 +20,9 @@ machine.
 - [x] All four connector dependencies resolve on 0.13 and every Flux engine dependency resolves on
       0.49, with the manifest, compile-time seam and lockfile tests proving there is no second line.
 - [x] The Rust workspace, console, public site, crate package dry-run and container build gates pass.
-- [ ] The workspace version and published `exchange-host` dependency move together, the changelog
+- [x] The workspace version and published `exchange-host` dependency move together, the changelog
       states the engine/connector upgrade, and a matching tag publishes the tested crate through CI.
-- [ ] `fly deploy` replaces the machine with that tested source; `/health` and the same-origin console
+- [x] `fly deploy` replaces the machine with that tested source; `/health` and the same-origin console
       answer successfully after deployment, and Fly reports the new release healthy.
 
 ## Progress
@@ -36,6 +36,11 @@ machine.
 - 2026-08-02: `codewandler-flux-exchange-host@0.12.0` packages and verifies in Cargo's dry-run, and
   the clean production Docker build completed as image
   `sha256:997009befadf7a13a6d843a408ce1ba56764d8712e465fc37a1db9209f9072e0`.
+- 2026-08-02: tag `v0.12.0` published the host crate through successful Actions run 30731038985;
+  crates.io reports 0.12.0 non-yanked and the GitHub release is live.
+- 2026-08-02: Fly release v2 replaced machine `2862de4a43e058` and its check passes. The public
+  `/health` answers `{"status":"ok","version":"0.12.0"}`, `/` serves the console, `/api/signin`
+  redirects to Google with PKCE, and the live catalogue returns 54 connectors.
 
 ## Notes
 - The connector repository is read-only for this story. Its release is an upstream input, not work
