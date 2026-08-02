@@ -113,6 +113,32 @@ primary_region = 'fra'
 
   RUST_LOG = 'info,flux_exchange=info,exchange_host=info'
 
+  # ── Google as the identity provider ──────────────────────────────────────────────────────────
+  #
+  # The four endpoints are read from Google's own discovery document
+  # (`https://accounts.google.com/.well-known/openid-configuration`, fetched 2026-08-02) rather than
+  # copied from a blog post. If a sign-in starts failing on an unknown key, re-fetch that document
+  # before suspecting this host: `jwks_uri` is the one Google is free to move.
+  #
+  # None of these five is a secret. `FLUX_EXCHANGE_OIDC_CLIENT_SECRET` is the sixth value and is set
+  # with `fly secrets set`; the client id is not secret and is here beside them.
+  FLUX_EXCHANGE_OIDC_ISSUER = 'https://accounts.google.com'
+  FLUX_EXCHANGE_OIDC_AUTHORIZATION_ENDPOINT = 'https://accounts.google.com/o/oauth2/v2/auth'
+  FLUX_EXCHANGE_OIDC_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token'
+  FLUX_EXCHANGE_OIDC_JWKS_URI = 'https://www.googleapis.com/oauth2/v3/certs'
+
+  # **This must match the redirect URI registered with Google byte for byte.** Google compares it
+  # exactly — a trailing slash, `http` for `https`, or a different host is `redirect_uri_mismatch`
+  # at the consent screen, before this host is ever reached. `flux-exchange.fly.dev` is the app's
+  # hostname, confirmed against `fly status`.
+  FLUX_EXCHANGE_OIDC_REDIRECT_URI = 'https://flux-exchange.fly.dev/api/signin/callback'
+
+  # The tenant every principal Google authenticates belongs to. **This is ours to choose, not
+  # Google's to supply** — Google says who somebody is, and this says which tenant's connections and
+  # grants they act within. Validated by `Tenant::new` at startup, so a spelling that could walk out
+  # of its own address space is refused before the socket opens rather than at sign-in.
+  FLUX_EXCHANGE_OIDC_TENANT = 'codewandler'
+
   # ── What is deliberately NOT here ────────────────────────────────────────────────────────────
   #
   # FLUX_EXCHANGE_DEV_IDENTITY. Armed, it makes the identity binding `Development`, and `admit_bind`
@@ -122,9 +148,8 @@ primary_region = 'fra'
   # a public address it is an open door. Setting it here does not weaken the deployment; it stops the
   # deployment from starting.
   #
-  # The seven FLUX_EXCHANGE_OIDC_* values. Six are not secret and belong here once the provider is
-  # registered — issuer, authorization endpoint, token endpoint, JWKS URI, client id, redirect URI
-  # (`https://<app>.fly.dev/api/signin/callback`) — and the seventh, the client secret, never does.
-  # They are left unset until a provider exists, because a partial OIDC configuration refuses at
-  # startup naming the variable that is missing (X-27), which is a better failure than a half-armed
-  # sign-in.
+  # FLUX_EXCHANGE_OIDC_CLIENT_ID and FLUX_EXCHANGE_OIDC_CLIENT_SECRET. Both come from the Google
+  # OAuth client, which can only be created in a browser — no CLI mints a web client secret. The id
+  # is not secret and could live here; it is set alongside the secret so the two arrive together and
+  # neither is half-configured. A partial OIDC configuration refuses at startup naming the variable
+  # that is missing (X-27), which is a better failure than a half-armed sign-in.
