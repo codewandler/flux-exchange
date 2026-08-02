@@ -157,7 +157,16 @@ Each is stated in `docs/vision.md` and several are already enforced by tests in
   segment, not a body field, not a header. `Identity` says so; the routes must make it true.
 - **This host constructs no request of its own.** Every execution path ends in `connector_pack`,
   evaluating the operation's own compiled Flux. A second request-building path is how this becomes
-  the credential-injecting proxy the family rejected.
+  the credential-injecting proxy the family rejected. **How far that is *enforced* is a narrower
+  statement than the principle, and X-55 settled where the line is: The locks bound the published
+  crate, not the deployed binary.** `crates/exchange-host/tests/no_second_request_path.rs` reads
+  that crate's manifest (lock 1) and scans `crates/exchange-host/src` (lock 2);
+  `crates/exchange-server` gets exactly one rule — its sources may not name `connector_pack` —
+  because holding this composition's transport is what that crate is *for*. So **a second request
+  path added to `exchange-server` is a review matter, not a caught one**, and closing that by
+  pointing lock 2 at the composing crate is the move to think twice about: read
+  `docs/designs/invoke.md`, "Where the locks stop", first. The per-file exception list a widened
+  scan needs is the drift the locks exist to prevent.
 - **The runtime is declared by the connector, never chosen by the caller.** There is deliberately no
   constructor on `Runtime` that takes caller input; keep it that way.
 - **A multi-tenant deployment refuses every locally-executing runtime.** `Deployment::admits` decides

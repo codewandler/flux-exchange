@@ -72,20 +72,39 @@
 //! - **Lock 3** (`tests/invoke.rs`) is behavioural: a counting transport, one dispatch per invoke,
 //!   and zero for every refusal. It proves things about the paths its tests drive and nothing about
 //!   paths nobody wrote a test for.
-//! - **The composition's posture, and read the boundary before leaning on it.**
-//!   `exchange-server`'s `execution::guarded_system` builds its `System` with
-//!   `SandboxMode::Require`, so `System::run`/`run_with_env` are confined or refuse. **That file is
-//!   in the other crate and this scanner never reads it**, which is the honest shape of the thing:
-//!   it is a property of *this repository's* composition, not of the published crate. A downstream
-//!   binary implements `Contexts` itself and supplies whatever `System` it built — quite possibly
-//!   `System::new`, whose sandbox is disabled. So for a consumer of
-//!   `codewandler-flux-exchange-host`, this backstop **does not exist**, and locks 1–2 are the
-//!   whole of what ships with the crate. It is also narrower than "a spawn": `build_command` only
-//!   consults `Sandbox::ensure_available` for `Confinement::Sandboxed`, so the `Exempt` paths
-//!   (`run_exempt`, `spawn_debug_pipe`) skip it entirely.
 //!
-//! Four mechanisms, and they fail differently. None of them is the argument on its own, and the
-//! fourth is not part of the published artifact at all.
+//! Three mechanisms, and they fail differently. None of them is the argument on its own, and all
+//! three are inside the crate that ships — which was a claim worth checking rather than assuming,
+//! and is the next section.
+//!
+//! # Where the locks stop (X-55)
+//!
+//! **The locks bound the published crate, not the deployed binary.** `exchange-host` is what
+//! `cargo publish` uploads and what a consumer composes into a process of its own;
+//! `exchange-server` is `publish = false`, one composition of this library among the ones nobody
+//! here writes. So lock 1 reads this crate's manifest, lock 2 walks [`claim::SCANNED`] — the
+//! boundary as one value rather than as a path typed at a call site — and `exchange-server` gets
+//! exactly one rule: [`the_crate_that_holds_a_transport_never_names_the_pack`].
+//!
+//! What that costs is written down rather than left to be found. **A second request path added to
+//! `exchange-server` is caught by nothing here**: that crate holds `flux_web` and binds the
+//! credential store, so it could build one, and the single rule reaching it bounds *naming the
+//! pack* rather than *building a request*. The scan does not follow, because holding a transport is
+//! what a composition is *for* — point lock 2 at that crate and every rule goes red on correct
+//! code, and the per-file exception list which answers that is the "one more file on the list"
+//! drift these locks exist to prevent. The argument in full, with the alternative and why it was
+//! not taken, is in `docs/designs/invoke.md` under "Where the locks stop".
+//!
+//! The consequence for prose is the half this file has to carry. A control outside the boundary may
+//! be **described** and may not be **leaned on**. `exchange-server`'s `execution::guarded_system`
+//! builds its `System` with `SandboxMode::Require`, so `System::run`/`run_with_env` are confined or
+//! refuse — a true and useful fact about *this repository's deployment*, and not a fact about
+//! `codewandler-flux-exchange-host`, since a downstream binary implements `Contexts` itself and
+//! supplies whatever `System` it built, quite possibly `System::new`, whose sandbox is disabled.
+//! It is narrower than "a spawn" too: `build_command` consults `Sandbox::ensure_available` only for
+//! `Confinement::Sandboxed`, so the `Exempt` paths (`run_exempt`, `spawn_debug_pipe`) skip it.
+//! [`no_document_claims_more_than_the_locks_reach`] is what keeps the three documents that say any
+//! of this from saying more.
 //!
 //! # If this test is red and your change is not about transports
 //!
@@ -248,6 +267,64 @@ mod rules {
     /// Files allowed to name `Egress`: the seam that hands it over, and the crate root that
     /// re-exports it so a composition need not name `connector-pack`.
     pub const MAY_NAME_EGRESS: &[&str] = &["invoke.rs", "lib.rs"];
+}
+
+/// **Where the locks reach, and what no document may say they reach** (X-55).
+///
+/// The rules above are about sources. These are about *claims*, and they exist because the failure
+/// this repository keeps having to correct is not a weak lock — it is a document describing a
+/// stronger one than the code enforces.
+mod claim {
+    /// **Lock 2's scan boundary, as a value rather than as a literal at a call site.**
+    ///
+    /// The real scan walks this and [`crate::the_locks_bound_the_published_crate`] asserts what it
+    /// is, so widening the boundary is one edit that fails one test with the argument attached,
+    /// rather than a quiet change to a path string.
+    pub const SCANNED: &str = "crates/exchange-host/src";
+
+    /// The prefix a scanned path must have: the crate that is actually published.
+    pub const THE_PUBLISHED_CRATE: &str = "crates/exchange-host/";
+
+    /// **The sentence X-55 settled the boundary question with**, carried verbatim by every document
+    /// in [`DOCUMENTS`].
+    ///
+    /// One sentence rather than a list of accepted paraphrases, and that is the whole reason it
+    /// works: a paraphrase is where a claim drifts back to the wider one it was narrowed from, and
+    /// a document that has to carry this exact string is a document somebody read before changing.
+    pub const THE_DECISION: &str = "The locks bound the published crate, not the deployed binary.";
+
+    /// The documents that say what the locks reach, and therefore the ones that can overstate it.
+    ///
+    /// `docs/vision.md` is deliberately out: it states the *principle* — this host constructs no
+    /// request of its own — and a principle is not a claim about enforcement. What drifts is the
+    /// sentence next to the principle that says which mechanism holds it, and that sentence lives
+    /// in these three.
+    pub const DOCUMENTS: &[&str] = &[
+        "AGENTS.md",
+        "docs/designs/invoke.md",
+        "crates/exchange-host/tests/no_second_request_path.rs",
+    ];
+
+    /// **Controls this repository really has, which live outside [`SCANNED`].**
+    ///
+    /// Naming one is not a fault — the composition's posture is real and worth describing. Reading
+    /// it as though it held something up inside the published crate is, because for a consumer of
+    /// `codewandler-flux-exchange-host` it is not there at all: a downstream binary implements
+    /// `Contexts` itself and supplies whatever `System` it built.
+    pub const OUTSIDE_THE_BOUNDARY: &[&str] = &["guarded_system", "SandboxMode::Require"];
+
+    /// **Vocabulary that turns naming one of those into leaning on it.**
+    ///
+    /// A cheap net and openly one: the ways to overstate a guarantee in English are not a set this
+    /// file can enumerate, exactly as [`crate::rules::REACHES_THE_SYSTEM`] cannot enumerate the
+    /// accessors that reach a `System`. What actually carries the claim is [`THE_DECISION`], which
+    /// a reader of any of these three documents meets; this list only catches the phrasing
+    /// somebody reaches for by accident.
+    ///
+    /// It refuses a sentence that *denies* coverage too — "this is not a backstop" — and that is
+    /// intended rather than tolerated. A passage that has to say so is still organised around the
+    /// idea that it might be; describe where the control lives and stop.
+    pub const CLAIMS_TO_COVER: &[&str] = &["backstop", "compensat", "makes up for"];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -435,12 +512,13 @@ fn the_crate_that_holds_a_transport_never_names_the_pack() {
 /// The real sources satisfy every rule in [`rules`].
 #[test]
 fn the_dispatch_seam_is_one_file_and_nothing_here_can_open_a_socket() {
-    let sources = sources_under(&workspace_path("crates/exchange-host/src"));
+    let sources = sources_under(&workspace_path(claim::SCANNED));
 
     assert!(
         sources.len() > 3,
-        "only {} source files were found under `exchange-host/src`; the walk is broken",
+        "only {} source files were found under `{}`; the walk is broken",
         sources.len(),
+        claim::SCANNED,
     );
 
     let found = violations(&sources);
@@ -592,6 +670,284 @@ fn the_scanner_catches_what_it_claims_to() {
         !violations(&[seam(), rehearsing("elsewhere.rs")]).is_empty(),
         "the scanner accepted the pack's third entry point in a file that may not name it",
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The boundary — the locks bound the published crate, and no document may say otherwise (X-55)
+// ---------------------------------------------------------------------------------------------
+
+/// **The scan boundary is inside the published crate, and that is the decision — not an accident
+/// of which path somebody typed.**
+///
+/// X-55 settled it: `exchange-host` is what ships, `exchange-server` is `publish = false`, and a
+/// consumer of `codewandler-flux-exchange-host` gets locks 1–2 and nothing else. Widening
+/// [`claim::SCANNED`] to the composing crate is a legitimate change to make — it is the other half
+/// of the question — but it changes what the locks *mean*, so it fails here first and the failure
+/// says where the argument has to be rewritten.
+#[test]
+fn the_locks_bound_the_published_crate() {
+    assert!(
+        claim::SCANNED.starts_with(claim::THE_PUBLISHED_CRATE),
+        "lock 2 now scans `{}`, which is outside `{}`.\n\n\
+         That is a change of claim, not of coverage. The locks are about the crate this repository \
+         publishes; a scan that reaches the composing binary makes them about a deployment, and \
+         `exchange-server` legitimately holds a transport, so every rule in `rules` would need an \
+         exception list with an entry per file — the drift these locks exist to prevent.\n\n\
+         If that is the trade you mean to make, make it in `docs/designs/invoke.md` first and \
+         change `claim::THE_DECISION` with it.",
+        claim::SCANNED,
+        claim::THE_PUBLISHED_CRATE,
+    );
+}
+
+/// **No document claims more than the locks reach.**
+///
+/// The other half of X-55, and the half that is easy to skip: deciding the boundary is worth
+/// nothing if a document goes on describing the wider one. Every document in [`claim::DOCUMENTS`]
+/// carries [`claim::THE_DECISION`] verbatim, and none of them leans on a control that lives outside
+/// the boundary to hold something up inside it.
+#[test]
+fn no_document_claims_more_than_the_locks_reach() {
+    let documents: Vec<(String, String)> = claim::DOCUMENTS
+        .iter()
+        .map(|relative| {
+            let path = workspace_path(relative);
+            let text = fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!(
+                    "`{relative}` states what the locks reach and must be readable: {error} \
+                     (looked at `{}`)",
+                    path.display()
+                )
+            });
+            ((*relative).to_owned(), text)
+        })
+        .collect();
+
+    assert_eq!(
+        documents.len(),
+        claim::DOCUMENTS.len(),
+        "not every document was read, so this test is asserting less than it says",
+    );
+
+    let found = overclaims(&documents);
+    assert!(found.is_empty(), "{}", found.join("\n\n"));
+}
+
+/// **The claim scanner, proved against prose it must reject and prose it must accept.**
+///
+/// Same treatment as [`the_scanner_catches_what_it_claims_to`], for the same reason: a rule whose
+/// marker stopped matching would pass every document forever while reading as though it guarded
+/// something.
+#[test]
+fn the_claim_scanner_catches_what_it_claims_to() {
+    let compliant = |name: &str| {
+        (
+            name.to_owned(),
+            format!("Where the locks stop.\n\n{}\n", claim::THE_DECISION),
+        )
+    };
+
+    assert!(
+        overclaims(&[compliant("docs/designs/invoke.md")]).is_empty(),
+        "the scanner rejects the shape it exists to permit",
+    );
+
+    // The decision wrapped at column 100, which is how it actually appears in all three documents.
+    // A raw `contains` would refuse every one of them.
+    let (head, tail) = claim::THE_DECISION.split_at(20);
+    let wrapped = (
+        "AGENTS.md".to_owned(),
+        format!("- **This host constructs no request of its own.**\n\n{head}\n {tail}\n"),
+    );
+    assert!(
+        overclaims(&[wrapped]).is_empty(),
+        "the scanner refuses a document that states the decision across a line break, which is \
+         every document that states it",
+    );
+
+    // A document that never states the decision is the drift this rule exists to catch: the
+    // boundary was settled once, and a document that does not carry it is one that never met it.
+    assert!(
+        !overclaims(&[(
+            "AGENTS.md".to_owned(),
+            "The locks are structural.".to_owned()
+        )])
+        .is_empty(),
+        "the scanner accepted a document that never states the boundary",
+    );
+
+    // A control from outside the boundary, presented as holding something up.
+    let leaning = (
+        "docs/designs/invoke.md".to_owned(),
+        format!(
+            "{}\n\nThe posture in `guarded_system` is the backstop for what lock 2 cannot see.\n",
+            claim::THE_DECISION
+        ),
+    );
+    assert!(
+        !overclaims(&[leaning]).is_empty(),
+        "the scanner accepted a composition-level control presented as covering a crate-level gap",
+    );
+
+    // And the same control, merely described. Naming it is the honest thing to do; the rule is
+    // about what the sentence claims for it.
+    let describing = (
+        "docs/designs/invoke.md".to_owned(),
+        format!(
+            "{}\n\n`exchange-server`'s `guarded_system` builds its `System` with \
+             `SandboxMode::Require`. A downstream binary supplies its own.\n",
+            claim::THE_DECISION
+        ),
+    );
+    assert!(
+        overclaims(&[describing]).is_empty(),
+        "the scanner rejects a document for describing where a control lives, which is the thing \
+         it wants documents to do",
+    );
+
+    // Prose only, and this direction is load-bearing rather than tidy: `claim`'s own tables hold
+    // both a control name and a coverage word as *code*, three lines apart. A scanner that read
+    // code would refuse this file for declaring the rule it enforces.
+    let tables = (
+        "crates/exchange-host/tests/no_second_request_path.rs".to_owned(),
+        format!(
+            "//! {}\nconst OUTSIDE: &[&str] = &[\"guarded_system\"];\n\
+             const COVER: &[&str] = &[\"backstop\"];\n",
+            claim::THE_DECISION
+        ),
+    );
+    assert!(
+        overclaims(&[tables]).is_empty(),
+        "the scanner read Rust code as a claim, so this file cannot name the strings it refuses",
+    );
+
+    // The same two strings in one doc comment of the same file, which *is* a claim.
+    let doc_comment = (
+        "crates/exchange-host/tests/no_second_request_path.rs".to_owned(),
+        format!(
+            "//! {}\n//!\n//! `guarded_system` is the backstop under lock 2.\n",
+            claim::THE_DECISION
+        ),
+    );
+    assert!(
+        !overclaims(&[doc_comment]).is_empty(),
+        "the scanner accepted a doc comment leaning on a control from outside the boundary",
+    );
+
+    // The residual, driven so it is a recorded limit rather than a discovered one: the rule is
+    // per paragraph, so a control named in one paragraph and leaned on two paragraphs later is
+    // not caught. Widening it to whole documents would refuse `docs/designs/invoke.md` for
+    // discussing lock 3 and the composition in the same file, which is most of what it is for.
+    let far_apart = (
+        "docs/designs/invoke.md".to_owned(),
+        format!(
+            "{}\n\n`guarded_system` sets the posture.\n\nIt is the backstop under lock 2.\n",
+            claim::THE_DECISION
+        ),
+    );
+    assert!(
+        overclaims(&[far_apart]).is_empty(),
+        "this is the rule's known limit and the assertion records it; if it now fails, the rule \
+         got stronger and this comment is what needs rewriting",
+    );
+}
+
+/// Every claim rule applied to `documents`, as human-readable violations.
+///
+/// A pure function over `(path, text)` pairs, so [`the_claim_scanner_catches_what_it_claims_to`]
+/// can drive the identical code over fixtures rather than over the documents it guards.
+fn overclaims(documents: &[(String, String)]) -> Vec<String> {
+    let mut found = Vec::new();
+
+    for (path, text) in documents {
+        // Paragraphs rather than raw text, and for the sentence check too: every document here
+        // wraps at column 100, so the decision arrives split across two lines and a `contains` over
+        // the raw text would refuse a document that carries it perfectly well.
+        let paragraphs = paragraphs(&prose_of(path, text));
+
+        if !paragraphs
+            .iter()
+            .any(|paragraph| paragraph.contains(claim::THE_DECISION))
+        {
+            found.push(format!(
+                "`{path}` says what the locks reach and does not carry the sentence that says how \
+                 far.\n\n\
+                 Write it verbatim, in prose rather than in a string literal:\n\n    {}\n\n\
+                 It is one sentence and not a list of accepted paraphrases on purpose — a \
+                 paraphrase is where the claim drifts back to the wider one. The argument behind \
+                 it is in `docs/designs/invoke.md`, under \"Where the locks stop\".",
+                claim::THE_DECISION,
+            ));
+        }
+
+        for paragraph in &paragraphs {
+            let Some(control) = claim::OUTSIDE_THE_BOUNDARY
+                .iter()
+                .find(|marker| paragraph.contains(**marker))
+            else {
+                continue;
+            };
+            let Some(coverage) = claim::CLAIMS_TO_COVER
+                .iter()
+                .find(|marker| paragraph.contains(**marker))
+            else {
+                continue;
+            };
+
+            found.push(format!(
+                "`{path}` names `{control}` and `{coverage}` in one paragraph:\n\n{paragraph}\n\n\
+                 `{control}` lives outside `{}`, so it is a property of this repository's \
+                 composition and not of the published crate — a consumer implements `Contexts` \
+                 itself and supplies whatever `System` it built. Presenting it as holding \
+                 something up is a composition-level control covering a crate-level gap, which is \
+                 the overstatement X-55 removed.\n\n\
+                 Describe where the control lives and stop. Denying the coverage counts too: a \
+                 passage that has to say \"this is not a {coverage}\" is still organised around \
+                 the idea that it might be.",
+                claim::SCANNED,
+            ));
+        }
+    }
+
+    found
+}
+
+/// `text` with everything that is not a claim removed, and paragraph breaks preserved.
+///
+/// The mirror image of [`code_of`], and the reason is the mirror image too. `code_of` throws prose
+/// away because the rules above are about what a source *does*; this throws code away because the
+/// rules below are about what a document *says*. In a `.rs` file the claims are the comments and
+/// the code is noise — `claim`'s own tables hold a control name and a coverage word three lines
+/// apart, and a scanner that read them would refuse this file for declaring its own rule.
+///
+/// A dropped line becomes an empty one rather than disappearing, so two comment blocks either side
+/// of a function do not merge into one paragraph.
+fn prose_of(path: &str, text: &str) -> String {
+    if !path.ends_with(".rs") {
+        return text.to_owned();
+    }
+
+    text.lines()
+        .map(|line| {
+            line.trim_start()
+                .strip_prefix("//")
+                .map(|rest| rest.trim_start_matches(['!', '/']).trim())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `prose` split on blank lines, with each paragraph's own line breaks flattened to spaces.
+///
+/// Flattened because a sentence wrapped at column 100 puts "the" and "backstop" on different lines,
+/// and a rule that matched line by line would miss every marker unlucky enough to straddle a wrap.
+fn paragraphs(prose: &str) -> Vec<String> {
+    prose
+        .split("\n\n")
+        .map(|paragraph| paragraph.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|paragraph| !paragraph.is_empty())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
