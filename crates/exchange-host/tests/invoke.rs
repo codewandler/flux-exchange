@@ -1,6 +1,6 @@
 //! **Invoking an operation** (X-12) — driven through a transport that records instead of sending.
 //!
-//! Every test here is `docs/designs/invoke.md` §3 lock 3: a counting transport, wrapped as an
+//! Every test here is `docs/designs/invoke.md` §2 lock 3: a counting transport, wrapped as an
 //! [`Egress`], which answers without opening a socket and remembers exactly what it was asked to
 //! carry. Two things follow that nothing else in this repository can assert:
 //!
