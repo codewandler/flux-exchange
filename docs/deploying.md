@@ -29,7 +29,7 @@ Before deploying:
       because the volume is created separately.
 - [ ] Verify there is exactly one machine and one attached volume. Do not scale this file-backed
       deployment horizontally.
-- [ ] Verify the four store paths remain nested below `/data`, the image still runs as uid `10001`,
+- [ ] Verify the five store paths remain nested below `/data`, the image still runs as uid `10001`,
       and no prior store directory or snapshot is being attached accidentally.
 - [ ] Inspect the commit and working-tree diff that `fly deploy` will build. Until X-93 lands, record
       the commit and any uncommitted changes with the deployment record.
@@ -187,6 +187,7 @@ docker run --rm -v flux-exchange-local:/data \
   -e FLUX_EXCHANGE_BIND=127.0.0.1:8080 \
   -e FLUX_EXCHANGE_CREDENTIALS=/data/credentials/store.json \
   -e FLUX_EXCHANGE_GRANTS=/data/grants/store.json \
+  -e FLUX_EXCHANGE_WORKFLOWS=/data/workflows \
   flux-exchange:local
 ```
 

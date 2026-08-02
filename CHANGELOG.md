@@ -6,7 +6,27 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-02
+
 ### Added
+
+- **Tenants can author, publish and run versioned Flux workflows** (X-98). Exact Flux source is
+  projected into the upstream versioned graph when representable and remains byte-preserved in
+  source-only mode otherwise. Drafts use optimistic revisions; publication revalidates against the
+  executable catalogue and freezes source, node map, input schema and operation contracts.
+
+  Published workflows enter through `workflow.<id>.run`: the tenant must grant that virtual
+  operation, and every nested connector call repeats its own runtime and tenant-grant checks before
+  credential resolution. Contract drift refuses before a credential port is constructed. Runs
+  target immutable versions, persist in SQLite, can be cancelled, and record only upstream's
+  value-free node lifecycle events; a trace write failure fails the run instead of silently losing
+  its explanation.
+
+  The console adds full-width Workflows and Activity surfaces with tree, freeform and exact-source
+  modes, server validation, searchable connector/pure-cognition palette, publication, JSON run
+  parameters, a durable timeline and live node overlays. `FLUX_EXCHANGE_WORKFLOWS` names the durable
+  definitions-and-runs directory; definitions and activity are created owner-only and widened
+  existing paths refuse at startup. Unset remains a fail-closed `503` rather than a memory fallback.
 
 - **Local development has a one-tenant startup shorthand** (X-59, partial). Running
   `flux-exchange --dev` derives `user:${USER}@dev`, keeps the secretless development identity

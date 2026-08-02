@@ -1,7 +1,7 @@
 ---
 id: X-98
 title: A versioned visual and source flow editor
-status: in-progress
+status: done
 epic: flow-editor
 design: docs/designs/flow-editor.md
 note: "connector operations plus the pure cognition group; immutable publication, dual grants and node-addressed run records"
@@ -14,18 +14,18 @@ Let a tenant author one invocable Flux flow visually or as source, publish immut
 run the published operation without a credential or tenant ever becoming caller-controlled.
 
 ## Acceptance
-- [ ] Failing-first API tests prove tenant-derived CRUD, optimistic draft conflicts and immutable
+- [x] Failing-first API tests prove tenant-derived CRUD, optimistic draft conflicts and immutable
       publication.
-- [ ] The editor catalogue contains connector operations and only the pure cognition built-ins.
-- [ ] Source and graph edits use Flux's upstream projection; unsupported valid source is preserved
+- [x] The editor catalogue contains connector operations and only the pure cognition built-ins.
+- [x] Source and graph edits use Flux's upstream projection; unsupported valid source is preserved
       and remains source-only.
-- [ ] A published workflow is a tenant-local operation whose entry grant and every nested connector
+- [x] A published workflow is a tenant-local operation whose entry grant and every nested connector
       grant are both required before credentials are read.
-- [ ] Runs target an immutable version, are cancellable, persist redacted node status and refuse a
+- [x] Runs target an immutable version, are cancellable, persist redacted node status and refuse a
       changed operation contract until republished.
-- [ ] The Vue console provides Workflows and Activity surfaces with tree/freeform/source modes,
+- [x] The Vue console provides Workflows and Activity surfaces with tree/freeform/source modes,
       validation, publication and run inspection.
-- [ ] Rust, console and public-site gates are green; README, onboarding, CHANGELOG and board agree.
+- [x] Rust, console and public-site gates are green; README, onboarding, CHANGELOG and board agree.
 
 ## Progress
 - 2026-08-02: story and design opened from the accepted implementation plan.
@@ -40,7 +40,17 @@ run the published operation without a credential or tenant ever becoming caller-
   four-crate dependency closure are green; it is intentionally uncommitted and unpublished. The
   remaining order is: integrate/gate L-126 on current Flux main, publish Flux on the 0.52 line,
   commit and publish the compatible connector pack, then move both exchange pin sets atomically.
+- 2026-08-02: the dependency sequence completed: L-126 is published on Flux 0.52 and
+  flux-connectors 0.16.0 is published against that line. Exchange moved the pins together with no
+  local override.
+- 2026-08-02: tenant-derived draft/version APIs, dual-gated execution, contract drift refusal,
+  cancellation, durable value-free run tracing and the Workflows/Activity console landed. The
+  console visually adds/reorders/removes calls through the upstream graph contract and preserves
+  exact source when source mode is authoritative.
+- 2026-08-02: workspace build/test/clippy/fmt, console test/build and public-site build/test are
+  green for the v0.14.0 release candidate. A final failing-first storage check also made the
+  definitions directory/file and run database explicitly refuse group/other access.
 
 ## Notes
-- Depends on a published Flux 0.52 release containing L-126 and a connector-pack release requiring
-  the same engine line. Do not bypass this with a sibling `path` or `git` dependency.
+- Delivered from published Flux 0.52 and connector-pack 0.16.0. The registry-only rule remains: do
+  not replace either with a sibling `path` or `git` dependency.

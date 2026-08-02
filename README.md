@@ -11,7 +11,7 @@ The contributor and operator [security posture](docs/security.md) maps the threa
 controls, deployment assumptions, known limitations, security roadmap and incident checklist.
 
 > [!WARNING]
-> **Status: v0.13.0 — credentials, a gated invoke, and a hardened public process.**
+> **Status: v0.14.0 — credentials, gated operations, and versioned tenant workflows.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
 > connector catalogue and a session without OIDC setup. The ordinary composition supports a
@@ -30,7 +30,10 @@ controls, deployment assumptions, known limitations, security roadmap and incide
 > and edits those grants over HTTP** — `GET`/`PUT /api/grants`, with `POST /api/grants/preview`
 > answering which operations a proposed grant *would* admit before it is saved — stating a connector
 > and at most a risk level, never a list of operation ids, which the route refuses. The console now
-> guides a person through Connect → Grant → Invoke. See
+> guides a person through Connect → Grant → Invoke. A signed-in human can also author and validate
+> a Flux workflow, publish immutable versions, and inspect or cancel durable runs. The workflow
+> entry operation and every nested connector call are independently grant-gated before credentials
+> are resolved; `FLUX_EXCHANGE_WORKFLOWS` names the durable definitions-and-runs directory. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 
@@ -91,19 +94,20 @@ against one tenant's connections, not a vendor secret.
 
 | | |
 |---|---|
-| `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path, `SettingsStore` — a **separate** file-backed store for a tenant's *non-secret* per-connection values, bound by `FLUX_EXCHANGE_SETTINGS`, because a subdomain is not a credential and sharing the store would make `held` and the tenant allowance each mean two things, and `Invoker` — which runs one catalogue operation through `connector_pack` and holds no transport of its own. **Real and tested (86 tests).** |
-| `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port — one that **ends when the id token behind it does** — **complete OIDC sign-in**, a per-tenant connection surface — credentials, and since X-47 the **non-secret per-connection values** a templated connector needs — and `POST /api/agents`, which **mints an agent principal for the caller's tenant and shows its token once**, and `POST /api/operations/{operation}/invoke`, a thin adapter over the host's `Invoker`. It is the **only crate here that holds an HTTP client**, and it deliberately never names `connector_pack` — a test asserts both halves. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (234 tests).** |
-| `console/` | A Vue 3 **admin surface**, not a catalogue browser: it guides a signed-in person through searchable connector setup, metadata grants and schema-backed invocation, with atomic credential rotation and consequence previews. Its catalogue remains one search with Connectors, Services and Operations tabs. `subscribe` and activity stay honestly inert. Failed reads name their endpoint and can be retried — never an empty catalogue or false "signed out". |
+| `crates/exchange-host` | Principal-derived tenancy, grants, runtime admission, credential/settings stores, ordinary invocation, and tenant-scoped workflow drafts plus immutable published versions. Workflow execution still dispatches through Flux and `connector_pack`; this crate holds no transport of its own. |
+| `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant connections and grants, agent minting, ordinary invocation, workflow authoring/publication and durable SQLite run records. It is the **only crate here that holds an HTTP client**, and deliberately never names `connector_pack` — a test asserts both halves. |
+| `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows and Activity. The workflow editor uses the upstream Flux graph contract, retains exact source, and paints durable value-free run events back onto nodes. `subscribe` stays honestly inert. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
 **Not built, despite being described in the design:** a second connection to one
 connector (the address has no instance dimension until upstream publishes one),
-`subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
-catalogue loader. The credential store has moved off this list and is described below, and X-47 moved
+`subscribe`, the websocket, channels, leases-in-anger, and the catalogue loader. Stored workflows
+and workflow execution records moved off this list in X-98. The credential store has moved off this
+list and is described below, and X-47 moved
 per-connection configuration off it too — but the honest replacement claim is narrower than "done":
-a tenant can now **supply**, over HTTP, the values thirteen of the seventeen connectors that need
-one require — and **four are refused on purpose**: `newrelic`, `okta`, `docusign` and `freshdesk`
-template their whole destination host, so a tenant-supplied value would *be* the origin this host
-sends their credential to. Those four stay uninvocable and say so. Connection settings still have
+a tenant can now **supply**, over HTTP, every admitted catalogue-declared connection value — and
+**four are refused on purpose**: `asterisk`, `okta`, `docusign` and `freshdesk` template their whole
+destination authority, so a tenant-supplied value would *be* the origin this host sends their
+credential to. Those four stay uninvocable and say so. Connection settings still have
 no human screen. The design is ahead of the code
 on purpose; the gap is stated here so nobody has to discover it.
 

@@ -5,36 +5,28 @@ the [board](stories/README.md); this document is the narrative around it.
 
 ## Status
 
-_As of 2026-08-01:_ **v0.4.0 — a platform that holds credentials and can sign a human in.**
-`cargo run` binds loopback and refuses a reachable address with no identity provider. Complete OIDC
-sign-in, sessions that end when the identity behind them does, a per-tenant connection surface with
-credential bounds, and the connector catalogue. **It still executes nothing** — `invoke`,
-`subscribe` and execution records are unbuilt, so the platform can be wired up but not yet used.
+_As of 2026-08-02:_ **v0.14.0 — credentials, gated operations and versioned tenant workflows.**
+`cargo run -- --dev` is the loopback single-tenant shorthand; reachable binds still require a real
+identity provider. Complete OIDC sign-in, per-tenant connections and settings, metadata grants,
+ordinary connector invocation, immutable workflow publication and durable value-free workflow run
+records are built. `subscribe`, channels and leases-in-anger remain unbuilt.
 
-`crates/exchange-host` carries the vocabulary and the rules as tested types (32 tests):
-`Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, and the `Identity` port.
-Four rules are executed rather than described — a traversing tenant id refused at construction, a
-multi-tenant deployment refusing every locally-executing runtime, deny beating allow in a selector,
-and a lease requiring the same principal rather than merely the same tenant.
+`crates/exchange-host` carries the vocabulary and rules, the credential/settings/grant bindings,
+ordinary invocation and the tenant workflow runtime. A workflow is a stored Flux program rather
+than another interpreter: publication freezes operation contracts and execution repeats both its
+entry grant and every nested connector grant before credential resolution.
 
-`crates/exchange-server` prints which runtimes each deployment shape would serve, and exits.
-`console/` reads the live catalogue from the service; the fixture banner is gone with the fixtures.
+`crates/exchange-server` composes the transport, identity and durable stores. `console/` guides an
+operator through Connect → Grant → Invoke and provides Workflows and Activity views backed by the
+upstream Flux editor schema.
 
-**It holds credentials, binds a port and answers requests. It does not yet run an operation.**
+**The credential never crosses the boundary; the authority does.**
 
-## The blocker, and what it does not block
+## The engine line
 
-`codewandler-connector-pack` 0.8.0 requires `codewandler-flux-runtime ^0.41`. For a `0.x` crate
-Cargo reads that as `>=0.41.0, <0.42.0`, and the flux family is at **0.45.0**. Because
-`connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, two engine versions are two
-incompatible traits — so this repository cannot link the pack and current flux together.
-
-**That blocks the `invoke` epic and nothing else.** Measured on crates.io the same day:
-`connector-catalog` has **zero dependencies**, and `connector-spec` and `connector-secrets` carry
-**no flux dependency at all**. The HTTP surface, sign-in, the catalogue and the credential store are
-buildable today, which is why the first wave is eight stories rather than one.
-
-X-11 tracks the alignment. The work is upstream, in flux-connectors.
+`connector-pack` 0.16 and the engine crates are aligned on Flux 0.52 for X-98. They remain one atomic
+pin set: two engine versions are two incompatible `Tool` traits even when their names are identical.
+The manifest, resolved-lock and compile-time seam tests keep that rule executable.
 
 ## Epics
 

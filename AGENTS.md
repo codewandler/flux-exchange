@@ -35,12 +35,13 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.13.0. The service serves health, the catalogue, a session, a complete OIDC sign-in,
+**v0.14.0. The service serves health, the catalogue, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
 `GET /api/onboarding`, an anonymous machine-readable descriptor of what this build can and cannot
-do.** `cargo run` binds loopback and refuses to start on a reachable address with no identity
-provider configured. What exists beyond that is still the vocabulary and the rules as tested types.
+do. Since X-98 it also stores tenant workflow drafts, publishes immutable versions, runs them
+through Flux with dual grant gates, and records value-free node activity.** `cargo run` binds
+loopback and refuses to start on a reachable address with no identity provider configured.
 
 **Signing in without an identity provider works on loopback** (X-57, v0.9.0+). Arm
 `FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme` and `GET /api/signin` tells you how — present the roster
@@ -143,15 +144,15 @@ separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
-**X-11 closed the engine-line conflict; X-85 moved the line.** The connector crates are on 0.13 and
+**X-11 closed the engine-line conflict; X-98 moved the line.** The connector crates are on 0.16 and
 `connector-pack` links here. What is left is one rule, and it is the one that bites:
 
-- **The flux engine line is `0.49`, and it is written down once** — in `[workspace.dependencies]`
+- **The flux engine line is `0.52`, and it is written down once** — in `[workspace.dependencies]`
   in the root `Cargo.toml`, under the `ENGINE_LINE` marker. Every `codewandler-flux-*` pin carries
   that value, and no member manifest pins one at all.
-- **It is set by what `connector-pack` requires, never by what is newest.** `connector-pack` 0.13.0
-  requires `codewandler-flux-runtime ^0.49`, and that is the whole reason 0.49 is allowed now — the
-  exchange stayed on 0.47 until the compatible connector release was published.
+- **It is set by what `connector-pack` requires, never by what is newest.** `connector-pack` 0.16.0
+  requires `codewandler-flux-runtime ^0.52`, and that is the whole reason 0.52 is allowed now — the
+  exchange stayed on 0.49 until the compatible connector release was published.
   `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, and two engine versions
   are two incompatible traits with identical names — Cargo resolves both happily and the failure
   lands at type-check somewhere else entirely.
