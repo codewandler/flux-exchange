@@ -49,6 +49,10 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+// How a credential was obtained, and the named weaknesses in obtaining it that way. Vocabulary
+// only, and deliberately separate from `connections`: that module answers *where* a credential
+// lives, this one answers *how it got there*.
+mod acquisition;
 mod connections;
 // Unix only, and for the reason `connector_secrets::file` is: the whole of what protects a value in
 // the file store is `0600` and `0700`, and a platform that cannot spell those would get a store that
@@ -115,6 +119,7 @@ pub use connector_pack::{ConfigStore, Egress, Field, MemoryConfig};
 /// engine line is pinned once, in the workspace manifest; this is the doorway to the one it names.
 pub use flux_runtime::ToolContext;
 
+pub use acquisition::AuthHazard;
 pub use connections::{
     address_path, admit_tenant_occupancy, stored_bytes, ConnectionRefusal, ConnectorDeclaration,
     DeclaredCredential, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES,
