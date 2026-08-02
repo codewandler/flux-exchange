@@ -132,9 +132,9 @@ judged a failure.
   being a test fixture and starts being load-bearing. The bind rule, the grant gate, the kind gate on
   connections (X-54), the anonymous-surface guard (X-61) and the runtime gate are the things standing
   between a public URL and a credential store. None of them should be touched in this epic.
-- **A public URL is a target.** There is no rate limiting, no brute-force protection on any endpoint,
-  and X-22's bounds are about one tenant's cost to another rather than about an anonymous flood. Worth
-  a story before the URL is shared.
+- **A public URL is a target.** X-87 subsequently added process-wide sign-in and invocation rate
+  bounds plus an invocation concurrency bound. They are application backstops; deployment-edge flood
+  protection remains a separate operational layer.
 - **The `0600`/`0700` store modes must survive the container.** The store refuses a widened mode rather
   than tightening it (X-09), so a volume mounted with a permissive default, or a process running as a
   different uid than the one that created the files, is a startup refusal. Decide the uid deliberately.

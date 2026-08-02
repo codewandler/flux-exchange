@@ -35,7 +35,7 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.12.0. The service serves health, the catalogue, a session, a complete OIDC sign-in,
+**v0.13.0. The service serves health, the catalogue, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
 `GET /api/onboarding`, an anonymous machine-readable descriptor of what this build can and cannot
@@ -55,7 +55,8 @@ are X-58.
 
 ⚠ **Invocation is gated by identity *and by grant*** (X-13, v0.9.0), and since X-62
 `GET/PUT /api/grants` edits them (`User` only) with `POST /api/grants/preview` showing what a selector
-would admit before it is saved. **A console screen for it is still unbuilt.** An operation runs only if a
+would admit before it is saved. Since X-88 the console guides a person through Connect → Grant →
+Invoke, including atomic rotation and consequence previews. An operation runs only if a
 grant the caller's tenant holds admits it, decided from what the operation declares — its risk, its
 effects, its idempotency — never from a list of names. **This is fail-closed and it will look like an
 outage**: a deployment runs nothing until `FLUX_EXCHANGE_GRANTS` names a file and grants are written
@@ -217,13 +218,14 @@ Each is stated in `docs/vision.md` and several are already enforced by tests in
 
 ## The console
 
-`console/src/components/` holds 15 Vue components **shared with flux-connectors**. They import only
-Vue, a sibling component, and `catalog.mts` — an invariant enforced by
-`console/test/components.test.mjs`, which is itself guarded by a test that runs the scanner against
-sources it must reject and accept.
+**The catalogue UI is owned here.** X-86 retired the copied flux-connectors documentation explorer:
+that site and this service publish different documents, and synchronising components made every
+host-specific improvement a cross-repository maintenance problem. Do not copy or package the
+upstream explorer back in.
 
-**Do not modify a carried component to make local work easier.** If one genuinely needs a change,
-that is a finding to report, because the change belongs upstream where the component is shared.
+Catalogue views still receive data from `App.vue`; they do not import `service.mts` or fetch for
+themselves. That local boundary keeps an unreachable service distinguishable from an empty
+catalogue. All colour goes through `tokens.css`, so light and dark remain one visual system.
 
 ## Publishing
 

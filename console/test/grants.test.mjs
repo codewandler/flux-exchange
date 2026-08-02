@@ -43,7 +43,7 @@ const consoleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 /** One app-layer source, read whole. */
 const source = (file) => readFileSync(path.join(consoleRoot, 'src', file), 'utf-8')
 
-/** Every app-layer source — the console's own, never the fifteen carried components. */
+/** Every app-layer source in this exchange-owned console. */
 function appSources() {
   return readdirSync(path.join(consoleRoot, 'src'), { withFileTypes: true })
     .filter((entry) => entry.isFile() && /\.(vue|mts|ts)$/.test(entry.name))
@@ -420,7 +420,7 @@ test('the_save_is_refused_until_the_preview_has_answered', async () => {
 
   assert.deepEqual(
     view.emitted.preview,
-    [{ connector: 'github', selector: { maxRisk: null, effectsWithin: null, idempotency: null } }],
+    [{ connector: 'github', selector: { maxRisk: 'low', effectsWithin: null, idempotency: null } }],
     'choosing a connector did not ask the service what the grant would admit'
   )
   assert.equal(
@@ -456,7 +456,7 @@ test('the_save_is_refused_until_the_preview_has_answered', async () => {
   await view.fire(at(view.root, 'form'), 'onSubmit')
   assert.deepEqual(
     view.emitted.save,
-    [[{ connector: 'github', selector: { maxRisk: null, effectsWithin: null, idempotency: null } }]],
+    [[{ connector: 'github', selector: { maxRisk: 'low', effectsWithin: null, idempotency: null } }]],
     'saving did not send the whole set the service replaces'
   )
 })

@@ -27,7 +27,7 @@ mod signin;
 use std::path::Path;
 
 use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, MethodRouter};
@@ -210,7 +210,53 @@ pub fn app_with_console(state: AppState, console: Option<&Path>) -> Router {
         None => api,
     };
 
-    app.layer(TraceLayer::new_for_http()).with_state(state)
+    app.layer(middleware::from_fn(security_headers))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+/// Attach the browser policy at the outermost application boundary, including errors and static
+/// fallbacks. API responses opt out of storage; fingerprinted console assets remain cacheable.
+async fn security_headers(request: Request, next: Next) -> Response {
+    let no_store = request.uri().path() == API_ROOT
+        || request.uri().path() == API_ROOT_SLASH
+        || request.uri().path().starts_with("/api/");
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+
+    for (name, value) in [
+        (
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; object-src 'none'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'",
+            ),
+        ),
+        (
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+        ),
+        (
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ),
+        (
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("no-referrer"),
+        ),
+        (
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static(
+                "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+            ),
+        ),
+    ] {
+        headers.insert(name, value);
+    }
+    if no_store {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+
+    response
 }
 
 /// The path patterns that keep the console's fallback off the API.
@@ -241,6 +287,18 @@ pub(super) const CONSOLE_ENTRY_POINT: &str = "index.html";
 /// reflection.
 async fn no_such_api_route() -> Response {
     refuse(StatusCode::NOT_FOUND, "no such route on this host")
+}
+
+/// A bounded-work refusal, carrying the standard delay and no deployment counters.
+pub(super) fn rate_limited(refusal: crate::traffic::TrafficRefusal) -> Response {
+    let retry_after = HeaderValue::from_str(&refusal.retry_after().to_string())
+        .unwrap_or_else(|_| HeaderValue::from_static("1"));
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, retry_after)],
+        Json(json!({ "error": "this host is at its request limit; retry later" })),
+    )
+        .into_response()
 }
 
 /// What [`require_principal`] logs when it identifies a caller and refuses it for its kind.
@@ -1678,6 +1736,50 @@ mod tests {
             .expect("a readable body");
 
         (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// **X-87's failing-first header test.** Browser policy is attached at the outer router, so it
+    /// applies equally to API answers, refusals and the static console while only sensitive routes
+    /// opt out of caching.
+    #[tokio::test]
+    async fn the_outer_router_hardens_every_response_and_does_not_cache_the_api() {
+        let console = a_built_console();
+
+        for (path, no_store) in [("/", false), ("/health", false), ("/api/onboarding", true)] {
+            let app = app_with_console(AppState::without_identity(), Some(console.path()));
+            let response = app
+                .into_service::<Body>()
+                .call(
+                    HttpRequest::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("a well-formed request"),
+                )
+                .await
+                .expect("the router answers");
+            let headers = response.headers();
+
+            for required in [
+                "content-security-policy",
+                "strict-transport-security",
+                "x-content-type-options",
+                "referrer-policy",
+                "permissions-policy",
+            ] {
+                assert!(
+                    headers.contains_key(required),
+                    "GET {path} omitted {required}"
+                );
+            }
+
+            assert_eq!(
+                headers
+                    .get(header::CACHE_CONTROL)
+                    .and_then(|value| value.to_str().ok()),
+                no_store.then_some("no-store"),
+                "GET {path} has the wrong caching policy"
+            );
+        }
     }
 
     /// **X-83's failing-first test.** An `/api` path this host does not serve must refuse, rather

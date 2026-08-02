@@ -162,6 +162,27 @@ impl Oidc {
         self.admit_and_open(&claims, &pending.nonce, now())
     }
 
+    /// Close the local session represented by the token a guarded request presented.
+    pub fn close_session(&self, presented: &str) {
+        self.sessions.close(presented);
+    }
+
+    /// Open a short-lived federated session without a provider round trip, for route integration
+    /// tests whose subject is what happens after the flow has completed.
+    #[cfg(test)]
+    pub(crate) fn open_session_for_test(&self, principal: Principal) -> SessionToken {
+        let as_of = now();
+        self.sessions
+            .open(
+                principal,
+                Expiry::Credential {
+                    expires_at: as_of + 300,
+                    as_of,
+                },
+            )
+            .expect("a five-minute test session is admissible")
+    }
+
     /// Admit a signature-verified id token and open the session it earns, **both against `now`**.
     ///
     /// One argument and one reading, which is the whole of X-24. Whether the token has expired and
@@ -189,15 +210,18 @@ impl Oidc {
         // The session ends when the id token does. The `exp` goes across verbatim: a provider that
         // issues a five-minute token gets a five-minute session, because a host that outlived the
         // credential it was shown would be asserting an identity nobody is still vouching for.
-        self.sessions
+        let token = self
+            .sessions
             .open(
-                principal,
+                principal.clone(),
                 Expiry::Credential {
                     expires_at: claims.expires_at,
                     as_of: now,
                 },
             )
-            .map_err(SignInRefusal::NoSession)
+            .map_err(SignInRefusal::NoSession)?;
+        crate::audit::signed_in(&principal);
+        Ok(token)
     }
 
     /// Every check this host makes on a signature-verified id token, and the principal it yields.
@@ -620,6 +644,26 @@ mod tests {
         assert_eq!(principal.kind(), PrincipalKind::User);
         assert_eq!(principal.id(), "248289761001", "the `sub` claim");
         assert_eq!(principal.tenant().as_str(), TENANT);
+    }
+
+    /// **X-87's failing-first logout test.** Closing the presented OIDC session invalidates the
+    /// server-side authority, not only the browser's copy of it.
+    #[tokio::test]
+    async fn closing_an_oidc_session_stops_it_resolving() {
+        let oidc = oidc();
+        let token = oidc
+            .admit_and_open(&good(), NONCE, 1_999_999_700)
+            .expect("well-formed claims open a session");
+
+        assert!(oidc.resolve(token.as_str()).await.is_ok());
+        oidc.close_session(token.as_str());
+        assert!(
+            matches!(
+                oidc.resolve(token.as_str()).await,
+                Err(IdentityError::Rejected)
+            ),
+            "logout must invalidate the authority held by the server"
+        );
     }
 
     /// Every binding check, one at a time, each with the reason it exists.

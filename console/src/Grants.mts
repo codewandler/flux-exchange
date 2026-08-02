@@ -32,7 +32,11 @@
 // the claims are only worth anything if a test drives them, and a render function mounts under a
 // plain `node --test`. Its rules live in `grants.css` for the reason `shell.css` gives.
 
-import { computed, defineComponent, h, ref, type PropType, type VNode } from 'vue'
+import { computed, defineComponent, h, ref, watch, type PropType, type VNode } from 'vue'
+import ConnectorPicker from './ConnectorPicker.mts'
+import type { Catalog, Connector } from './catalog.mts'
+import { grantPreset, groupAdmitted, previewChange, type GrantPreset } from './journey-model.mts'
+import { fragmentPath } from './routing.ts'
 import {
   EFFECTS,
   RISK_LEVELS,
@@ -221,6 +225,10 @@ export default defineComponent({
     grants: { type: Object as PropType<GrantsState>, required: true },
     /** Every connector the catalogue lists. The console enumerates none of its own. */
     connectors: { type: Array as PropType<string[]>, required: true },
+    catalogConnectors: { type: Array as PropType<Connector[]>, default: () => [] },
+    connected: { type: Array as PropType<string[]>, default: () => [] },
+    catalog: { type: Object as PropType<Catalog>, default: null },
+    initialConnector: { type: String, default: '' },
     /** Every risk level the catalogue publishes, so a level this console cannot offer is visible. */
     catalogueRisks: { type: Array as PropType<string[]>, default: () => [] },
     /** Every effect the catalogue publishes, for `catalogueRisks`' reason. */
@@ -232,19 +240,34 @@ export default defineComponent({
     /** Whether a write is in flight, so the form cannot be submitted twice. */
     busy: { type: Boolean, default: false },
   },
-  emits: ['preview', 'save'],
+  emits: ['preview', 'save', 'retry'],
   setup(props, { emit }) {
     // ---------------------------------------------------------------------------------------
     // The draft. A connector and three axes, and there is nowhere here for an operation id.
     // ---------------------------------------------------------------------------------------
 
-    const connector = ref('')
+    const connector = ref(props.initialConnector)
+    const preset = ref<GrantPreset>('read-only')
     /** `''` is "any risk" — the axis absent, which is how the service spells unbounded. */
-    const maxRisk = ref('')
+    const maxRisk = ref('low')
     const idempotency = ref('')
     /** Whether the effects axis bounds anything at all. `false` sends no `effects_within`. */
     const boundEffects = ref(false)
     const effects = ref<string[]>([])
+
+    function applyPreset(next: GrantPreset): void {
+      preset.value = next
+      const selector = grantPreset(next, props.catalogueEffects)
+      maxRisk.value = selector.maxRisk ?? ''
+      idempotency.value = selector.idempotency ?? ''
+      boundEffects.value = selector.effectsWithin !== null
+      effects.value = selector.effectsWithin ?? []
+      changed()
+    }
+
+    watch(() => props.initialConnector, (next) => {
+      if (next) { connector.value = next; applyPreset('read-only') }
+    }, { immediate: true })
 
     /** What the operator has stated, or `null` before they have chosen a connector. */
     const draft = (): ProposedGrant | null =>
@@ -349,6 +372,7 @@ export default defineComponent({
             value,
             onChange: (event: Event) => {
               const chosen = (event.target as HTMLSelectElement).value
+              preset.value = 'custom'
               if (name === 'max-risk') maxRisk.value = chosen
               if (name === 'idempotency') idempotency.value = chosen
               changed()
@@ -374,6 +398,7 @@ export default defineComponent({
             'data-grants': 'bound-effects',
             checked: boundEffects.value,
             onChange: (event: Event) => {
+              preset.value = 'custom'
               boundEffects.value = (event.target as HTMLInputElement).checked
               changed()
             },
@@ -391,6 +416,7 @@ export default defineComponent({
                     'data-effect': effect,
                     checked: effects.value.includes(effect),
                     onChange: (event: Event) => {
+                      preset.value = 'custom'
                       const on = (event.target as HTMLInputElement).checked
                       effects.value = on
                         ? [...effects.value, effect]
@@ -426,8 +452,8 @@ export default defineComponent({
         )
       }
       if (preview === null || preview.status === 'loading') {
-        return h('p', { class: 'grants__note', 'data-grants': 'preview-loading' }, [
-          'Asking the service what this would admit…',
+        return h('div', { class: 'connections__skeleton', 'data-grants': 'preview-loading', 'aria-label': 'Reading grant preview' }, [
+          h('span', { class: 'skeleton' }), h('span', { class: 'skeleton' }),
         ])
       }
       if (preview.status === 'refused') return refusalNotice(preview.refusal)
@@ -438,27 +464,42 @@ export default defineComponent({
           h('h3', { class: 'failure__title' }, 'What this grant would admit could not be read'),
           h('p', { class: 'failure__endpoint' }, ['Endpoint: ', h('code', null, preview.failure.endpoint)]),
           h('p', { class: 'failure__message' }, failureSentence(preview.failure)),
+          h('button', { type: 'button', class: 'failure__retry', onClick: changed }, 'Retry preview'),
         ])
       }
 
       const answer = evaluated.value
       if (answer === null) {
-        return h(
-          'p',
-          { class: 'grants__note', 'data-grants': 'preview-stale' },
-          'Asking the service what this would admit…'
-        )
+        return h('div', { class: 'grants__note', 'data-grants': 'preview-stale' }, [
+          h('p', null, 'This preview belongs to an older draft.'),
+          h('button', { type: 'button', class: 'failure__retry', onClick: changed }, 'Refresh preview'),
+        ])
       }
 
       return h('section', { class: 'grants__preview', 'data-grants': 'preview' }, [
         h('h3', null, 'This grant would admit'),
+        (() => {
+          const current = held.value.find((grant) => grant.connector === answer.connector)
+          const change = previewChange(current?.admits.map((operation) => operation.id) ?? [], answer.admits.map((operation) => operation.id))
+          return h('p', { class: [`grants__delta`, `grants__delta--${change}`], 'data-change': change },
+            current ? `Compared with the saved grant, this is ${change}.` : `This adds authority for ${answer.admits.length} operations.`)
+        })(),
         h(
           'p',
           { class: 'grants__derived' },
           'Answered by the service from what each operation declares — the same projection the gate ' +
             'decides on when something is actually run. This console computes none of it.'
         ),
-        admittedPanel(answer),
+        props.catalog
+          ? h('div', { class: 'grants__groups' }, groupAdmitted(props.catalog, answer.admits.map((operation) => operation.id)).map((group) =>
+              h('section', { key: `${group.connector}/${group.service}`, class: 'grants__group' }, [
+                h('h4', null, [h('code', null, group.service), ` · ${group.connector}`]),
+                ...group.risks.map((risk) => h('details', { key: risk.risk, open: risk.operations.length < 6 }, [
+                  h('summary', null, `${risk.risk} risk · ${risk.operations.length}`),
+                  h('ul', null, risk.operations.map((id) => h('li', { key: id }, h('code', null, id)))),
+                ])),
+              ])))
+          : admittedPanel(answer),
       ])
     }
 
@@ -528,7 +569,17 @@ export default defineComponent({
             ])
           : null,
 
-        h('label', { class: 'grants__field' }, [
+        h(ConnectorPicker, {
+          connectors: props.catalogConnectors.length
+            ? props.catalogConnectors
+            : props.connectors.map((id) => ({ id, vendor: id, description: '', operationCount: 0, operations: [] })),
+          connected: props.connected,
+          value: connector.value,
+          label: 'Connector',
+          'onChoose': (id: string) => { connector.value = id; if (id) applyPreset(preset.value); else changed() },
+        }),
+
+        h('label', { class: 'sr-only', 'aria-hidden': 'true' }, [
           h('span', { class: 'grants__label' }, 'Connector'),
           h(
             'select',
@@ -538,7 +589,7 @@ export default defineComponent({
               value: connector.value,
               onChange: (event: Event) => {
                 connector.value = (event.target as HTMLSelectElement).value
-                changed()
+                if (connector.value) applyPreset(preset.value)
               },
             },
             [
@@ -555,6 +606,21 @@ export default defineComponent({
               'and leaves the others exactly as they are.'
           ),
         ]),
+
+        h('fieldset', { class: 'grants__presets' }, [
+          h('legend', { class: 'grants__label' }, 'Starting policy'),
+          ...([
+            ['read-only', 'Read only', 'Low-risk operations only.'],
+            ['no-destructive', 'No destructive effects', 'Excludes delete and money effects published by this build.'],
+            ['custom', 'Custom', 'Edit every metadata bound yourself.'],
+          ] as const).map(([id, label, description]) => h('label', { class: ['grants__preset', preset.value === id ? 'grants__preset--active' : ''], key: id }, [
+            h('input', { type: 'radio', name: 'preset', value: id, checked: preset.value === id, onChange: () => applyPreset(id) }),
+            h('strong', null, label),
+            h('span', null, description),
+          ])),
+        ]),
+
+        h('div', { class: ['grants__custom', preset.value === 'custom' ? '' : 'grants__custom--preset'] }, [
 
         chooser(
           'max-risk',
@@ -575,6 +641,7 @@ export default defineComponent({
           'any',
           ['idempotent', 'conditional', 'not_idempotent']
         ),
+        ]),
 
         unknown.length > 0
           ? h('p', { class: 'grants__stale', 'data-grants': 'unknown-risks', role: 'alert' }, [
@@ -625,10 +692,8 @@ export default defineComponent({
       const state = props.grants
 
       if (state.status === 'loading') {
-        return h('p', { class: 'grants__note' }, [
-          'Reading what this tenant may run from ',
-          h('code', null, GRANTS_ENDPOINT),
-          '…',
+        return h('div', { class: 'connections__skeleton', 'aria-label': `Reading grants from ${GRANTS_ENDPOINT}` }, [
+          h('span', { class: 'skeleton skeleton--title' }), h('span', { class: 'skeleton' }),
         ])
       }
 
@@ -637,6 +702,7 @@ export default defineComponent({
           h('h3', { class: 'failure__title' }, 'What this tenant may run could not be read'),
           h('p', { class: 'failure__endpoint' }, ['Endpoint: ', h('code', null, state.failure.endpoint)]),
           h('p', { class: 'failure__message' }, failureSentence(state.failure)),
+          h('button', { type: 'button', class: 'failure__retry', onClick: () => emit('retry') }, 'Retry grants'),
         ])
       }
 
@@ -666,6 +732,7 @@ export default defineComponent({
       if (outcome.status === 'saved') {
         return h('p', { class: 'grants__saved', 'data-grants': 'saved', role: 'status' }, [
           'Saved. What is listed above is what the service answered with, not what this page sent.',
+          ' ', h('a', { href: fragmentPath('/invoke') }, 'Next: invoke an admitted operation.'),
         ])
       }
 

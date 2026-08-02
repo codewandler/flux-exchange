@@ -7,8 +7,8 @@
  *
  * THEY ARE IN THEIR OWN FILE for one reason: **every colour here goes through a token from
  * `tokens.css`**, and `the_shell_names_no_colour_of_its_own` in `test/shell.test.mjs` scans this
- * file to hold that. The carried components name no colour, this console has exactly one colour
- * vocabulary, and a second one would be a light-mode value baked into a page a reader might be
+ * file to hold that. The console has exactly one colour vocabulary, and a second one would be a
+ * light-mode value baked into a page a reader might be
  * looking at in the dark. A separate file is what makes that assertion precise rather than a scan
  * of everything.
  *
@@ -164,6 +164,14 @@
   padding: 0;
 }
 
+.rail__desktop-future {
+  display: contents;
+}
+
+.rail__future {
+  display: none;
+}
+
 .rail__entry {
   display: inline-flex;
   align-items: center;
@@ -267,6 +275,7 @@
   flex-wrap: wrap;
   gap: 10px;
   align-items: baseline;
+  justify-content: space-between;
 }
 
 .connection__name {
@@ -286,6 +295,65 @@
   margin-left: auto;
   font-size: 12px;
   color: var(--vp-c-text-3);
+}
+
+.connection__status {
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+  font-size: 12px;
+}
+
+.connection__summary,
+.connection__actions {
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.connection__actions {
+  display: flex;
+  gap: 16px;
+}
+
+.connection__details > summary,
+.connection__rotate > summary {
+  cursor: pointer;
+  color: var(--vp-c-brand-1);
+}
+
+.connection__rotate form {
+  display: grid;
+  gap: 8px;
+  min-width: 240px;
+  padding: 12px 0;
+}
+
+.connection__rotate input {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 5px;
+  background: var(--vp-c-bg);
+}
+
+.connection__rotated { color: var(--vp-c-brand-1); font-size: 13px; }
+
+@media (max-width: 640px) {
+  .shell__bar { align-items: flex-start; }
+  .shell__bar-end { width: 100%; justify-content: space-between; }
+  .shell__identity { flex-wrap: wrap; }
+  .rail { gap: 0; overflow-x: auto; flex-wrap: nowrap; }
+  .rail__entry { padding-inline: 9px; }
+  .rail__desktop-future { display: none; }
+  .rail__future { display: block; flex: 0 0 auto; padding: 7px 8px; }
+  .rail__future > summary { cursor: pointer; color: var(--vp-c-text-2); }
+  .rail__future-list { display: grid; position: absolute; z-index: 10; padding: 8px; border: 1px solid var(--vp-c-divider); border-radius: 8px; background: var(--vp-c-bg); }
+  .shell__inventory { display: none; }
+  .connection { padding-inline: 14px; }
+  .connection__credentials th, .connection__credentials td { padding: 7px; }
 }
 
 .connection__authority {

@@ -57,6 +57,10 @@ jobs:
         run: npm ci
         working-directory: web
 
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+        working-directory: web
+
       # The gate itself. `ignoreDeadLinks: false` means a dead internal link fails here rather than
       # publishing a broken page — so this step is the reason a broken site cannot reach the URL.
       - name: Build site

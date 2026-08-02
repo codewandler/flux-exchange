@@ -1,11 +1,7 @@
 <script setup lang="ts">
-// The console's root: the one place that knows where data comes from, and the one place that answers
-// the components' path question.
-//
-// Every component under `src/components/` takes what it renders as a prop. That is not an accident of
-// how they were written — it is the property that let them be lifted out of the flux-connectors docs
-// site without a rewrite, and `test/components.test.mjs` holds it. So everything is fetched *here*
-// and passed down, and no component under `src/components/` knows a network exists.
+// The console's root: the one place that knows where data comes from and which view receives it.
+// Catalogue views are exchange-owned, but they still receive completed data as props; the service
+// client decides loading, failure and readiness before any catalogue view renders.
 //
 // Each thing this file reads has three states and each has its own view, because collapsing any two
 // of them lies to the reader:
@@ -24,8 +20,7 @@
 // states the platform's surfaces instead, including the three that are not built, and `surfaces.mts`
 // is the single statement of which is which.
 
-import { computed, onMounted, provide, shallowRef, watch } from 'vue'
-import { PATH_RESOLVER } from './catalog.mts'
+import { computed, onMounted, shallowRef, watch } from 'vue'
 import { fragmentPath, useRoute } from './routing'
 import {
   CONNECTORS_ENDPOINT,
@@ -38,6 +33,7 @@ import {
   loadSession,
   previewGrant,
   replaceGrants,
+  rotateCredential,
   signOut,
   type CatalogueState,
   type ConnectionsState,
@@ -47,6 +43,7 @@ import {
   type GrantsState,
   type PreviewState,
   type ProposedGrant,
+  type RotationOutcome,
   type SessionState,
 } from './service.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
@@ -57,19 +54,15 @@ import { isDark, toggleTheme } from './theme'
 
 import AgentOnboarding from './AgentOnboarding.mts'
 import Agents from './Agents.mts'
+import CatalogueFinder from './CatalogueFinder.mts'
 import CatalogueFailure from './CatalogueFailure.mts'
+import CatalogueOperation from './CatalogueOperation.mts'
 import Connect from './Connect.mts'
 import Connections from './Connections.mts'
 import ConsoleShell from './ConsoleShell.mts'
 import Grants from './Grants.mts'
-import OperationFacts from './OperationFacts.mts'
-import CatalogExplorer from './components/CatalogExplorer.vue'
-import CatalogSnapshot from './components/CatalogSnapshot.vue'
-import OperationDetail from './components/OperationDetail.vue'
-
-// The components' one port. Their default is identity, which would be wrong here: this console is a
-// single static document, so `/operations/<id>` as a bare href would 404. See `src/routing.ts`.
-provide(PATH_RESOLVER, fragmentPath)
+import Invoke from './Invoke.mts'
+import Journey from './Journey.mts'
 
 // `shallowRef` rather than `ref`: each of these is replaced wholesale and never edited, so making
 // every operation in a catalogue deeply reactive would buy nothing and cost a walk of the document.
@@ -83,18 +76,33 @@ const route = useRoute()
 const principal = computed(() => (session.value.status === 'ready' ? session.value.principal : null))
 const signedIn = computed(() => principal.value !== null)
 
+async function reloadCatalogue() {
+  catalogue.value = { status: 'loading' }
+  catalogue.value = await loadCatalogue()
+}
+
+async function reloadSession() {
+  session.value = { status: 'loading' }
+  session.value = await loadSession()
+}
+
+async function reloadConnections() {
+  connections.value = { status: 'loading' }
+  connections.value = await loadConnections()
+}
+
 onMounted(async () => {
   // Both at once. The catalogue is anonymous and the session is not, so neither waits on the other
   // — and a slow identity provider must not delay the one view that never needed a principal.
-  void loadCatalogue().then((state) => (catalogue.value = state))
-  session.value = await loadSession()
+  void reloadCatalogue()
+  await reloadSession()
 })
 
 // Connections are tenant data and `/api/connections` requires a principal, so this is not asked
 // until one resolves. That is what keeps `ConnectionsState` at three states: a signed-out reader is
 // never shown a listing that failed, because none was attempted — the gate below is shown instead.
 watch(signedIn, async (resolved) => {
-  if (resolved) connections.value = await loadConnections()
+  if (resolved) await reloadConnections()
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -138,7 +146,18 @@ async function connectChosen(values: Record<string, string>) {
   outcome.value = await connect(connector, values)
   connecting.value = false
 
-  if (outcome.value.status === 'connected') connections.value = await loadConnections()
+  if (outcome.value.status === 'connected') await reloadConnections()
+}
+
+const rotating = shallowRef('')
+const rotationOutcome = shallowRef<RotationOutcome | null>(null)
+
+async function rotateHeld(connector: string, credential: string, value: string) {
+  if (rotating.value) return
+  rotating.value = `${connector}/${credential}`
+  rotationOutcome.value = await rotateCredential(connector, credential, value)
+  rotating.value = ''
+  if (rotationOutcome.value.status === 'rotated') await reloadConnections()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -174,9 +193,14 @@ let asked = 0
 watch(
   () => mayGrant(principal.value),
   async (may) => {
-    if (may) grants.value = await loadGrants()
+    if (may) await reloadGrants()
   }
 )
+
+async function reloadGrants() {
+  grants.value = { status: 'loading' }
+  grants.value = await loadGrants()
+}
 
 /** Ask what a proposed grant would admit. Reads the preview route; writes nothing. */
 async function previewProposed(proposed: ProposedGrant) {
@@ -221,7 +245,11 @@ const sessionFailure = computed(() =>
  * read, which leaves the form's chooser empty rather than short: a partial list of connectors would
  * read as the complete one.
  */
-const connectors = computed(() => ready.value?.catalog.providers.map((provider) => provider.id) ?? [])
+const connectors = computed(() => ready.value?.catalog.connectors.map((connector) => connector.id) ?? [])
+const catalogConnectors = computed(() => ready.value?.catalog.connectors ?? [])
+const readyConnections = computed(() => connections.value.status === 'ready' ? connections.value.connections : [])
+const connected = computed(() => readyConnections.value.map((connection) => connection.connector))
+const readyGrants = computed(() => grants.value.status === 'ready' ? grants.value.grants : [])
 
 /**
  * Every risk level and every effect the catalogue actually publishes.
@@ -232,16 +260,19 @@ const connectors = computed(() => ready.value?.catalog.providers.map((provider) 
  * recovered from a set of strings; this is what keeps that list from going stale in silence.
  */
 const catalogueRisks = computed(() => [
-  ...new Set(Object.values(ready.value?.served ?? {}).map((operation) => operation.risk)),
+  ...new Set(
+    (ready.value?.catalog.connectors ?? []).flatMap((connector) =>
+      connector.operations.map((operation) => operation.risk)
+    )
+  ),
 ])
 const catalogueEffects = computed(() => [
-  ...new Set(Object.values(ready.value?.served ?? {}).flatMap((operation) => operation.effects)),
+  ...new Set(
+    (ready.value?.catalog.connectors ?? []).flatMap((connector) =>
+      connector.operations.flatMap((operation) => operation.effects)
+    )
+  ),
 ])
-
-/** The served facts about the operation on screen, when the route names one this catalogue has. */
-const facts = computed(() =>
-  ready.value && route.value.name === 'operation' ? (ready.value.served[route.value.id] ?? null) : null
-)
 
 /** Which surface of the platform the reader is on, so the rail can say so. */
 const active = computed(() => surfaceOfRoute(route.value.name))
@@ -249,7 +280,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
 
 <template>
   <div class="console">
-    <ConsoleShell :session="session" :active="active" @sign-out="endSession">
+    <ConsoleShell :session="session" :active="active" @sign-out="endSession" @retry-session="reloadSession">
       <template #theme>
         <button type="button" :aria-pressed="isDark" @click="toggleTheme()">
           {{ isDark ? 'Light' : 'Dark' }}
@@ -298,7 +329,9 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         a fetch.
       -->
       <template v-else-if="route.name === 'connections'">
-        <p v-if="session.status === 'loading'" class="console__loading">Reading your session…</p>
+        <div v-if="session.status === 'loading'" class="connections__skeleton" aria-label="Reading session">
+          <span class="skeleton skeleton--title"></span><span class="skeleton"></span>
+        </div>
 
         <!--
           The listing first, then the form. A reader lands on what is wired up — X-34's decision,
@@ -307,15 +340,25 @@ const active = computed(() => surfaceOfRoute(route.value.name))
           service's answer rather than this page's memory of what was sent.
         -->
         <template v-else-if="signedIn">
-          <Connections :state="connections" />
+          <Journey :connections="readyConnections" :grants="readyGrants" active="connect" />
+          <Connections
+            :state="connections"
+            :rotating="rotating"
+            :rotation-outcome="rotationOutcome"
+            @retry="reloadConnections"
+            @rotate="rotateHeld"
+          />
           <Connect
             :connectors="connectors"
+            :catalog-connectors="catalogConnectors"
+            :connected="connected"
             :chosen="chosen"
             :declaration="declaration"
             :outcome="outcome"
             :busy="connecting"
             @choose="chooseConnector"
             @submit="connectChosen"
+            @retry="chooseConnector(chosen ?? '')"
           />
         </template>
 
@@ -330,6 +373,9 @@ const active = computed(() => surfaceOfRoute(route.value.name))
             <code>{{ sessionFailure.endpoint }}</code> did not answer, so this console cannot tell
             whether you are signed in. It is not saying that you are not.
           </p>
+          <button v-if="sessionFailure" type="button" class="failure__retry" @click="reloadSession">
+            Retry session
+          </button>
           <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
         </section>
       </template>
@@ -347,10 +393,15 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         cannot offer is something it states rather than something it silently drops.
       -->
       <template v-else-if="route.name === 'grants'">
+        <Journey :connections="readyConnections" :grants="readyGrants" active="grant" />
         <Grants
           :session="session"
           :grants="grants"
           :connectors="connectors"
+          :catalog-connectors="catalogConnectors"
+          :connected="connected"
+          :catalog="ready?.catalog"
+          :initial-connector="route.connector"
           :catalogue-risks="catalogueRisks"
           :catalogue-effects="catalogueEffects"
           :preview="preview"
@@ -358,30 +409,46 @@ const active = computed(() => surfaceOfRoute(route.value.name))
           :busy="granting"
           @preview="previewProposed"
           @save="saveGrants"
+          @retry="reloadGrants"
         />
+      </template>
+
+      <template v-else-if="route.name === 'invoke'">
+        <div v-if="catalogue.status === 'loading'" class="connections__skeleton" aria-label="Reading operation schemas">
+          <span class="skeleton skeleton--title"></span><span class="skeleton"></span><span class="skeleton"></span>
+        </div>
+        <CatalogueFailure v-else-if="failure" :failure="failure" @retry="reloadCatalogue" />
+        <template v-else-if="ready">
+          <Journey :connections="readyConnections" :grants="readyGrants" active="invoke" />
+          <Invoke
+            :catalog="ready.catalog"
+            :session="session"
+            :connections="readyConnections"
+            :grants="readyGrants"
+            :initial-operation="route.operation"
+            @retry-session="reloadSession"
+          />
+        </template>
       </template>
 
       <!-- Everything below is the catalogue: reference material, and no longer the front door. -->
 
       <!-- Named, so a request that never comes back is visibly a request and not a blank page. -->
-      <p v-else-if="catalogue.status === 'loading'" class="console__loading">
-        Reading the catalogue from <code>{{ CONNECTORS_ENDPOINT }}</code
-        >…
-      </p>
+      <div v-else-if="catalogue.status === 'loading'" class="connections__skeleton" aria-label="Reading catalogue">
+        <span class="skeleton skeleton--title"></span><span class="skeleton"></span><span class="skeleton"></span>
+      </div>
 
-      <CatalogueFailure v-else-if="failure" :failure="failure" />
+      <CatalogueFailure v-else-if="failure" :failure="failure" @retry="reloadCatalogue" />
 
       <template v-else-if="ready">
         <template v-if="route.name === 'explorer'">
           <h1>Catalogue</h1>
-          <CatalogSnapshot :catalog="ready.catalog" />
-          <CatalogExplorer :catalog="ready.catalog" />
+          <CatalogueFinder :catalog="ready.catalog" :initial-view="route.view" />
         </template>
 
         <template v-else-if="route.name === 'operation'">
           <h1><code>{{ route.id }}</code></h1>
-          <OperationDetail :catalog="ready.catalog" :id="route.id" />
-          <OperationFacts v-if="facts" :operation="facts" />
+          <CatalogueOperation :catalog="ready.catalog" :id="route.id" :return-view="route.returnView" />
         </template>
 
         <!--

@@ -18,9 +18,6 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { createSSRApp } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
@@ -33,15 +30,14 @@ import {
   operationsEndpoint,
 } from '../src/service.mts'
 import CatalogueFailure from '../src/CatalogueFailure.mts'
-import OperationFacts from '../src/OperationFacts.mts'
-
-const consoleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+import CatalogueOperation from '../src/CatalogueOperation.mts'
 
 /** One served operation, in the shape the catalogue routes publish. */
 const operation = (over = {}) => ({
   id: 'zendesk-ticket-show',
   service: 'default',
   description: 'Read one ticket.',
+  input_schema: { type: 'object', properties: {}, required: [] },
   risk: 'low',
   idempotency: 'idempotent',
   effects: ['network'],
@@ -67,7 +63,14 @@ function servedBy(document) {
   const fetchImpl = async (url) => {
     asked.push(url)
     if (url === CONNECTORS_ENDPOINT) {
-      return answer({ connectors: Object.keys(document).map((id) => ({ id, operation_count: document[id].length })) })
+      return answer({
+        connectors: Object.keys(document).map((id) => ({
+          id,
+          vendor: id === 'zendesk' ? 'Zendesk' : id === 'slack' ? 'Slack' : id,
+          description: `${id} connector`,
+          operation_count: document[id].length,
+        })),
+      })
     }
     for (const id of Object.keys(document)) {
       if (url === operationsEndpoint(id)) return answer({ connector: id, operations: document[id] })
@@ -77,6 +80,21 @@ function servedBy(document) {
 
   return { fetchImpl, asked }
 }
+
+test('connector_human_facts_survive_the_service_adapter', async () => {
+  const { fetchImpl } = servedBy({ zendesk: [operation()] })
+  const state = await loadCatalogue({ fetch: fetchImpl })
+
+  assert.equal(state.status, 'ready')
+  assert.deepEqual(
+    {
+      id: state.catalog.connectors[0].id,
+      vendor: state.catalog.connectors[0].vendor,
+      description: state.catalog.connectors[0].description,
+    },
+    { id: 'zendesk', vendor: 'Zendesk', description: 'zendesk connector' }
+  )
+})
 
 /** A service that is not there: `fetch` rejects, which is what an unreachable host looks like. */
 const unreachable = async () => {
@@ -108,7 +126,7 @@ test('zero_connectors_and_an_unreachable_service_do_not_look_the_same', async ()
   const stopped = await loadCatalogue({ fetch: unreachable })
 
   assert.equal(empty.status, 'ready')
-  assert.deepEqual(empty.catalog.providers, [], 'a service with nothing in it serves an empty catalogue')
+  assert.deepEqual(empty.catalog.connectors, [], 'a service with nothing in it serves an empty catalogue')
   assert.equal(empty.failure, undefined, 'an empty catalogue is not a failure')
 
   assert.notEqual(
@@ -153,7 +171,9 @@ test('an_unknown_connector_fails_the_load_and_names_its_endpoint', async () => {
   // empty one, so the load fails and says which endpoint refused.
   const fetchImpl = async (url) => {
     if (url === CONNECTORS_ENDPOINT) {
-      return new Response(JSON.stringify({ connectors: [{ id: 'zendesk', operation_count: 12 }] }), {
+      return new Response(JSON.stringify({
+        connectors: [{ id: 'zendesk', vendor: 'Zendesk', description: 'Support', operation_count: 12 }],
+      }), {
         status: 200,
       })
     }
@@ -177,7 +197,7 @@ test('a_body_the_console_cannot_read_is_a_failure_and_not_an_empty_catalogue', a
   assert.ok(failureMessage(state.failure).includes(CONNECTORS_ENDPOINT))
 })
 
-test('the_served_metadata_reaches_the_catalogue_the_components_render', async () => {
+test('the_served_metadata_reaches_the_exchange_owned_catalogue', async () => {
   const { fetchImpl } = servedBy({
     zendesk: [
       operation(),
@@ -187,119 +207,73 @@ test('the_served_metadata_reaches_the_catalogue_the_components_render', async ()
   const state = await loadCatalogue({ fetch: fetchImpl })
   assert.equal(state.status, 'ready')
 
-  const [provider] = state.catalog.providers
-  assert.equal(provider.id, 'zendesk')
+  const [connector] = state.catalog.connectors
+  assert.equal(connector.id, 'zendesk')
+  assert.equal(connector.vendor, 'Zendesk')
+  assert.equal(connector.description, 'zendesk connector')
   assert.deepEqual(
-    provider.operations.map((each) => [each.id, each.risk, each.idempotency, each.service]),
+    connector.operations.map((each) => [each.id, each.risk, each.idempotency, each.service]),
     [
       ['zendesk-ticket-show', 'low', 'idempotent', 'default'],
       ['zendesk-ticket-delete', 'destructive', 'conditional', 'tickets'],
     ]
   )
 
-  // The service names each operation's service, so the services a connector publishes are real
-  // catalogue data here and not a placeholder. The reserved `default` is not one of them.
-  assert.deepEqual(
-    provider.services.map((each) => [each.name, each.operation_count]),
-    [
-      ['default', 1],
-      ['tickets', 1],
-    ]
-  )
-
-  // Nothing the service does not publish is filled in with something that looks published.
-  const [first] = provider.operations
-  assert.equal(first.method, '')
-  assert.equal(first.path, '')
-  assert.deepEqual(first.parameters, [])
-  assert.deepEqual(first.credentials, [])
-  assert.equal(first.flux, '')
-
-  // And the page is told, once, that those blanks mean unpublished rather than absent.
-  const wide = first.status.issues.filter((issue) => issue.scope === 'catalog')
-  assert.ok(wide.length > 0, 'the reader must be told what this source does and does not publish')
-  assert.ok(
-    wide.some((issue) => issue.summary.includes('not published')),
-    `got: ${wide.map((issue) => issue.summary).join(' | ')}`
-  )
-
-  // `effects` and `admitted` have no home in the carried catalogue contract, so they are kept
-  // beside it rather than dropped — see `served` in `service.mts`.
-  assert.deepEqual(state.served['zendesk-ticket-show'].effects, ['network'])
-  assert.equal(state.served['zendesk-ticket-show'].effects_derived, true)
-  assert.equal(state.served['zendesk-ticket-show'].admitted, null)
-})
-
-test('an_unresolved_principal_is_stated_as_a_condition_of_the_whole_catalogue', async () => {
-  const { fetchImpl } = servedBy({ zendesk: [operation()] })
-  const state = await loadCatalogue({ fetch: fetchImpl })
-
-  const summaries = state.catalog.providers[0].operations[0].status.issues.map((issue) => issue.summary)
-  assert.ok(
-    summaries.some((summary) => /principal/i.test(summary)),
-    `a catalogue in which nothing is admitted or refused says why; got: ${summaries.join(' | ')}`
-  )
-  assert.ok(
-    !summaries.some((summary) => /\bdenied\b|\brefused\b/i.test(summary)),
-    'an unresolved principal is not a refusal'
-  )
+  const [first] = connector.operations
+  assert.deepEqual(first.effects, ['network'])
+  assert.equal(first.effectsDerived, true)
+  assert.equal(first.admitted, null)
+  assert.equal(first.method, undefined, 'an unpublished method must not become a blank visible fact')
+  assert.equal(first.path, undefined, 'an unpublished path must not become a blank visible fact')
 })
 
 test('derived_effects_are_rendered_as_inferred_and_never_as_declared', async () => {
-  const derived = await renderToString(
-    createSSRApp(OperationFacts, { operation: operation({ effects_derived: true }) })
-  )
+  const derivedState = await loadCatalogue({
+    fetch: servedBy({ zendesk: [operation({ effects_derived: true })] }).fetchImpl,
+  })
+  const derived = await renderToString(createSSRApp(CatalogueOperation, {
+    catalog: derivedState.catalog,
+    id: 'zendesk-ticket-show',
+  }))
   assert.match(derived, /network/)
   assert.match(derived, /inferred/i, 'a derived effect must be presented as an inference')
   assert.doesNotMatch(derived, /declared by the connector/i)
 
-  const declared = await renderToString(
-    createSSRApp(OperationFacts, { operation: operation({ effects_derived: false }) })
-  )
+  const declaredState = await loadCatalogue({
+    fetch: servedBy({ zendesk: [operation({ effects_derived: false })] }).fetchImpl,
+  })
+  const declared = await renderToString(createSSRApp(CatalogueOperation, {
+    catalog: declaredState.catalog,
+    id: 'zendesk-ticket-show',
+  }))
   assert.match(declared, /declared by the connector/i)
 })
 
 test('admitted_null_is_a_third_state_and_never_reads_as_denied', async () => {
-  const unresolved = await renderToString(
-    createSSRApp(OperationFacts, { operation: operation({ admitted: null }) })
-  )
-  assert.match(unresolved, /no principal/i, 'null must say why there is no answer')
+  const rendered = async (admitted) => {
+    const state = await loadCatalogue({
+      fetch: servedBy({ zendesk: [operation({ admitted })] }).fetchImpl,
+    })
+    return renderToString(createSSRApp(CatalogueOperation, {
+      catalog: state.catalog,
+      id: 'zendesk-ticket-show',
+    }))
+  }
+
+  const unresolved = await rendered(null)
+  assert.match(unresolved, /not evaluated/i, 'null must say there is no answer')
   assert.doesNotMatch(
     unresolved,
     /\bdenied\b|\brefused\b|\bnot admitted\b/i,
     'a null admission is not a refusal — there is no principal to refuse'
   )
 
-  const refused = await renderToString(
-    createSSRApp(OperationFacts, { operation: operation({ admitted: false }) })
-  )
+  const refused = await rendered(false)
   assert.match(refused, /refused/i, 'false is a refusal and must read as one')
 
-  const admitted = await renderToString(
-    createSSRApp(OperationFacts, { operation: operation({ admitted: true }) })
-  )
+  const admitted = await rendered(true)
   assert.match(admitted, /admitted/i)
 })
-
-// ---------------------------------------------------------------------------------------------
-// What the explorer says about invocation (X-53).
-//
-// `POST /api/operations/{operation}/invoke` has been in the published surface since v0.7.0, and this
-// adapter went on setting `works: false` for every operation, so the cards badged operations this
-// service runs as "Not live yet". These two tests are the pair the story asks for: the badge is
-// true, and it is true **without** the page learning anything about a tenant.
-// ---------------------------------------------------------------------------------------------
-
-/**
- * The count the cards badge from.
- *
- * `ProviderCard.vue` and `CatalogSnapshot.vue` both count a provider's operations whose
- * `status.works` is true and read "Not live yet" at zero. They are carried single-file components
- * and there is no bundler in this test run — nothing here can import a `.vue` — so the rule is
- * evaluated over the same props they are handed, and `the_cards_still_badge_from_works` below reads
- * their sources so this cannot go on guarding a rule they have stopped using.
- */
-const liveOperations = (provider) => provider.operations.filter((each) => each.status.works).length
 
 /** The two operations of one connector, as the catalogue routes publish them. */
 const zendesk = () => [
@@ -312,56 +286,6 @@ const zendesk = () => [
   }),
 ]
 
-test('an_operation_this_service_runs_is_not_badged_as_unrunnable', async () => {
-  const { fetchImpl } = servedBy({ zendesk: zendesk() })
-  const state = await loadCatalogue({ fetch: fetchImpl })
-  assert.equal(state.status, 'ready')
-
-  const [provider] = state.catalog.providers
-  assert.ok(provider.operations.length > 0, 'an empty connector would make every assertion vacuous')
-
-  for (const each of provider.operations) {
-    assert.equal(
-      each.status.works,
-      true,
-      `\`${each.id}\` is served by a host that publishes POST /api/operations/{operation}/invoke and ` +
-        'is marked as something this service cannot run'
-    )
-  }
-
-  // The badge itself: zero live operations is the "Not live yet" branch, and everything live is
-  // "Live". This is the sentence the story exists to stop the page saying.
-  assert.notEqual(liveOperations(provider), 0, 'the card reads "Not live yet" on operations this service runs')
-  assert.equal(
-    liveOperations(provider),
-    provider.operation_count,
-    'a provider whose operations this service all runs must not be badged as partly live'
-  )
-
-  // And nothing was moved into the operations to buy it: the two catalogue-wide conditions are the
-  // reader's context, not defects, so no operation owns one.
-  const owned = provider.operations.flatMap((each) =>
-    each.status.issues.filter((issue) => issue.scope === 'operation')
-  )
-  assert.deepEqual(owned, [], 'no operation owns a defect, so none may be badged with one')
-})
-
-test('the_cards_still_badge_from_works', () => {
-  // The guard on the guard, in the shape `components.test.mjs` uses. The rule above is a copy of one
-  // that lives in components this repository may not edit (`AGENTS.md` § The console); if they stop
-  // reading `works`, or stop rendering that label, the copy is guarding nothing and this says so.
-  for (const file of ['ProviderCard.vue', 'CatalogSnapshot.vue']) {
-    const source = readFileSync(path.join(consoleRoot, 'src', 'components', file), 'utf-8')
-    assert.ok(
-      source.includes('status.works'),
-      `${file} no longer reads \`status.works\`, so the rule this file evaluates is not the one it renders`
-    )
-    assert.ok(
-      source.includes('Not live yet'),
-      `${file} no longer renders "Not live yet"; re-read what it badges before trusting the test above`
-    )
-  }
-})
 
 /**
  * The same host, serving the same catalogue, holding one tenant's state.

@@ -16,7 +16,7 @@
 // the difference rather than trusting anyone to hold it.
 //
 // **Why a render function rather than a single-file component.** The same reason as
-// `CatalogueFailure.mts` and `OperationFacts.mts`: the claims above are only worth anything if a
+// `CatalogueFailure.mts`: the claims above are only worth anything if a
 // test renders them, and `vue/server-renderer` renders a render function under plain `node --test`
 // with no bundler and no new dependency. An SFC could only have been checked by grepping a
 // template, which is not evidence that anything renders.
@@ -104,7 +104,7 @@ function inventory(absent: readonly Surface[]): VNode {
 }
 
 /** Who the service says you are, or the honest absence of an answer. */
-function identity(session: SessionState, emit: (event: 'signOut') => void): VNode {
+function identity(session: SessionState, emit: (event: 'signOut' | 'retrySession') => void): VNode {
   const surface = SURFACES.find((candidate) => candidate.id === IDENTITY)
   const box = (state: string, children: unknown[]) =>
     h(
@@ -137,6 +137,7 @@ function identity(session: SessionState, emit: (event: 'signOut') => void): VNod
         h('code', null, session.failure.endpoint),
         ' did not answer.',
       ]),
+      h('button', { class: 'shell__signout', type: 'button', onClick: () => emit('retrySession') }, 'Retry'),
       h('a', { class: 'shell__signin', href: SIGNIN_ENDPOINT, 'data-shell': 'signin' }, 'Sign in'),
     ])
   }
@@ -179,10 +180,11 @@ export default defineComponent({
     /** The surface the reader is on, or `null` for a route that belongs to none. */
     active: { type: String as PropType<string | null>, default: null },
   },
-  emits: ['signOut'],
+  emits: ['signOut', 'retrySession'],
   setup(props, { emit, slots }) {
     const rail = SURFACES.filter((surface) => surface.id !== IDENTITY)
     const absent = rail.filter((surface) => !surface.built)
+    const built = rail.filter((surface) => surface.built)
 
     return () =>
       h('header', { class: 'shell', 'data-shell': 'head' }, [
@@ -207,7 +209,14 @@ export default defineComponent({
         h(
           'nav',
           { class: 'rail', 'data-shell': 'surfaces', 'aria-label': 'Platform surfaces' },
-          rail.map((surface) => entry(surface, props.active))
+          [
+            ...built.map((surface) => entry(surface, props.active)),
+            h('span', { class: 'rail__desktop-future' }, absent.map((surface) => entry(surface, props.active))),
+            absent.length ? h('details', { class: 'rail__future' }, [
+              h('summary', null, `Future (${absent.length})`),
+              h('div', { class: 'rail__future-list' }, absent.map((surface) => entry(surface, props.active))),
+            ]) : null,
+          ]
         ),
 
         absent.length ? inventory(absent) : null,

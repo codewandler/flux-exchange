@@ -73,7 +73,7 @@ use exchange_host::{InvokeRefusal, Principal, Sent};
 use serde_json::{json, Value};
 use tracing::warn;
 
-use super::{Access, Module, Route};
+use super::{rate_limited, Access, Module, Route};
 use crate::state::AppState;
 
 /// The setting that names the grant store, quoted when no invoker is bound.
@@ -119,9 +119,16 @@ async fn run(
     let Some(invoker) = state.invoker() else {
         return no_invoker();
     };
+    let _claim = match state.begin_invocation() {
+        Ok(claim) => claim,
+        Err(refusal) => return rate_limited(refusal),
+    };
 
     match invoker.invoke(&principal, &operation, params).await {
-        Ok(invocation) => (StatusCode::OK, Json(invocation)).into_response(),
+        Ok(invocation) => {
+            crate::audit::invocation_completed(&principal, &operation);
+            (StatusCode::OK, Json(invocation)).into_response()
+        }
         Err(refusal) => {
             // To the log at `warn` when this host could not be sure the request stayed home. That
             // is the one class an operator has to be able to find afterwards, because it is the one
@@ -244,6 +251,7 @@ mod tests {
     use tower::Service;
 
     use crate::dev_identity::DevIdentity;
+    use crate::traffic::Traffic;
 
     /// The development roster this module's tests sign in through.
     const ROSTER: &str = "agent:triage-bot@acme";
@@ -418,6 +426,30 @@ mod tests {
         assert_eq!(body["refusal"], "unknown_operation");
         assert_eq!(body["sent"], "no");
         assert_eq!(body["retryable"], false);
+    }
+
+    /// The invocation rate bound is applied only after identity and an invoker exist, and refuses a
+    /// second attempt before operation dispatch.
+    #[tokio::test]
+    async fn invocations_are_rate_limited_before_dispatch() {
+        let state = identified()
+            .with_invoker(invoker_holding(all_of_github()))
+            .with_traffic(Traffic::for_test(
+                1,
+                1,
+                1,
+                std::time::Duration::from_secs(60),
+            ));
+        let path = "/api/operations/not-in-the-catalogue/invoke";
+
+        assert_eq!(
+            post_json(state.clone(), path, json!({})).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post_json(state, path, json!({})).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
     }
 
     /// A tenant this host serves has connected nothing, so the operation refuses **by address** —

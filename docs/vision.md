@@ -138,12 +138,13 @@ about one can never be misread as a sentence about the other.
 flux's ecosystem design lists both as open and hands them here. Answering them is this document's
 job, so they are answered rather than left hanging:
 
-- **Does this console reuse flux-connectors' explorer components?** **Yes, and it already does.**
-  Fifteen components are carried in `console/src/components/`, importing only Vue, a sibling
-  component and `catalog.mts` — an invariant enforced by `console/test/components.test.mjs`, which is
-  itself guarded by a scanner self-test. They take everything they render as props, which is the
-  property that let them be lifted without a rewrite. **They are not modified here**; a change one
-  needs is a finding to report upstream, where the component is shared.
+- **Does this console reuse flux-connectors' explorer components?** **No.** X-86 retired that copied
+  surface after the two hosts diverged in exactly the way the boundary predicted: the documentation
+  site publishes request paths, generated Flux, hosts, credentials and inbound declarations, while
+  this service deliberately publishes a thinner anonymous catalogue. Rendering the richer UI here
+  produced blank facts, and changing it required synchronising two repositories. The exchange now
+  owns one finder over what its own API actually serves. The useful seams survived — data still
+  arrives as props and colour still comes from one token layer — without shared source ownership.
 - **Does `subscribe` ship before or after multi-tenant sign-in?** **After, and sign-in has now
   landed.** The inbound confused-deputy argument is sound only once a principal exists; until it did,
   a loopback bind stood in for one exactly as it does for `invoke`. Complete OIDC sign-in shipped in

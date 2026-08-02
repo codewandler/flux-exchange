@@ -1,19 +1,12 @@
-// The console's half of the components' one port.
-//
-// `src/catalog.mts` answers *which page* — `/operations/<id>`, `/core/<section>/<name>` — and that
-// answer is the catalogue's, identical wherever the components are mounted. Turning it into an href
-// a browser can follow is the **host's** answer, and this file is where this host gives it.
-//
-// The default the components fall back to is identity, which is honest but wrong here: this console
-// is a single HTML document with no server to route `/operations/<id>` for it, so an identity href
-// would 404. So the resolver is the fragment router below, and the router is real — every path the
-// catalogue can produce resolves to a view this app actually renders.
+// The console's fragment router, including the catalogue finder's shareable view.
 
-import type { PathResolver } from './catalog.mts'
+import { decodeSearchView, encodeSearchView, type SearchView } from './catalog.mts'
 import { GRANTS_PATH } from './granting.mts'
 import { AGENTS_PATH } from './minting.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { nextTick, ref, type Ref } from 'vue'
+
+export type PathResolver = (path: string) => string
 
 /**
  * Where the console is served from, with exactly one trailing slash.
@@ -31,16 +24,23 @@ const BASE = import.meta.env?.BASE_URL ?? '/'
  * dev-server fallback plus a host rewrite) to hand every URL back to `index.html`, and there is no
  * server here to configure. The fragment is honest about that — the whole app is at `BASE`.
  *
- * A catalogue path may already carry an in-page anchor — `CatalogSnapshot` and `OperationDetail`
- * both emit `/explorer#<provider>`, and `ProviderCard` renders the matching `id`. On a path router
- * that is an ordinary URL. Here it would be a *second* `#`, and a URL has one fragment: the first
- * one swallows the rest, so `#/explorer#airtable` names the path `/explorer#airtable`, which matches
- * no route. Encoding it keeps the delimiter unambiguous, and [`parseRoute`] splits it back off.
- *
- * The components are right to emit it and must not learn about this; `PathResolver` is exactly the
- * seam where a host says how its own URLs are spelled.
+ * A console path may carry an in-page anchor. On a path router that is an ordinary URL; here it
+ * would be a second `#`, and a URL has one fragment. Encoding it keeps the delimiter unambiguous,
+ * and [`parseRoute`] splits it back off.
  */
 export const fragmentPath: PathResolver = (path) => `${BASE}#${path.replace(/#/g, '%23')}`
+
+/** The route-local address of one finder view. */
+export function explorerPath(view: SearchView): string {
+  const search = encodeSearchView(view)
+  return `/explorer${search ? `?${search}` : ''}`
+}
+
+/** Publish finder state without making every keystroke a Back-button entry. */
+export function replaceExplorerView(view: SearchView): void {
+  if (typeof window === 'undefined') return
+  window.history.replaceState(window.history.state, '', fragmentPath(explorerPath(view)))
+}
 
 /**
  * One of the views this console renders, already resolved against the fragment.
@@ -54,9 +54,10 @@ export type Route =
   | { name: 'connect'; anchor?: string }
   | { name: 'agents'; anchor?: string }
   | { name: 'connections'; anchor?: string }
-  | { name: 'grants'; anchor?: string }
-  | { name: 'explorer'; anchor?: string }
-  | { name: 'operation'; id: string; anchor?: string }
+  | { name: 'grants'; connector?: string; anchor?: string }
+  | { name: 'invoke'; operation: string; anchor?: string }
+  | { name: 'explorer'; view: SearchView; anchor?: string }
+  | { name: 'operation'; id: string; returnView?: SearchView; anchor?: string }
   | { name: 'core'; kind: string; entry: string; anchor?: string }
   | { name: 'unknown'; path: string }
 
@@ -78,8 +79,12 @@ export function parseRoute(hash: string): Route {
   // Split on the *first* `#` only: the anchor is an element id and cannot contain one, so anything
   // after a second `#` is part of the id and stays there.
   const split = decoded.indexOf('#')
-  const path = split === -1 ? decoded : decoded.slice(0, split)
+  const addressed = split === -1 ? decoded : decoded.slice(0, split)
   const anchor = split === -1 ? undefined : decoded.slice(split + 1) || undefined
+
+  const queryAt = addressed.indexOf('?')
+  const path = queryAt === -1 ? addressed : addressed.slice(0, queryAt)
+  const search = queryAt === -1 ? '' : addressed.slice(queryAt + 1)
 
   // Spread rather than always setting the key: a route with no anchor should not carry
   // `anchor: undefined`, which reads as "asked for nothing" and compares unequal to a bare route.
@@ -87,9 +92,8 @@ export function parseRoute(hash: string): Route {
 
   // `/` is **connections**, not the catalogue. The console's two jobs are wiring things up and
   // seeing what happened; the catalogue is reference material about what this build could run, and
-  // landing a reader there is what made this console read as a connector browser. The explorer keeps
-  // its own path — `/explorer` is the one the carried components emit — so every link they produce
-  // still resolves exactly as it did.
+  // landing a reader there is what made this console read as a connector browser. The finder keeps
+  // its own path so its tab and query can be copied, restored and navigated independently.
   if (path === '/' || path === '/connections') return { name: 'connections', ...at }
 
   // What this tenant may run. A surface of the platform rather than a footer reference, so unlike
@@ -97,7 +101,15 @@ export function parseRoute(hash: string): Route {
   // editing a grant is working, and needs to see where they are. A bare path with no segment: the
   // tenant comes from the resolved principal, and a grant is addressed by the connector *inside*
   // the body, which is the same shape `/api/grants` has for the same reason.
-  if (path === GRANTS_PATH) return { name: 'grants', ...at }
+  if (path === GRANTS_PATH) {
+    const connector = new URLSearchParams(search).get('connector')?.trim()
+    return { name: 'grants', ...(connector ? { connector } : {}), ...at }
+  }
+
+  if (path === '/invoke') {
+    const operation = new URLSearchParams(search).get('operation')?.trim() ?? ''
+    return { name: 'invoke', operation, ...at }
+  }
 
   // How to connect an agent. Deliberately not a surface of the platform — it is a reference an agent
   // author reaches for once rather than a place an operator works, so it is reached from the footer
@@ -112,10 +124,24 @@ export function parseRoute(hash: string): Route {
   // go. See `minting.mts` for why the name is `/agents`.
   if (path === AGENTS_PATH) return { name: 'agents', ...at }
 
-  if (path === '/explorer') return { name: 'explorer', ...at }
+  if (path === '/explorer') {
+    // Before X-86 provider links were anchors into the four-column card grid. The grid is gone, so
+    // treating that anchor as the connector query it always meant preserves the destination rather
+    // than leaving a link that scrolls nowhere.
+    const view = anchor
+      ? { kind: 'connectors' as const, query: anchor }
+      : decodeSearchView(search)
+    return { name: 'explorer', view }
+  }
 
   const operation = /^\/operations\/(.+)$/.exec(path)
-  if (operation) return { name: 'operation', id: operation[1], ...at }
+  if (operation) {
+    const params = new URLSearchParams(search)
+    const returnView = params.has('return_kind') || params.has('return_q')
+      ? decodeSearchView(`kind=${encodeURIComponent(params.get('return_kind') ?? '')}&q=${encodeURIComponent(params.get('return_q') ?? '')}`)
+      : undefined
+    return { name: 'operation', id: operation[1], ...(returnView ? { returnView } : {}), ...at }
+  }
 
   const core = /^\/core\/([^/]+)\/(.+)$/.exec(path)
   if (core) return { name: 'core', kind: core[1], entry: core[2], ...at }
@@ -125,14 +151,23 @@ export function parseRoute(hash: string): Route {
   return { name: 'unknown', path }
 }
 
+/** Carry the old document-level `?q=` into X-86's route-local finder address. */
+export function migrateLegacySearch(route: Route, search: string): Route {
+  if (route.name !== 'explorer' || route.view.query) return route
+  const query = new URLSearchParams(search.replace(/^\?/, '')).get('q')?.trim() ?? ''
+  return query ? { name: 'explorer', view: { ...route.view, query } } : route
+}
+
 /**
  * The current route, kept in step with the address bar.
  *
- * `hashchange` only — the fragment is written by following a link, never by this app, so there is
- * nothing here that could push a history entry per keystroke the way `OperationList` warns about.
+ * Finder edits use `replaceState`, while following a link emits `hashchange`. This keeps typing out
+ * of the Back stack and still makes browser navigation authoritative.
  */
 export function useRoute(): Ref<Route> {
-  const route = ref<Route>(parseRoute(window.location.hash))
+  const initial = migrateLegacySearch(parseRoute(window.location.hash), window.location.search)
+  if (initial.name === 'explorer' && window.location.search) replaceExplorerView(initial.view)
+  const route = ref<Route>(initial)
   window.addEventListener('hashchange', () => {
     route.value = parseRoute(window.location.hash)
     scrollToRoute(route.value)

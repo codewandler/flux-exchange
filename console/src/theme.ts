@@ -1,7 +1,7 @@
-// Light and dark, the way the carried components expect it.
+// Light and dark through the console's shared token vocabulary.
 //
-// `tokens.css` mirrors VitePress's palette, and the components' own dark rules are written against
-// `.dark` on the root element — so that is where the class goes. The preference is the reader's
+// `tokens.css` mirrors VitePress's palette, and `.dark` on the root selects the alternate values.
+// The preference is the reader's
 // first, the operating system's second; a stored choice survives a reload and an unstored one keeps
 // following the OS, including when the OS changes while the page is open.
 

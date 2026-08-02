@@ -1,10 +1,8 @@
 // The flux-exchange service, as this console reads it.
 //
-// This is the **only** module that knows a network exists. The fifteen components under
-// `src/components/` take everything they render as a prop and resolve paths through an injected
-// `PathResolver`; that is what makes them carryable, `test/components.test.mjs` holds it, and nothing
-// here is allowed to change it. So the fetching lives at the app layer, and what this file hands the
-// app is the same `Catalog` the components were already given — see `adapt` below.
+// This is the **only** module that knows a network exists. Catalogue views receive the completed
+// document from `App.vue`; they never fetch for themselves, so an unreachable service and an empty
+// catalogue remain different states all the way to the page.
 //
 // Two properties are the point of the file:
 //
@@ -12,17 +10,11 @@
 //      catalogue or a failure, never a catalogue that happens to be empty because nothing answered.
 //      "Zero connectors" and "the service is not there" are different facts and the reader is owed
 //      the difference.
-//   2. **Nothing is filled in.** The served catalogue is a *thinner* document than the one the
-//      carried components were written against: it publishes each operation's declared metadata and
-//      no request shape, no credentials, no hosts and no Flux source. Those fields are mapped to the
-//      contract's own empty values and the reader is told, once, that an empty field here means
-//      unpublished by this source rather than absent from the connector.
+//   2. **Nothing is filled in.** The exchange-owned catalogue type has fields only for facts this
+//      API publishes. An unpublished request path or host is impossible to render rather than a
+//      plausible empty string.
 
-import type { Catalog, Issue, Operation, Provider, Service, Status } from './catalog.mts'
-// The one thing this file reads that is not the served document: whether this build's service
-// serves the invocation route. It is a statement about the API surface — no tenant, no principal,
-// no session — and `adapt` below is where the whole argument for reading it here lives.
-import { SURFACES } from './surfaces.mts'
+import type { Catalog, Connector, Operation } from './catalog.mts'
 
 // ---------------------------------------------------------------------------------------------
 // The endpoints.
@@ -98,41 +90,44 @@ export function credentialEndpoint(connector: string, credential: string): strin
   return `${connectionEndpoint(connector)}/credentials/${encodeURIComponent(credential)}`
 }
 
+/** Where one catalogue operation is invoked with its declared parameter object. */
+export function invocationEndpoint(operation: string): string {
+  return `/api/operations/${encodeURIComponent(operation)}/invoke`
+}
+
 // ---------------------------------------------------------------------------------------------
 // The served contract.
 //
 // Typed as the service publishes it and not as this console wishes it were: `risk` and
-// `idempotency` are the vocabularies below, but they are typed as `string` where they enter the
-// carried contract, which is also `string` — a value from a newer service than this bundle must
-// render as itself rather than fail a type guard.
+// `idempotency` remain strings at this anonymous boundary, so a value from a newer service than
+// this bundle can render as itself rather than fail a type guard.
 // ---------------------------------------------------------------------------------------------
 
 /** One entry of `GET /api/catalogue/connectors`. */
 export interface ServedConnector {
   id: string
+  vendor: string
+  description: string
   operation_count: number
 }
 
 /**
  * One entry of `GET /api/catalogue/connectors/{id}/operations`.
  *
- * `effects_derived` and `admitted` are the two fields with no home in the carried catalogue
- * contract, and both carry a distinction that is destroyed by dropping it:
+ * `effects_derived` and `admitted` both carry a distinction that is destroyed by dropping it:
  *
  *   - `effects_derived: true` means the service **inferred** the effects rather than reading them
  *     from a declaration. An inference shown as a declaration is a claim nobody made.
  *   - `admitted` is three-valued. `null` is not `false`: it means the question was never asked, so
  *     the catalogue is saying what exists rather than what the reader may call. `null` is what every
- *     operation carries today, and **not because nobody can sign in** — that sentence was true when
- *     this file was written and stopped being true when OIDC landed, and X-57 made a locally
- *     provisioned host say so as well. It is `null` because nothing in this build decides what a
- *     principal may run: there is no grant model, so the answer would be the same for a signed-in
- *     reader. X-13 is the story that gives this field its other two values.
+ *     operation carries today. The grant model gates invocation, but this route is anonymous and
+ *     intentionally does not evaluate a principal's grants.
  */
 export interface ServedOperation {
   id: string
   service: string
   description: string
+  input_schema: Record<string, unknown>
   risk: string
   idempotency: string
   effects: string[]
@@ -220,19 +215,7 @@ export function failureMessage(failure: CatalogueFailure): string {
  */
 export type CatalogueState =
   | { status: 'loading' }
-  | {
-      status: 'ready'
-      catalog: Catalog
-      /**
-       * The served operations by id, kept beside the adapted catalogue.
-       *
-       * `effects` and `admitted` have no field in the carried contract and this console will not add
-       * one — `catalog.mts` is shared with flux-connectors. Dropping them instead would throw away
-       * exactly the metadata a grant is written over, so they are kept here and rendered by the app
-       * layer (`OperationFacts.mts`).
-       */
-      served: Record<string, ServedOperation>
-    }
+  | { status: 'ready'; catalog: Catalog }
   | { status: 'failed'; failure: CatalogueFailure }
 
 /** How to reach the service. Both have honest defaults; tests supply their own `fetch`. */
@@ -385,8 +368,14 @@ function readConnectors(body: unknown): ServedConnector[] | string {
   const connectors: ServedConnector[] = []
   for (const entry of body.connectors) {
     if (!isObject(entry) || typeof entry.id !== 'string') return 'a connector entry has no `id`'
+    if (typeof entry.vendor !== 'string') return `connector \`${entry.id}\` has no \`vendor\``
+    if (typeof entry.description !== 'string') {
+      return `connector \`${entry.id}\` has no \`description\``
+    }
     connectors.push({
       id: entry.id,
+      vendor: entry.vendor,
+      description: entry.description,
       operation_count: typeof entry.operation_count === 'number' ? entry.operation_count : 0,
     })
   }
@@ -399,10 +388,12 @@ function readOperations(body: unknown): ServedOperation[] | string {
   const operations: ServedOperation[] = []
   for (const entry of body.operations) {
     if (!isObject(entry) || typeof entry.id !== 'string') return 'an operation entry has no `id`'
+    if (!isObject(entry.input_schema)) return `operation \`${entry.id}\` has no \`input_schema\``
     operations.push({
       id: entry.id,
       service: typeof entry.service === 'string' ? entry.service : RESERVED_SERVICE,
       description: typeof entry.description === 'string' ? entry.description : '',
+      input_schema: entry.input_schema,
       risk: typeof entry.risk === 'string' ? entry.risk : '',
       idempotency: typeof entry.idempotency === 'string' ? entry.idempotency : '',
       effects: Array.isArray(entry.effects) ? entry.effects.filter((e) => typeof e === 'string') : [],
@@ -463,15 +454,12 @@ export async function loadCatalogue(options: LoadOptions = {}): Promise<Catalogu
   )
 
   const pairs: ServedPair[] = []
-  const served: Record<string, ServedOperation> = {}
-
   for (const answer of answers) {
     if (!('connector' in answer)) return { status: 'failed', failure: answer }
-    for (const operation of answer.operations) served[operation.id] = operation
     pairs.push(answer)
   }
 
-  return { status: 'ready', catalog: adapt(pairs), served }
+  return { status: 'ready', catalog: adapt(pairs) }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -889,6 +877,118 @@ export async function connect(
   }
 
   return { status: 'connected', connection }
+}
+
+/** What became of an atomic credential replacement. */
+export type RotationOutcome =
+  | { status: 'rotated'; connection: Connection }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/** Replace one held credential without ever removing the connection around it. */
+export async function rotateCredential(
+  connector: string,
+  credential: string,
+  value: string,
+  options: LoadOptions = {}
+): Promise<RotationOutcome> {
+  const endpoint = credentialEndpoint(connector, credential)
+  const answered = await read(endpoint, options, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ value }),
+  })
+  if (!answered.ok) {
+    const error = serviceError(answered.body)
+    if (error !== null && answered.failure.status !== null) {
+      return { status: 'refused', refusal: { endpoint, status: answered.failure.status, error } }
+    }
+    return { status: 'failed', failure: answered.failure }
+  }
+  const connection = readConnection(answered.body)
+  return typeof connection === 'string'
+    ? { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 200, detail: connection } }
+    : { status: 'rotated', connection }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Invocation: the body is the operation's parameter object and nothing else.
+// ---------------------------------------------------------------------------------------------
+
+export interface InvocationResult {
+  operation: string
+  content: string
+  view: string | null
+  isError: boolean
+}
+
+export interface InvocationRefusal {
+  endpoint: string
+  status: number
+  refusal: string
+  operation: string
+  sent: 'no' | 'maybe' | 'unknown'
+  retryable: boolean
+  message: string
+  supplyAt: string | null
+}
+
+export type InvokeOutcome =
+  | { status: 'invoked'; result: InvocationResult }
+  | { status: 'refused'; refusal: InvocationRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/** Invoke one catalogue operation, preserving the service's sent/retryable distinction. */
+export async function invokeOperation(
+  operation: string,
+  params: Record<string, unknown>,
+  options: LoadOptions = {}
+): Promise<InvokeOutcome> {
+  const endpoint = invocationEndpoint(operation)
+  const answered = await read(endpoint, options, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(params),
+  })
+  if (!answered.ok) {
+    if (isObject(answered.body) && answered.failure.status !== null) {
+      return {
+        status: 'refused',
+        refusal: {
+          endpoint,
+          status: answered.failure.status,
+          refusal: typeof answered.body.refusal === 'string' ? answered.body.refusal : 'refused',
+          operation: typeof answered.body.operation === 'string' ? answered.body.operation : operation,
+          sent: answered.body.sent === 'no' || answered.body.sent === 'maybe' ? answered.body.sent : 'unknown',
+          retryable: answered.body.retryable === true,
+          message: typeof answered.body.message === 'string'
+            ? answered.body.message
+            : serviceError(answered.body) ?? 'the service refused this invocation',
+          supplyAt: typeof answered.body.supply_at === 'string' ? answered.body.supply_at : null,
+        },
+      }
+    }
+    return { status: 'failed', failure: answered.failure }
+  }
+  if (
+    !isObject(answered.body) ||
+    typeof answered.body.operation !== 'string' ||
+    typeof answered.body.content !== 'string'
+  ) {
+    return {
+      status: 'failed',
+      failure: { kind: 'unreadable', endpoint, status: 200, detail: 'the invocation result has no operation or content' },
+    }
+  }
+  return {
+    status: 'invoked',
+    result: {
+      operation: answered.body.operation,
+      content: answered.body.content,
+      view: typeof answered.body.view === 'string' ? answered.body.view : null,
+      isError: answered.body.is_error === true,
+    },
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1412,211 +1512,35 @@ export async function mintAgent(agent: NewAgent, options: LoadOptions = {}): Pro
 }
 
 // ---------------------------------------------------------------------------------------------
-// The adapter: the served document, in the shape the carried components read.
-//
-// Every unpublished field becomes the contract's own empty value — `''`, `null`, `[]` — and never a
-// plausible-looking stand-in. That is the whole discipline here: a base URL of `https://example.com`
-// would render as a fact, and an empty one renders as a blank the banner below explains.
+// The adapter: wire spelling to the exchange-owned console spelling.
 // ---------------------------------------------------------------------------------------------
 
-/**
- * What this source publishes, and what it does not — stated once, over the whole catalogue.
- *
- * This is the console's own statement about the document it read, not a condition the service
- * reported, and the `CONSOLE-` code is there so it can never be mistaken for one of the catalogue's
- * own. It is carried on `status.issues` at catalogue scope because that is the channel the carried
- * components already render a set-wide condition through: a banner above the explorer, and a neutral
- * block on each operation page. Saying it in a hand-rolled element instead would put it on one page
- * and not the other.
- */
-const SOURCE_SCOPE: Issue = {
-  code: 'CONSOLE-SOURCE-SCOPE',
-  scope: 'catalog',
-  summary:
-    'This catalogue was read from the flux-exchange service, which publishes what each operation is ' +
-    'and what it costs — its connector, service, description, risk, idempotency and effects — and ' +
-    'nothing more. A request method and path, parameters, credentials, hosts and Flux source are ' +
-    'not published by this source, so where this page shows one of them empty it means unpublished ' +
-    'here, not absent from the connector.',
-  params: [],
-}
-
-/**
- * Why nothing in this catalogue is admitted or refused.
- *
- * Attached only when every served operation carries `admitted: null`, so it is read off the document
- * rather than asserted: the day the service answers `true` or `false` for one, this condition
- * disappears on its own with no edit here.
- *
- * **The summary used to say "this console has no sign-in yet", and that stopped being true when OIDC
- * landed.** It was doubly wrong after X-57, which made a host provisioned with a local identity
- * report sign-in as available too — so a reader who *was* signed in read a banner telling them the
- * console could not sign anyone in. The correction is not to swap one cause for another, either:
- * `admitted` is `null` whoever is reading, because nothing in this build decides what a principal
- * may run. That is X-13, and it is the event this condition should key on. The code keeps its name
- * so the string a component may already be matching on does not move; what it *says* is the fact.
- */
-const NO_PRINCIPAL: Issue = {
-  code: 'CONSOLE-NO-PRINCIPAL',
-  scope: 'catalog',
-  summary:
-    'The service answered `admitted: null` for every operation, so what follows is what exists, not ' +
-    'what you may call. That is not about being signed out: this host decides nothing about what a ' +
-    'principal may run, so the answer is the same whoever is reading. It is not a statement that ' +
-    'anything here is closed to you.',
-  params: [],
-}
-
-/**
- * One operation, in the carried contract's shape.
- *
- * `works` arrives on the shared `Status` that [`adapt`] computes once over the whole document, and
- * what it means is written down there. `ownIssues` sees none of the catalogue-wide conditions above
- * — they are catalogue-scoped — so no operation is badged with a defect it does not own.
- */
-function adaptOperation(connector: string, served: ServedOperation, status: Status): Operation {
+/** One wire operation, preserving every distinction the service publishes. */
+function adaptOperation(served: ServedOperation): Operation {
   return {
     id: served.id,
-    provider: connector,
     service: served.service,
     description: served.description,
+    inputSchema: served.input_schema,
     risk: served.risk,
     idempotency: served.idempotency,
-    // Everything from here down is unpublished by this source. Empty, never invented.
-    method: '',
-    path: '',
-    parameters: [],
-    body_schema: null,
-    response_schema: null,
-    credentials: [],
-    hosts: [],
-    flux: '',
-    status,
+    effects: served.effects,
+    effectsDerived: served.effects_derived,
+    admitted: served.admitted,
   }
 }
 
-/**
- * The services one connector publishes, reconstructed from its operations.
- *
- * This is real data rather than a placeholder: every served operation names its service, so the set
- * of services and the count in each are exactly what the service said. Everything a service
- * otherwise carries — its own base URL, hosts, version and address — is unpublished and stays empty.
- */
-function adaptServices(operations: ServedOperation[]): Service[] {
-  const counts = new Map<string, number>()
-  for (const operation of operations) {
-    counts.set(operation.service, (counts.get(operation.service) ?? 0) + 1)
-  }
-  return [...counts].map(([name, operation_count]) => ({
-    name,
-    description: '',
-    base_url: '',
-    hosts: [],
-    api_version: null,
-    gid: null,
-    operation_count,
-  }))
-}
-
-/** One connector, in the carried contract's shape. */
-function adaptProvider(pair: ServedPair, status: Status): Provider {
-  return {
-    id: pair.connector.id,
-    authority: null,
-    // The id is the only name this source publishes for a connector, so it is the only name shown.
-    // A vendor's proper name would have to be invented, and an invented one would read as published.
-    vendor: pair.connector.id,
-    description: '',
-    base_url: '',
-    api_version: null,
-    hosts: [],
-    services: adaptServices(pair.operations),
-    auth: { schemes: [], credentials: [], default: [] },
-    operation_count: pair.connector.operation_count,
-    operations: pair.operations.map((served) => adaptOperation(pair.connector.id, served, status)),
-    events: [],
-    channels: [],
-  }
-}
-
-/**
- * **What `works` means in this console** — set out here because the name does not say it, and
- * because there were four defensible readings and three of them are wrong on this page.
- *
- * It means: **this service runs this operation.** `POST /api/operations/{operation}/invoke` is in
- * the published surface, it is compiled against the same catalogue this document was read from, and
- * dispatch ends in the operation's own compiled Flux. That is the whole claim. It is not a claim
- * that the reader may call it, that anyone holds the credential it needs, or that a call would
- * succeed.
- *
- * The three readings not taken (`docs/stories/X-53-…`), each for one reason:
- *
- *   - **the tenant has a connection**, and **the tenant has supplied every setting the connector
- *     needs** (X-47) — both are per-tenant state, and this explorer is reachable *anonymously*. A
- *     badge derived from either would turn a public page into a report on somebody's connections,
- *     and it would need `GET /api/connections`, which the catalogue path deliberately never calls.
- *     `test/service.test.mjs::the_explorer_is_the_same_document_for_two_tenants` holds that shut
- *     adversarially rather than by reading, the way `routes::onboarding::tests` does for the
- *     descriptor.
- *   - **the caller's principal could invoke it** — that is `admitted`, it is three-valued, and
- *     `null` is not `false`. Collapsing it into a boolean destroys the distinction `OperationFacts`
- *     exists to render, and makes a badge on a public page move with who is looking at it.
- *
- * What is left is a fact about **this build and its route table**, identical for every caller, and
- * it is *derived* rather than asserted: `surfaces.mts` says whether the service serves `invoke`, and
- * the server's own gate
- * (`routes::onboarding::tests::a_capability_is_live_exactly_when_a_route_on_this_surface_serves_it`)
- * measures that field against `routes::MODULES`. A route leaving the surface turns the Rust gate red
- * until `surfaces.mts` agrees, and this badge follows with no edit here. That is X-42's correction
- * in `docs/designs/agent-onboarding.md` applied a fourth time: derive, and derive from the construct
- * that answers the question being asked. If that surface is ever renamed away this reads `false`,
- * which under-claims — the direction this repository prefers to fail in.
- *
- * **Every operation gets the same answer, and that is honest rather than lazy.** The catalogue route
- * filters nothing — it serves what this binary was compiled with — and every connector in the
- * shipped catalogue declares `Runtime::Http`, which
- * `exchange_host::invoke::tests::the_whole_catalogue_declares_http` keeps true, so the deployment
- * gate refuses none of them. The day one declares a locally-executing runtime, this console will not
- * be able to see it: the served document publishes no runtime. That is a gap in what the service
- * publishes, recorded in the story, and not something to guess at here.
- *
- * **Why this does not contradict the two conditions on `status.issues`.** The carried contract
- * describes `works` as `issues.length === 0` (`catalog.mts`), from an emitter where every issue is a
- * defect of the operation carrying it. Neither condition here is one: `CONSOLE-SOURCE-SCOPE` is a
- * statement about what this *source* publishes, and `CONSOLE-NO-PRINCIPAL` says in its own words
- * that it "is not a statement that anything here is closed to you". Both are catalogue-scoped,
- * `ownIssues` filters them out, and no operation owns a defect. The banner and the badge answer
- * different questions — *may you call it* and *does this service run it* — and the first is exactly
- * what keeps the second from reading as a promise to the visitor.
- */
-const SERVICE_RUNS_OPERATIONS: boolean = SURFACES.some(
-  (surface) => surface.id === 'invoke' && surface.served
-)
-
-/**
- * The catalogue the components render, with the catalogue-wide conditions applied.
- *
- * The conditions are decided over the whole document and then shared by every operation, which is
- * how `catalogIssues` finds them: it collects catalogue-scoped issues off operations and states each
- * once. One `Status` object is shared by every operation rather than copied — it is the same
- * condition, and `distinct` would collapse the copies anyway.
- */
+/** The complete document, with no placeholder field for facts this endpoint does not carry. */
 function adapt(pairs: ServedPair[]): Catalog {
-  const operations = pairs.flatMap((pair) => pair.operations)
-  const issues: Issue[] = [SOURCE_SCOPE]
-  if (operations.length > 0 && operations.every((operation) => operation.admitted === null)) {
-    issues.push(NO_PRINCIPAL)
-  }
-  const status: Status = { works: SERVICE_RUNS_OPERATIONS, issues, notes: [] }
-
   return {
-    // Neither is published by the served document, and nothing renders either — the console's footer
-    // names the endpoint it read instead, which is the fact a reader can act on.
-    schema_version: 0,
-    generator: CONNECTORS_ENDPOINT,
-    providers: pairs.map((pair) => adaptProvider(pair, status)),
-    // The service publishes no Flux core catalogue. `null` is the contract's own way to say so, and
-    // every component that renders core checks for it.
-    core: null,
+    connectors: pairs.map(
+      (pair): Connector => ({
+        id: pair.connector.id,
+        vendor: pair.connector.vendor,
+        description: pair.connector.description,
+        operationCount: pair.connector.operation_count,
+        operations: pair.operations.map(adaptOperation),
+      })
+    ),
   }
 }

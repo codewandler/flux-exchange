@@ -8,7 +8,7 @@ happened; agents are what call operations all day. That inverts the usual assump
 everything below.
 
 > [!WARNING]
-> **Status: v0.12.0 — credentials, a gated invoke, and an anonymous descriptor of what this build can do.**
+> **Status: v0.13.0 — credentials, a gated invoke, and a hardened public process.**
 >
 > `cargo run` binds `127.0.0.1:8080` and serves health, the connector catalogue, a session, and a
 > **complete** OIDC sign-in. It refuses to start on a reachable address while no identity provider
@@ -25,8 +25,8 @@ everything below.
 > (`FLUX_EXCHANGE_GRANTS`) runs nothing at all. Since X-62 a **signed-in human of the tenant reads
 > and edits those grants over HTTP** — `GET`/`PUT /api/grants`, with `POST /api/grants/preview`
 > answering which operations a proposed grant *would* admit before it is saved — stating a connector
-> and at most a risk level, never a list of operation ids, which the route refuses. There is still no
-> console screen for it. See
+> and at most a risk level, never a list of operation ids, which the route refuses. The console now
+> guides a person through Connect → Grant → Invoke. See
 > [What exists today](#what-exists-today) for the honest inventory before planning around any of
 > this.
 
@@ -89,22 +89,18 @@ against one tenant's connections, not a vendor secret.
 |---|---|
 | `crates/exchange-host` | The vocabulary and the rules, as ports. `Principal`/`Tenant`, `Grant`/`Selector`, `Runtime`/`Deployment`, `Lease`, the `Identity` trait, and `CredentialStore` — a file-backed credential store, bound by the binary when `FLUX_EXCHANGE_CREDENTIALS` names a path, `SettingsStore` — a **separate** file-backed store for a tenant's *non-secret* per-connection values, bound by `FLUX_EXCHANGE_SETTINGS`, because a subdomain is not a credential and sharing the store would make `held` and the tenant allowance each mean two things, and `Invoker` — which runs one catalogue operation through `connector_pack` and holds no transport of its own. **Real and tested (86 tests).** |
 | `crates/exchange-server` | A service on loopback: `GET /health`, the connector catalogue, a session behind the `Identity` port — one that **ends when the id token behind it does** — **complete OIDC sign-in**, a per-tenant connection surface — credentials, and since X-47 the **non-secret per-connection values** a templated connector needs — and `POST /api/agents`, which **mints an agent principal for the caller's tenant and shows its token once**, and `POST /api/operations/{operation}/invoke`, a thin adapter over the host's `Invoker`. It is the **only crate here that holds an HTTP client**, and it deliberately never names `connector_pack` — a test asserts both halves. It refuses to start on a reachable address with no identity provider — and a development identity does not count, because a roster handle is a credential with no secret in it. **Tested (234 tests).** |
-| `console/` | A Vue 3 **admin surface**, not a catalogue browser: it lands on this tenant's connections, reads its session from `/api/session`, and reuses the framework-free explorer components from flux-connectors for the catalogue. `invoke`, `subscribe` and activity are **named in the navigation and inert** — no route resolves to them and no placeholder screen exists, which `console/test/shell.test.mjs` asserts rather than assumes. An unreachable service renders an error naming the endpoint — never an empty catalogue and never a false "signed out". |
+| `console/` | A Vue 3 **admin surface**, not a catalogue browser: it guides a signed-in person through searchable connector setup, metadata grants and schema-backed invocation, with atomic credential rotation and consequence previews. Its catalogue remains one search with Connectors, Services and Operations tabs. `subscribe` and activity stay honestly inert. Failed reads name their endpoint and can be retried — never an empty catalogue or false "signed out". |
 
 **Not built, despite being described in the design:** a second connection to one
 connector (the address has no instance dimension until upstream publishes one),
-**a console screen for editing a grant** — this used to read *"any surface for editing a grant"*, and
-X-62 landed the HTTP half: `GET`/`PUT /api/grants` read and replace a tenant's grants and
-`POST /api/grants/preview` evaluates a proposed one, all three admitting a signed-in human of the
-tenant and nothing else. So a grant is no longer a file only an operator can write; what is missing
-is the page, so today it is an HTTP call rather than a screen — `subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
+`subscribe`, the websocket, channels, leases-in-anger, stored workflows, execution records, and the
 catalogue loader. The credential store has moved off this list and is described below, and X-47 moved
 per-connection configuration off it too — but the honest replacement claim is narrower than "done":
 a tenant can now **supply**, over HTTP, the values thirteen of the seventeen connectors that need
 one require — and **four are refused on purpose**: `newrelic`, `okta`, `docusign` and `freshdesk`
 template their whole destination host, so a tenant-supplied value would *be* the origin this host
-sends their credential to. Those four stay uninvocable and say so. Nothing renders any of this for a
-human; the console does not know these routes exist. The design is ahead of the code
+sends their credential to. Those four stay uninvocable and say so. Connection settings still have
+no human screen. The design is ahead of the code
 on purpose; the gap is stated here so nobody has to discover it.
 
 ### An agent token is minted, and nothing yet verifies one

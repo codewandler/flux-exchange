@@ -50,6 +50,43 @@ use crate::{
     Principal, Runtime, RuntimeRefusal, SecretStore,
 };
 
+/// Why an operation's declared input contract could not be projected for a caller.
+#[derive(Debug, thiserror::Error)]
+pub enum InputSchemaError {
+    /// The catalogue does not name the requested operation.
+    #[error("no operation in this catalogue is called `{operation}`")]
+    UnknownOperation {
+        /// The catalogue key that was requested.
+        operation: String,
+    },
+    /// The compiled operation could not become the same tool specification invocation uses.
+    #[error("the catalogue operation `{operation}` could not be projected: {message}")]
+    Unprojectable {
+        /// The catalogue key that failed.
+        operation: String,
+        /// The pack's redaction-safe diagnostic; catalogue source contains no credential value.
+        message: String,
+    },
+}
+
+/// The exact JSON input schema the pack gives an operation when it executes it.
+///
+/// This is deliberately a projection through `connector_pack`, not a parser beside it. The
+/// console can therefore compose the verbatim parameter object without this host owning another
+/// interpretation of embedded Flux.
+pub fn operation_input_schema(operation: &str) -> Result<Value, InputSchemaError> {
+    let entry = connector_catalog::operation(connector_catalog::OperationKey::id(operation))
+        .ok_or_else(|| InputSchemaError::UnknownOperation {
+            operation: operation.to_owned(),
+        })?;
+    connector_pack::project(entry)
+        .map(|spec| spec.input_schema)
+        .map_err(|error| InputSchemaError::Unprojectable {
+            operation: operation.to_owned(),
+            message: error.to_string(),
+        })
+}
+
 /// A source of fresh [`ToolContext`]s — **one per invocation**.
 ///
 /// The redactor lives on the context, so a credential registered for one call must not outlive it

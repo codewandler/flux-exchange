@@ -488,8 +488,8 @@ test('a_declaration_that_could_not_be_read_is_not_a_connector_with_no_credential
     `a failed read must name the endpoint that did not answer; got: ${html}`
   )
   assert.ok(
-    !/<input/.test(html),
-    `a read that failed rendered a form with no inputs, which reads as a connector that declares none; got: ${html}`
+    !/<input[^>]+data-credential/.test(html),
+    `a read that failed rendered credential inputs, which reads as a declaration that answered; got: ${html}`
   )
 })
 

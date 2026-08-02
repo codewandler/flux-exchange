@@ -49,7 +49,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{error, warn};
 
-use super::{Access, Module, Route};
+use super::{rate_limited, Access, Module, Route};
 use crate::oidc::config::{
     AUTHORIZATION_ENDPOINT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, ISSUER_ENV, JWKS_URI_ENV,
     REDIRECT_URI_ENV, TENANT_ENV, TOKEN_ENDPOINT_ENV,
@@ -114,6 +114,10 @@ async fn signin(State(state): State<AppState>) -> Response {
         // There is no provider to send the browser to; the caller signs in against this host.
         SignIn::Development => return development_page(),
     };
+
+    if let Err(refusal) = state.admit_sign_in() {
+        return rate_limited(refusal);
+    }
 
     match oidc.authorize() {
         // Two headers, one act: where the browser goes, and the binder that will prove on the way
@@ -465,6 +469,7 @@ mod tests {
     use crate::oidc::exchange::{ExchangeError, Redemption, SignedClaims, TokenExchange};
     use crate::oidc::Oidc;
     use crate::session::SESSION_COOKIE;
+    use crate::traffic::Traffic;
 
     /// The routes under test, read from the declaration rather than written out again.
     const SIGNIN: &str = super::MODULE.routes[0].path;
@@ -544,6 +549,12 @@ mod tests {
         super::super::app(AppState::with_oidc(Arc::new(Oidc::new(config(), exchange))))
     }
 
+    fn oidc_app_with_traffic(exchange: Arc<dyn TokenExchange>, traffic: Traffic) -> Router {
+        super::super::app(
+            AppState::with_oidc(Arc::new(Oidc::new(config(), exchange))).with_traffic(traffic),
+        )
+    }
+
     /// Drive one request through a fully assembled app and hand back everything a caller sees.
     async fn call(app: Router, request: HttpRequest<Body>) -> (StatusCode, HeaderMap, String) {
         let mut service = app.into_service::<Body>();
@@ -575,6 +586,37 @@ mod tests {
             .uri(path)
             .body(Body::empty())
             .expect("a well-formed request")
+    }
+
+    /// An anonymous burst cannot allocate enough pending flows to churn legitimate browsers out of
+    /// the bounded store. The refusal names when to retry and does not make the read-only
+    /// availability answer disappear with it.
+    #[tokio::test]
+    async fn authorization_starts_are_rate_limited_without_hiding_availability() {
+        let exchange = Arc::new(StubExchange::returning(claims("unused")));
+        let app = oidc_app_with_traffic(
+            exchange,
+            Traffic::for_test(1, 1, 1, std::time::Duration::from_secs(60)),
+        );
+
+        assert_eq!(
+            call(app.clone(), get(SIGNIN)).await.0,
+            StatusCode::SEE_OTHER
+        );
+        let (status, headers, body) = call(app.clone(), get(SIGNIN)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert_eq!(
+            headers
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("60")
+        );
+
+        assert_eq!(
+            call(app, get(super::MODULE.routes[2].path)).await.0,
+            StatusCode::OK,
+            "the limit protects allocation, not the availability fact"
+        );
     }
 
     /// Whether anything in this text could be a session token.

@@ -14,9 +14,8 @@
 // string, which is not evidence that anything renders. Written this way it is server-rendered by
 // `vue/server-renderer`, which ships inside `vue` itself, and the test reads the real HTML.
 //
-// This is app-layer and deliberately not under `src/components/`: that directory is the fifteen
-// components shared with flux-connectors, and a sixteenth that imported this console's service
-// client would break the invariant they are carried by.
+// This view receives a completed failure value and never imports the service client. Keeping that
+// boundary explicit makes an unreachable service impossible to mistake for an empty catalogue.
 
 import { defineComponent, h, type PropType } from 'vue'
 import { failureHeadline, failureMessage, type CatalogueFailure } from './service.mts'
@@ -26,7 +25,8 @@ export default defineComponent({
   props: {
     failure: { type: Object as PropType<CatalogueFailure>, required: true },
   },
-  setup(props) {
+  emits: ['retry'],
+  setup(props, { emit }) {
     return () =>
       h(
         'section',
@@ -38,6 +38,7 @@ export default defineComponent({
             h('code', null, props.failure.endpoint),
           ]),
           h('p', { class: 'failure__message' }, failureMessage(props.failure)),
+          h('button', { type: 'button', class: 'failure__retry', onClick: () => emit('retry') }, 'Retry catalogue'),
         ]
       )
   },

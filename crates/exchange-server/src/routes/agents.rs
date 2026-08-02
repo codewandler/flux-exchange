@@ -209,20 +209,23 @@ async fn mint(
     };
 
     match agents.mint(&principal, &body.id, expiry) {
-        Ok(minted) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "principal": minted.principal,
-                "expires_at": minted.expires_at,
-                // The one disclosure, and the whole point of the route. It is not recoverable from
-                // this host afterwards: `crate::agent`'s module documentation says what the store
-                // holds instead, and `an_attacker_who_reads_the_store_obtains_no_usable_token`
-                // pins it.
-                "token": minted.token.as_str(),
-                "shown": "once",
-            })),
-        )
-            .into_response(),
+        Ok(minted) => {
+            crate::audit::agent_minted(&principal, &minted.principal);
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "principal": minted.principal,
+                    "expires_at": minted.expires_at,
+                    // The one disclosure, and the whole point of the route. It is not recoverable from
+                    // this host afterwards: `crate::agent`'s module documentation says what the store
+                    // holds instead, and `an_attacker_who_reads_the_store_obtains_no_usable_token`
+                    // pins it.
+                    "token": minted.token.as_str(),
+                    "shown": "once",
+                })),
+            )
+                .into_response()
+        }
         Err(error) => refuse_mint(error),
     }
 }

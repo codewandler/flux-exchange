@@ -27,8 +27,9 @@
 //!    tenant has stored one is per-principal state, and it is not on this surface at all. See
 //!    [`ConnectorCredentials`].
 
-use exchange_host::OperationFacts;
+use exchange_host::{operation_input_schema, InputSchemaError, OperationFacts};
 use serde::Serialize;
+use serde_json::Value;
 
 // The dependency is keyed `connector-catalog` in the workspace manifest, so Cargo links the crate
 // under *that* name and not under its own `catalog` lib name. The alias restores the vocabulary the
@@ -48,6 +49,10 @@ pub struct ConnectorEntry {
     /// The connector id, as the catalogue spells it — the segment
     /// `/api/catalogue/connectors/{id}/operations` and `…/{id}/credentials` take.
     pub id: String,
+    /// The human name the catalogue declares for this connector.
+    pub vendor: String,
+    /// What the connector is for, in the catalogue's own one-line description.
+    pub description: String,
     /// How many operations it publishes. A count, not the operations: the listing is a directory,
     /// and a client that wants the metadata asks for the connector it is interested in.
     pub operation_count: usize,
@@ -82,6 +87,8 @@ pub struct OperationView {
     pub service: String,
     /// What the operation does, in one line: the same text a model sees as the tool description.
     pub description: String,
+    /// The declared parameter object, projected by the same pack invocation executes through.
+    pub input_schema: Value,
     /// **Always `true`, and it is not decoration.** `effects` above was inferred by this host, not
     /// declared by the connector. A client that treats an inferred effect as a declared one is
     /// trusting a guess; this field is how it can tell. See [`OperationFacts::of`].
@@ -189,6 +196,8 @@ pub fn connectors() -> ConnectorList {
             .iter()
             .map(|provider| ConnectorEntry {
                 id: provider.id.to_string(),
+                vendor: provider.vendor.to_string(),
+                description: provider.description.to_string(),
                 operation_count: provider.operations.len(),
             })
             .collect(),
@@ -200,16 +209,24 @@ pub fn connectors() -> ConnectorList {
 /// Deliberately `catalog::provider(…)` and not `catalog::operations_of(…)`: the latter answers an
 /// unknown id with an empty slice, which would turn "no such connector" into "a connector with
 /// nothing in it" — the exact `404`-into-empty-`200` collapse the contract forbids.
-pub fn connector_operations(connector: &str) -> Option<ConnectorOperations> {
-    let provider = catalog::provider(catalog::ProviderKey::id(connector))?;
+pub fn connector_operations(
+    connector: &str,
+) -> Result<Option<ConnectorOperations>, InputSchemaError> {
+    let Some(provider) = catalog::provider(catalog::ProviderKey::id(connector)) else {
+        return Ok(None);
+    };
 
-    Some(ConnectorOperations {
+    Ok(Some(ConnectorOperations {
         // The catalogue's spelling, not the caller's string. They are equal today because the
         // lookup is exact, and sourcing it from the catalogue is what keeps that true if the
         // lookup ever stops being.
         connector: provider.id.to_string(),
-        operations: provider.operations.iter().map(view).collect(),
-    })
+        operations: provider
+            .operations
+            .iter()
+            .map(view)
+            .collect::<Result<Vec<_>, _>>()?,
+    }))
 }
 
 /// One connector's declared credentials, or `None` when the catalogue carries no such connector.
@@ -255,16 +272,17 @@ pub fn connector_credentials(connector: &str) -> Option<ConnectorCredentials> {
 /// projections would be two answers to *"what is this operation's risk"* — with the published one
 /// being the one that is **not** deciding. A client could then predict admission correctly from
 /// this body and still be refused, which is worse than not publishing the metadata at all.
-fn view(operation: &catalog::Operation) -> OperationView {
-    OperationView {
+fn view(operation: &catalog::Operation) -> Result<OperationView, InputSchemaError> {
+    Ok(OperationView {
         facts: OperationFacts::of(operation),
         service: operation.service.to_string(),
         description: operation.description.to_string(),
+        input_schema: operation_input_schema(operation.id)?,
         // Every effect above was inferred by `effects`, and saying so is not optional.
         effects_derived: true,
         // No identity resolves a principal in this binary yet, so the question was never asked.
         admitted: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -280,6 +298,7 @@ mod tests {
     /// bytes a client actually receives rather than against the Rust value behind them.
     fn operation_objects(connector: &str) -> Vec<Map<String, Value>> {
         let response = connector_operations(connector)
+            .unwrap_or_else(|error| panic!("`{connector}` projects: {error}"))
             .unwrap_or_else(|| panic!("the catalogue carries `{connector}`"));
         let Value::Object(mut body) = serde_json::to_value(&response).expect("serialises") else {
             panic!("the response body is a JSON object");
@@ -366,6 +385,8 @@ mod tests {
             .iter()
             .map(|provider| ConnectorEntry {
                 id: provider.id.to_string(),
+                vendor: provider.vendor.to_string(),
+                description: provider.description.to_string(),
                 operation_count: provider.operations.len(),
             })
             .collect();
@@ -375,6 +396,36 @@ mod tests {
             "an empty catalogue would vacuously pass"
         );
         assert_eq!(connectors().connectors, expected);
+    }
+
+    /// **X-86's failing-first server test.** A connector result needs the human name and sentence
+    /// the compiled catalogue already carries. Serving only the machine id forced the console to
+    /// render the id twice and left free-text connector search with one field worth searching.
+    ///
+    /// The exact key set matters too: this is still the anonymous directory, so gaining the useful
+    /// catalogue facts must not become a place for tenant, grant, holding or credential state.
+    #[test]
+    fn connector_results_publish_the_catalogues_human_facts_and_nothing_private() {
+        let body = serde_json::to_value(connectors()).expect("the listing serialises");
+        let served = body["connectors"]
+            .as_array()
+            .expect("connectors is an array");
+
+        assert_eq!(served.len(), catalog::providers().len());
+        for (entry, provider) in served.iter().zip(catalog::providers()) {
+            let object = entry.as_object().expect("one connector is an object");
+            assert_eq!(entry["id"], provider.id);
+            assert_eq!(entry["vendor"], provider.vendor);
+            assert_eq!(entry["description"], provider.description);
+            assert_eq!(entry["operation_count"], provider.operations.len());
+
+            let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+            assert_eq!(
+                keys,
+                BTreeSet::from(["description", "id", "operation_count", "vendor"]),
+                "the anonymous connector directory gained state beyond static catalogue facts",
+            );
+        }
     }
 
     /// `404`, never an empty `200`. `catalog::operations_of` answers an unknown id with an empty
@@ -387,7 +438,7 @@ mod tests {
             "the sentinel must not name a shipped connector",
         );
 
-        assert_eq!(connector_operations(NO_SUCH_CONNECTOR), None);
+        assert!(matches!(connector_operations(NO_SUCH_CONNECTOR), Ok(None)));
         assert_eq!(
             serde_json::to_value(UnknownConnector::new(NO_SUCH_CONNECTOR)).expect("serialises"),
             serde_json::json!({ "error": "unknown connector", "connector": NO_SUCH_CONNECTOR }),
@@ -485,7 +536,9 @@ mod tests {
     /// a surprise downstream.
     #[test]
     fn the_wire_shape_of_an_operation_is_the_agreed_contract() {
-        let response = connector_operations("zendesk").expect("the catalogue carries zendesk");
+        let response = connector_operations("zendesk")
+            .expect("zendesk projects")
+            .expect("the catalogue carries zendesk");
         assert_eq!(response.connector, "zendesk");
 
         let body = serde_json::to_value(&response).expect("serialises");
@@ -509,6 +562,7 @@ mod tests {
                 "effects_derived",
                 "id",
                 "idempotency",
+                "input_schema",
                 "risk",
                 "service",
             ],
@@ -683,9 +737,9 @@ mod tests {
         );
     }
 
-    /// The last Acceptance item, made mechanical: adding this route added **nothing** to the
-    /// answers that existed before it, so a caller that does not ask for the declaration sees the
-    /// same bytes it saw yesterday.
+    /// Adding the credential declaration route added nothing to operation answers. X-86 later made
+    /// an intentional additive change to the connector listing, so this guard is scoped to the
+    /// operation document whose stability it was written to protect.
     ///
     /// Counted, for the reason `every_connector_publishes_exactly_what_it_declares` gives: every
     /// assertion below is inside a loop over the catalogue, so a catalogue that served no operation
@@ -693,24 +747,14 @@ mod tests {
     /// caught by `the_wire_shape_of_the_listing_is_the_agreed_contract`, which looks a connector up
     /// in it; nothing caught this one.
     #[test]
-    fn the_existing_catalogue_answers_gained_no_field() {
+    fn operation_answers_gained_no_field_with_the_declaration_route() {
         let mut seen = 0usize;
-
-        let listing = serde_json::to_value(connectors()).expect("serialises");
-        for entry in listing["connectors"].as_array().expect("an array") {
-            let mut keys: Vec<&str> = entry
-                .as_object()
-                .expect("an object")
-                .keys()
-                .map(String::as_str)
-                .collect();
-            keys.sort_unstable();
-            assert_eq!(keys, ["id", "operation_count"]);
-        }
 
         for provider in catalog::providers() {
             let body = serde_json::to_value(
-                connector_operations(provider.id).expect("every listed connector answers"),
+                connector_operations(provider.id)
+                    .expect("every listed connector projects")
+                    .expect("every listed connector answers"),
             )
             .expect("serialises");
 
@@ -740,6 +784,7 @@ mod tests {
                         "effects_derived",
                         "id",
                         "idempotency",
+                        "input_schema",
                         "risk",
                         "service",
                     ],
@@ -754,7 +799,7 @@ mod tests {
         assert!(seen > 0, "an empty catalogue would vacuously pass");
     }
 
-    /// The listing's own shape.
+    /// The listing's own shape, including the human facts X-86 added for catalogue search.
     #[test]
     fn the_wire_shape_of_the_listing_is_the_agreed_contract() {
         let body = serde_json::to_value(connectors()).expect("serialises");
@@ -769,8 +814,14 @@ mod tests {
 
         let mut keys: Vec<&str> = zendesk.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["id", "operation_count"]);
+        assert_eq!(keys, ["description", "id", "operation_count", "vendor"]);
 
+        let provider = catalog::providers()
+            .iter()
+            .find(|provider| provider.id == "zendesk")
+            .expect("the source catalogue carries zendesk");
+        assert_eq!(zendesk["vendor"], provider.vendor);
+        assert_eq!(zendesk["description"], provider.description);
         assert_eq!(
             zendesk["operation_count"],
             serde_json::json!(catalog::operations_of(catalog::ProviderKey::id("zendesk")).len()),
@@ -784,7 +835,7 @@ mod tests {
         let show = catalog::operation(catalog::OperationKey::id("zendesk-ticket-show"))
             .expect("the catalogue carries zendesk-ticket-show");
 
-        let view = view(show);
+        let view = view(show).expect("the generated operation projects");
 
         assert_eq!(view.facts.id, show.id);
         assert_eq!(view.service, show.service);
@@ -794,6 +845,28 @@ mod tests {
         assert_eq!(view.facts.effects, BTreeSet::from([Effect::Network]));
         assert!(view.effects_derived);
         assert_eq!(view.admitted, None);
+    }
+
+    /// **X-88's failing-first schema test.** The invoke form must use the same declared parameter
+    /// contract the pack executes, not parse embedded Flux or maintain a second schema itself.
+    #[test]
+    fn an_operation_publishes_the_packs_exact_input_schema() {
+        let operation = catalog::operation(catalog::OperationKey::id("github-repo-get"))
+            .expect("the catalogue carries github-repo-get");
+        let expected = exchange_host::operation_input_schema(operation.id)
+            .expect("the generated operation projects");
+        let body = serde_json::to_value(
+            connector_operations("github")
+                .expect("github projects")
+                .expect("github exists")
+                .operations
+                .iter()
+                .find(|entry| entry.facts.id == operation.id)
+                .expect("github-repo-get is served"),
+        )
+        .expect("the operation serialises");
+
+        assert_eq!(body["input_schema"], expected);
     }
 
     /// Every level of both vocabularies actually reaches the wire.
@@ -808,6 +881,7 @@ mod tests {
             .iter()
             .flat_map(|provider| {
                 connector_operations(provider.id)
+                    .expect("every listed connector projects")
                     .expect("every listed connector answers")
                     .operations
             })

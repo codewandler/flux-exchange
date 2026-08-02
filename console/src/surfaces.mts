@@ -155,17 +155,10 @@ export const SURFACES: readonly Surface[] = [
     id: 'invoke',
     label: 'Invoke',
     summary: 'Call a connector operation as this tenant, without ever holding its credential.',
-    path: null,
-    built: false,
-    // The one surface where the two questions have different answers, and the reason this field
-    // exists. `POST /api/operations/{operation}/invoke` shipped in v0.7.0 and is in the published
-    // route table; what has never been built is a screen to drive it from.
+    path: '/invoke',
+    built: true,
     served: true,
-    absent:
-      'The service invokes: POST /api/operations/{operation}/invoke runs one catalogue operation ' +
-      'for the caller’s own tenant. What is not built is a *screen* for it — there is nowhere in ' +
-      'this console to pick an operation, supply its parameters and read the result — so this ' +
-      'entry leads nowhere and the API is what you call.',
+    absent: '',
   },
   {
     id: 'subscribe',
@@ -183,8 +176,7 @@ export const SURFACES: readonly Surface[] = [
     label: 'Catalogue',
     summary: 'Every operation this build could run, what each one costs, and what it declares.',
     // `/explorer` and not `/`: the catalogue is reference material rather than the front door, and
-    // `/` is where a reader lands. The carried components emit `/explorer#<provider>` themselves,
-    // so this is the path they were already written against.
+    // `/` is where a reader lands. Search state lives on this route, so links remain shareable.
     path: '/explorer',
     built: true,
     served: true,
@@ -219,6 +211,8 @@ export function surfaceOfRoute(name: string): string | null {
       return 'connections'
     case 'grants':
       return 'grants'
+    case 'invoke':
+      return 'invoke'
     case 'explorer':
     case 'operation':
     case 'core':

@@ -1,14 +1,10 @@
 /*
- * The design tokens the carried components speak.
+ * The design tokens every console view speaks.
  *
- * WHY THE NAMES LOOK FOREIGN. The fifteen components under `src/components/` came from the
- * flux-connectors documentation site, which is built with VitePress. They hardcode no colour at all —
- * every one of them is written against VitePress's CSS custom properties (`--vp-c-text-2`,
- * `--vp-c-divider`, `--vp-c-warning-soft`, …). That is a *good* property, and it is why they could be
- * lifted here without a rewrite: a component that names no colour can be re-skinned by its host.
- *
- * So this console does not restyle them. It supplies the vocabulary they already speak, which makes
- * "reuse the docs site's visual identity" a file of variable declarations rather than fifteen diffs.
+ * WHY THE NAMES LOOK FOREIGN. This palette began as the vocabulary of the flux-connectors
+ * documentation site, which is built with VitePress. The exchange-owned console deliberately keeps
+ * those CSS custom properties (`--vp-c-text-2`, `--vp-c-divider`, `--vp-c-warning-soft`, …), so its
+ * search and administrative surfaces retain the same visual family without sharing UI code.
  *
  * WHERE THE VALUES CAME FROM. Read out of the *built* flux-connectors site,
  * `web/.vitepress/dist/assets/style.DFk-4o7g.css`, on 2026-08-01 — the computed values, not the
@@ -24,14 +20,12 @@
  * chose the name it chose.
  *
  * DARK MODE. `.dark` on the root element, which is where VitePress puts it and therefore what the
- * components' own `.dark` rules are written against. `src/main.ts` sets it from
+ * alternate rules are written against. `src/main.ts` sets it from
  * `prefers-color-scheme` and from an explicit toggle; nothing here needs a media query, and using
  * one would fight the toggle.
  *
- * ADDING A COMPONENT THAT NEEDS A NEW VARIABLE? Define it here. The test
- * `every_variable_the_components_use_is_defined` in `test/components.test.mjs` fails if a component
- * reads a variable this file does not define — an undefined custom property degrades to nothing,
- * silently, which is exactly the failure that test exists to make loud.
+ * ADDING A VIEW THAT NEEDS A NEW VARIABLE? Define it here. Tests fail if a stylesheet reads a
+ * variable this file does not define — an undefined custom property degrades to nothing silently.
  */
 
 :root {

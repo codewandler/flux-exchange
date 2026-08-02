@@ -1,0 +1,15 @@
+.invoke { max-width: 86ch; margin-top: 36px; }
+.invoke__lead, .invoke__description { color: var(--vp-c-text-2); }
+.invoke__prerequisite { padding: 12px 14px; border-left: 3px solid var(--vp-c-warning-1); background: var(--vp-c-warning-soft); }
+.invoke__search, .invoke__body { display: grid; gap: 6px; font-weight: 600; }
+.invoke__search input, .invoke__body textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--vp-c-divider); border-radius: 7px; background: var(--vp-c-bg); color: var(--vp-c-text-1); }
+.invoke__choices { margin-top: 4px; padding: 6px; border: 1px solid var(--vp-c-divider); border-radius: 7px; list-style: none; }
+.invoke__choices button { display: grid; gap: 3px; width: 100%; padding: 9px; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.invoke__choices button:hover { background: var(--vp-c-bg-soft); }
+.invoke__form { margin-top: 24px; }
+.invoke__submit { margin-top: 14px; padding: 9px 16px; border: 1px solid var(--vp-c-brand-1); border-radius: 7px; background: var(--vp-c-brand-1); color: var(--vp-c-bg); cursor: pointer; }
+.invoke__problems { color: var(--vp-c-danger-1); }
+.invoke__result { margin-top: 24px; padding: 18px; border: 1px solid var(--vp-c-divider); border-radius: 8px; }
+.invoke__result h2 { margin-top: 0; padding-top: 0; border: 0; }
+.invoke__content, .invoke__result pre { max-height: 420px; overflow: auto; padding: 12px; background: var(--vp-code-bg); white-space: pre-wrap; }
+.invoke__elapsed, .invoke__facts { color: var(--vp-c-text-2); font-size: 13px; }

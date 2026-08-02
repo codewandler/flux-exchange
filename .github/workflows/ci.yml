@@ -151,7 +151,7 @@ jobs:
         run: cargo build --workspace --locked
 
   console:
-    name: console · test · build
+    name: console · audit · test · build
     runs-on: ubuntu-latest
     # Its own job rather than a step bolted onto `check`. `console/` is a separate Node build that
     # does not participate in the Cargo workspace (AGENTS.md § Build / test / run): it needs Node and
@@ -185,6 +185,10 @@ jobs:
         run: npm ci
         working-directory: console
 
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+        working-directory: console
+
       # Order is AGENTS.md's: test, then build. Unlike ../flux-connectors' `web` job — whose suite
       # asserts against the *rendered* site and so must run after the build — these tests read
       # `console/src` only and never `console/dist`, so they do not depend on a build having
@@ -199,6 +203,34 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: console
+
+  dependency-audit:
+    name: Rust dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.97.0"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Install cargo-audit 0.22.0
+        run: cargo install cargo-audit --version 0.22.0 --locked
+
+      - name: Audit locked dependencies
+        # RUSTSEC-2023-0071 affects RSA key generation. This service generates no RSA keys: its
+        # jsonwebtoken path parses provider public keys and verifies id-token signatures.
+        # RUSTSEC-2026-0192 marks ttf-parser unmaintained rather than vulnerable; it is transitive
+        # through flux-web's PDF reader and has no maintained release to update to today. Denying
+        # every other warning keeps each exception narrow and visible here.
+        run: >-
+          cargo audit --deny warnings
+          --ignore RUSTSEC-2023-0071
+          --ignore RUSTSEC-2026-0192
 
   action-pins:
     name: third-party actions are pinned to a commit SHA

@@ -94,8 +94,8 @@ Nothing is wrong; nobody has been granted anything.
    { "grants": [ { "connector": "github", "selector": { "max_risk": "low" } } ] }
    ```
 
-   There is **no console screen for grants yet** (X-62 shipped the API and said so), so this step is
-   `curl` or the preview endpoint until one exists.
+   The console's Grants step previews and writes this policy for a signed-in human; `curl` remains
+   useful for deployment automation.
 3. **Connect a connector** from the console. The credential goes to the store and is never returned by
    any route — that is the platform's whole claim, not a detail.
 4. **Invoke an operation.** `POST /api/operations/{operation}/invoke`. If it refuses, the table above
@@ -154,11 +154,17 @@ docker run --rm -v flux-exchange-local:/data \
   flux-exchange:local
 ```
 
-## Not covered, and worth knowing before the URL is shared
+## The process traffic boundary
 
-**Nothing here rate-limits anything.** X-22's bounds are about one tenant's cost to another, not about
-an anonymous flood, and there is no brute-force protection on any endpoint. A public URL is a target.
-That is a story, not a gap in this runbook.
+X-87 bounds the two paths that allocate or spend outside the handler: 30 OIDC authorization starts
+per rolling minute, 120 invocation attempts per rolling minute, and 16 concurrently executing
+invocations. The bounds are process-wide — this deployment deliberately has one process — and a
+saturated path refuses immediately with `429` and `Retry-After` rather than growing a queue. Health,
+session and administration routes do not consume invocation slots.
+
+These are application backstops, not a substitute for edge flood protection. They deliberately do
+not trust `X-Forwarded-For` as a bucket key: this process has no authenticated relationship with that
+caller-controlled header.
 
 There is also **no CI deploy pipeline** — a deploy is `fly deploy` from a working tree. Worth
 automating once it has been done by hand more than once.

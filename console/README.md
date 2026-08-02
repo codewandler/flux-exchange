@@ -11,12 +11,12 @@ reader lands on **Connections** rather than on the explorer.
 
 ## What is not built, and how this console says so
 
-`invoke`, `subscribe` and execution records do not exist. They are **named in the navigation**,
+`subscribe` and execution records do not exist. They are **named in the navigation**,
 because a platform that hides its own shape is not clearer for it, and they are **inert**: no href,
 `aria-disabled`, struck through, tagged `not built`, with the reason on the entry and a sentence
 under the rail.
 
-There is deliberately **no screen behind any of them**. A page headed "Activity" reading "No
+There is deliberately **no screen behind either of them**. A page headed "Activity" reading "No
 executions yet" would claim that nothing has happened when the truth is that nothing can run, and
 this repository has spent several stories removing exactly that class of thing. It is not a
 convention anybody has to remember — `test/shell.test.mjs` asserts four separate things about it:
@@ -34,10 +34,14 @@ unbuilt to built, is an edit there and nowhere else.
 
 What that does and does not mean:
 
-- **Connections is read-only.** It lists what this tenant has wired up, as **addresses and never
-  values** — `GET /api/connections` publishes where each declared credential lives and whether
-  something is stored there, and there is nowhere in this console for a value to appear. Connecting
-  a connector is `POST /api/connections/{connector}`; there is no form for it yet.
+- **Connections is actionable, but still addresses and never values.** A searchable catalogue-backed
+  picker creates a connection, status cards show held addresses under progressive detail, and each
+  held credential can be rotated with the service's atomic `PUT`. Typed values live only in their
+  uncontrolled password input and request.
+- **Connect → Grant → Invoke is one visible journey.** Completion comes from the latest connection
+  and grant responses. Grant presets compile to metadata selectors, preview groups the service's
+  admitted answer by service and risk, and Invoke starts its JSON body from the runtime pack's exact
+  projected input schema.
 - **Identity is read from `/api/session`, never invented.** Signed out offers a link to
   `/api/signin` — a link, because that route answers `303` to the identity provider and a `fetch`
   would chase the redirect inside the page. Signed in names the principal *and the tenant*, because
@@ -50,20 +54,17 @@ What that does and does not mean:
 - **If the service is not there, the console says so and names the endpoint.** It does not render an
   empty catalogue. "Zero connectors" and "the service did not answer" are different facts and the
   page shows different things for them; `test/service.test.mjs` is what holds that.
-- **The served catalogue is thinner than the one these components were written for.** flux-exchange
-  publishes what an operation *is* and what it costs — connector, service, description, risk,
-  idempotency, effects — and nothing else. No request method or path, no parameters, no credentials,
-  no hosts, no Flux source, and no Flux core catalogue. Those fields are shown empty rather than
-  filled in with something plausible, and a catalogue-wide notice on every page says that an empty
-  field there means *unpublished by this source*, not absent from the connector.
+- **The catalogue finder renders only what flux-exchange publishes.** Connector vendor and
+  description, derived services, and operation description, risk, idempotency and effects all come
+  from the live API. It invents no method, path, parameter, credential, host or Flux source.
 - **The service runs these operations, and the cards say so.** `POST
   /api/operations/{operation}/invoke` has been in the published surface since v0.7.0, so an operation
   of a connector this build carries is badged live rather than "not live yet" — the badge is a
   statement about *this deployment*, not about the reader. What it does not claim is that you may
   call it: that needs a principal, a connection and the credential the connector declares, and the
   catalogue-wide notice on the page is what draws that line. `src/service.mts` sets the flag and
-  carries the argument for this reading and against the three tenant-specific ones (X-53). **There
-  is still no screen for it** — the surface rail says so — so the API is what you call.
+  carries the argument for this reading and against the three tenant-specific ones (X-53). The
+  signed-in Invoke screen now calls that API and preserves its `sent` and `retryable` distinctions.
 - **`admitted` is three-valued and the catalogue route answers `null` for every operation.** That
   route is anonymous — it says what *exists*, not what you may call — so the console renders the
   third state and never a refusal, whether or not somebody is signed in.
@@ -71,10 +72,11 @@ What that does and does not mean:
   out from the operation itself rather than reading a declaration, and the operation page says which
   of the two it is looking at.
 
-The fifteen explorer components carried over from
-[flux-connectors](https://github.com/codewandler/flux-connectors) still render here unmodified. The
-adapter that puts the served document into the shape they read is `src/service.mts`, and it is the
-only module in this app that knows a network exists.
+Since X-86, flux-exchange owns its catalogue UI. One search field drives three tabs — Connectors,
+Services and Operations — and the selected kind plus query live in the fragment route so the view is
+shareable. An empty query browses the active kind, and connector or service results can narrow the
+same finder to their operations. Channels will become a tab only when the service publishes real
+channel metadata.
 
 ## Running it
 
@@ -94,22 +96,26 @@ vite.config.ts
 tsconfig.json
 src/
   main.ts              mounts the app; sets the theme before first paint
-  App.vue              the root: routing, every three-state read, and the one `provide()`
-  surfaces.mts         what this platform is — the six surfaces, and which three are not built
+  App.vue              the root: routing and every three-state read
+  surfaces.mts         what this platform is — the surfaces, including two future ones
   ConsoleShell.mts     the chrome: the service's name, the surface rail, the identity affordance
   Connections.mts      what this tenant has wired up, as addresses and never values
+  Journey.mts          Connect → Grant → Invoke progress derived from server answers
+  Invoke.mts           schema-backed invocation and result/refusal rendering
   service.mts          the network — catalogue, session and connections, each in three states
   CatalogueFailure.mts what the page shows when there is no catalogue, naming the endpoint
-  OperationFacts.mts   effects and admission — what the carried contract has no field for
-  routing.ts           the fragment router and the PathResolver this host supplies
+  CatalogueFinder.mts  one search field and the three result-kind tabs
+  CatalogueOperation.mts operation detail from served facts only
+  routing.ts           fragment routes, including shareable finder state
   theme.ts             light/dark, stored choice over OS preference
-  tokens.css           the CSS custom properties the components speak
+  tokens.css           the shared CSS custom-property vocabulary
   app.css              the document baseline (tables, code, links, headings)
   shell.css            the shell's own rules — scanned by a test for colours it must not name
-  catalog.mts          the catalogue's typed contract — types and pure selectors, no data
-  components/          the fifteen carried components; see components/README.md
+  catalogue.css        responsive finder and operation-detail layout
+  catalog.mts          served types, derived services, ranking and URL state
 test/
-  components.test.mjs  the boundary that keeps the components carryable
+  catalogue.test.mjs   search, ranking, tabs, drill-down and empty states
+  components.test.mjs  catalogue data and design-token boundaries
   shell.test.mjs       the surfaces, the identity affordance, and the honesty invariant
   routing.test.mjs     the fragment router, anchors included
   service.test.mjs     an unreachable service is never an empty catalogue
@@ -132,58 +138,33 @@ survives. `test/discovery.test.mjs` asserts both properties, and measures the se
 throwaway fixture rather than trusting a Node version's documented behaviour — on Node 22.23.1,
 pointing `--test` at a directory does not enumerate it, it fails with `MODULE_NOT_FOUND`.
 
-`CatalogueFailure.mts` and `OperationFacts.mts` are render functions rather than single-file
-components, and that is deliberate: both carry a claim worth asserting — *the failure names the
-endpoint*, *a null admission is not a refusal* — and a render function can be server-rendered by
-`vue/server-renderer` under plain `node --test`, with no bundler and no new dependency. Written as
-SFCs they could only have been checked by grepping a template, which is not evidence that anything
-renders.
+`CatalogueFailure.mts`, `CatalogueFinder.mts` and `CatalogueOperation.mts` are render functions so
+plain Node tests can render or mount their real output without adding a browser-only test harness.
+The finder also exposes pure ranking and URL-state seams in `catalog.mts`.
 
 ## The invariant this repository has to keep
 
-The components under `src/components/` were copied, not rewritten. That was possible because of one
-asserted property in their original home: **a component may import Vue, a sibling component, and the
-catalogue's typed contract, and nothing else.** No framework, no `node:*`, no data loader — everything
-a component renders arrives as a prop or as injected context.
-
-[`test/components.test.mjs`](test/components.test.mjs) is the port of that assertion, and it is the
-most valuable file here. The failure it prevents is invisible in the output: a component that imports
-this console's service client, or a router, renders exactly the same page and silently stops being
-mountable anywhere else. The test also checks itself — it runs its scanner against sources that must
-be rejected, so it cannot decay into a vacuous pass.
-
-This is why the fetch is at the app layer and not in a component. If one of the fifteen needs
-something it does not have, that is a change to make **upstream in flux-connectors**, where they are
-shared — not here.
-
-If you add a component here, it obeys the same rule. If you need a component to know something,
-pass it.
+The catalogue UI belongs to flux-exchange and tracks the API it actually serves. It is not copied
+from, packaged with, or synchronized against flux-connectors. The useful boundary remains local:
+`service.mts` owns network access and three-state loading, `App.vue` passes completed data down, and
+catalogue views render props without fetching. `test/components.test.mjs` holds that boundary.
 
 ## What this host supplies
 
-Three things, and deliberately only three.
+Two things, deliberately kept explicit.
 
-**The data.** `src/service.mts` fetches, and `src/App.vue` passes it down as props. Nothing under
-`src/components/` fetches, and nothing under `src/components/` can tell where the document came from
-— which is the same property that let it come from a fixture before this. The shell and the
-connections view are **not** under `src/components/` and must never be: they are this console's own,
-and one of them imports the service client.
+**The data.** `src/service.mts` fetches, validates and adapts the wire response; `src/App.vue` passes
+the ready catalogue to the finder and operation detail. An unreachable request is decided before
+either view renders.
 
-**A `PathResolver`.** `catalog.mts` answers *which page* (`/operations/<id>`,
-`/core/<section>/<name>`); turning that into a followable href is the host's answer, injected under
-`PATH_RESOLVER`. The components' default is identity, which would break every link here — this
-console is one static document with no server to route those paths — so `src/App.vue` provides the
-fragment resolver from `src/routing.ts`, and the fragment router resolves every path the catalogue
-can produce. A `/core/…` path resolves to a statement that this source publishes no Flux core
-entries, rather than to a blank page.
+**The routes.** `catalog.mts` encodes and decodes the active result kind and query. `routing.ts`
+places that state after the hash because this console is one static document, and maps operation
+links to the same fragment router.
 
-**The design tokens.** The components name no colour; they are written entirely against VitePress's
-CSS variables. [`src/tokens.css`](src/tokens.css) defines that vocabulary with the values read out of
-the built flux-connectors site, so the console inherits the docs site's identity without a single edit
-to a component. Light and dark both, via `.dark` on the root element, which is where the components'
-own dark rules expect it. `every_variable_the_components_use_is_defined` in the test suite fails if a
-component reads a property the token layer forgot — an undefined custom property renders as nothing,
-and that is the kind of breakage nobody notices.
+The visual relationship is intentional but code-free: [`src/tokens.css`](src/tokens.css) retains
+the VitePress-derived palette used by flux-connectors, while `catalogue.css` owns exchange-specific
+layout. Light and dark both flow through `.dark` on the root element, and tests reject literal
+colours or undefined custom properties in catalogue styles.
 
 ## Licence
 

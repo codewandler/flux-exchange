@@ -118,7 +118,7 @@ test('every_surface_is_marked_with_its_true_state', async () => {
   // carries, restated where a reader of the console will actually meet it. `grants` joined the
   // first group in X-62: the service serves `GET`/`PUT /api/grants` and this console now has a
   // screen for it, which is the pair `built` and `served` exist to keep separable.
-  const built = { connections: true, grants: true, catalogue: true, identity: true, invoke: false, subscribe: false, activity: false }
+  const built = { connections: true, grants: true, catalogue: true, identity: true, invoke: true, subscribe: false, activity: false }
 
   for (const surface of SURFACES) {
     assert.equal(
@@ -158,7 +158,7 @@ function screensMountedBy(source) {
   return found
 }
 
-/** Every app-layer source — the console's own, never the fifteen carried components. */
+/** Every app-layer source in this exchange-owned console. */
 function appSources() {
   return readdirSync(path.join(consoleRoot, 'src'), { withFileTypes: true })
     .filter((entry) => entry.isFile() && /\.(vue|mts|ts)$/.test(entry.name))
@@ -364,7 +364,7 @@ test('the_shell_names_no_colour_of_its_own', () => {
   const css = readFileSync(path.join(consoleRoot, 'src', 'shell.css'), 'utf-8')
   const rules = css.replace(/\/\*[\s\S]*?\*\//g, '')
 
-  // The carried components name no colour and neither does this: `tokens.css` is the one colour
+  // Catalogue views name no colour and neither does this: `tokens.css` is the one colour
   // vocabulary, and a second one would be a light-mode value hardcoded into a dark page.
   const literals = [...rules.matchAll(/#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?)\s*\(/g)].map((m) => m[0])
   assert.deepEqual(

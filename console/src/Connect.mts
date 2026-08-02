@@ -28,6 +28,9 @@
 
 import { defineComponent, h, ref, watch, type PropType, type VNode } from 'vue'
 import { connectionCard } from './Connections.mts'
+import ConnectorPicker from './ConnectorPicker.mts'
+import { fragmentPath } from './routing.ts'
+import type { Connector } from './catalog.mts'
 import { credentialEndpoint, type ConnectOutcome, type DeclarationState } from './service.mts'
 import type { ServiceFailure, ServiceRefusal } from './service.mts'
 
@@ -90,8 +93,8 @@ function rotationNotice(connector: string, declared: string[]): VNode {
       )
     ),
     h('p', { class: 'connect__aside' }, [
-      'This console does not offer that as a button yet, and it will never offer disconnect-then-',
-      'reconnect as one.',
+      'Use Rotate on the connection dashboard. It replaces one held value atomically and never ',
+      'offers disconnect-then-reconnect.',
     ]),
   ])
 }
@@ -133,13 +136,11 @@ function credentialInputs(connector: string, declared: string[]): VNode {
 }
 
 /** The declaration's four states, each said as itself. */
-function declarationBody(state: DeclarationState, connector: string): VNode {
+function declarationBody(state: DeclarationState, connector: string, retry: () => void): VNode {
   switch (state.status) {
     case 'loading':
-      return h('p', { class: 'connect__note' }, [
-        'Asking the service what ',
-        h('code', null, connector),
-        ' declares…',
+      return h('div', { class: 'connections__skeleton', 'aria-label': `Reading what ${connector} declares` }, [
+        h('span', { class: 'skeleton' }), h('span', { class: 'skeleton' }),
       ])
 
     case 'ready':
@@ -162,6 +163,7 @@ function declarationBody(state: DeclarationState, connector: string): VNode {
             h('code', null, state.failure.endpoint),
           ]),
           h('p', { class: 'failure__message' }, failureSentence(state.failure)),
+          h('button', { type: 'button', class: 'failure__retry', onClick: retry }, 'Retry declaration'),
         ]
       )
   }
@@ -175,6 +177,9 @@ function outcomeBody(outcome: ConnectOutcome, connector: string, declared: strin
       // The same renderer the read-only listing uses, deliberately: addresses and `held`, and
       // structurally nowhere for a value to appear.
       connectionCard(outcome.connection),
+      h('p', { class: 'connect__next' }, [
+        h('a', { href: fragmentPath(`/grants?connector=${encodeURIComponent(connector)}`) }, 'Next: grant this connector'),
+      ]),
     ])
   }
 
@@ -195,6 +200,9 @@ export default defineComponent({
   props: {
     /** Every connector the catalogue lists, by id. The console enumerates nothing itself. */
     connectors: { type: Array as PropType<string[]>, required: true },
+    /** Human catalogue facts for the searchable picker. */
+    catalogConnectors: { type: Array as PropType<Connector[]>, default: () => [] },
+    connected: { type: Array as PropType<string[]>, default: () => [] },
     /** The connector being connected, or `null` before one is chosen. */
     chosen: { type: String as PropType<string | null>, default: null },
     /** What it declares, or `null` when nothing is chosen. */
@@ -204,7 +212,7 @@ export default defineComponent({
     /** Whether a connect is in flight, so the form cannot be submitted twice. */
     busy: { type: Boolean, default: false },
   },
-  emits: ['choose', 'submit'],
+  emits: ['choose', 'submit', 'retry'],
   setup(props, { emit }) {
     // The form element, held only so a successful connect can clear it. There is no reactive mirror
     // of what was typed, which is the point: the values exist in the DOM inputs and in the request
@@ -246,6 +254,9 @@ export default defineComponent({
     return () => {
       const chosen = props.chosen
       const names = declared()
+      const picker = props.catalogConnectors.length
+        ? props.catalogConnectors
+        : props.connectors.map((id) => ({ id, vendor: id, description: '', operationCount: 0, operations: [] }))
 
       return h('section', { class: 'connect', 'data-connect': 'panel' }, [
         h('h2', { class: 'connect__title' }, 'Connect a connector'),
@@ -259,30 +270,15 @@ export default defineComponent({
         ]),
 
         h('form', { class: 'connect__form', 'data-connect': 'form', ref: element, onSubmit: submit }, [
-          h('label', { class: 'connect__field' }, [
-            h('span', { class: 'connect__label' }, 'Connector'),
-            h(
-              'select',
-              {
-                class: 'connect__select',
-                'data-connect': 'connector',
-                onChange: (event: Event) =>
-                  emit('choose', (event.target as HTMLSelectElement).value),
-              },
-              [
-                h('option', { value: '', selected: chosen === null }, 'Choose a connector…'),
-                ...props.connectors.map((connector) =>
-                  h(
-                    'option',
-                    { key: connector, value: connector, selected: connector === chosen },
-                    connector
-                  )
-                ),
-              ]
-            ),
-          ]),
+          h(ConnectorPicker, {
+            connectors: picker,
+            connected: props.connected,
+            value: chosen ?? '',
+            label: 'Connector',
+            'onChoose': (id: string) => emit('choose', id),
+          }),
 
-          chosen && props.declaration ? declarationBody(props.declaration, chosen) : null,
+          chosen && props.declaration ? declarationBody(props.declaration, chosen, () => emit('retry')) : null,
 
           h(
             'button',

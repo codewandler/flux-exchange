@@ -156,8 +156,8 @@
 }
 
 /*
- * The sentence not to skim. `--vp-c-warning-*` is the vocabulary the carried components already use
- * for "true, and it will cost you if you miss it", which is exactly what a credential shown once is.
+ * The sentence not to skim. `--vp-c-warning-*` is the console's vocabulary for "true, and it will
+ * cost you if you miss it", which is exactly what a credential shown once is.
  */
 .onboard__warn {
   margin: 12px 0 0;

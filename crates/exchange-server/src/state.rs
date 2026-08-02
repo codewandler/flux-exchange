@@ -9,6 +9,7 @@ use crate::bind::IdentityBinding;
 use crate::connection_guard::ConnectionGuard;
 use crate::dev_identity::DevIdentity;
 use crate::oidc::Oidc;
+use crate::traffic::{InvocationClaim, Traffic, TrafficRefusal};
 
 /// The state the router hands to every route.
 ///
@@ -62,6 +63,8 @@ pub struct AppState {
     /// composition that runs nothing, and `POST /api/operations/{operation}/invoke` refuses rather
     /// than pretending — see [`crate::routes::invoke`].
     invoker: Option<Arc<Invoker>>,
+    /// Process-wide bounds around anonymous sign-in allocation and operation execution.
+    traffic: Traffic,
 }
 
 /// What this composition can offer a human who wants to sign in.
@@ -186,6 +189,7 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            traffic: Traffic::default(),
         }
     }
 
@@ -207,6 +211,7 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            traffic: Traffic::default(),
         }
     }
 
@@ -225,6 +230,7 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            traffic: Traffic::default(),
         }
     }
 
@@ -246,6 +252,7 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            traffic: Traffic::default(),
         }
     }
 
@@ -264,6 +271,7 @@ impl AppState {
             connections: Arc::default(),
             agents: None,
             invoker: None,
+            traffic: Traffic::default(),
         }
     }
 
@@ -410,6 +418,35 @@ impl AppState {
     /// What this composition can offer a caller who wants to sign in.
     pub fn sign_in(&self) -> &SignIn {
         &self.sign_in
+    }
+
+    /// Close the session token this guarded request proved it holds.
+    pub fn close_session(&self, presented: &str) {
+        match &self.sign_in {
+            SignIn::Development => {
+                if let BoundIdentity::Development(identity) = &self.identity {
+                    identity.close_session(presented);
+                }
+            }
+            SignIn::Oidc(oidc) => oidc.close_session(presented),
+            SignIn::Unconfigured | SignIn::NoTokenExchange => {}
+        }
+    }
+
+    /// Admit one anonymous OIDC authorization start.
+    pub(crate) fn admit_sign_in(&self) -> Result<(), TrafficRefusal> {
+        self.traffic.admit_sign_in()
+    }
+
+    /// Claim one bounded invocation slot and one request from the rolling window.
+    pub(crate) fn begin_invocation(&self) -> Result<InvocationClaim, TrafficRefusal> {
+        self.traffic.begin_invocation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_traffic(mut self, traffic: Traffic) -> Self {
+        self.traffic = traffic;
+        self
     }
 }
 

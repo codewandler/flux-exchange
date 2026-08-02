@@ -1,14 +1,10 @@
 /*
- * The document baseline the carried components render into.
+ * The document baseline every console view renders into.
  *
- * The components style their own class names and nothing else — a `<table>`, a `<code>`, an `<a>` and
- * a heading are left to the host, because on the docs site they landed inside VitePress's `.vp-doc`
- * container which styles those elements. Without an equivalent here the explorer would render as an
- * unstyled outline: borderless tables, unmarked inline code, black links.
+ * Views style their own class names; shared elements such as tables, code, links and headings are
+ * left to the host. These rules retain the VitePress-derived baseline used throughout the console.
  *
- * So these rules are `.vp-doc`'s own, transcribed from the built flux-connectors stylesheet
- * (`web/.vitepress/dist/assets/style.DFk-4o7g.css`) and reduced to the elements the components
- * actually emit. Every value goes through a token from `tokens.css`, so light and dark come for free.
+ * Every value goes through a token from `tokens.css`, so light and dark share one vocabulary.
  */
 
 @import './tokens.css';
@@ -20,6 +16,10 @@
 @import './agents.css';
 /* The grants screen's, kept apart for the same reason. See `grants.css`. */
 @import './grants.css';
+/* The exchange-owned catalogue finder and operation detail. */
+@import './catalogue.css';
+@import './journey.css';
+@import './invoke.css';
 
 *,
 *::before,
@@ -178,6 +178,7 @@ li + li {
 }
 
 input,
+textarea,
 select,
 button {
   font-family: inherit;
@@ -186,11 +187,10 @@ button {
 }
 
 /*
- * The two app-layer views (`src/CatalogueFailure.mts`, `src/OperationFacts.mts`).
+ * App-layer status and operation-fact treatments.
  *
- * They are render functions rather than single-file components so a plain-Node test can render them
- * — see their own headers — and a render function carries no `<style scoped>`, so their rules live
- * here. They read the same tokens as everything else, so light and dark come for free.
+ * Render functions carry no `<style scoped>`, so their shared rules live here. They read the same
+ * tokens as everything else, so light and dark come for free.
  */
 
 .failure {
@@ -232,4 +232,44 @@ button {
   margin: 8px 0 0;
   font-size: 14px;
   color: var(--vp-c-text-2);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.failure__retry {
+  margin-top: 14px;
+  padding: 7px 12px;
+  border: 1px solid var(--vp-c-danger-1);
+  border-radius: 6px;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-danger-1);
+  cursor: pointer;
+}
+
+.skeleton {
+  display: block;
+  height: 18px;
+  margin: 12px 0;
+  border-radius: 5px;
+  background: var(--vp-c-bg-soft);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+.skeleton--title { width: 38%; height: 28px; }
+
+@keyframes skeleton-pulse { 50% { opacity: 0.45; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }

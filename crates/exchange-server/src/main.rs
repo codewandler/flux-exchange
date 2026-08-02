@@ -14,6 +14,7 @@
 //! [`bind::admit_bind`] and `docs/designs/http-surface.md`.
 
 mod agent;
+mod audit;
 mod bind;
 mod connection_guard;
 mod dev_identity;
@@ -23,6 +24,7 @@ mod oidc;
 mod routes;
 mod session;
 mod state;
+mod traffic;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

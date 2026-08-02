@@ -29,11 +29,11 @@
 //! The catalogue is `&'static` data compiled in from `codewandler-connector-catalog`, a published
 //! crates.io package. It is byte-identical in every deployment of this version, and anyone who can
 //! run `cargo add` already has all of it. It names no tenant, no principal and no connection, and
-//! it carries no credential **value** — this module serves an operation's id, service, description
-//! and declared metadata, and a connector's declared credential *names*, and nothing else. Most of
-//! all it is **structurally incapable** of leaking a permission: it never reads a principal, never
-//! consults a grant and never filters, which is the same property `admitted: null` states on the
-//! wire.
+//! it carries no credential **value** — this module serves a connector's id, vendor, description
+//! and operation count; an operation's id, service, description and declared metadata; and a
+//! connector's declared credential *names*, and nothing else. Most of all it is **structurally
+//! incapable** of leaking a permission: it never reads a principal, never consults a grant and
+//! never filters, which is the same property `admitted: null` states on the wire.
 //!
 //! What it does disclose is which catalogue this deployment was built against. That is a
 //! fingerprint, and an operator who wants it closed should be able to close it — but that is a
@@ -98,14 +98,25 @@ async fn connectors() -> Json<view::ConnectorList> {
 /// One connector's operations, or a refusal naming the id that was asked for.
 async fn operations(Path(connector): Path<String>) -> Response {
     match view::connector_operations(&connector) {
-        Some(operations) => Json(operations).into_response(),
+        Ok(Some(operations)) => Json(operations).into_response(),
         // A 404 naming the id, never an empty 200: a client that cannot tell "no such connector"
         // from "a connector with nothing in it" cannot tell a typo from a gap in the catalogue.
-        None => (
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(view::UnknownConnector::new(&connector)),
         )
             .into_response(),
+        Err(error) => {
+            tracing::error!(%error, connector, "the compiled catalogue could not be projected");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "catalogue projection failed",
+                    "connector": connector,
+                })),
+            )
+                .into_response()
+        }
     }
 }
 

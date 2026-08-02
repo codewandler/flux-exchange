@@ -717,6 +717,7 @@ async fn create(
     }
 
     let stored: Vec<String> = body.credentials.keys().cloned().collect();
+    crate::audit::connection_created(&principal, provider.id);
     (
         StatusCode::CREATED,
         Json(view(provider, &addresses, &stored)),
@@ -859,6 +860,7 @@ async fn rotate(
     if let Err(error) = store.put(&reference, &secret).await {
         return rotation_failed(provider, &credential, &reference, &error);
     }
+    crate::audit::credential_rotated(&principal, provider.id, &credential);
 
     // `200` and not `201`: nothing was created, and the connection is the one that was already
     // there. The answer is the same view every other route gives — addresses, and which
@@ -952,6 +954,7 @@ async fn remove(
         return partly_destroyed(provider, &error, destroyed, left_behind);
     }
 
+    crate::audit::connection_removed(&principal, provider.id);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1092,6 +1095,7 @@ async fn set_setting(
         return settings_refused(&refusal);
     }
 
+    crate::audit::setting_set(&principal, provider.id, &setting.service, &setting.binds());
     Json(setting_view(provider, &setting, true)).into_response()
 }
 
@@ -1121,7 +1125,15 @@ async fn clear_setting(
     match store.clear(principal.tenant(), provider.id, &setting) {
         Err(refusal) => settings_refused(&refusal),
         Ok(false) => nothing_to_clear(provider, &setting),
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            crate::audit::setting_cleared(
+                &principal,
+                provider.id,
+                &setting.service,
+                &setting.binds(),
+            );
+            StatusCode::NO_CONTENT.into_response()
+        }
     }
 }
 

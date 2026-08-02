@@ -882,12 +882,12 @@ test('the_mint_screen_is_reachable_and_is_not_declared_a_platform_surface', asyn
   )
 })
 
-test('the_mint_screen_carries_none_of_the_shared_components', async () => {
+test('the_mint_screen_does_not_reach_into_catalogue_views', async () => {
   const code = source('Agents.mts')
   assert.doesNotMatch(
     code,
     /from\s+['"]\.\/components\//,
-    '`Agents.mts` imports a carried component; the fifteen under `src/components/` are shared with flux-connectors and this story changes none of them'
+    '`Agents.mts` imports a catalogue view; minting identity and browsing catalogue entries are separate surfaces'
   )
 })
 

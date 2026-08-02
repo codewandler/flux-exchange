@@ -31,7 +31,7 @@
 //!
 //! # Status
 //!
-//! **v0.12.0, and the service around these types runs operations.** Since X-12,
+//! **v0.13.0, and the service around these types runs operations.** Since X-12,
 //! `POST /api/operations/{operation}/invoke` executes one catalogue operation for the caller's
 //! tenant through [`Invoker`], over a credential store, a connection-settings store and an OIDC
 //! sign-in. What is *not* built is itemized in the repository README, and keeping that page
@@ -132,7 +132,10 @@ pub use grant::{
 };
 #[cfg(unix)]
 pub use grant::{GrantStore, GrantStoreError, GRANT_STORE_SETTING};
-pub use invoke::{admit_runtime, Contexts, Invocation, InvokeRefusal, Invoker, Sent};
+pub use invoke::{
+    admit_runtime, operation_input_schema, Contexts, InputSchemaError, Invocation, InvokeRefusal,
+    Invoker, Sent,
+};
 pub use lease::{Lease, LeaseId, LeaseState};
 pub use principal::{Principal, PrincipalKind, Tenant, TenantError};
 pub use runtime::{Admitted, Deployment, Runtime, RuntimeRefusal};

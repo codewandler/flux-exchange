@@ -6,6 +6,51 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-02
+
+### Added
+
+- **A signed-in operator can complete Connect → Grant → Invoke in the console** (X-88). Searchable
+  connector pickers show vendor context and connection state; connection cards expose status,
+  progressive credential addresses and atomic rotation without ever reading a value back. Grants
+  add conservative presets, grouped consequence previews and narrower/unchanged/wider comparisons
+  while continuing to send metadata selectors only.
+
+  The catalogue now publishes the exact input schema projected by `connector_pack`, and the Invoke
+  screen validates a JSON parameter object, renders success and refusal details including
+  `sent`/`retryable`, and reports elapsed time. Failed reads have in-context retry actions, loading
+  is stable, mobile navigation groups honest future surfaces, and catalogue search gains `/` focus,
+  match highlights, service grouping and result-preserving breadcrumbs.
+
+- **The public process has an operational security boundary** (X-87). OIDC logout now invalidates
+  the server-side session as well as clearing the browser cookie. Anonymous authorization starts are
+  limited to 30 per rolling minute; operation invocation is limited to 120 attempts per rolling
+  minute and 16 concurrent executions, refusing with `429` and `Retry-After` without occupying an
+  unbounded queue.
+
+  Successful sign-in/out, agent minting, connection credential/settings changes, grant replacement
+  and invocation emit structured audit events carrying the resolved actor and a non-secret target,
+  never token or credential material. The outer router supplies a same-origin CSP, HSTS, MIME,
+  referrer and permissions policy on every response, with `Cache-Control: no-store` on `/api`.
+
+  CI now audits all three dependency trees. RustSec exceptions are narrow and documented: the RSA
+  advisory affects key generation while this service verifies with provider public keys, and the
+  transitive `ttf-parser` warning is unmaintained-only with no maintained release available. The
+  VitePress tree forces the first patched Vite line and both Node audits report zero vulnerabilities.
+
+### Changed
+
+- **One exchange-owned catalogue finder replaces the copied flux-connectors explorer** (X-86).
+  The console now has one search field with Connectors, Services and Operations tabs, relevance
+  ordering, shareable route-local state, and connector/service drill-down into operations. It
+  renders only facts this host serves; Channels stays absent until the catalogue publishes real
+  channel metadata. The fifteen copied components and their documentation-shaped adapter contract
+  are removed, so catalogue UI changes no longer have to be synchronized between repositories.
+
+  `GET /api/catalogue/connectors` additively publishes each connector's catalogue-declared `vendor`
+  and `description`. Those are anonymous vendor facts from the compiled catalogue, never tenant,
+  grant, connection or credential state.
+
 ## [0.12.0] - 2026-08-02
 
 ### Changed

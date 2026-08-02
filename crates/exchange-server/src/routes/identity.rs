@@ -24,7 +24,7 @@ use axum::routing::{get, MethodRouter};
 use axum::{Extension, Json};
 use exchange_host::Principal;
 use serde_json::json;
-use tracing::{error, warn};
+use tracing::error;
 
 use super::{Access, Carrier, Module, Route};
 use crate::session;
@@ -114,6 +114,7 @@ async fn sign_in(
             );
         }
     };
+    crate::audit::signed_in(&principal);
 
     (
         [(header::SET_COOKIE, session::planted(&token))],
@@ -123,15 +124,16 @@ async fn sign_in(
 }
 
 /// Close the caller's session and clear the browser's copy of it.
-async fn sign_out(State(state): State<AppState>, request: axum::extract::Request) -> Response {
-    if let Some(dev) = state.development_identity() {
-        // Whatever the caller presented is what gets closed. A caller can only ever close its own
-        // session, because closing is keyed on the token it just proved it holds.
-        let presented = super::presented(&request).map_or("", |(material, _)| material);
-        dev.close_session(presented);
-    } else {
-        warn!("sign-out on a composition whose identity provider mints no sessions");
-    }
+async fn sign_out(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    request: axum::extract::Request,
+) -> Response {
+    // Whatever the caller presented is what gets closed. A caller can only ever close its own
+    // session, because closing is keyed on the token it just proved it holds.
+    let presented = super::presented(&request).map_or("", |(material, _)| material);
+    state.close_session(presented);
+    crate::audit::signed_out(&principal);
 
     (
         StatusCode::NO_CONTENT,
@@ -161,7 +163,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::{get, MethodRouter};
     use axum::{Extension, Json, Router};
-    use exchange_host::{async_trait, Identity, IdentityError, Principal};
+    use exchange_host::{async_trait, Identity, IdentityError, Principal, PrincipalKind, Tenant};
     use serde_json::{json, Value};
     use tower::Service;
 
@@ -566,6 +568,52 @@ mod tests {
             status,
             StatusCode::UNAUTHORIZED,
             "a closed session must stop resolving",
+        );
+    }
+
+    /// X-87's route-level regression: federated logout closes the same server-side store the guard
+    /// resolves, so replaying a copied cookie after the browser clears its copy does not work.
+    #[tokio::test]
+    async fn signing_out_closes_an_oidc_session_server_side() {
+        use crate::oidc::config::OidcConfig;
+        use crate::oidc::exchange::{ExchangeError, Redemption, SignedClaims, TokenExchange};
+        use crate::oidc::Oidc;
+
+        struct UnusedExchange;
+        #[async_trait]
+        impl TokenExchange for UnusedExchange {
+            async fn redeem(&self, _: Redemption<'_>) -> Result<SignedClaims, ExchangeError> {
+                unreachable!("the test begins after OIDC completion")
+            }
+        }
+
+        let oidc = Arc::new(Oidc::new(
+            OidcConfig::for_test("https://accounts.example.com", "flux-exchange", RESOLVED),
+            Arc::new(UnusedExchange),
+        ));
+        let token = oidc.open_session_for_test(Principal::new(
+            PrincipalKind::User,
+            "248289761001",
+            Tenant::new(RESOLVED).expect("a literal tenant"),
+        ));
+        let app = app(AppState::with_oidc(oidc));
+        let carried = |method: Method| {
+            HttpRequest::builder()
+                .method(method)
+                .uri(SESSION)
+                .header(AUTHORIZATION, format!("Bearer {}", token.as_str()))
+                .body(Body::empty())
+                .expect("a well-formed request")
+        };
+
+        assert_eq!(
+            call(app.clone(), carried(Method::DELETE)).await.0,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            call(app, carried(Method::GET)).await.0,
+            StatusCode::UNAUTHORIZED,
+            "a copied OIDC session token must not survive logout"
         );
     }
 
