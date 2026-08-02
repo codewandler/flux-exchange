@@ -1,7 +1,7 @@
 ---
 id: X-61
 title: "A second declaration at one path cannot hide from the anonymous enumeration"
-status: in-progress
+status: done
 priority: 1
 epic: invoke
 areas: [exchange-server]

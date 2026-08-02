@@ -67,6 +67,53 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **The anonymous-surface guard probes declarations, not paths** (X-61). X-54 introduced a duplicated
+  path with two declarations, and the guard that exists to make widening the anonymous surface a
+  deliberate act probed every declaration with a `GET`. Both resolved to the same `GET` — served by
+  the `Principal` entry — so setting `Access::Anonymous` on the `POST` entry was **invisible to the
+  test whose whole job is to notice it**. Demonstrated at the base: the mutation the story names left
+  the old guard printing `ok`.
+
+  Discovery now asks each declaration's own **unguarded** method router which verbs it answers, by
+  reading `Allow` off a `405`, then drives those verbs through the **assembled** app — so what is
+  measured is what the merged router really hands a caller. It must be the unguarded router, because
+  `route_layer` wraps the fallback too and a guarded route answers `401` before the fallback could
+  name anything; a mistake there fails loudly rather than enumerating nothing. An independent review
+  attempted five distinct widenings — an unmerged path, an `options`-only sibling, three declarations
+  at one path, a cross-module declaration, a `head`-only sibling — and the guard caught every one.
+
+  **The whole diff is inside `mod tests`.** `ANONYMOUS` is byte-identical: the routes were right and
+  the guard was not.
+
+  Two facts captured on the guard's doc comment rather than fixed, both confirmed by mutation: the
+  merged router's `405` fallback takes the **second** declaration's guard, so `PATCH`/`OPTIONS`
+  behaviour depends on declaration order and nothing pins that order; and `KIND_GATED`'s tuples are
+  byte-identical for two declarations at one path, so a failure says the count is wrong without
+  saying which declaration caused it.
+
+- **The locks bound the published crate, and no document may say otherwise** (X-55). Lock 2 scans
+  `crates/exchange-host/src` only, so `crates/exchange-server/src/execution.rs` — which holds this
+  composition's transport and sandbox posture — was unscanned while documents counted it as a fourth
+  mechanism. **Widening the scan was considered and rejected**: `exchange-server` legitimately holds a
+  transport, so every lock-2 rule would go red on correct code, and the per-file exception list that
+  answers would be extended by whoever is adding the thing it should catch. Lock 1's allow-list works
+  because a dependency is a rare deliberate addition; that is not the same instrument.
+
+  So the claim narrows instead — three mechanisms, all inside the crate that ships — and **the
+  narrowing is enforced rather than promised**. A decision sentence must appear verbatim in
+  `AGENTS.md`, `docs/designs/invoke.md` and the test's own module doc, and no paragraph of those three
+  may name a control from outside the boundary alongside the vocabulary of leaning on one. The scan
+  root is a single constant walked by the real scan, so a future widening fails a test carrying the
+  argument rather than passing as an edit to a path string.
+
+  ⚠ **The residual is stated in all three documents rather than left to be found**: a second request
+  path added to `exchange-server` is a review matter, not a caught one. That is acceptable only
+  because `exchange-server` is `publish = false`; the design says how to close it if that changes.
+
+  Known limit, disclosed: `no_document_claims_more_than_the_locks_reach` carries one assertion that
+  cannot fire — it compares a length against the list it was built from. No coverage is lost, since
+  an unreadable document panics at the read, but it is worth knowing before trusting it.
+
 - **The console's dev server follows the bind the service was told to use** (X-71). `vite.config.ts`
   hard-coded `http://127.0.0.1:8080` as the `/api` proxy target, so a reader who moved
   `FLUX_EXCHANGE_BIND` — the first thing anyone does when a port is taken — got a console that

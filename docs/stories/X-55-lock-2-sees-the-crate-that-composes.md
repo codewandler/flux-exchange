@@ -1,7 +1,7 @@
 ---
 id: X-55
 title: "Lock 2 sees the crate that composes, or says why it does not"
-status: in-progress
+status: done
 priority: 2
 epic: invoke
 areas: [exchange-host, exchange-server]
