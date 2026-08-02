@@ -19,7 +19,7 @@ machine.
       only `ENGINE_LINE` is changed to the line required by `connector-pack` 0.13.0.
 - [x] All four connector dependencies resolve on 0.13 and every Flux engine dependency resolves on
       0.49, with the manifest, compile-time seam and lockfile tests proving there is no second line.
-- [ ] The Rust workspace, console, public site, crate package dry-run and container build gates pass.
+- [x] The Rust workspace, console, public site, crate package dry-run and container build gates pass.
 - [ ] The workspace version and published `exchange-host` dependency move together, the changelog
       states the engine/connector upgrade, and a matching tag publishes the tested crate through CI.
 - [ ] `fly deploy` replaces the machine with that tested source; `/health` and the same-origin console
@@ -33,6 +33,9 @@ machine.
 - 2026-08-02: all four engine-line tests pass; the full workspace test suite (283 route/library tests
   plus integration tests), clippy, formatting, console (97 tests/build), and site (28 tests/build)
   are green on connector 0.13.0 and Flux 0.49.0.
+- 2026-08-02: `codewandler-flux-exchange-host@0.12.0` packages and verifies in Cargo's dry-run, and
+  the clean production Docker build completed as image
+  `sha256:997009befadf7a13a6d843a408ce1ba56764d8712e465fc37a1db9209f9072e0`.
 
 ## Notes
 - The connector repository is read-only for this story. Its release is an upstream input, not work
