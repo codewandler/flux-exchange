@@ -6,6 +6,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **Local development has a one-tenant startup shorthand** (X-59, partial). Running
+  `flux-exchange --dev` derives `user:${USER}@dev`, keeps the secretless development identity
+  loopback-only, and selects `Deployment::SingleTenant` for runtime admission. From a Cargo checkout
+  the command is `cargo run -- --dev`; an explicit `FLUX_EXCHANGE_DEV_IDENTITY` roster remains the
+  multi-tenant development path and is never overwritten by the shorthand.
+
+  Credential addresses keep the ordinary `tenants/dev/...` layout, byte-identical to the same
+  tenant in a multi-tenant composition, so leaving development mode does not strand stored data.
+  X-59 remains in progress for the orthogonal form that selects one tenant independently of OIDC or
+  a future verified local-user provider.
+
 ## [0.13.0] - 2026-08-02
 
 ### Added

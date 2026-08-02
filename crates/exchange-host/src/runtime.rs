@@ -47,8 +47,8 @@ impl Runtime {
 /// Whether this process serves one tenant or many.
 ///
 /// The distinction is not cosmetic and not a feature flag: it decides which runtimes may run at
-/// all. A single-tenant deployment is the local-development mode — one operator, no sign-in — and
-/// is also a perfectly good production shape for one team.
+/// all. A single-tenant deployment is the local-development mode — one operator identity, one
+/// tenant — and is also a perfectly good production shape for one team.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Deployment {

@@ -1,7 +1,7 @@
 ---
 id: X-59
 title: "A deployment can hold one tenant and stop asking which"
-status: ready
+status: in-progress
 priority: 2
 epic: local-identity
 design: docs/designs/local-identity.md
@@ -36,19 +36,42 @@ to avoid, and a one-way door for anybody who later grows a second tenant.
 So: one tenant, **named once at startup**, and every principal is of it. The address is unchanged.
 
 ## Acceptance
+- [x] `flux-exchange --dev` declares the single tenant `dev` and resolves the startup user's
+      principal as `user:${USER}@dev`; from Cargo the spelling is `cargo run -- --dev`, because Cargo
+      forwards binary arguments only after `--`.
+      → `tests::dev_declares_the_startup_user_and_one_dev_tenant` and the process-level smoke run.
 - [ ] A deployment declares one tenant at startup and every principal it resolves is of that tenant.
-- [ ] **The credential address is byte-identical** to what a multi-tenant deployment renders for the
+- [x] **The credential address is byte-identical** to what a multi-tenant deployment renders for the
       same tenant. Assert it literally, the way `tests/engine_line.rs` asserts the rendered address —
       this is the property that keeps the door open.
-- [ ] **Failing-first test** — nothing in a request can name a tenant, in this mode or any other. This
+      → `tests::dev_credentials_keep_the_multi_tenant_address_layout` pins
+      `tenants/dev/com.zendesk.api/api_token` literally.
+- [x] **Failing-first test** — nothing in a request can name a tenant, in this mode or any other. This
       already holds; pin it here too, because a single-tenant mode is where somebody would be tempted
       to accept one "since there is only one".
-- [ ] Moving a single-tenant deployment to multi-tenant does not strand a stored credential. State how
+      → `tests::dev_resolves_the_startup_user_to_dev_and_no_request_can_rename_it` sends hostile query,
+      header and body claims through the new startup composition and still resolves `dev`.
+- [x] Moving a single-tenant deployment to multi-tenant does not strand a stored credential. State how
       in the design, and test it if it is testable.
-- [ ] The console does not show a tenant column that always says the same word, and the descriptor
+      → the address-layout test above and `docs/designs/local-identity.md` state why removing the flag
+      leaves the same `tenants/dev/...` address.
+- [x] The console does not show a tenant column that always says the same word, and the descriptor
       does not publish the tenant's name — it is tenant-specific and `GET /api/onboarding` is
       anonymous.
+      → the console has no tenant listing column, and the existing
+      `nothing_tenant_specific_can_reach_this_page`/`the_document_is_identical_with_two_tenants_connected`
+      tests keep the descriptor tenant-free.
 
 ## Notes
 - The honest gain is small and worth saying so: it removes a made-up id from the getting-started path.
   It does not remove tenancy from the model, and it must not.
+
+## Progress
+- **2026-08-02 — owner chose the concrete local-development shape.** `--dev` is the single-tenant
+  declaration and implies `user:${USER}@dev`; an explicit `FLUX_EXCHANGE_DEV_IDENTITY` roster stays
+  the multi-tenant development path.
+- **The local slice is delivered and walked.** `cargo run -- --dev` announced
+  `timo -> User:timo@dev`, selected `Deployment::SingleTenant`, admitted the loopback bind and served
+  the API. The full Rust, console and public-site gates pass. What remains before the story itself is
+  done is the broader, orthogonal deployment declaration: selecting one tenant independently of how
+  that deployment authenticates, including OIDC and X-58's future verified local users.

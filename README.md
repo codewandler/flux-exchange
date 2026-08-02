@@ -10,8 +10,9 @@ everything below.
 > [!WARNING]
 > **Status: v0.13.0 — credentials, a gated invoke, and a hardened public process.**
 >
-> `cargo run` binds `127.0.0.1:8080` and serves health, the connector catalogue, a session, and a
-> **complete** OIDC sign-in. It refuses to start on a reachable address while no identity provider
+> `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
+> connector catalogue and a session without OIDC setup. The ordinary composition supports a
+> **complete** OIDC sign-in and refuses to start on a reachable address while no identity provider
 > is configured. The authorization code is redeemed back-channel and the id token's signature is
 > verified against the provider's published keys, so `/api/signin` redirects to a real provider —
 > configure the eight `FLUX_EXCHANGE_OIDC_*` variables and it works end to end. Connections can be
@@ -154,10 +155,14 @@ refuse and name the setting rather than pretending a store exists.
 ## Try it
 
 ```bash
-cargo run                       # binds 127.0.0.1:8080; health, catalogue, session, sign-in
+cargo run -- --dev              # user:${USER}@dev on 127.0.0.1:8080; no OIDC setup
 cargo test --workspace          # 366 tests
 cd console && npm install && npm run dev
 ```
+
+`--dev` belongs to the binary, so Cargo's first `--` is the argument-forwarding boundary. An
+explicit `FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,...` roster remains available when local work
+needs named tenants or more than one principal.
 
 Rust 1.88 or newer — the floor `Cargo.toml`'s `rust-version` states. ⚠ *This said 1.87 through
 three releases and was false the whole time; `jsonwebtoken` and `time` both require 1.88. X-30

@@ -67,6 +67,7 @@ impl Contexts for GuardedSystem {
 /// fallible step, and it is fallible at *startup* rather than on the first request, which is where
 /// a composition problem should announce itself.
 pub fn invoker(
+    deployment: Deployment,
     credentials: Arc<dyn SecretStore>,
     settings: Arc<dyn ConfigStore>,
     grants: Arc<dyn Grants>,
@@ -101,12 +102,10 @@ pub fn invoker(
     })?;
 
     Ok(Invoker::new(
-        // **Multi-tenant**, which is the class that refuses more. This host serves many principals
-        // over a socket, so it is multi-tenant by construction; and even if it were not, choosing
-        // the permissive class as a default would make "a locally-executing runtime is refused" a
-        // property that depends on a setting nobody set. Every shipped connector declares `http`,
-        // which this admits — see `exchange_host::admit_runtime`.
-        Deployment::MultiTenant,
+        // Chosen once at startup, never by a request. Ordinary startup remains multi-tenant — the
+        // class that refuses more — while X-59's `--dev` shorthand declares the one `dev` tenant
+        // and selects `SingleTenant`. A caller cannot choose the permissive runtime class.
+        deployment,
         Egress::new(Arc::new(HttpRequestTool::new(&options))),
         credentials,
         // **A tenant's non-secret connection settings**, as the port. X-47 gave them a store of

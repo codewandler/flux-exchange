@@ -317,6 +317,7 @@ mod tests {
     fn invoker_holding(grants: Vec<exchange_host::Grant>) -> Arc<exchange_host::Invoker> {
         Arc::new(
             crate::execution::invoker(
+                exchange_host::Deployment::MultiTenant,
                 Arc::new(EmptyStore),
                 // No connection settings bound: these tests drive connectors that need none.
                 Arc::new(exchange_host::MemoryConfig::new()),

@@ -29,12 +29,6 @@ cd flux-exchange
 # a name anybody can guess is worse than no authentication, because the surface in front of it
 # believes every caller. It is a refusal and not a warning: no flag relaxes it.
 #
-# The principals this host will mint, comma-separated. One entry is `kind:id@tenant`: `user`,
-# `agent` or `service`; an id you choose; and the tenant that principal is of — fixed here, at
-# startup, where no request field can reach it. Choose your own. This page prints no entry,
-# because a handle with no secret in it is a working credential.
-export FLUX_EXCHANGE_DEV_IDENTITY="<kind:id@tenant>"
-
 # What each tenant may run, and what operations run with. Two paths, both outside every
 # checkout — a grant file that arrives with a clone is an authorisation policy nobody decided,
 # and this host refuses such a path rather than writing there. It creates what it needs, with
@@ -42,12 +36,26 @@ export FLUX_EXCHANGE_DEV_IDENTITY="<kind:id@tenant>"
 export FLUX_EXCHANGE_GRANTS=<a path outside every checkout>
 export FLUX_EXCHANGE_CREDENTIALS=<a second path outside every checkout>
 
+# Cargo forwards everything after its `--` to the binary. This declares one tenant, `dev`, and
+# one human from the startup environment: user:${USER}@dev.
+cargo run -- --dev
+```
+
+The resulting bearer handle is the value of `$USER`. If local work needs a deliberately named tenant,
+several principals, or several tenants, leave off `--dev` and arm the existing roster explicitly:
+
+```sh
+# This also carries a secretless development identity and is loopback-only. It is not how you deploy
+# the service, and no flag relaxes that constraint.
+export FLUX_EXCHANGE_DEV_IDENTITY="<kind:id@tenant>"
 cargo run
 ```
 
-Paste those placeholders as they stand and the process **refuses to start**, naming the entry it could
-not read and the kinds it accepts. It does not skip the bad entry and arm the rest: a roster that
-silently lost a principal is a roster whose operator is debugging the wrong thing.
+One entry is `kind:id@tenant`: `user`, `agent` or `service`; an id you choose; and the tenant that
+principal is of, fixed at startup where no request field can reach it. Paste the placeholder as it
+stands and the process **refuses to start**, naming the entry it could not read and the kinds it
+accepts. It does not skip the bad entry and arm the rest: a roster that silently lost a principal is
+a roster whose operator is debugging the wrong thing.
 
 Then read the startup log once. It is the operator's channel, and it is more current than this page:
 
@@ -74,7 +82,8 @@ exchange="<the address the log named>"
 # redirecting anywhere — and it names no roster entry, for the reason this page does not either.
 curl "$exchange/api/signin"
 
-# The exchange itself. Loopback only, for the reason in the first block.
+# The exchange itself. With `--dev`, <handle> is the value of $USER. Loopback only, for the reason
+# in the first block.
 curl -X POST "$exchange/api/session" \
   -H 'Authorization: Bearer <handle>' \
   -c cookies

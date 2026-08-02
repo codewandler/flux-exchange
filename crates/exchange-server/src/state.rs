@@ -682,6 +682,7 @@ mod tests {
 
         let invoker = Arc::new(
             crate::execution::invoker(
+                exchange_host::Deployment::MultiTenant,
                 Arc::new(NoStore),
                 // Deciding an identity binding reads no connection setting either.
                 Arc::new(exchange_host::MemoryConfig::new()),

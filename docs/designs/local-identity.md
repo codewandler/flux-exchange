@@ -172,6 +172,24 @@ to avoid. Single-tenant means **one tenant, named once, at startup**, and every 
 The honest gain is that nobody has to invent a tenant id to try the thing, and that a listing does not
 show a tenant column that always says the same word.
 
+#### The local declaration is `--dev`
+
+The owner chose the concrete local-development spelling on 2026-08-02: running
+`flux-exchange --dev` declares one tenant named `dev` and one human principal named from the startup
+environment, `user:${USER}@dev`. From a Cargo checkout the command is `cargo run -- --dev`; the first
+`--` belongs to Cargo and is the boundary after which it forwards arguments to the binary.
+
+This is deliberately more than an alias for `FLUX_EXCHANGE_DEV_IDENTITY`. It also selects
+`Deployment::SingleTenant` for the invoker, so the runtime gate and the identity agree about the
+deployment's shape. The development identity remains loopback-only: the handle is still a name with
+no secret, and choosing one tenant changes none of the bind argument.
+
+An explicit `FLUX_EXCHANGE_DEV_IDENTITY` roster remains the multi-tenant development path and takes
+precedence over the shorthand. `--dev` never rewrites it or collapses principals from several tenants
+into `dev`; doing either would silently authenticate a different principal than the operator named.
+The default `dev` address stays `tenants/dev/<authority>/<credential>`, byte-identical to the same
+principal under the multi-tenant composition, so removing `--dev` later does not strand stored data.
+
 ## Alternatives considered
 
 - **Let `DevIdentity` bind a reachable address.** Rejected, and this is the one to keep rejecting: a

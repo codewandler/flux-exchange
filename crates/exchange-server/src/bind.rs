@@ -72,6 +72,12 @@ pub fn admit_bind(bind: SocketAddr, identity: IdentityBinding) -> Result<(), Sta
 /// value, and distinguish failures an operator answers differently — is met below.
 #[derive(Debug)]
 pub enum StartupRefusal {
+    /// The `--dev` shorthand could not derive its one local principal.
+    DevelopmentMode {
+        /// What startup input was missing or unusable. It carries no credential value.
+        reason: String,
+    },
+
     /// The bind is reachable from outside this machine and nothing could authenticate a caller.
     ReachableBindWithoutIdentity {
         /// The address that was asked for.
@@ -190,6 +196,7 @@ impl From<DevIdentityRefusal> for StartupRefusal {
 impl fmt::Display for StartupRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::DevelopmentMode { reason } => write!(f, "{reason}"),
             // Names both things that would have worked, because the operator cannot tell from the
             // outside which half of the pair they meant to change.
             Self::ReachableBindWithoutIdentity { bind } => write!(
@@ -204,8 +211,8 @@ impl fmt::Display for StartupRefusal {
                 "refusing to serve on {bind}: it is reachable from outside this machine and the \
                  development identity is armed, so anyone who can reach it becomes any principal \
                  on the roster by naming it. Either bind loopback \
-                 ({BIND_ENV}={DEFAULT_BIND}), or unset {DEV_IDENTITY_ENV} and configure a real \
-                 identity provider",
+                 ({BIND_ENV}={DEFAULT_BIND}), or remove `--dev`/unset {DEV_IDENTITY_ENV} and \
+                 configure a real identity provider",
             ),
             Self::UnreadableBind { value, .. } => write!(
                 f,
@@ -237,6 +244,7 @@ impl std::error::Error for StartupRefusal {
         match self {
             Self::ReachableBindWithoutIdentity { .. }
             | Self::ReachableBindWithDevelopmentIdentity { .. }
+            | Self::DevelopmentMode { .. }
             | Self::CredentialStore { .. }
             | Self::AgentStore { .. }
             | Self::SettingsStore { .. }

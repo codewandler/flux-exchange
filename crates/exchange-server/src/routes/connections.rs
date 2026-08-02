@@ -2453,8 +2453,13 @@ mod tests {
             )
             .expect("a store outside a working tree takes a write");
         let invoker = Arc::new(
-            crate::execution::invoker(store.clone(), settings.clone(), grants)
-                .expect("a usable workspace root"),
+            crate::execution::invoker(
+                exchange_host::Deployment::MultiTenant,
+                store.clone(),
+                settings.clone(),
+                grants,
+            )
+            .expect("a usable workspace root"),
         );
 
         let app = super::super::app(

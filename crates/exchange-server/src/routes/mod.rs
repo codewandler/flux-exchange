@@ -1385,6 +1385,7 @@ mod tests {
     fn editing(grants: Arc<StoredGrants>) -> AppState {
         let invoker = Arc::new(
             crate::execution::invoker(
+                exchange_host::Deployment::MultiTenant,
                 Arc::new(NoCredentials),
                 Arc::new(exchange_host::MemoryConfig::new()),
                 grants,

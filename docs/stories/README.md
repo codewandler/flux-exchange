@@ -30,6 +30,7 @@ HTTP surface, sign-in, the catalogue and the credential store are all buildable 
 
 ## Now (in progress)
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · the first deployment any flux-family repository has made, so it sets the precedent the siblings copy. One machine deliberately — the credential store fsyncs the whole file under one mutex and a fly volume is per-machine, so two machines is two divergent stores with no reconciliation
+- [X-59 — A deployment can hold one tenant and stop asking which](X-59-single-tenant-deployment.md) · the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-81 — Four places state this project's version and three of them are wrong](X-81-the-version-a-page-states-is-checked.md) · found by X-73's implementor, 2026-08-02: lib.rs says v0.7.0, AGENTS.md and README.md say v0.9.0, the manifest says 0.11.0. lib.rs's is the published crate's front-page doc comment, so docs.rs is serving the wrong one — and nothing in the gate compares any of them to the manifest
@@ -52,7 +53,6 @@ _Every credential this service holds today arrived the same way: **a human paste
 ### signing in without an identity provider
 _**You cannot use this console without standing up an OIDC provider.** That is the whole problem, and_
 - [X-58 — An operator can define users in a config file and sign in on their own network](X-58-static-users-from-a-config-file.md) · the axis that actually unblocks the console: a local identity with a real secret, so it may bind a reachable address — unlike DevIdentity, whose roster handle is a name anybody can guess
-- [X-59 — A deployment can hold one tenant and stop asking which](X-59-single-tenant-deployment.md) · the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it
 - [X-68 — The sign-in callback is the oracle it says it is](X-68-the-callback-is-the-oracle-it-claims.md) · found by X-57's review, 2026-08-01: the callback's comment says it 'stays the oracle for nothing', but ?error=access_denied answers 401 on a federated host and 400 on a development one — and the withheld-variable guard does not list the dev roster's own variable
 
 ### a public documentation site

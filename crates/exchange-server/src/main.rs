@@ -26,6 +26,7 @@ mod session;
 mod state;
 mod traffic;
 
+use std::ffi::OsStr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -44,6 +45,86 @@ use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
 use crate::oidc::Oidc;
 use crate::state::AppState;
+
+/// The binary flag that declares the zero-configuration, one-tenant development composition.
+const DEV_FLAG: &str = "--dev";
+
+/// The conventional startup-user setting from which [`DEV_FLAG`] names its one human.
+const USER_ENV: &str = "USER";
+
+/// Startup choices that must agree across identity and runtime admission.
+#[derive(Debug, PartialEq, Eq)]
+enum Startup {
+    /// The existing composition: an explicit roster or OIDC may resolve several tenants, and local
+    /// runtimes are refused.
+    MultiTenant,
+    /// One loopback-only development principal, fixed to the one `dev` tenant at startup.
+    Development { roster: String },
+}
+
+impl Startup {
+    /// Read the process arguments and environment once, before any port is composed.
+    fn configured() -> Result<Self, StartupRefusal> {
+        let requested = requests_development(std::env::args_os().skip(1));
+        let explicit_roster = std::env::var_os(DEV_IDENTITY_ENV).is_some();
+        let user = std::env::var(USER_ENV).ok();
+
+        Self::select(requested, explicit_roster, user.as_deref())
+    }
+
+    /// Select a startup shape from already-read inputs, so tests never race over process state.
+    fn select(
+        requested: bool,
+        explicit_roster: bool,
+        user: Option<&str>,
+    ) -> Result<Self, StartupRefusal> {
+        // An explicit roster is the operator's more precise declaration. Do not overwrite it or
+        // silently collapse principals from several tenants into `dev`.
+        if explicit_roster || !requested {
+            return Ok(Self::MultiTenant);
+        }
+
+        let Some(user) = user.filter(|user| !user.is_empty()) else {
+            return Err(StartupRefusal::DevelopmentMode {
+                reason: format!(
+                    "{DEV_FLAG} cannot name its local principal because {USER_ENV} is unset or \
+                     empty. Set {USER_ENV}, or configure {DEV_IDENTITY_ENV} explicitly"
+                ),
+            });
+        };
+
+        Ok(Self::Development {
+            roster: format!("user:{user}@dev"),
+        })
+    }
+
+    /// The runtime class selected by this startup declaration.
+    const fn deployment(&self) -> Deployment {
+        match self {
+            Self::MultiTenant => Deployment::MultiTenant,
+            Self::Development { .. } => Deployment::SingleTenant,
+        }
+    }
+
+    /// An implied development roster, or `None` when the normal identity configuration applies.
+    fn development_roster(&self) -> Option<&str> {
+        match self {
+            Self::MultiTenant => None,
+            Self::Development { roster } => Some(roster),
+        }
+    }
+}
+
+/// Whether the binary arguments request the local single-tenant composition.
+fn requests_development<I, S>(arguments: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    arguments
+        .into_iter()
+        .any(|argument| argument.as_ref() == DEV_FLAG)
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -66,13 +147,14 @@ async fn main() -> ExitCode {
 
 /// Start the server, or refuse and say why.
 async fn serve() -> Result<(), StartupRefusal> {
-    let state = compose()?;
+    let startup = Startup::configured()?;
+    let state = compose(&startup)?;
     let bind = configured_bind()?;
 
     // Before the socket, not after: a listener that opens and then closes has still been open.
     admit_bind(bind, state.identity_binding())?;
 
-    report_deployments();
+    report_deployment(startup.deployment());
     report_surface();
 
     let listener = TcpListener::bind(bind)
@@ -138,14 +220,15 @@ fn configured_console() -> Option<PathBuf> {
 /// safety property that depends on a setting staying at its default is one setting away from gone,
 /// so nothing here has to be turned *off* to be safe — only turned on to be useful.
 ///
-/// The development identity is armed by [`DEV_IDENTITY_ENV`]; failing that, OIDC sign-in is offered
-/// if it was configured; the credential store and the agent store are bound by their own settings.
-/// Unset and unconfigured binds nothing, which is the state a reachable bind is already refused in.
+/// The development identity is armed by [`DEV_FLAG`] or [`DEV_IDENTITY_ENV`]; failing that, OIDC
+/// sign-in is offered if it was configured; the credential store and the agent store are bound by
+/// their own settings. Unset and unconfigured binds nothing, which is the state a reachable bind is
+/// already refused in.
 ///
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
-fn compose() -> Result<AppState, StartupRefusal> {
-    let mut state = compose_identity()?;
+fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
+    let mut state = compose_identity(startup)?;
 
     // Bound before the invoker, because the invoker reads it. A composition with no settings store
     // still builds one — it gets an empty configuration, which is X-12's behaviour: the connectors
@@ -181,7 +264,7 @@ fn compose() -> Result<AppState, StartupRefusal> {
             );
 
             state = state.with_invoker(Arc::new(
-                invoker(store.clone(), configuration, grants)
+                invoker(startup.deployment(), store.clone(), configuration, grants)
                     .map_err(|reason| StartupRefusal::Invoker { reason })?,
             ));
         }
@@ -380,11 +463,16 @@ fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>
 
 /// Bind the identity port this composition serves with.
 ///
-/// Two on offer. The development one is armed only by [`DEV_IDENTITY_ENV`] being set and wins when
-/// it is; failing that, OIDC federates if it is configured and its token exchange could be built.
-/// Unset and unconfigured binds nothing, which is the state a reachable bind is already refused in.
-fn compose_identity() -> Result<AppState, StartupRefusal> {
-    let Some(dev) = DevIdentity::armed()? else {
+/// Two on offer. The development one is armed by [`DEV_FLAG`] or [`DEV_IDENTITY_ENV`] and wins when
+/// either selects it; failing that, OIDC federates if it is configured and its token exchange could
+/// be built. Unset and unconfigured binds nothing, which is the state a reachable bind is already
+/// refused in.
+fn compose_identity(startup: &Startup) -> Result<AppState, StartupRefusal> {
+    let implied = startup
+        .development_roster()
+        .map(DevIdentity::from_roster)
+        .transpose()?;
+    let Some(dev) = implied.or(DevIdentity::armed()?) else {
         return Ok(compose_oidc(OidcConfig::from_env()));
     };
 
@@ -395,10 +483,16 @@ fn compose_identity() -> Result<AppState, StartupRefusal> {
         .roster()
         .map(|(handle, principal)| format!("{handle} -> {principal}"))
         .collect();
+    let armed_by = if startup.development_roster().is_some() {
+        DEV_FLAG
+    } else {
+        DEV_IDENTITY_ENV
+    };
 
     warn!(
+        armed_by,
         roster = %roster.join(", "),
-        "DEVELOPMENT identity armed by {DEV_IDENTITY_ENV}. Any caller presenting one of these \
+        "DEVELOPMENT identity armed. Any caller presenting one of these \
          handles becomes that principal, with no secret required. This host will refuse to serve \
          on any address but loopback while it is armed",
     );
@@ -490,12 +584,11 @@ fn report_surface() {
     }
 }
 
-/// Log which runtimes each deployment shape would serve, and which it refuses.
+/// Log which runtimes the selected deployment shape serves, and which it refuses.
 ///
 /// Kept from the pre-service binary deliberately. It is the one line of startup output that shows
-/// the multi-tenancy rule is in force and decided from the manifest, rather than from a setting
-/// somebody could have turned off.
-fn report_deployments() {
+/// the tenancy rule is in force and decided at startup, rather than from a request field.
+fn report_deployment(deployment: Deployment) {
     const RUNTIMES: [Runtime; 6] = [
         Runtime::Http,
         Runtime::Socket,
@@ -505,18 +598,16 @@ fn report_deployments() {
         Runtime::Remote,
     ];
 
-    for deployment in [Deployment::SingleTenant, Deployment::MultiTenant] {
-        let (served, refused): (Vec<_>, Vec<_>) = RUNTIMES
-            .iter()
-            .partition(|runtime| deployment.admits(**runtime).is_ok());
+    let (served, refused): (Vec<_>, Vec<_>) = RUNTIMES
+        .iter()
+        .partition(|runtime| deployment.admits(**runtime).is_ok());
 
-        info!(
-            deployment = ?deployment,
-            serves = %names(&served),
-            refuses = %names(&refused),
-            "runtime admission",
-        );
-    }
+    info!(
+        deployment = ?deployment,
+        serves = %names(&served),
+        refuses = %names(&refused),
+        "runtime admission",
+    );
 }
 
 fn names(runtimes: &[&Runtime]) -> String {
@@ -543,6 +634,101 @@ mod tests {
     use tower::Service;
 
     use crate::oidc::config::AUTHORIZATION_ENDPOINT_ENV;
+
+    /// **X-59's failing-first test.** The flag is one declaration carrying both axes of the local
+    /// deployment: who the human is and that every address belongs to the one `dev` tenant. The
+    /// explicit-roster control keeps the existing multi-tenant development path intact.
+    #[test]
+    fn dev_declares_the_startup_user_and_one_dev_tenant() {
+        assert!(requests_development(["--dev"]));
+        assert!(requests_development(["ignored-before", "--dev"]));
+        assert!(!requests_development(["--development"]));
+
+        let dev = Startup::select(true, false, Some("timo"))
+            .expect("a startup user makes the development shorthand usable");
+        assert_eq!(dev.deployment(), Deployment::SingleTenant);
+        assert_eq!(dev.development_roster(), Some("user:timo@dev"));
+
+        let explicit = Startup::select(true, true, Some("timo"))
+            .expect("an explicit development roster remains authoritative");
+        assert_eq!(explicit.deployment(), Deployment::MultiTenant);
+        assert_eq!(explicit.development_roster(), None);
+    }
+
+    /// A missing startup user is a named refusal, not a silently anonymous development host and
+    /// not a made-up default credential shared by every checkout.
+    #[test]
+    fn dev_refuses_when_the_startup_user_cannot_be_named() {
+        for user in [None, Some("")] {
+            let message = Startup::select(true, false, user)
+                .expect_err("the shorthand needs a real startup user")
+                .to_string();
+            assert!(message.contains(DEV_FLAG), "{message}");
+            assert!(message.contains(USER_ENV), "{message}");
+            assert!(message.contains(DEV_IDENTITY_ENV), "{message}");
+        }
+    }
+
+    /// The shortcut reaches the guard as an ordinary principal whose tenant was fixed at startup.
+    /// Hostile request fields are present so this pins X-59's tenant-vector acceptance against the
+    /// new entry point rather than inheriting X-03's roster test by assertion.
+    #[tokio::test]
+    async fn dev_resolves_the_startup_user_to_dev_and_no_request_can_rename_it() {
+        let startup = Startup::select(true, false, Some("timo")).expect("a development startup");
+        let state = compose_identity(&startup).expect("the implied roster is valid");
+        let mut service = routes::app(state).into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("a router is always ready");
+
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri("/api/session?tenant=attacker")
+            .header("Authorization", "Bearer timo")
+            .header("X-Tenant", "attacker")
+            .header("Content-Type", "application/json")
+            .body(Body::from(r#"{"tenant":"attacker"}"#))
+            .expect("a well-formed request");
+        let response = service.call(request).await.expect("an infallible router");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("a response body");
+        let body: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("the session response is JSON");
+
+        assert_eq!(body["principal"]["id"], "timo", "{body}");
+        assert_eq!(body["principal"]["kind"], "user", "{body}");
+        assert_eq!(body["principal"]["tenant"], "dev", "{body}");
+        assert!(!body.to_string().contains("attacker"), "{body}");
+    }
+
+    /// Single-tenant changes runtime admission, never address layout. Rendering the default tenant
+    /// literally pins the migration property: the same `Tenant("dev")` under the existing
+    /// multi-tenant composition looks in exactly this location after `--dev` is removed.
+    #[test]
+    fn dev_credentials_keep_the_multi_tenant_address_layout() {
+        const CREDENTIALS: &[exchange_host::DeclaredCredential<'static>] =
+            &[exchange_host::DeclaredCredential {
+                name: "zendesk.api_token",
+                leaf: "api_token",
+            }];
+        let declaration = exchange_host::ConnectorDeclaration {
+            connector: "zendesk",
+            authority: Some("com.zendesk.api"),
+            credentials: CREDENTIALS,
+        };
+        let tenant = exchange_host::Tenant::new("dev").expect("the fixed tenant is addressable");
+        let reference = declaration
+            .address_of(&tenant, "zendesk.api_token")
+            .expect("a declared credential");
+
+        assert_eq!(
+            exchange_host::address_path(&reference),
+            "tenants/dev/com.zendesk.api/api_token",
+        );
+        assert_eq!(reference.tenant(), "dev");
+    }
 
     /// Send a whole request.
     ///

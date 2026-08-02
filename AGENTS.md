@@ -47,6 +47,12 @@ provider configured. What exists beyond that is still the vocabulary and the rul
 handle as a bearer token, `POST /api/session` exchanges it for a cookie. `sign_in_available` now means
 *this deployment can turn a caller into a principal*, not *OIDC is configured*.
 
+**X-59's delivered local slice removes even that roster setup:** `cargo run -- --dev` implies
+`user:${USER}@dev`, keeps the identity loopback-only, and selects `Deployment::SingleTenant` for the
+invoker while preserving the ordinary `tenants/dev/...` address layout. An explicit
+`FLUX_EXCHANGE_DEV_IDENTITY` roster still takes precedence and remains the multi-tenant development
+path. X-59 stays in progress for selecting one tenant independently of the authentication provider.
+
 ⚠ *This paragraph used to say the console hid its sign-in affordance. That was never true — it renders
 the anchor unconditionally and nothing reads `sign_in_available`. The link led nowhere useful; that is
 what X-57 fixed.* A **reachable** deployment still needs a real provider: the roster has no secret, so
