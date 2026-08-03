@@ -114,8 +114,6 @@ async fn sign_in(
             );
         }
     };
-    crate::audit::signed_in(&principal);
-
     (
         [(header::SET_COOKIE, session::planted(&token))],
         Json(json!({ "token": token.as_str(), "principal": principal })),
@@ -124,17 +122,11 @@ async fn sign_in(
 }
 
 /// Close the caller's session and clear the browser's copy of it.
-async fn sign_out(
-    State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    request: axum::extract::Request,
-) -> Response {
+async fn sign_out(State(state): State<AppState>, request: axum::extract::Request) -> Response {
     // Whatever the caller presented is what gets closed. A caller can only ever close its own
     // session, because closing is keyed on the token it just proved it holds.
     let presented = super::presented(&request).map_or("", |(material, _)| material);
     state.close_session(presented);
-    crate::audit::signed_out(&principal);
-
     (
         StatusCode::NO_CONTENT,
         [(header::SET_COOKIE, session::cleared())],

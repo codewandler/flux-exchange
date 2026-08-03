@@ -6,6 +6,7 @@ use exchange_host::{
     ConnectionSettings, Identity, Invoker, PureEditorTools, SecretStore, WorkflowStore,
 };
 
+use crate::audit::AuditJournal;
 use crate::bind::IdentityBinding;
 use crate::channel::ChannelSupervisor;
 use crate::connection_guard::ConnectionGuard;
@@ -22,6 +23,8 @@ use crate::workflow_runs::WorkflowRunStore;
 /// a route could reach for instead.
 #[derive(Clone)]
 pub struct AppState {
+    /// Durable non-secret evidence, when this composition bound it.
+    audit: Option<Arc<AuditJournal>>,
     identity: BoundIdentity,
     sign_in: SignIn,
     /// Where credentials are kept, as the **port** rather than as the concrete store.
@@ -198,6 +201,7 @@ impl AppState {
     /// the host cannot attribute the request, so it does not serve it.
     pub fn without_identity() -> Self {
         Self {
+            audit: None,
             identity: BoundIdentity::None,
             sign_in: SignIn::Unconfigured,
             credentials: None,
@@ -224,6 +228,7 @@ impl AppState {
     #[cfg(test)]
     pub fn with_identity(identity: Arc<dyn Identity>) -> Self {
         Self {
+            audit: None,
             identity: BoundIdentity::Real(identity),
             sign_in: SignIn::Unconfigured,
             credentials: None,
@@ -247,6 +252,7 @@ impl AppState {
     /// a host that mints principals and reports that it cannot.
     pub fn with_development_identity(identity: Arc<DevIdentity>) -> Self {
         Self {
+            audit: None,
             identity: BoundIdentity::Development(identity),
             sign_in: SignIn::Development { automatic: false },
             credentials: None,
@@ -280,6 +286,7 @@ impl AppState {
     /// The binary reaches this once `HttpTokenExchange` is built; see `docs/designs/oidc-signin.md`.
     pub fn with_oidc(oidc: Arc<Oidc>) -> Self {
         Self {
+            audit: None,
             identity: BoundIdentity::Real(oidc.clone()),
             sign_in: SignIn::Oidc(oidc),
             credentials: None,
@@ -303,6 +310,7 @@ impl AppState {
     /// state: the bind rule asks whether anything *could* resolve a caller, and here nothing can.
     pub fn oidc_without_a_token_exchange() -> Self {
         Self {
+            audit: None,
             identity: BoundIdentity::None,
             sign_in: SignIn::NoTokenExchange,
             credentials: None,
@@ -316,6 +324,17 @@ impl AppState {
             channels: None,
             traffic: Traffic::default(),
         }
+    }
+
+    /// Bind the durable application audit journal.
+    pub fn with_audit(mut self, audit: Arc<AuditJournal>) -> Self {
+        self.audit = Some(audit);
+        self
+    }
+
+    /// The durable application audit journal, if this composition bound one.
+    pub fn audit(&self) -> Option<&Arc<AuditJournal>> {
+        self.audit.as_ref()
     }
 
     /// Bind the credential store this composition holds.

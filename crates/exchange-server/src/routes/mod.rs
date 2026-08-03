@@ -41,6 +41,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::warn;
 
+use crate::audit::{
+    Action as AuditAction, AuditError, Outcome as AuditOutcome, RequestId, Target as AuditTarget,
+};
 use crate::session;
 use crate::state::AppState;
 
@@ -218,7 +221,24 @@ pub fn app_with_console(state: AppState, console: Option<&Path>) -> Router {
 
     app.layer(middleware::from_fn(security_headers))
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(request_correlation))
         .with_state(state)
+}
+
+/// Generate correlation before every guard and return it without trusting a caller-supplied id.
+async fn request_correlation(mut request: Request, next: Next) -> Response {
+    let request_id = match RequestId::generate() {
+        Ok(request_id) => request_id,
+        Err(error) => return audit_unavailable(error),
+    };
+    request.extensions_mut().insert(request_id.clone());
+    let mut response = next.run(request).await;
+    if let Ok(value) = HeaderValue::from_str(request_id.as_str()) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("x-request-id"), value);
+    }
+    response
 }
 
 /// Attach the browser policy at the outermost application boundary, including errors and static
@@ -322,6 +342,17 @@ async fn require_principal(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let request_id = match request.extensions().get::<RequestId>().cloned() {
+        Some(request_id) => request_id,
+        None => match RequestId::generate() {
+            Ok(request_id) => {
+                request.extensions_mut().insert(request_id.clone());
+                request_id
+            }
+            Err(error) => return audit_unavailable(error),
+        },
+    };
+    let route = request.uri().path().to_owned();
     let (presented, carrier) = presented(&request).unwrap_or(("", Carrier::Authorization));
     let service_account = (carrier == Carrier::Authorization)
         .then(|| state.service_accounts())
@@ -349,6 +380,16 @@ async fn require_principal(
     };
 
     if state.identity().is_none() && state.service_accounts().is_none() {
+        if let Err(error) = record_audit(
+            &state,
+            &request_id,
+            AuditAction::Authentication,
+            AuditOutcome::Refused,
+            None,
+            AuditTarget::Identity,
+        ) {
+            return audit_unavailable(error);
+        }
         return refuse(
             StatusCode::UNAUTHORIZED,
             "this host has no identity provider configured, so no caller can be resolved to a principal",
@@ -358,6 +399,26 @@ async fn require_principal(
     match resolved {
         Ok(Some(principal)) => match admitted {
             Some(kinds) if !kinds.contains(&principal.kind()) => {
+                if let Err(error) = record_audit(
+                    &state,
+                    &request_id,
+                    AuditAction::Authentication,
+                    AuditOutcome::Succeeded,
+                    Some(&principal),
+                    AuditTarget::Identity,
+                )
+                .and_then(|()| {
+                    record_audit(
+                        &state,
+                        &request_id,
+                        AuditAction::Authorization,
+                        AuditOutcome::Refused,
+                        Some(&principal),
+                        AuditTarget::Route { path: route },
+                    )
+                }) {
+                    return audit_unavailable(error);
+                }
                 // Identified, and refused anyway. To the log, because an agent reaching for a
                 // route only a human may call is the shape of a leaked token being used — and an
                 // operator who cannot see it happening has nothing to revoke. The caller's own id
@@ -366,31 +427,247 @@ async fn require_principal(
                 refuse_kind(kinds)
             }
             _ => {
-                request.extensions_mut().insert(principal);
+                if let Err(error) = record_audit(
+                    &state,
+                    &request_id,
+                    AuditAction::Authentication,
+                    AuditOutcome::Succeeded,
+                    Some(&principal),
+                    AuditTarget::Identity,
+                ) {
+                    return audit_unavailable(error);
+                }
+                let audited = audited_action(&request, &principal);
+                let attempt = match (&audited, state.audit()) {
+                    (Some((action, target)), Some(journal)) => {
+                        match journal.begin(&request_id, *action, &principal, target.clone()) {
+                            Ok(attempt) => Some(attempt),
+                            Err(error) => return audit_unavailable(error),
+                        }
+                    }
+                    _ => None,
+                };
+                request.extensions_mut().insert(principal.clone());
                 // How the caller authenticated, for the one route that mints credentials. The
                 // guard is the only thing that inserts this, so a handler cannot be lied to
                 // about it.
                 request.extensions_mut().insert(carrier);
-                next.run(request).await
+                let response = next.run(request).await;
+                let outcome = if response.status().is_success() {
+                    AuditOutcome::Succeeded
+                } else {
+                    AuditOutcome::Refused
+                };
+                let had_durable_attempt = attempt.is_some();
+                if let Some(attempt) = attempt {
+                    if let Err(error) = attempt.finish(outcome) {
+                        return audit_unavailable(error);
+                    }
+                }
+                if !had_durable_attempt {
+                    if let Some((action, target)) = &audited {
+                        if let Err(error) = record_audit(
+                            &state,
+                            &request_id,
+                            *action,
+                            outcome,
+                            Some(&principal),
+                            target.clone(),
+                        ) {
+                            return audit_unavailable(error);
+                        }
+                    }
+                }
+                if response.status() == StatusCode::FORBIDDEN {
+                    if let Some((_, target)) = audited {
+                        if let Err(error) = record_audit(
+                            &state,
+                            &request_id,
+                            AuditAction::Authorization,
+                            AuditOutcome::Refused,
+                            Some(&principal),
+                            target,
+                        ) {
+                            return audit_unavailable(error);
+                        }
+                    }
+                }
+                response
             }
         },
-        Ok(None) => refuse(
-            StatusCode::UNAUTHORIZED,
-            "this route requires a principal and none was presented",
-        ),
-        Err(IdentityError::Rejected) => refuse(StatusCode::UNAUTHORIZED, "credential rejected"),
+        Ok(None) => {
+            if let Err(error) = record_audit(
+                &state,
+                &request_id,
+                AuditAction::Authentication,
+                AuditOutcome::Refused,
+                None,
+                AuditTarget::Identity,
+            ) {
+                return audit_unavailable(error);
+            }
+            refuse(
+                StatusCode::UNAUTHORIZED,
+                "this route requires a principal and none was presented",
+            )
+        }
+        Err(IdentityError::Rejected) => {
+            if let Err(error) = record_audit(
+                &state,
+                &request_id,
+                AuditAction::Authentication,
+                AuditOutcome::Refused,
+                None,
+                AuditTarget::Identity,
+            ) {
+                return audit_unavailable(error);
+            }
+            refuse(StatusCode::UNAUTHORIZED, "credential rejected")
+        }
         // Distinct on purpose, and distinct all the way out to the caller: an operator answers an
         // outage and a bad token in opposite ways, and a 401 for an unreachable provider reads to
         // everyone as "your login is broken".
         Err(IdentityError::Unreachable(reason)) => {
             // The reason goes to the log, not to the caller — it describes this host's dependencies.
             warn!(%reason, "identity provider unreachable");
+            if let Err(error) = record_audit(
+                &state,
+                &request_id,
+                AuditAction::Authentication,
+                AuditOutcome::Refused,
+                None,
+                AuditTarget::Identity,
+            ) {
+                return audit_unavailable(error);
+            }
             refuse(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "identity provider unreachable",
             )
         }
     }
+}
+
+/// The closed set of state-changing guarded routes and their non-secret path targets.
+///
+/// Bodies are intentionally unavailable here: the attempt is durable before axum deserialises one,
+/// so a credential, setting or invocation body cannot become evidence through a future field.
+fn audited_action(
+    request: &Request,
+    principal: &exchange_host::Principal,
+) -> Option<(AuditAction, AuditTarget)> {
+    use axum::http::Method;
+
+    let method = request.method();
+    let path = request.uri().path();
+    if path == "/api/session" {
+        return match *method {
+            Method::POST => Some((AuditAction::SessionOpened, AuditTarget::Session)),
+            Method::DELETE => Some((AuditAction::SessionClosed, AuditTarget::Session)),
+            _ => None,
+        };
+    }
+    if (path == "/api/service-accounts" || path == "/api/agents") && *method == Method::POST {
+        return Some((
+            AuditAction::ServiceAccountMinted,
+            AuditTarget::ServiceAccounts,
+        ));
+    }
+    if let Some(id) = path.strip_prefix("/api/service-accounts/") {
+        if *method == Method::DELETE && !id.is_empty() && !id.contains('/') {
+            return Some((
+                AuditAction::ServiceAccountRevoked,
+                AuditTarget::ServiceAccount { id: id.to_owned() },
+            ));
+        }
+    }
+    if path == "/api/grants" && *method == Method::PUT {
+        return Some((
+            AuditAction::GrantsReplaced,
+            AuditTarget::Grants {
+                tenant: principal.tenant().as_str().to_owned(),
+            },
+        ));
+    }
+    if let Some(operation) = path
+        .strip_prefix("/api/operations/")
+        .and_then(|rest| rest.strip_suffix("/invoke"))
+    {
+        if *method == Method::POST && !operation.is_empty() && !operation.contains('/') {
+            return Some((
+                AuditAction::Invocation,
+                AuditTarget::Invocation {
+                    operation: operation.to_owned(),
+                },
+            ));
+        }
+    }
+    let rest = path.strip_prefix("/api/connections/")?;
+    let segments: Vec<&str> = rest.split('/').collect();
+    match (method, segments.as_slice()) {
+        (&Method::POST, [connector]) if !connector.is_empty() => Some((
+            AuditAction::ConnectionCreated,
+            AuditTarget::Connection {
+                connector: (*connector).to_owned(),
+            },
+        )),
+        (&Method::DELETE, [connector]) if !connector.is_empty() => Some((
+            AuditAction::ConnectionRemoved,
+            AuditTarget::Connection {
+                connector: (*connector).to_owned(),
+            },
+        )),
+        (&Method::PUT, [connector, "credentials", credential]) => Some((
+            AuditAction::CredentialRotated,
+            AuditTarget::Credential {
+                connector: (*connector).to_owned(),
+                credential: (*credential).to_owned(),
+            },
+        )),
+        (&Method::PUT, [connector, "settings", service, field]) => Some((
+            AuditAction::SettingSet,
+            AuditTarget::Setting {
+                connector: (*connector).to_owned(),
+                service: (*service).to_owned(),
+                field: (*field).to_owned(),
+            },
+        )),
+        (&Method::DELETE, [connector, "settings", service, field]) => Some((
+            AuditAction::SettingCleared,
+            AuditTarget::Setting {
+                connector: (*connector).to_owned(),
+                service: (*service).to_owned(),
+                field: (*field).to_owned(),
+            },
+        )),
+        _ => None,
+    }
+}
+
+pub(super) fn record_audit(
+    state: &AppState,
+    request_id: &RequestId,
+    action: AuditAction,
+    outcome: AuditOutcome,
+    actor: Option<&exchange_host::Principal>,
+    target: AuditTarget,
+) -> Result<(), AuditError> {
+    match state.audit() {
+        Some(journal) => journal
+            .record(request_id, action, outcome, actor, target)
+            .map(|_| ()),
+        None => {
+            crate::audit::emit_ephemeral(request_id, action, outcome, actor, target).map(|_| ())
+        }
+    }
+}
+
+pub(super) fn audit_unavailable(error: AuditError) -> Response {
+    warn!(%error, "audit evidence unavailable; refusing the request");
+    refuse(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "audit evidence is unavailable; the requested authority was not exercised",
+    )
 }
 
 /// How a caller carried the credential it presented.

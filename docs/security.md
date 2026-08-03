@@ -42,9 +42,9 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   stores separate from credential material. Invocation reads a tenant once from the resolved
   principal and binds both credential and setting ports from that value in one expression; see
   [`invoke.rs`](../crates/exchange-host/src/invoke.rs).
-- **Known limitation.** Audit records are operational evidence, not durable execution records.
-  Process loss or provider log expiry can remove them; [X-95](stories/X-95-audit-evidence-survives-the-process.md)
-  supplies retention and alerting.
+- **Enforced in code.** Operational audit records are a separate, durable, typed journal and are
+  not execution records. Process loss and provider-log expiry do not remove rows inside their
+  30-day minimum retention; invocation inputs, outputs and trace values remain outside this model.
 
 ### Trust boundaries
 
@@ -266,21 +266,29 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
 
 ## Audit and incident evidence
 
-- **Enforced in code.** Successful sign-in, sign-out, agent minting, connection creation/removal,
-  credential rotation, setting changes, grant replacement and invocation emit structured tracing
-  events with a stable action, actor and non-secret target. The narrow function signatures in
-  [`audit.rs`](../crates/exchange-server/src/audit.rs) do not accept tokens, credential/setting
-  values, OIDC material or request bodies.
+- **Enforced in code.** Authentication, authorization, Service Account lifecycle,
+  connection/credential/settings changes, grant replacement and invocation outcomes write
+  versioned JSON with independent event/request ids, RFC 3339 time, stable action/outcome, resolved
+  actor fields and a closed non-secret target. [`audit.rs`](../crates/exchange-server/src/audit.rs)
+  cannot represent tokens, credential/setting values, OIDC material or request bodies.
+- **Enforced in code.** State-changing authority is journaled as `attempted` before the handler
+  touches its store or runtime, then atomically transitioned to `succeeded` or `refused`. A failed
+  initial write refuses the action; a failed final write leaves the attempted row and refuses a
+  false success. A reachable bind without `FLUX_EXCHANGE_AUDIT` refuses before its socket opens.
+- **Enforced in code.** SQLite retains at least 30 days and supports bounded local queries by event
+  id, actor or target. Authentication floods, repeated per-actor authorization refusals and every
+  credential/grant change append identifier-and-count-only alerts and emit `warn` notifications.
 - **Enforced in code.** Refusals distinguish operator action where it matters while avoiding an
   oracle to the caller. Provider detail and attacker-chosen key identifiers do not cross into HTTP
   responses; unreachable dependency details are logged for the operator.
-- **Known limitation.** Audit events have no request/event identifier, durable sink, retention
-  guarantee or alert policy. Successful actions are recorded; the current stream is not a complete
-  ledger of refusals or execution outcomes. [X-95](stories/X-95-audit-evidence-survives-the-process.md)
-  adds JSON records, correlation, 30-day access-controlled retention and alerts.
-- **Known limitation.** The store does not record who originally supplied a credential. Existing
-  [X-60](stories/X-60-who-supplied-this-credential.md) owns provenance of credential substitution;
-  X-95 connects that fact to retained audit evidence.
+- **Deployment-dependent.** The Fly volume supplies persistence. The runtime uid and Fly SSH users
+  can read the journal; that uid or a Fly organization administrator able to replace/destroy the
+  volume can delete it early. Tenant HTTP callers have no audit-enumeration route. The runbook names
+  these powers and the read-only query command.
+- **Known limitation.** Credential creation and rotation events now retain who changed which
+  non-secret credential address and when, but `GET /api/connections` cannot yet answer the current
+  supplier after later writes or missing evidence. [X-60](stories/X-60-who-supplied-this-credential.md)
+  owns that attribution projection and its “unknown, never absent” semantics.
 
 ## Supply chain and deployment provenance
 
@@ -319,7 +327,6 @@ The story files are the contract; this table is only the ranked map.
 | P0 | [X-92 — Private reporting and protected main](stories/X-92-private-reporting-and-protected-main.md) | Give findings a safe channel and prevent unreviewed or known-secret changes reaching main. |
 | P1 | [X-93 — Production comes from a reviewed commit](stories/X-93-production-comes-from-a-reviewed-commit.md) | Make a live image traceable to a gated SHA. |
 | P1 | [X-94 — Persistent state has a tested recovery path](stories/X-94-persistent-state-has-a-tested-recovery-path.md) | Give the single credential-bearing volume an observed restore path. |
-| P1 | [X-95 — Audit evidence survives the process](stories/X-95-audit-evidence-survives-the-process.md) | Retain and correlate evidence without retaining material. |
 | P1 | [X-96 — Traffic controls are fair as well as bounded](stories/X-96-traffic-controls-are-fair-as-well-as-bounded.md) | Keep one caller from consuming the shared backstop. |
 | P2 | [X-97 — Public credentials leave the file store](stories/X-97-public-credentials-leave-the-file-store.md) | Move public-deployment secrets behind a managed backend and migration contract. |
 
@@ -336,8 +343,8 @@ material, and treat every store, snapshot and log export as sensitive until prov
   atomic rotation surface, verify one least-privilege operation, then confirm the old value is
   unusable. Do not place either value in a ticket, command history or log.
 - **Known limitation.** If a store or snapshot may have escaped, assume every credential it held was
-  exposed. Application logs cannot currently prove otherwise; rotate the full set and preserve
-  non-secret audit evidence for X-95's future sink.
+  exposed. The durable audit journal can identify recorded suppliers and changes but cannot prove a
+  copied store was unread; rotate the full set and preserve the non-secret evidence separately.
 
 ### OIDC client-secret rotation or identity-provider incident
 

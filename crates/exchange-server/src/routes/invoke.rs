@@ -133,10 +133,7 @@ async fn run(
     };
 
     match invoker.invoke(&principal, &operation, params).await {
-        Ok(invocation) => {
-            crate::audit::invocation_completed(&principal, &operation);
-            (StatusCode::OK, Json(invocation)).into_response()
-        }
+        Ok(invocation) => (StatusCode::OK, Json(invocation)).into_response(),
         Err(refusal) => {
             // To the log at `warn` when this host could not be sure the request stayed home. That
             // is the one class an operator has to be able to find afterwards, because it is the one

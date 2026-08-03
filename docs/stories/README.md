@@ -27,7 +27,6 @@ lockfile and compile-time tests.
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-92 — Private reporting and protected main](X-92-private-reporting-and-protected-main.md) · Observed 2026-08-02: private vulnerability reporting, secret scanning, Dependabot security updates and main protection are all disabled.
-- [X-95 — Audit evidence survives the process](X-95-audit-evidence-survives-the-process.md) · X-87 emits structured success events, but they have no correlation id, durable sink, retention target or alert policy.
 
 ### the primary caller can authenticate
 _Almost everything else downstream of the vision waits on X-11 — `connector-pack` pins_
@@ -163,6 +162,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-87 — The public service has an operational security boundary](X-87-harden-the-public-service.md) · Raised from the first review after public deployment. Organization-wide Google admission is intentional; this story hardens the service around that policy rather than narrowing it.
 - [X-88 — An operator can finish the job without translating the API](X-88-an-operator-can-finish-the-job.md) · owner-directed 2026-08-02: turn the ten highest-impact UX findings into one connect → grant → invoke journey and include it in v0.13.0
 - [X-89 — The security posture is discoverable and its gaps are tracked](X-89-document-and-extend-the-security-posture.md) · Document the controls X-87 hardened, label deployment assumptions and limitations honestly, and turn the remaining security work into ranked stories.
+- [X-95 — Audit evidence survives the process](X-95-audit-evidence-survives-the-process.md) · v0.16.0 retains correlated, value-free operational evidence for 30 days; Fly release v4 proved one event survives restart and remains queryable.
 - [X-98 — A versioned visual and source flow editor](X-98-a-versioned-flow-editor.md) · connector operations plus the pure cognition group; immutable publication, dual grants and node-addressed run records
 - [X-99 — The development build keeps the declared MSRV](X-99-dev-build-keeps-the-declared-msrv.md) · cargo run -- --dev regressed when bundled SQLite moved beyond Rust 1.88; align Exchange and Flux on the compatible registry line and prove the real browser round trip
 - [X-100 — The development command keeps a real browser session](X-100-dev-command-keeps-a-browser-session.md) · a route fixture covered --dev, but no repeatable test spawned cargo run; meanwhile the explicit-roster page rendered <handle> as an empty HTML element

@@ -44,12 +44,15 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
-use axum::Json;
+use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{error, warn};
 
-use super::{rate_limited, Access, Module, Route};
+use super::{audit_unavailable, rate_limited, record_audit, Access, Module, Route};
+use crate::audit::{
+    Action as AuditAction, Outcome as AuditOutcome, RequestId, Target as AuditTarget,
+};
 use crate::oidc::config::{
     AUTHORIZATION_ENDPOINT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, ISSUER_ENV, JWKS_URI_ENV,
     REDIRECT_URI_ENV, TENANT_ENV, TOKEN_ENDPOINT_ENV,
@@ -153,7 +156,10 @@ async fn signin(State(state): State<AppState>) -> Response {
 /// establish that same sole local identity, and `SameSite=Strict` still prevents it from exercising
 /// the cookie; a multi-principal roster keeps requiring the explicit bearer handle so it cannot be
 /// used for login CSRF between identities.
-async fn development_signin(State(state): State<AppState>) -> Response {
+async fn development_signin(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
     if !matches!(state.sign_in(), SignIn::Development { automatic: true }) {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -178,9 +184,35 @@ async fn development_signin(State(state): State<AppState>) -> Response {
             None,
         );
     };
+    let attempt = match state.audit() {
+        Some(journal) => match journal.begin(
+            &request_id,
+            AuditAction::SessionOpened,
+            &principal,
+            AuditTarget::Session,
+        ) {
+            Ok(attempt) => Some(attempt),
+            Err(error) => return audit_unavailable(error),
+        },
+        None => None,
+    };
     let token = match identity.open_session(principal.clone()) {
         Ok(token) => token,
         Err(error) => {
+            if let Some(attempt) = attempt {
+                if let Err(audit_error) = attempt.finish(AuditOutcome::Refused) {
+                    return audit_unavailable(audit_error);
+                }
+            } else if let Err(audit_error) = record_audit(
+                &state,
+                &request_id,
+                AuditAction::SessionOpened,
+                AuditOutcome::Refused,
+                Some(&principal),
+                AuditTarget::Session,
+            ) {
+                return audit_unavailable(audit_error);
+            }
             error!(%error, "cannot mint an automatic development session");
             return page(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -190,7 +222,20 @@ async fn development_signin(State(state): State<AppState>) -> Response {
             );
         }
     };
-    crate::audit::signed_in(&principal);
+    if let Some(attempt) = attempt {
+        if let Err(error) = attempt.finish(AuditOutcome::Succeeded) {
+            return audit_unavailable(error);
+        }
+    } else if let Err(error) = record_audit(
+        &state,
+        &request_id,
+        AuditAction::SessionOpened,
+        AuditOutcome::Succeeded,
+        Some(&principal),
+        AuditTarget::Session,
+    ) {
+        return audit_unavailable(error);
+    }
 
     planting(
         (
@@ -257,20 +302,31 @@ struct Callback {
 /// Finish a sign-in.
 async fn callback(
     State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
     Query(callback): Query<Callback>,
 ) -> Response {
     let oidc = match state.sign_in() {
         SignIn::Oidc(oidc) => oidc,
-        SignIn::Unconfigured => return unconfigured_page(),
-        SignIn::NoTokenExchange => return no_token_exchange_page(),
+        SignIn::Unconfigured => {
+            return refused_authentication(&state, &request_id, unconfigured_page())
+        }
+        SignIn::NoTokenExchange => {
+            return refused_authentication(&state, &request_id, no_token_exchange_page())
+        }
         // A callback on a host that federates nothing. Sign-in *is* available here, so neither
         // page above is true — and `development_page` is not the answer either: a browser arriving
         // mid-redirect asked to finish a flow, not for instructions. This host planted no `state`
         // and never will, which is exactly [`SignInRefusal::UnknownState`] — the same `400` and the
         // same phrase a forged `state` gets on a federated host, so this route stays the oracle for
         // nothing that `a_callback_without_a_code_is_not_an_oracle_for_a_live_state` made it.
-        SignIn::Development { .. } => return refused(&SignInRefusal::UnknownState),
+        SignIn::Development { .. } => {
+            return refused_authentication(
+                &state,
+                &request_id,
+                refused(&SignInRefusal::UnknownState),
+            )
+        }
     };
 
     // The provider refused, or something walked a browser here with an `error` of its own. Either
@@ -278,7 +334,7 @@ async fn callback(
     // is the provider's words about a credential, so it may not reach the caller.
     if callback.error.is_some() {
         warn!("the identity provider returned an error to the sign-in callback");
-        return refused(&SignInRefusal::CodeRejected);
+        return refused_authentication(&state, &request_id, refused(&SignInRefusal::CodeRejected));
     }
 
     let (Some(presented_state), Some(code)) = (callback.state, callback.code) else {
@@ -288,7 +344,7 @@ async fn callback(
         // happens here rather than after a lookup.
         // `tests::a_callback_without_a_code_is_not_an_oracle_for_a_live_state` pins both halves:
         // the answers match byte for byte, and the probe does not spend what it asked about.
-        return refused(&SignInRefusal::UnknownState);
+        return refused_authentication(&state, &request_id, refused(&SignInRefusal::UnknownState));
     };
 
     // The binder the browser is holding, if it is holding one. This is the **one** credential-shaped
@@ -306,11 +362,14 @@ async fn callback(
         // whether the `state` named is one this host is holding.
         let refusal = SignInRefusal::NoBinder;
         warn!(reason = %refusal, "a sign-in did not complete");
-        return refused(&refusal);
+        return refused_authentication(&state, &request_id, refused(&refusal));
     };
 
-    let token = match oidc.complete(&presented_state, &code, binder).await {
-        Ok(token) => token,
+    let admission = match oidc
+        .complete_admission(&presented_state, &code, binder)
+        .await
+    {
+        Ok(admission) => admission,
         Err(refusal) => {
             // The operator's version goes to the log; `caller_facing` is what the caller sees, and
             // it carries no value from the provider and no address of one. Which status each refusal
@@ -319,9 +378,67 @@ async fn callback(
             // the phrase it decides alongside. X-26 moved it there; this route decides only how a
             // refusal is rendered.
             warn!(reason = %refusal, "a sign-in did not complete");
+            return refused_authentication(&state, &request_id, refused(&refusal));
+        }
+    };
+    let principal = admission.principal().clone();
+    if let Err(error) = record_audit(
+        &state,
+        &request_id,
+        AuditAction::Authentication,
+        AuditOutcome::Succeeded,
+        Some(&principal),
+        AuditTarget::Identity,
+    ) {
+        return audit_unavailable(error);
+    }
+    let attempt = match state.audit() {
+        Some(journal) => match journal.begin(
+            &request_id,
+            AuditAction::SessionOpened,
+            &principal,
+            AuditTarget::Session,
+        ) {
+            Ok(attempt) => Some(attempt),
+            Err(error) => return audit_unavailable(error),
+        },
+        None => None,
+    };
+    let token = match oidc.open_admitted(admission) {
+        Ok(token) => token,
+        Err(refusal) => {
+            if let Some(attempt) = attempt {
+                if let Err(error) = attempt.finish(AuditOutcome::Refused) {
+                    return audit_unavailable(error);
+                }
+            } else if let Err(error) = record_audit(
+                &state,
+                &request_id,
+                AuditAction::SessionOpened,
+                AuditOutcome::Refused,
+                Some(&principal),
+                AuditTarget::Session,
+            ) {
+                return audit_unavailable(error);
+            }
+            warn!(reason = %refusal, "a sign-in did not complete");
             return refused(&refusal);
         }
     };
+    if let Some(attempt) = attempt {
+        if let Err(error) = attempt.finish(AuditOutcome::Succeeded) {
+            return audit_unavailable(error);
+        }
+    } else if let Err(error) = record_audit(
+        &state,
+        &request_id,
+        AuditAction::SessionOpened,
+        AuditOutcome::Succeeded,
+        Some(&principal),
+        AuditTarget::Session,
+    ) {
+        return audit_unavailable(error);
+    }
 
     // The session leaves here as a cookie and in no other form. See the module documentation: this
     // response has no body a script can read a credential out of.
@@ -341,6 +458,25 @@ async fn callback(
             .into_response(),
         &[session::planted(&token), flow::cleared_binder()],
     )
+}
+
+/// Retain a callback refusal without changing the deliberately non-oracular response.
+fn refused_authentication(
+    state: &AppState,
+    request_id: &RequestId,
+    response: Response,
+) -> Response {
+    match record_audit(
+        state,
+        request_id,
+        AuditAction::Authentication,
+        AuditOutcome::Refused,
+        None,
+        AuditTarget::Identity,
+    ) {
+        Ok(()) => response,
+        Err(error) => audit_unavailable(error),
+    }
 }
 
 /// A response carrying every `Set-Cookie` in `cookies`.

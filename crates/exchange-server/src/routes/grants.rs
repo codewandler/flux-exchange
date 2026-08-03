@@ -448,7 +448,6 @@ async fn replace(
         return store_refused();
     }
 
-    crate::audit::grants_replaced(&principal, proposed.len());
     Json(document(&proposed)).into_response()
 }
 

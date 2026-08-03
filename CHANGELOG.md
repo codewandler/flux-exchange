@@ -16,6 +16,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Authority evidence now survives the process in an owner-only SQLite audit journal** (X-95).
+  Authentication, authorization, Service Account lifecycle, connection/credential/settings and
+  grant changes, and invocation outcomes use a closed JSON vocabulary with request/event ids,
+  resolved actor fields and non-secret targets. State-changing actions are recorded before their
+  store/runtime is touched and fail closed when evidence cannot be written; a sentinel test proves
+  tokens, OIDC material, request bodies and credential/setting values cannot enter any field.
+
+  `FLUX_EXCHANGE_AUDIT` binds the journal; reachable deployments refuse without it. Rows have a
+  30-day minimum retention and bounded local `audit-query` queries by event, actor or target.
+  Authentication floods, repeated per-actor authorization failures, and credential/grant changes
+  append identifier-and-count-only alerts and emit warning notifications. The Fly composition puts
+  the journal on its encrypted volume; the runbook names read and early-deletion powers.
+
 - **Service Accounts are now a complete non-human identity resource** (X-107). Signed-in humans can
   create, list and revoke them at `/api/service-accounts`; creation returns a new `fxsa_…` token
   once, the durable store retains only its verifier, and bearer presentation resolves the canonical

@@ -65,6 +65,15 @@ pub fn admit_bind(bind: SocketAddr, identity: IdentityBinding) -> Result<(), Sta
     }
 }
 
+/// Require durable evidence exactly when the requested socket is remotely reachable.
+pub fn admit_audit(bind: SocketAddr, audit_bound: bool) -> Result<(), StartupRefusal> {
+    if bind.ip().is_loopback() || audit_bound {
+        Ok(())
+    } else {
+        Err(StartupRefusal::ReachableBindWithoutAudit { bind })
+    }
+}
+
 /// Why the server would not start. Every variant refuses; none repairs.
 ///
 /// Hand-written rather than derived: `thiserror` is the library's convention and this binary does
@@ -91,6 +100,12 @@ pub enum StartupRefusal {
     /// the one they have. A single refusal covering both would tell half of its readers to do the
     /// wrong thing.
     ReachableBindWithDevelopmentIdentity {
+        /// The address that was asked for.
+        bind: SocketAddr,
+    },
+
+    /// A remotely reachable process would observe authority without durable evidence.
+    ReachableBindWithoutAudit {
         /// The address that was asked for.
         bind: SocketAddr,
     },
@@ -192,6 +207,12 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A configured durable audit journal could not be bound.
+    AuditStore {
+        /// The journal's redaction-safe refusal.
+        reason: String,
+    },
+
     /// The composition could not build the thing that runs operations.
     ///
     /// A separate variant for the reason the two stores are separate: an operator fixes this
@@ -232,6 +253,12 @@ impl fmt::Display for StartupRefusal {
                  ({BIND_ENV}={DEFAULT_BIND}), or remove `--dev`/unset {DEV_IDENTITY_ENV} and \
                  configure a real identity provider",
             ),
+            Self::ReachableBindWithoutAudit { bind } => write!(
+                f,
+                "refusing to serve on {bind}: it is reachable from outside this machine and no \
+                 durable audit journal is configured. Set `FLUX_EXCHANGE_AUDIT` to an owner-only \
+                 SQLite path on durable storage, or bind loopback",
+            ),
             Self::UnreadableBind { value, .. } => write!(
                 f,
                 "{BIND_ENV} is not a socket address: {value:?}. Expected `host:port`, \
@@ -247,7 +274,8 @@ impl fmt::Display for StartupRefusal {
             | Self::SettingsStore { reason }
             | Self::GrantStore { reason }
             | Self::WorkflowStore { reason }
-            | Self::ChannelStore { reason } => {
+            | Self::ChannelStore { reason }
+            | Self::AuditStore { reason } => {
                 write!(f, "{reason}")
             }
             Self::Invoker { reason } => write!(
@@ -269,6 +297,7 @@ impl std::error::Error for StartupRefusal {
         match self {
             Self::ReachableBindWithoutIdentity { .. }
             | Self::ReachableBindWithDevelopmentIdentity { .. }
+            | Self::ReachableBindWithoutAudit { .. }
             | Self::DevelopmentMode { .. }
             | Self::CredentialStore { .. }
             | Self::ServiceAccountStore { .. }
@@ -276,6 +305,7 @@ impl std::error::Error for StartupRefusal {
             | Self::GrantStore { .. }
             | Self::WorkflowStore { .. }
             | Self::ChannelStore { .. }
+            | Self::AuditStore { .. }
             | Self::ChannelRuntime { .. }
             | Self::Invoker { .. } => None,
             Self::DevIdentity { source } => Some(source),
@@ -368,6 +398,16 @@ mod tests {
                 "`{open}` was refused as {refusal:?} rather than for the development identity",
             );
         }
+    }
+
+    #[test]
+    fn a_reachable_bind_without_durable_audit_is_refused_and_loopback_is_not() {
+        assert!(matches!(
+            admit_audit(addr("0.0.0.0:8080"), false),
+            Err(StartupRefusal::ReachableBindWithoutAudit { .. })
+        ));
+        admit_audit(addr("0.0.0.0:8080"), true).expect("durable evidence admits the bind");
+        admit_audit(addr("127.0.0.1:8080"), false).expect("loopback may use the ephemeral stream");
     }
 
     /// The development identity is for local work, so loopback must still be admitted — otherwise

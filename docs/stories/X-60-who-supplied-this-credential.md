@@ -61,6 +61,11 @@ listed and still usable, merely unattributed.
       `connection-settings.md` carries its own correction.
 
 ## Notes
+- 2026-08-03 — X-95's durable audit journal now retains connection creation and credential rotation
+  with the resolved actor, timestamp and non-secret address. This supplies the evidence source but
+  does not close this story: the connection projection still cannot answer the current supplier,
+  and deleting evidence must degrade attribution to `unknown` without changing whether a
+  credential exists.
 - This is also what would make [[X-54]]'s DELETE decision reviewable: an agent deleting a connection
   is currently permitted on the argument that an operator sees it in `GET /api/connections`. That is
   true only if the operator was already looking.
