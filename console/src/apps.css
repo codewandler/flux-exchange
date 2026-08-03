@@ -1,0 +1,14 @@
+.apps { display: grid; gap: 1.5rem; }
+.apps__header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.apps__header h1, .apps__panel h2 { margin: 0; }
+.apps__activation { padding: .5rem .75rem; border: 1px solid var(--vp-c-success-1); border-radius: 999px; color: var(--vp-c-success-1); }
+.apps__panel { display: grid; gap: 1rem; padding: 1.25rem; border: 1px solid var(--vp-c-divider); border-radius: .75rem; background: var(--vp-c-bg); }
+.apps__form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.apps__form label, .apps__panel > label { display: grid; gap: .5rem; }
+.apps__form fieldset { display: grid; gap: .5rem; border: 1px solid var(--vp-c-divider); border-radius: .5rem; }
+.apps__form .apps__check { display: flex; align-items: center; }
+.apps__chat { display: grid; grid-template-columns: 1fr auto; gap: .75rem; }
+.apps__reply { padding: 1rem; border-left: 3px solid var(--vp-c-brand-1); background: var(--vp-c-bg-soft); }
+.apps__session { color: var(--vp-c-text-2); }
+.apps__activity { display: grid; gap: .5rem; margin: 0; padding-left: 1.25rem; }
+@media (max-width: 760px) { .apps__form { grid-template-columns: 1fr; } }

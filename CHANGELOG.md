@@ -13,6 +13,15 @@ All notable changes to this project are documented in this file. The format is b
   without a closed set omit `choices`, and stored tenant values remain unreadable. The same response
   contract covers sole and labelled connection instances.
 
+- **Tenant-installed Flux Apps now supervise Managed Agents through frozen authority** (X-108).
+  Immutable curated App Packages carry exact Program bytes, integrity and provenance without
+  tenant values. Atomic installation resolves labelled Connections, metadata-selected operations,
+  Datasources and Model Profiles into one reviewed revision; widening upgrades require a new
+  fingerprint. Chat and declared Event Types enter a durable inbox before Flux execution, opaque
+  runtime tokens can spend only frozen operations through the existing Invoker, unsafe retry is
+  marked indeterminate, and Sessions/Runs/value-free Activity are projected from per-tenant/App
+  Flux event logs. The console installs and drives the Slack-bot-style template end to end.
+
 - **Service Accounts can now discover their exact remote connector surface** (X-113).
   Authenticated `GET /api/catalogue/effective` intersects the invoker's credential and non-secret
   settings ports with the resolved principal's tenant grants, returns only usable

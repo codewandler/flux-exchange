@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 // only, and deliberately separate from `connections`: that module answers *where* a credential
 // lives, this one answers *how it got there*.
 mod acquisition;
+mod app;
 mod channel;
 mod connections;
 // Unix only, and for the reason `connector_secrets::file` is: the whole of what protects a value in
@@ -130,6 +131,12 @@ pub use flux_runtime::{ToolContext, ToolRegistry};
 pub use acquisition::{
     AcquiredCredential, AcquisitionRefusal, AuthHazard, AuthPosture, AuthPostureRefusal,
     CredentialAcquirer, PasswordRedemption, RefreshRedemption,
+};
+pub use app::{
+    AccessLayer, ActivityEvent, AppInstallation, AppPackage, AppRefusal, AppRuntimeToken, AppStore,
+    AvailableConnection, ConnectionRequirement, Datasource, DatasourceRequirement, EventDelivery,
+    FrozenAppOperation, InstallRequest, ModelProfile, PackageProvenance, PackageRegistry,
+    PackageRequirements, PackageTrigger, RuntimeOperation, TriggerTarget, APP_STORE_SETTING,
 };
 pub use channel::{
     ChannelId, ChannelPlanRefusal, ChannelRecord, ChannelRefusal, Channels,

@@ -223,6 +223,12 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A configured installed-App store or its durable Flux event root could not be bound.
+    AppStore {
+        /// The redaction-safe store or runtime refusal.
+        reason: String,
+    },
+
     /// A persistent connector-channel store was named and could not be bound.
     ChannelStore {
         /// The store's redaction-safe refusal.
@@ -306,6 +312,7 @@ impl fmt::Display for StartupRefusal {
             | Self::ConnectionRegistry { reason }
             | Self::GrantStore { reason }
             | Self::WorkflowStore { reason }
+            | Self::AppStore { reason }
             | Self::ChannelStore { reason }
             | Self::AuditStore { reason } => {
                 write!(f, "{reason}")
@@ -340,6 +347,7 @@ impl std::error::Error for StartupRefusal {
             | Self::ConnectionRegistry { .. }
             | Self::GrantStore { .. }
             | Self::WorkflowStore { .. }
+            | Self::AppStore { .. }
             | Self::ChannelStore { .. }
             | Self::AuditStore { .. }
             | Self::ChannelRuntime { .. }

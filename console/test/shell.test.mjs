@@ -106,7 +106,7 @@ test('the_shell_names_the_service_and_every_surface_it_has', async () => {
 test('the_shell_covers_the_surfaces_the_vision_says_this_platform_has', () => {
   // Written out here rather than derived from `SURFACES`, so dropping a surface from the model
   // fails this test instead of quietly shrinking what the console claims to be.
-  const expected = ['connections', 'grants', 'workflows', 'catalogue', 'identity', 'invoke', 'subscribe', 'activity']
+  const expected = ['connections', 'grants', 'workflows', 'catalogue', 'identity', 'invoke', 'subscribe', 'activity', 'managed-agents']
 
   assert.deepEqual(
     SURFACES.map((surface) => surface.id).sort(),
@@ -122,7 +122,7 @@ test('every_surface_is_marked_with_its_true_state', async () => {
   // carries, restated where a reader of the console will actually meet it. `grants` joined the
   // first group in X-62: the service serves `GET`/`PUT /api/grants` and this console now has a
   // screen for it, which is the pair `built` and `served` exist to keep separable.
-  const built = { connections: true, grants: true, workflows: true, catalogue: true, identity: true, invoke: true, subscribe: true, activity: true }
+  const built = { connections: true, grants: true, workflows: true, catalogue: true, identity: true, invoke: true, subscribe: true, activity: true, 'managed-agents': true }
 
   for (const surface of SURFACES) {
     assert.equal(

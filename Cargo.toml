@@ -58,12 +58,15 @@ time = { version = "0.3.55", features = ["formatting", "parsing"] }
 flux-app = { package = "codewandler-flux-app", version = "0.54" }
 flux-channels = { package = "codewandler-flux-channels", version = "0.54" }
 flux-core = { package = "codewandler-flux-core", version = "0.54" }
+flux-events = { package = "codewandler-flux-events", version = "0.54" }
 flux-flow = { package = "codewandler-flux-flow", version = "0.54" }
 flux-lang = { package = "codewandler-flux-lang", version = "0.54" }
+flux-provider = { package = "codewandler-flux-provider", version = "0.54" }
 flux-runtime = { package = "codewandler-flux-runtime", version = "0.54" }
 # Stable Flux contract vocabulary. Unlike the 0.54 engine crates this follows its own 1.x line;
 # workflow execution names `IntentSet` only to implement the host-neutral interpreter port.
 flux-spec = { package = "codewandler-flux-spec", version = "1.2.1" }
+flux-secret = { package = "codewandler-flux-secret", version = "1.2.1" }
 # flux's guarded-IO facade. Named here only because `flux_runtime::ToolContext::new` takes an
 # `Arc<System>` and there is no other constructor — so a composition that wants to invoke an
 # operation has to build one. It is **not** in `exchange-host`'s `[dependencies]`: it carries

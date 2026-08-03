@@ -14,6 +14,7 @@ use crate::connection_guard::ConnectionGuard;
 use crate::credential_acquisition::AcquisitionBindings;
 use crate::dev_identity::DevIdentity;
 use crate::local_identity::LocalUsers;
+use crate::managed_apps::ManagedAppSupervisor;
 use crate::oidc::Oidc;
 use crate::operator::OperatorPolicy;
 use crate::service_account::ServiceAccountStore;
@@ -86,6 +87,8 @@ pub struct AppState {
     /// composition that runs nothing, and `POST /api/operations/{operation}/invoke` refuses rather
     /// than pretending — see [`crate::routes::invoke`].
     invoker: Option<Arc<Invoker>>,
+    /// Installed App packages, tenant bindings and Flux runtime supervision.
+    apps: Option<Arc<ManagedAppSupervisor>>,
     /// Tenant-scoped mutable drafts and immutable workflow versions.
     workflows: Option<Arc<WorkflowStore>>,
     /// The validated pure cognition registry shared by validation and execution.
@@ -251,6 +254,7 @@ impl AppState {
             connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
@@ -283,6 +287,7 @@ impl AppState {
             connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
@@ -312,6 +317,7 @@ impl AppState {
             connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
@@ -343,6 +349,7 @@ impl AppState {
             connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
@@ -375,6 +382,7 @@ impl AppState {
             connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
@@ -404,6 +412,7 @@ impl AppState {
             connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
@@ -570,6 +579,17 @@ impl AppState {
     /// class through it — the only thing it can do is name an operation and hand over a principal.
     pub fn invoker(&self) -> Option<&Arc<Invoker>> {
         self.invoker.as_ref()
+    }
+
+    /// Bind installed App storage and Flux runtime supervision.
+    pub fn with_apps(mut self, apps: Arc<ManagedAppSupervisor>) -> Self {
+        self.apps = Some(apps);
+        self
+    }
+
+    /// Installed App supervisor, when this composition bound one.
+    pub fn apps(&self) -> Option<&Arc<ManagedAppSupervisor>> {
+        self.apps.as_ref()
     }
 
     /// Bind workflow definitions and the only built-in registry the editor admits.

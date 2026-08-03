@@ -114,6 +114,10 @@ export function invocationEndpoint(operation: string): string {
 export const WORKFLOWS_ENDPOINT = '/api/workflows'
 /** Tenant-derived durable workflow activity. */
 export const WORKFLOW_RUNS_ENDPOINT = '/api/workflow-runs'
+/** Curated immutable App Packages and tenant installations. */
+export const APP_PACKAGES_ENDPOINT = '/api/app-packages'
+export const APPS_ENDPOINT = '/api/apps'
+export const MODEL_PROFILES_ENDPOINT = '/api/model-profiles'
 /** The upstream editor schema and executable palette. */
 export const EDITOR_CATALOG_ENDPOINT = `${WORKFLOWS_ENDPOINT}/editor-catalog`
 
@@ -127,6 +131,14 @@ export function workflowRunsEndpoint(workflow: string): string {
 
 export function workflowRunEndpoint(run: string): string {
   return `${WORKFLOW_RUNS_ENDPOINT}/${encodeURIComponent(run)}`
+}
+
+export function appChatEndpoint(app: string): string {
+  return `${APPS_ENDPOINT}/${encodeURIComponent(app)}/chat`
+}
+
+export function appActivityEndpoint(app: string): string {
+  return `${APPS_ENDPOINT}/${encodeURIComponent(app)}/activity`
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1587,6 +1599,129 @@ export async function loadActivity(options: LoadOptions = {}): Promise<ActivityS
     runs.push(run)
   }
   return { status: 'ready', runs }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Installed Apps. App.vue owns these reads and passes completed state into the view.
+// ---------------------------------------------------------------------------------------------
+
+export interface AppPackage {
+  id: string
+  version: string
+  integrity: string
+  requirements: {
+    connections: Array<{ name: string; connector: string }>
+    access_layers: Array<{ name: string; connector: string; required: boolean }>
+  }
+}
+
+export interface InstalledApp {
+  id: string
+  package: string
+  version: string
+  activation: string
+  review_fingerprint: string
+  connections: Record<string, string>
+  model_profile: { id: string; provider: string; model: string }
+  risk_ceiling: string
+  scopes: string[]
+}
+
+export interface AppActivity {
+  id: string
+  session: string
+  kind: string
+  delivery: string
+  outcome: string
+  at_ms: number
+}
+
+export type AppsState =
+  | { status: 'loading' }
+  | { status: 'ready'; packages: AppPackage[]; apps: InstalledApp[] }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export type AppMutation =
+  | { status: 'installed'; app: InstalledApp }
+  | { status: 'answered'; reply: string; session: string; activation: string }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+function appFailure(answered: Extract<Read, { ok: false }>): AppMutation {
+  return answered.failure.kind === 'refused'
+    ? { status: 'refused', refusal: { endpoint: answered.failure.endpoint, status: answered.failure.status ?? 0, error: serviceError(answered.body) ?? answered.failure.detail } }
+    : { status: 'failed', failure: answered.failure }
+}
+
+export async function loadApps(options: LoadOptions = {}): Promise<AppsState> {
+  const [packageAnswer, appAnswer] = await Promise.all([
+    read(APP_PACKAGES_ENDPOINT, options),
+    read(APPS_ENDPOINT, options),
+  ])
+  if (!packageAnswer.ok) return { status: 'failed', failure: packageAnswer.failure }
+  if (!appAnswer.ok) return { status: 'failed', failure: appAnswer.failure }
+  if (!isObject(packageAnswer.body) || !Array.isArray(packageAnswer.body.packages)) {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint: APP_PACKAGES_ENDPOINT, status: 200, detail: 'no `packages` array' } }
+  }
+  if (!isObject(appAnswer.body) || !Array.isArray(appAnswer.body.apps)) {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint: APPS_ENDPOINT, status: 200, detail: 'no `apps` array' } }
+  }
+  return {
+    status: 'ready',
+    packages: packageAnswer.body.packages.filter((item): item is AppPackage => isObject(item) && typeof item.id === 'string' && typeof item.version === 'string') as AppPackage[],
+    apps: appAnswer.body.apps.filter((item): item is InstalledApp => isObject(item) && typeof item.id === 'string' && typeof item.activation === 'string') as InstalledApp[],
+  }
+}
+
+export interface InstallAppChoice {
+  id: string
+  package: string
+  version: string
+  connection: string
+  access_layers: string[]
+  risk_ceiling: string
+  scopes: string[]
+  profile: string
+  static_reply: string
+}
+
+export async function installApp(choice: InstallAppChoice, options: LoadOptions = {}): Promise<AppMutation> {
+  const profile = await read(MODEL_PROFILES_ENDPOINT, options, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: choice.profile, provider: 'static', model: 'static', revision: 1, static_reply: choice.static_reply }),
+  })
+  if (!profile.ok) return appFailure(profile)
+  const answered = await read(APPS_ENDPOINT, options, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      id: choice.id, package: choice.package, version: choice.version,
+      connections: { slack: choice.connection }, model_profile: choice.profile,
+      access_layers: choice.access_layers, datasources: {}, risk_ceiling: choice.risk_ceiling,
+      scopes: choice.scopes, review: null,
+    }),
+  })
+  if (!answered.ok) return appFailure(answered)
+  return { status: 'installed', app: answered.body as InstalledApp }
+}
+
+export async function sendAppMessage(app: string, message: string, session: string | null, options: LoadOptions = {}): Promise<AppMutation> {
+  const endpoint = appChatEndpoint(app)
+  const answered = await read(endpoint, options, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ message, ...(session ? { session } : {}) }),
+  })
+  if (!answered.ok) return appFailure(answered)
+  if (!isObject(answered.body) || typeof answered.body.reply !== 'string' || typeof answered.body.session !== 'string') {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 200, detail: 'no App reply or session' } }
+  }
+  return { status: 'answered', reply: answered.body.reply, session: answered.body.session, activation: typeof answered.body.activation === 'string' ? answered.body.activation : '' }
+}
+
+export async function loadAppActivity(app: string, options: LoadOptions = {}): Promise<AppActivity[]> {
+  const endpoint = appActivityEndpoint(app)
+  const answered = await read(endpoint, options)
+  if (!answered.ok || !isObject(answered.body) || !Array.isArray(answered.body.activity)) return []
+  return answered.body.activity.filter((item): item is AppActivity => isObject(item) && typeof item.id === 'string' && typeof item.outcome === 'string') as AppActivity[]
 }
 
 function mutationFailure(answered: Extract<Read, { ok: false }>): WorkflowMutation {
