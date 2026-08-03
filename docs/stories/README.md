@@ -9,7 +9,7 @@ directory (`<ID>-<slug>.md`); this board indexes them by status. New work? Copy
 
 ## Status
 
-**v0.14.2 — credentials, gated operations and versioned tenant workflows.** The host serves OIDC
+**v0.14.3 — credentials, gated operations and versioned tenant workflows.** The host serves OIDC
 and loopback development identity, tenant connections/settings/grants, ordinary connector invoke,
 immutable workflow publication and durable value-free run activity. `subscribe`, channels and
 leases-in-anger remain unbuilt. See [README](../../README.md) § Status.

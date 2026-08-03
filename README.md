@@ -11,7 +11,7 @@ The contributor and operator [security posture](docs/security.md) maps the threa
 controls, deployment assumptions, known limitations, security roadmap and incident checklist.
 
 > [!WARNING]
-> **Status: v0.14.2 — credentials, gated operations, and versioned tenant workflows.**
+> **Status: v0.14.3 — credentials, gated operations, and versioned tenant workflows.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
 > connector catalogue and a session without OIDC setup. The ordinary composition supports a

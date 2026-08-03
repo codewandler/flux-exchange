@@ -33,6 +33,10 @@ working one-click session for `user:${USER}@dev`.
 - 2026-08-03: The lock now contains Flux 0.52.2 throughout and one rusqlite 0.39/libsqlite3-sys
   0.37 line. `cargo +1.88 build --workspace --locked`, workspace tests and clippy, console tests and
   build, and public-site build and tests pass.
+- 2026-08-03: The v0.14.2 audit exposed a vulnerable PDF parser pulled in by the upstream MSRV
+  repair. Flux 0.52.3 removes PDF parsing from its default web feature and keeps the safe parser
+  behind an explicit feature; v0.14.3 consumes that corrected graph rather than suppressing the
+  advisory.
 
 ## Notes
 - This repairs an existing compatibility promise. Raising Exchange's MSRV would turn a transitive

@@ -6,6 +6,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-08-03
+
+### Fixed
+
+- **The MSRV repair no longer retains a vulnerable PDF parser** (X-99). Exchange now consumes Flux
+  0.52.3, whose default web feature treats PDFs as opaque instead of linking the affected parser;
+  safe PDF extraction remains an explicit upstream feature. This keeps `cargo run -- --dev` on the
+  promised Rust 1.88 line while restoring a green dependency audit.
+
 ## [0.14.2] - 2026-08-03
 
 ### Fixed
