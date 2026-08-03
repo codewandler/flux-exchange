@@ -1,11 +1,11 @@
 ---
 id: X-93
 title: "Production comes from a reviewed commit"
-status: in-progress
+status: done
 priority: 1
 epic: remote-deployment
 areas: [ci, deployment, supply-chain]
-note: "Wave #1 implements the immutable-SHA full-gate workflow, digest-pinned image, SBOM/scan, exact-digest deploy, evidence and rollback verifier; production environment configuration and the first workflow release remain live operations."
+note: "v0.16.1 was built from protected main, scanned clean, deployed by immutable digest, verified live and retained with 90-day source/image/release evidence."
 ---
 
 # Production comes from a reviewed commit
@@ -24,12 +24,12 @@ evidence of what was built, scanned and deployed.
       `--locked` in image builds and fail if a lockfile would change.
 - [x] Scan the built image for known vulnerabilities and emit an SBOM tied to the image digest and
       source SHA. Exceptions are narrow, inline and owned like the existing RustSec exceptions.
-- [ ] Publish or record source SHA, image digest, Fly release and machine identifiers without
+- [x] Publish or record source SHA, image digest, Fly release and machine identifiers without
       credential-shaped values.
 - [x] After deployment, verify `/health` reports the release version and live console/API responses
       carry the security headers and `no-store` policy. A failed verification fails or rolls back
       the deployment visibly.
-- [ ] Produce a versioned Fly release through the new path, update the runbook and remove language
+- [x] Produce a versioned Fly release through the new path, update the runbook and remove language
       that describes dirty-worktree deployment as normal.
 
 ## Evidence
@@ -64,4 +64,9 @@ evidence of what was built, scanned and deployed.
   verifier found the same undeclared `rg` dependency before it could record header evidence. The
   visible rollback restored health 0.16.0. Both workflow-invoked verifiers now use portable
   `grep -E`; a repository-wide operational-script search found no remaining `rg` invocation.
-- Remaining live work: merge the workflow and retain the first green production artifact.
+- 2026-08-03 — protected-main production run `30833969572` completed every immutable-source,
+  repository-gate, build, SBOM, zero-known-vulnerability scan, push, exact-digest deploy and live
+  verification step for v0.16.1. Its sole non-expired artifact is retained for 90 days and contains
+  the source/image/release evidence, SPDX document and digest sidecar, and Grype report. Source,
+  version, image, release and machine references agree; both hashes recompute; the scan has zero
+  matches; and an identifier-safe content scan found no credential-shaped value.

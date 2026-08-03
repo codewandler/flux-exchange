@@ -6,6 +6,13 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Operations
+
+- **The first protected-main v0.16.1 release and its recovery point are verified** (X-93, X-94).
+  The retained 90-day artifact ties one reviewed source commit to the scan-clean static image, SBOM,
+  Fly release and live machine verification; the post-release encrypted snapshot remains inside the
+  declared 24-hour RPO after the isolated 597-second recovery drill.
+
 ## [0.16.2] - 2026-08-03
 
 ### Fixed
