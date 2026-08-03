@@ -21,7 +21,9 @@ trap cleanup EXIT
 cd "$repo_root"
 
 # Unset every competing identity choice. This test is specifically the zero-configuration shorthand,
-# not the explicit development roster or a federated composition.
+# not the explicit development roster or a federated composition. The CI gate forces Cargo colour
+# globally; this log is a machine-readable process boundary, and ANSI between a structured field
+# name and `=` makes a healthy ephemeral listener undiscoverable.
 env \
   -u FLUX_EXCHANGE_DEV_IDENTITY \
   -u FLUX_EXCHANGE_OIDC_ISSUER \
@@ -32,6 +34,8 @@ env \
   -u FLUX_EXCHANGE_OIDC_CLIENT_SECRET \
   -u FLUX_EXCHANGE_OIDC_REDIRECT_URI \
   -u FLUX_EXCHANGE_OIDC_TENANT \
+  NO_COLOR=1 \
+  CARGO_TERM_COLOR=never \
   FLUX_EXCHANGE_BIND=127.0.0.1:0 \
   USER=flux-dev-e2e \
   cargo run --locked -- --dev >"$server_log" 2>&1 &

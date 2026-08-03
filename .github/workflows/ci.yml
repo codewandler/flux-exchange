@@ -261,7 +261,7 @@ jobs:
           ./scripts/check-action-pins.sh
 
   crate-versions:
-    name: the workspace version and the exchange-host pin agree
+    name: workspace, host pin and current prose versions agree
     runs-on: ubuntu-latest
     # X-30. `Cargo.toml` states this workspace's version twice — `[workspace.package].version` and the
     # `version` on the `exchange-host` entry in `[workspace.dependencies]` — and the `path` half of
@@ -274,12 +274,16 @@ jobs:
     # compares the pushed tag against the manifest and can only run at release, and a tag can be
     # pushed at a commit no pull request ever touched. This one catches the mismatch a week earlier,
     # where the fix is free.
+    #
+    # X-81 extends the same rule to the five exact prose lines that claim to describe the current
+    # build. Its scanner deliberately ignores historical release headings and milestone citations;
+    # those versions remain true and rewriting them would destroy history rather than prevent drift.
     permissions:
       contents: read # restates the workflow default, so the job is readable on its own
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
-      - name: One version, stated in two places, is one number
+      - name: One current version is one number
         run: |
           ./scripts/check-crate-versions.sh --self-test
           ./scripts/check-crate-versions.sh
