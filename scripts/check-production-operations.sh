@@ -28,27 +28,27 @@ check_root() {
   [ "$build_count" -gt 0 ] || { fail 'Dockerfile has no Cargo build'; return 1; }
   [ "$build_count" = "$locked_count" ] || { fail 'every container Cargo build must use --locked'; return 1; }
 
-  rg -q 'snapshot_retention[[:space:]]*=[[:space:]]*14' "$fly_config" || {
+  grep -Eq 'snapshot_retention[[:space:]]*=[[:space:]]*14' "$fly_config" || {
     fail 'fly.toml must retain volume snapshots for 14 days'; return 1;
   }
-  rg -q 'scheduled_snapshots[[:space:]]*=[[:space:]]*true' "$fly_config" || {
+  grep -Eq 'scheduled_snapshots[[:space:]]*=[[:space:]]*true' "$fly_config" || {
     fail 'fly.toml must explicitly enable scheduled snapshots'; return 1;
   }
 
-  rg -q 'environment:[[:space:]]*$' "$deploy_workflow" || { fail 'production deploy must name an environment'; return 1; }
-  rg -q 'name:[[:space:]]*production' "$deploy_workflow" || { fail 'production deploy must use the production environment'; return 1; }
-  rg -q 'scripts/verify-production-release\.sh' "$deploy_workflow" || {
+  grep -Eq 'environment:[[:space:]]*$' "$deploy_workflow" || { fail 'production deploy must name an environment'; return 1; }
+  grep -Eq 'name:[[:space:]]*production' "$deploy_workflow" || { fail 'production deploy must use the production environment'; return 1; }
+  grep -Eq 'scripts/verify-production-release\.sh' "$deploy_workflow" || {
     fail 'production deploy must run the post-deploy verifier'; return 1;
   }
-  rg -q 'anchore/scan-action@[0-9a-f]{40}' "$deploy_workflow" || {
+  grep -Eq 'anchore/scan-action@[0-9a-f]{40}' "$deploy_workflow" || {
     fail 'production deploy must scan the image with a SHA-pinned action'; return 1;
   }
-  rg -q 'anchore/sbom-action@[0-9a-f]{40}' "$deploy_workflow" || {
+  grep -Eq 'anchore/sbom-action@[0-9a-f]{40}' "$deploy_workflow" || {
     fail 'production deploy must emit an SBOM with a SHA-pinned action'; return 1;
   }
 
-  rg -q '^  schedule:' "$snapshot_workflow" || { fail 'snapshot verification must run on a schedule'; return 1; }
-  rg -q 'scripts/verify-fly-snapshot\.sh' "$snapshot_workflow" || {
+  grep -Eq '^  schedule:' "$snapshot_workflow" || { fail 'snapshot verification must run on a schedule'; return 1; }
+  grep -Eq 'scripts/verify-fly-snapshot\.sh' "$snapshot_workflow" || {
     fail 'snapshot workflow must run the bounded snapshot verifier'; return 1;
   }
 }
