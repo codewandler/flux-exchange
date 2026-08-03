@@ -35,7 +35,7 @@ lockfile and compile-time tests.
 - [X-92 — Private reporting and protected main](X-92-private-reporting-and-protected-main.md) · Private reporting, protected main and baseline scanning are live; GitHub Free cannot enable validity checks or non-provider patterns.
 - [X-96 — Traffic controls are fair as well as bounded](X-96-traffic-controls-are-fair-as-well-as-bounded.md) · Fair budgets, bounded metrics and edge occupancy controls are ready; live release verification remains.
 - [X-97 — Public credentials leave the file store](X-97-public-credentials-leave-the-file-store.md) · The file store is honest and mode-safe but application-plaintext; the existing SecretStore port is the seam for a managed Vault-class backend.
-- [X-111 — Host every connector runtime through Exchange (epic)](X-111-rich-connector-runtimes-epic.md) · EPIC — HTTP is the first runtime, not the boundary: host socket/process/container/plugin connectors through single-tenant or isolated remote placement, with streams and leases
+- [X-111 — Host every connector runtime through Exchange (epic)](X-111-rich-connector-runtimes-epic.md) · EPIC — Exchange is the sole official-integration executor: ship the effective catalogue and existing HTTP invoke first, then rich runtimes and lifecycle
 
 ## Next (ready — take the top one unless the user named a story)
 
@@ -43,7 +43,7 @@ lockfile and compile-time tests.
 - [X-108 — Host installed Flux Apps and Managed Agents](X-108-host-installed-flux-apps.md) · Flux App/channel contracts are published on the connector-compatible line; design Exchange-owned package installation and tenant bindings before implementation
 
 ### rich connector runtimes through Exchange
-- [X-124 — Adopt Exchange-only official integration execution](X-124-adopt-exchange-only-integration-execution.md) · Milestone 0 — reconcile X-111 through X-120 with the cross-repository execution decision before runtime implementation
+- [X-113 — Publish the effective Service Account catalogue and HTTP invoke contract](X-113-publish-the-remote-connector-protocol.md) · Milestone 1 — authenticated connected-and-granted operation projection with stable generation identity beside the existing one-shot HTTP invoke; lifecycle remains X-117/X-118
 
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
@@ -63,14 +63,13 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-78 — The family-link rule catches one spelling of a repository URL, and its comment says it catches the kind](X-78-the-subject-rule-reads-one-spelling-of-a-url.md) · found by X-77's independent review, 2026-08-02: subjectIsTheProject matches the exact canonical href, so [flux](http://github.com/codewandler/flux) — plain http — passes silently with the project's own name as the anchor text. The narrowness is real and the comment that web/README.md calls the statement of record does not mention it
 
 ### rich connector runtimes through Exchange
-- [X-113 — Publish the complete remote connector protocol](X-113-publish-the-remote-connector-protocol.md) · one versioned contract covers invoke, subscribe, streamed output, cancellation, terminal status and lease frames under the same tenant/grant derivation
-- [X-114 — Dispatch declared connector runtime plans through one host seam](X-114-dispatch-declared-runtime-plans.md) · generalize the admitted/granted invoke chain beyond HttpRequestTool while keeping connector-pack as the only compiled behavior path and runtime caller-immutable
-- [X-115 — Run every connector runtime in a single-tenant Exchange](X-115-run-rich-runtimes-single-tenant.md) · bind Flux's guarded http/socket/process/container/plugin mechanisms in --dev and one-team deployments; no ambient path, host or credential fallback
+- [X-114 — Dispatch declared connector runtime plans through one host seam](X-114-dispatch-declared-runtime-plans.md) · Exchange dispatches connector-declared plans after admission and grants; Flux supplies guarded substrate but no second official execution placement
+- [X-115 — Run every connector runtime in a single-tenant Exchange](X-115-run-rich-runtimes-single-tenant.md) · Exchange binds Flux's guarded substrate in --dev and one-team deployments; it remains the sole official-integration execution placement
 - [X-116 — Isolate rich connector runtimes per tenant](X-116-isolate-rich-runtimes-per-tenant.md) · a shared Exchange delegates local runtimes to operator-selected OS/container/pod workers; absent isolation refuses before credential access
-- [X-117 — Stream and cancel connector operations over the connector WebSocket](X-117-stream-and-cancel-connector-operations.md) · extend the bounded subscribe connection with request-correlated logs/stdout/socket output, cancellation and terminal status; no second WebSocket
-- [X-118 — Make leases own rich runtime resources](X-118-make-leases-own-runtime-resources.md) · turn the existing lease vocabulary into acquire/renew/release ownership for database handles, port-forwards, exec sessions and other stateful connector resources
-- [X-119 — Install and attest connector runtime artifacts](X-119-install-and-attest-runtime-artifacts.md) · operators install digest-pinned connector binaries/images; callers select operations only, and activation/rotation is audited without credential-shaped metadata
-- [X-120 — Prove rich connectors locally and through Exchange](X-120-prove-rich-connectors-end-to-end.md) · release gate runs the shared connector corpus across HTTP, plugin/process, socket and container placements, including isolation, streams, leases and credential non-disclosure
+- [X-117 — Stream and cancel connector operations over the connector WebSocket](X-117-stream-and-cancel-connector-operations.md) · Milestone 3 — extend the bounded subscribe connection with request-correlated streams, cancellation and terminal outcomes; no second WebSocket and no dependency from one-shot HTTP
+- [X-118 — Make leases own rich runtime resources](X-118-make-leases-own-runtime-resources.md) · Milestone 3 — acquire/renew/release ownership for stateful connector resources; no dependency from the effective catalogue or one-shot HTTP invoke
+- [X-119 — Install and attest connector runtime artifacts](X-119-install-and-attest-runtime-artifacts.md) · Exchange installs digest-pinned connector artifacts from the connector/Exchange pipeline; Flux supplies substrate but distributes no official plugin artifact
+- [X-120 — Prove migrated rich connectors through local Exchange](X-120-prove-rich-connectors-end-to-end.md) · release gate accumulates HTTP, plugin/process, socket and container migration fixtures through local single-tenant Exchange; hosted isolation remains X-116
 
 ## Done
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
@@ -170,6 +169,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-121 — Remove the legacy Agent principal spellings](X-121-remove-the-legacy-agent-principal-spellings.md) · v0.17 compatibility checkpoint; existing verifier-keyed bearer tokens remain valid
 - [X-122 — Bind a generated channel to one immutable connection instance](X-122-bind-channels-to-connection-instances.md) · Generated channels now resolve operator labels to rename-safe host-minted instance UUIDs and refuse stale deletion.
 - [X-123 — Production refuses an operatorless deployment](X-123-production-refuses-an-operatorless-deployment.md) · The deploy checks Fly's value-free secret metadata before building and after rollout, so an absent operator policy cannot ship silently.
+- [X-124 — Adopt Exchange-only official integration execution](X-124-adopt-exchange-only-integration-execution.md) · Milestone 0 — reconcile X-111 through X-120 with the cross-repository execution decision before runtime implementation
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

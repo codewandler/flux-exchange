@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- **The rich-runtime program now has one official integration execution placement** (X-124).
+  Exchange owns authenticated effective Service Account discovery, invocation, rich runtime
+  execution and lifecycle; Flux contributes its guarded substrate and embedded client without a
+  local vendor/plugin fallback. Milestone 1 is now the effective catalogue plus existing one-shot
+  HTTP invoke, while streams, cancellation and terminal outcomes remain X-117, leases remain X-118,
+  and hosted multi-tenant isolation remains X-116. A failing-first repository contract prevents the
+  corrected epic, design and child stories from drifting back.
+
 ## [0.17.0] - 2026-08-03
 
 ### Added

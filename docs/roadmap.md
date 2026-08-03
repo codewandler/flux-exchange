@@ -3,6 +3,10 @@
 What is delivered, what is next, and the epics that group the work. The operational detail lives on
 the [board](stories/README.md); this document is the narrative around it.
 
+For work named by `../flux-roadmap/programs/`, the cross-repository schedule and Decision 0001 take
+precedence over this local narrative. Repo-local story Goal and Acceptance remain the definition of
+done.
+
 ## Status
 
 _As of 2026-08-03:_ **v0.17.0 — Wave #2: canonical callers, complete public boundaries and
@@ -13,7 +17,8 @@ ordinary connector invocation, immutable workflow publication, durable value-fre
 records, multiple labelled connections per connector with explicit invocation selection, canonical
 Service Account lifecycle and bearer identity, persistent generated WebSocket
 channels and authenticated live subscriptions are built.
-Webhook channels, durable event replay/inboxes and leases-in-anger remain unbuilt.
+The authenticated effective Service Account catalogue, webhook channels, durable event
+replay/inboxes and leases-in-anger remain unbuilt.
 
 `crates/exchange-host` carries the vocabulary and rules, the credential/settings/grant bindings,
 ordinary invocation and the tenant workflow runtime. A workflow is a stored Flux program rather
@@ -39,16 +44,22 @@ The manifest, resolved-lock and compile-time seam tests keep that rule executabl
 HTTP invocation and generated connector WebSocket channels are delivered slices, not the hosted
 boundary. The accepted family direction moves Docker, Kubernetes, SQL, observability, secret stores,
 collaboration tools, and every other official integration into flux-connectors. Exchange executes
-the same declared connector address under tenant-derived authority; it does not invent its own
-vendor request or adapter path.
+every declared connector address under tenant-derived authority; it does not invent its own vendor
+request or adapter path. Flux contributes guarded substrate and an embedded client, not a second
+official execution placement or fallback.
 
-[[X-111]] tracks the program. [[X-113]] completes the remote invoke/subscribe/stream/lease protocol;
-[[X-114]] dispatches the pack's declared runtime plans; [[X-115]] binds all guarded runtimes in
-single-tenant mode; [[X-116]] adds fail-closed per-tenant isolation for shared deployments; [[X-117]]
-and [[X-118]] own streams, cancellation and leases; [[X-119]] installs only digest-pinned attested
-artifacts; and [[X-120]] proves local/hosted parity through Docker, Kubernetes, SQL and a streamed
-operation. Delivered [[X-107]] Service Account authentication and X-101–X-105 channel work are
-prerequisites, not duplicate stories. Design:
+[[X-111]] tracks the program and [[X-124]] fixes its cross-repository execution contract. The first
+independently shippable milestone is [[X-113]]: an authenticated effective Service Account catalogue
+with stable generation identity beside the existing one-shot HTTP invoke. Streams, cancellation and
+terminal outcomes stay in [[X-117]], and leases stay in [[X-118]], so neither blocks that useful path.
+
+After the HTTP milestone, [[X-114]] dispatches connector-declared runtime plans through Exchange;
+[[X-115]] binds Flux's guarded substrate in local single-tenant Exchange; [[X-119]] installs only
+digest-pinned connector artifacts through the connector/Exchange pipeline; and [[X-120]] runs the
+accumulated migration corpus through that local Exchange. [[X-116]] separately adds fail-closed
+per-tenant isolation for a hosted multi-tenant deployment and does not block the local proof.
+Delivered [[X-107]] Service Account authentication and X-101–X-105 channel work are prerequisites,
+not duplicate stories. Design:
 [`docs/designs/rich-connector-runtimes.md`](designs/rich-connector-runtimes.md).
 
 ### A public documentation site
@@ -257,17 +268,19 @@ preference to be re-litigated per story:
   **lease liveness**, because this host must learn that a holder died in order to release what it is
   holding for them.
 
-flux needs no new concept to consume this: `flux-channels` already has a generic `connector` channel
-kind, and a `mode = "remote"` setting opens a stream instead of binding a listener. The event names
-come from the same manifest either way, so `trigger { on = … }` is unchanged.
+Flux's embedded Exchange binding consumes both transports. `flux-channels` already has a generic
+`connector` channel kind, and its Exchange-backed mode opens the authenticated stream instead of
+binding a vendor listener. Event names still come from the connector manifest, so `trigger { on =
+… }` is unchanged; the placement is always Exchange for an official external integration.
 
 ## The formerly unfiled platform work is now owned
 
 Generated `subscribe` shipped in X-101–X-105 and workflows plus execution records shipped in X-98.
-The remaining general work is no longer an unscoped direction: streams and cancellation are X-117,
-leases are X-118, isolated rich runtimes are X-114–X-116, artifact trust is X-119, and X-120 holds
-the end-to-end migration proof. Webhook/poll hosting and durable replay remain outside this runtime
-epic and still require their own designs before implementation.
+The remaining general work is no longer an unscoped direction: the effective catalogue and one-shot
+HTTP contract are X-113; streams and cancellation are X-117; leases are X-118; rich runtime dispatch
+and placement are X-114–X-116; artifact trust is X-119; and X-120 holds the local single-tenant
+migration-corpus proof. Webhook/poll hosting and durable replay remain outside this runtime epic and
+still require their own designs before implementation.
 
 **Current dependency boundary, 2026-08-03.** connector v0.18 and Flux v0.54.4 move as one registry-only
 graph. `connector-pack` and `flux-runtime` are ordinary host dependencies because Exchange executes

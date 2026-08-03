@@ -1,7 +1,7 @@
 ---
 id: X-124
 title: "Adopt Exchange-only official integration execution"
-status: ready
+status: done
 priority: 0
 epic: rich-connector-runtimes
 design: docs/designs/rich-connector-runtimes.md
@@ -18,29 +18,35 @@ shippable one-shot HTTP milestone and move streams, cancellation and leases back
 
 ## Acceptance
 
-- [ ] `AGENTS.md` identifies `../flux-roadmap` as the scheduling authority for work named by its
+- [x] `AGENTS.md` identifies `../flux-roadmap` as the scheduling authority for work named by its
       program while preserving repo-local Goal and Acceptance as the implementation contract.
-- [ ] X-111 and `docs/designs/rich-connector-runtimes.md` require Exchange-only execution for official
+- [x] X-111 and `docs/designs/rich-connector-runtimes.md` require Exchange-only execution for official
       integrations; they contain no local-first Flux placement or local vendor/plugin fallback.
-- [ ] X-113 covers the authenticated effective Service Account catalogue and existing one-shot HTTP
+- [x] X-113 covers the authenticated effective Service Account catalogue and existing one-shot HTTP
       invocation contract only, including stable generation identity, tenant/grant derivation and no
       credential or caller-selected authority.
-- [ ] Streams, cancellation, terminal outcomes and leases remain owned by X-117 and X-118, so they do
+- [x] Streams, cancellation, terminal outcomes and leases remain owned by X-117 and X-118, so they do
       not block the Milestone 1 HTTP path.
-- [ ] X-114, X-115 and X-119 state that connector-declared plans and attested artifacts are installed
+- [x] X-114, X-115 and X-119 state that connector-declared plans and attested artifacts are installed
       and executed by Exchange; Flux contributes guarded runtime substrate without becoming a second
       official-integration execution placement.
-- [ ] X-120 proves the accumulated migration corpus through local single-tenant Exchange and does not
+- [x] X-120 proves the accumulated migration corpus through local single-tenant Exchange and does not
       require hosted multi-tenant isolation, which remains X-116.
-- [ ] A repository contract check fails first when the corrected epic/design/story vocabulary drifts
+- [x] A repository contract check fails first when the corrected epic/design/story vocabulary drifts
       back to a second official execution placement, then passes with the reconciled documents.
-- [ ] The generated story board and roadmap-facing notes describe the corrected dependency split.
+- [x] The generated story board and roadmap-facing notes describe the corrected dependency split.
 
 ## Progress
 
 - 2026-08-03: Filed from flux-roadmap's preservation/adoption schedule after the worktree audit found
   the primary Exchange checkout dirty on an obsolete wave branch. Implementation must use a fresh
   canonical worktree and must not modify or clean that checkout.
+- 2026-08-03: Started from canonical `origin/main` in an isolated story worktree. The repository
+  contract was added before the reconciliation and failed against the former local-placement and
+  combined-protocol wording.
+- 2026-08-03: Done. X-111 through X-120, the accepted design, vision, README and roadmap now carry
+  one official execution placement. X-113 is the ready Milestone 1 HTTP contract; X-117/X-118 own
+  lifecycle; X-116 alone owns hosted isolation; and the ordinary Rust gate enforces the split.
 
 ## Notes
 
