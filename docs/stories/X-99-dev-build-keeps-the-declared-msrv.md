@@ -1,7 +1,7 @@
 ---
 id: X-99
 title: The development build keeps the declared MSRV
-status: in-progress
+status: done
 priority: 0
 epic: local-identity
 areas: [exchange-server, supply-chain]
@@ -22,7 +22,7 @@ working one-click session for `user:${USER}@dev`.
       resolved `dev` tenant without exposing the roster handle in the response body.
 - [x] A real `cargo run --locked -- --dev` process has completed the same browser-shaped cookie
       round trip for a temporary startup user.
-- [ ] The complete gate and crates.io release workflow pass, and the corrective version is visible
+- [x] The complete gate and crates.io release workflow pass, and the corrective version is visible
       in the registry.
 
 ## Progress
@@ -37,6 +37,8 @@ working one-click session for `user:${USER}@dev`.
   repair. Flux 0.52.3 removes PDF parsing from its default web feature and keeps the safe parser
   behind an explicit feature; v0.14.3 consumes that corrected graph rather than suppressing the
   advisory.
+- 2026-08-03: v0.14.3 passed the tag-triggered publish gate and ordinary CI, including the exact
+  Rust 1.88 build and dependency audit, and is visible on crates.io.
 
 ## Notes
 - This repairs an existing compatibility promise. Raising Exchange's MSRV would turn a transitive
