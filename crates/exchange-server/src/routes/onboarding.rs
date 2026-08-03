@@ -580,6 +580,11 @@ mod tests {
             "liveness, for an operator's monitor. Not something an agent does with this service.",
         ),
         (
+            "/metrics",
+            "fixed-cardinality process saturation for an operator's monitor. It describes host \
+             load and grants an agent no authority.",
+        ),
+        (
             "/api/catalogue/connectors/{id}/operations",
             "the second page of the catalogue capability, named in its own note rather than as a \
              capability of its own — one capability per thing an agent *does*, not per route.",
@@ -607,6 +612,10 @@ mod tests {
         (
             "/api/signin/availability",
             "published in this document as `sign_in_available`, so it is not a capability as well.",
+        ),
+        (
+            "/api/signin/local",
+            "the verifier-backed human form target. It creates the browser session through the same sign-in capability fact and is never a call an agent makes.",
         ),
         (
             "/api/connections",

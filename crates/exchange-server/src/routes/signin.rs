@@ -43,8 +43,8 @@
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, MethodRouter};
-use axum::{Extension, Json};
+use axum::routing::{get, post, MethodRouter};
+use axum::{Extension, Form, Json};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{error, warn};
@@ -53,9 +53,11 @@ use super::{audit_unavailable, rate_limited, record_audit, Access, Module, Route
 use crate::audit::{
     Action as AuditAction, Outcome as AuditOutcome, RequestId, Target as AuditTarget,
 };
+use crate::dev_identity::DEV_IDENTITY_ENV;
+use crate::local_identity::LOCAL_USERS_SETTING;
 use crate::oidc::config::{
-    AUTHORIZATION_ENDPOINT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, ISSUER_ENV, JWKS_URI_ENV,
-    REDIRECT_URI_ENV, TENANT_ENV, TOKEN_ENDPOINT_ENV,
+    AUTHORIZATION_ENDPOINT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, HOSTED_DOMAIN_ENV, ISSUER_ENV,
+    JWKS_URI_ENV, REDIRECT_URI_ENV, TENANT_ENV, TOKEN_ENDPOINT_ENV,
 };
 use crate::oidc::flow;
 use crate::oidc::SignInRefusal;
@@ -90,6 +92,11 @@ pub(super) const MODULE: Module = Module {
             access: Access::Anonymous,
             method_router: availability_route,
         },
+        Route {
+            path: "/api/signin/local",
+            access: Access::Anonymous,
+            method_router: local_signin_route,
+        },
     ],
 };
 
@@ -105,6 +112,10 @@ fn availability_route() -> MethodRouter<AppState> {
     get(availability)
 }
 
+fn local_signin_route() -> MethodRouter<AppState> {
+    post(local_signin)
+}
+
 /// Send the browser to the provider, or explain why it cannot be sent.
 async fn signin(State(state): State<AppState>) -> Response {
     let oidc = match state.sign_in() {
@@ -116,6 +127,7 @@ async fn signin(State(state): State<AppState>) -> Response {
         // Sign-in is *available* here and it is not a redirect, which is X-57's whole distinction.
         // There is no provider to send the browser to; the caller signs in against this host.
         SignIn::Development { automatic } => return development_page(*automatic),
+        SignIn::LocalUsers => return local_users_page(),
     };
 
     if let Err(refusal) = state.admit_sign_in() {
@@ -146,6 +158,116 @@ async fn signin(State(state): State<AppState>) -> Response {
             refused(&refusal)
         }
     }
+}
+
+/// Credentials submitted by the local sign-in form. Deliberately no `Debug`: `secret` is the
+/// plaintext credential at this one boundary, and making it printable would make logging it easy.
+#[derive(Deserialize)]
+struct LocalCredentials {
+    user: String,
+    secret: String,
+}
+
+/// Verify a local user's generated secret and establish the browser session end to end.
+async fn local_signin(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Form(credentials): Form<LocalCredentials>,
+) -> Response {
+    if !matches!(state.sign_in(), SignIn::LocalUsers) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Err(refusal) = state.admit_sign_in() {
+        return rate_limited(refusal);
+    }
+    let Some(identity) = state.local_users() else {
+        error!("local sign-in state has no local users identity");
+        return local_signin_unavailable();
+    };
+    let principal = match identity.authenticate(&credentials.user, &credentials.secret) {
+        Ok(principal) => principal,
+        Err(_) => {
+            if let Err(error) = record_audit(
+                &state,
+                &request_id,
+                AuditAction::Authentication,
+                AuditOutcome::Refused,
+                None,
+                AuditTarget::Identity,
+            ) {
+                return audit_unavailable(error);
+            }
+            return local_credentials_refused();
+        }
+    };
+    if let Err(error) = record_audit(
+        &state,
+        &request_id,
+        AuditAction::Authentication,
+        AuditOutcome::Succeeded,
+        Some(&principal),
+        AuditTarget::Identity,
+    ) {
+        return audit_unavailable(error);
+    }
+    let token = match identity.open_session(principal.clone()) {
+        Ok(token) => token,
+        Err(error) => {
+            error!(%error, "cannot mint a local-user session");
+            if let Err(audit_error) = record_audit(
+                &state,
+                &request_id,
+                AuditAction::SessionOpened,
+                AuditOutcome::Refused,
+                Some(&principal),
+                AuditTarget::Session,
+            ) {
+                return audit_unavailable(audit_error);
+            }
+            return local_signin_unavailable();
+        }
+    };
+    if let Err(error) = record_audit(
+        &state,
+        &request_id,
+        AuditAction::SessionOpened,
+        AuditOutcome::Succeeded,
+        Some(&principal),
+        AuditTarget::Session,
+    ) {
+        return audit_unavailable(error);
+    }
+
+    planting(
+        (
+            StatusCode::OK,
+            Html(document(
+                "Signed in",
+                "You are signed in. Returning to the console…",
+                Some(AFTER_SIGN_IN),
+            )),
+        )
+            .into_response(),
+        &[session::planted(&token)],
+    )
+}
+
+fn local_credentials_refused() -> Response {
+    page(
+        StatusCode::UNAUTHORIZED,
+        "Sign-in refused",
+        "The user or secret was not accepted.",
+        None,
+    )
+}
+
+fn local_signin_unavailable() -> Response {
+    page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Sign-in refused",
+        "this host cannot open a session right now. Try again shortly",
+        None,
+    )
 }
 
 /// Complete the one-principal `--dev` browser flow without putting a token in a readable body.
@@ -273,7 +395,7 @@ async fn development_signin(
 ///
 /// # What it says, and what it deliberately does not
 ///
-/// One boolean and nothing else. The three states of [`SignIn`] are what an operator needs and the
+/// One boolean and nothing else. The states of [`SignIn`] are what an operator needs and the
 /// two explanatory pages above are where they are said; a caller learns only whether sign-in
 /// works. See [`SignIn::available`] for why collapsing them is the decision rather than a loss, and
 /// `tests::the_availability_answer_discloses_nothing_about_the_configuration` for the adversarial
@@ -318,9 +440,11 @@ async fn callback(
         // page above is true — and `development_page` is not the answer either: a browser arriving
         // mid-redirect asked to finish a flow, not for instructions. This host planted no `state`
         // and never will, which is exactly [`SignInRefusal::UnknownState`] — the same `400` and the
-        // same phrase a forged `state` gets on a federated host, so this route stays the oracle for
-        // nothing that `a_callback_without_a_code_is_not_an_oracle_for_a_live_state` made it.
-        SignIn::Development { .. } => {
+        // same phrase a forged `state` gets on a federated host. That narrow equivalence prevents
+        // probing whether a particular state is live. It does not hide the provider kind in every
+        // callback arm: an explicit provider `error` remains a credential refusal (`401`) on a
+        // federated host, while this non-federated host has no provider answer to refuse (`400`).
+        SignIn::Development { .. } | SignIn::LocalUsers => {
             return refused_authentication(
                 &state,
                 &request_id,
@@ -612,6 +736,28 @@ fn development_page(automatic: bool) -> Response {
         .into_response()
 }
 
+/// The self-contained form for the verifier-backed local provider. It names no configured user or
+/// tenant and posts the credential only to the same-origin host that will plant the session.
+fn local_users_page() -> Response {
+    (
+        StatusCode::OK,
+        Html(
+            "<!doctype html>\n\
+             <html lang=\"en\">\n\
+             <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+             <title>Sign in — flux-exchange</title></head>\n\
+             <body><main><h1>Sign in</h1>\n\
+             <form method=\"post\" action=\"/api/signin/local\">\n\
+             <label>User <input name=\"user\" autocomplete=\"username\" required></label>\n\
+             <label>Secret <input name=\"secret\" type=\"password\" autocomplete=\"current-password\" required></label>\n\
+             <button type=\"submit\">Sign in</button>\n\
+             </form></main></body></html>\n"
+                .to_owned(),
+        ),
+    )
+        .into_response()
+}
+
 /// A small, self-contained HTML answer.
 fn page(status: StatusCode, heading: &str, detail: &str, refresh_to: Option<&str>) -> Response {
     (status, Html(document(heading, detail, refresh_to))).into_response()
@@ -671,6 +817,9 @@ fn document_with_action(
 /// one is a compile error here and the decision above gets re-read rather than silently rotting.
 #[allow(dead_code)]
 const WITHHELD_FROM_THE_PAGE: &[&str] = &[
+    DEV_IDENTITY_ENV,
+    LOCAL_USERS_SETTING,
+    HOSTED_DOMAIN_ENV,
     ISSUER_ENV,
     AUTHORIZATION_ENDPOINT_ENV,
     TOKEN_ENDPOINT_ENV,
@@ -703,6 +852,7 @@ mod tests {
     /// The routes under test, read from the declaration rather than written out again.
     const SIGNIN: &str = super::MODULE.routes[0].path;
     const CALLBACK: &str = super::MODULE.routes[1].path;
+    const LOCAL_SIGNIN: &str = super::MODULE.routes[3].path;
 
     const ISSUER: &str = "https://accounts.example.com";
     const CLIENT_ID: &str = "flux-exchange";
@@ -765,7 +915,7 @@ mod tests {
             subject: SUBJECT.to_string(),
             nonce: Some(nonce.to_string()),
             expires_at: session::now() + 300,
-            email: Some("alice@example.com".to_string()),
+            hosted_domain: None,
         }
     }
 
@@ -815,6 +965,78 @@ mod tests {
             .uri(path)
             .body(Body::empty())
             .expect("a well-formed request")
+    }
+
+    /// The whole browser path for X-58: the host renders the form, verifies a generated secret,
+    /// plants an HttpOnly session, and resolves that session to the file's principal and tenant.
+    #[tokio::test]
+    async fn a_local_user_signs_in_from_the_console_form_end_to_end() {
+        let (secret, entry) =
+            crate::local_identity::generate("alice", "acme").expect("the OS supplies entropy");
+        let users = crate::local_identity::LocalUsers::from_json(
+            &serde_json::to_string(&vec![entry]).expect("an entry document"),
+        )
+        .expect("valid local users");
+        let app = super::super::app(AppState::with_local_users(Arc::new(users)));
+
+        let (page_status, _, page_body) = call(app.clone(), get(SIGNIN)).await;
+        assert_eq!(page_status, StatusCode::OK, "{page_body}");
+        assert!(page_body.contains("action=\"/api/signin/local\""));
+        assert!(page_body.contains("name=\"secret\""));
+
+        let request = HttpRequest::builder()
+            .method("POST")
+            .uri(LOCAL_SIGNIN)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "user=alice&secret={}",
+                secret.expose_once()
+            )))
+            .expect("a form request");
+        let (status, headers, body) = call(app.clone(), request).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains(secret.expose_once()), "{body}");
+        let planted = planted_session(&headers).expect("the session cookie is planted");
+        assert!(planted.contains("HttpOnly"), "{planted}");
+        let cookie = planted.split(';').next().expect("a cookie pair");
+
+        let whoami = HttpRequest::builder()
+            .uri("/api/session")
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .expect("a session request");
+        let (status, _, principal) = call(app, whoami).await;
+        assert_eq!(status, StatusCode::OK, "{principal}");
+        assert!(principal.contains("\"id\":\"alice\""), "{principal}");
+        assert!(principal.contains("\"tenant\":\"acme\""), "{principal}");
+    }
+
+    #[tokio::test]
+    async fn local_signin_does_not_distinguish_an_unknown_user_from_a_wrong_secret() {
+        let (_, entry) =
+            crate::local_identity::generate("alice", "acme").expect("the OS supplies entropy");
+        let users = crate::local_identity::LocalUsers::from_json(
+            &serde_json::to_string(&vec![entry]).expect("an entry document"),
+        )
+        .expect("valid local users");
+        let app = super::super::app(AppState::with_local_users(Arc::new(users)));
+
+        let form = |user: &str| {
+            HttpRequest::builder()
+                .method("POST")
+                .uri(LOCAL_SIGNIN)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(format!("user={user}&secret=wrong")))
+                .expect("a form request")
+        };
+        let wrong = call(app.clone(), form("alice")).await;
+        let absent = call(app, form("nobody")).await;
+
+        assert_eq!(wrong.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(wrong.0, absent.0);
+        assert_eq!(wrong.2, absent.2);
+        assert!(wrong.1.get(SET_COOKIE).is_none());
+        assert!(absent.1.get(SET_COOKIE).is_none());
     }
 
     /// An anonymous burst cannot allocate enough pending flows to churn legitimate browsers out of
@@ -1505,10 +1727,10 @@ mod tests {
         let challenge = parameter(location, "code_challenge").expect("a code challenge");
         assert_eq!(challenge.len(), 43, "SHA-256, base64url, unpadded");
 
-        // `openid email profile`, percent-encoded, and nothing else.
+        // `openid`, and nothing else. Identity is the immutable `sub`; email/profile are unused.
         assert_eq!(
             parameter(location, "scope"),
-            Some("openid%20email%20profile"),
+            Some("openid"),
             "sign-in asks to identify the human and to do nothing on their behalf",
         );
 
@@ -1550,14 +1772,14 @@ mod tests {
     /// The three vector tests in `routes::identity` assert this for a path segment, a body field
     /// and a header against the development identity. This is the same rule against the federated
     /// one, where there is a second source to worry about: an id token's claims. The claims here
-    /// carry a hostile `email` domain and the request carries a hostile query parameter, and the
+    /// carry a hostile hosted-domain claim and the request carries a hostile query parameter, and the
     /// principal that comes back is in the configured tenant regardless.
     #[tokio::test]
     async fn neither_a_request_nor_a_claim_influences_the_tenant() {
         const CLAIMED: &str = "attacker";
 
         let mut hostile = claims("not-yet-known");
-        hostile.email = Some(format!("alice@{CLAIMED}.example.com"));
+        hostile.hosted_domain = Some(format!("{CLAIMED}.example.com"));
         hostile.subject = SUBJECT.to_string();
 
         let exchange = Arc::new(StubExchange::returning(hostile));
@@ -1862,8 +2084,8 @@ mod tests {
     ///
     /// Written out in one place because three tests below drive all of them, and a composition
     /// covered by two of them is the gap that matters. The list is exhaustive by construction:
-    /// [`SignIn`] has four variants and [`SignIn::available`] matches them with no wildcard arm, so
-    /// a fifth cannot arrive without a compile error pointing at the decision — and a fifth that
+    /// [`SignIn`] has five variants and [`SignIn::available`] matches them with no wildcard arm, so
+    /// a sixth cannot arrive without a compile error pointing at the decision — and a sixth that
     /// arrived without a row here would be a state two of the three tests below never drove.
     ///
     /// **The fourth entry is X-57's**, and it is the one that makes this fixture say something it
@@ -1871,6 +2093,12 @@ mod tests {
     /// existed, "available" and "redirects to a provider" were the same set, which is exactly the
     /// conflation [`SignIn::available`] used to encode.
     fn every_composition() -> Vec<(&'static str, AppState, bool)> {
+        let (_, entry) =
+            crate::local_identity::generate("alice", "acme").expect("the OS supplies entropy");
+        let local_users = crate::local_identity::LocalUsers::from_json(
+            &serde_json::to_string(&vec![entry]).expect("an entry document"),
+        )
+        .expect("valid local users");
         vec![
             (
                 "a bound OIDC provider",
@@ -1881,6 +2109,11 @@ mod tests {
                 true,
             ),
             ("the development identity armed", development(), true),
+            (
+                "a verifier-backed local users file",
+                AppState::with_local_users(Arc::new(local_users)),
+                true,
+            ),
             (
                 "OIDC configured with no token exchange",
                 AppState::oidc_without_a_token_exchange(),
@@ -2249,6 +2482,10 @@ mod tests {
 
         // The same line the two `503` pages hold: the remedy's shape, never this deployment's
         // settings. See `unconfigured_page`.
+        assert!(
+            WITHHELD_FROM_THE_PAGE.contains(&DEV_IDENTITY_ENV),
+            "the withheld-variable guard must cover the development roster variable itself",
+        );
         for variable in WITHHELD_FROM_THE_PAGE {
             assert!(
                 !body.contains(variable),
@@ -2278,5 +2515,48 @@ mod tests {
         );
         assert!(headers.get(SET_COOKIE).is_none(), "{body}");
         assert!(!carries_a_token(&body), "{body}");
+    }
+
+    /// **X-68's callback-arm regression test.** A provider's refusal remains a credential failure,
+    /// while a host with no provider cannot claim to have rejected a provider credential.
+    ///
+    /// This distinction is intentional operator signal, not an oracle claim: both answers issue
+    /// nothing and reflect only the provider kind already exposed by visiting `/api/signin`.
+    #[tokio::test]
+    async fn a_provider_error_is_distinct_from_a_non_federated_callback() {
+        let federated = oidc_app(Arc::new(StubExchange::returning(claims("unused"))));
+        let development = super::super::app(development());
+
+        let (federated_status, federated_headers, federated_body) =
+            call(federated, get(&format!("{CALLBACK}?error=access_denied"))).await;
+        let (development_status, development_headers, development_body) =
+            call(development, get(&format!("{CALLBACK}?error=access_denied"))).await;
+
+        assert_eq!(
+            federated_status,
+            StatusCode::UNAUTHORIZED,
+            "{federated_body}"
+        );
+        assert_eq!(
+            development_status,
+            StatusCode::BAD_REQUEST,
+            "{development_body}"
+        );
+        assert!(
+            federated_headers.get(SET_COOKIE).is_none(),
+            "{federated_body}"
+        );
+        assert!(
+            development_headers.get(SET_COOKIE).is_none(),
+            "{development_body}"
+        );
+        assert!(
+            !federated_body.contains("access_denied"),
+            "{federated_body}"
+        );
+        assert!(
+            !development_body.contains("access_denied"),
+            "{development_body}"
+        );
     }
 }

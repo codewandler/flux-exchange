@@ -109,33 +109,20 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, MethodRouter};
 use axum::{Extension, Json};
-use exchange_host::{Principal, PrincipalKind};
+use exchange_host::Principal;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::error;
 
-use super::{refuse_kind, Access, Module, Route};
+use super::{refuse_operator, Access, Module, Route};
 use crate::service_account::{Expiry, ServiceAccountError, SERVICE_ACCOUNT_STORE_SETTING};
 use crate::session;
 use crate::state::AppState;
 
-/// The kinds of principal that may create a principal: a **signed-in human, and nothing else**.
-///
-/// This is X-40, and it is the narrowest list this host publishes. The argument is in the module
-/// documentation above; what follows is why it is a `const` beside the route rather than a check
-/// inside [`mint`].
-///
-/// It is read in two places, and they are not redundant:
-///
-/// - [`MODULE`] declares it, so the guard enforces it before this module runs and
-///   `super::tests::the_kind_gated_surface_is_only_what_was_declared` can see it by walking the
-///   published surface. That is what a caller meets.
-/// - `crate::service_account::ServiceAccountStore::mint` enforces it again against the principal it is handed, so the
-///   rule survives a future handler that reaches the store without declaring an access. That is
-///   what makes it true.
-pub(super) const MAY_MINT: &[PrincipalKind] = &[PrincipalKind::User];
-
 /// This module's contribution to the surface.
+///
+/// The route boundary requires deployment operator authority. The store retains its defensive
+/// human-kind check, so a future internal caller cannot bypass the narrower domain invariant.
 pub(super) const MODULE: Module = Module {
     name: "service-accounts",
     routes: &[
@@ -152,17 +139,17 @@ pub(super) const MODULE: Module = Module {
             // **Only a `User`.** Minting is not an operation against a connection, it is the creation
             // of a principal in this tenant — so the question this route asks is which *kind* of caller
             // may do that, and [`MAY_MINT`] is the answer.
-            access: Access::PrincipalOfKind(MAY_MINT),
+            access: Access::Operator,
             method_router: collection,
         },
         Route {
             path: "/api/service-accounts/{id}",
-            access: Access::PrincipalOfKind(MAY_MINT),
+            access: Access::Operator,
             method_router: item,
         },
         Route {
             path: "/api/agents",
-            access: Access::PrincipalOfKind(MAY_MINT),
+            access: Access::Operator,
             method_router: legacy_collection,
         },
     ],
@@ -274,7 +261,7 @@ async fn list(
             Json(json!({ "service_accounts": accounts })),
         )
             .into_response(),
-        Err(ServiceAccountError::MayNotManage { .. }) => refuse_kind(MAY_MINT),
+        Err(ServiceAccountError::MayNotManage { .. }) => refuse_operator(),
         Err(error) => refuse_management(error),
     }
 }
@@ -289,7 +276,7 @@ async fn revoke(
     };
     match accounts.revoke(&principal, &id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(ServiceAccountError::MayNotManage { .. }) => refuse_kind(MAY_MINT),
+        Err(ServiceAccountError::MayNotManage { .. }) => refuse_operator(),
         Err(ServiceAccountError::NotFound { .. }) => {
             refuse(StatusCode::NOT_FOUND, "no such Service Account".to_owned())
         }
@@ -366,11 +353,10 @@ fn refuse_mint(error: ServiceAccountError) -> Response {
             refuse(StatusCode::CONFLICT, error.to_string())
         }
         ServiceAccountError::MayNotMint { .. } => {
-            // Unreachable through the published route — `Access::PrincipalOfKind(MAY_MINT)` refuses
-            // before this module runs — and answered anyway, in the guard's own terms rather than
-            // in a second phrase that could drift from it. `error.to_string()` is deliberately not
-            // used: it names the caller's kind, which belongs in a log line and not in an answer.
-            refuse_kind(MAY_MINT)
+            // Unreachable through the published operator route, and answered anyway in the
+            // guard's terms. `error.to_string()` names the caller's kind, which belongs in a log
+            // line and not in an answer.
+            refuse_operator()
         }
         ServiceAccountError::MayNotManage { .. } | ServiceAccountError::NotFound { .. } => {
             error!(%error, "unexpected Service Account mint refusal");
@@ -422,6 +408,7 @@ mod tests {
     use axum::http::{HeaderMap, Method, Request as HttpRequest};
     use axum::routing::get;
     use axum::Router;
+    use exchange_host::PrincipalKind;
     use serde_json::Value;
     use tower::Service;
 

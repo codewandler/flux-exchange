@@ -48,8 +48,12 @@ const consoleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const SERVICE_NAME = 'flux-exchange'
 
 /** Render the shell in one session state, as a browser would see it. */
-const shell = (session, active = null) =>
-  renderToString(createSSRApp(ConsoleShell, { session, active }))
+const shell = (session, active = null, signInAvailability = { status: 'ready', available: true }) =>
+  renderToString(createSSRApp(ConsoleShell, {
+    session,
+    active,
+    signInAvailability,
+  }))
 
 /** A resolved principal, in the shape `GET /api/session` publishes it. */
 const principal = (over = {}) => ({ kind: 'user', id: 'alice', tenant: 'acme', ...over })
@@ -282,6 +286,16 @@ test('signed_out_offers_a_link_to_sign_in_and_never_a_fetch', async () => {
     new RegExp(`<a[^>]*href="${SIGNIN_ENDPOINT}"`),
     `signing in must be an anchor to ${SIGNIN_ENDPOINT}: it answers 303 to the provider, and a fetch would follow the redirect in the page instead of navigating`
   )
+})
+
+test('signed_out_does_not_offer_a_link_when_this_deployment_cannot_sign_anyone_in', async () => {
+  const html = await shell(
+    { status: 'ready', principal: null },
+    null,
+    { status: 'ready', available: false }
+  )
+  assert.doesNotMatch(html, new RegExp(`href="${SIGNIN_ENDPOINT}"`))
+  assert.match(html, /Sign-in unavailable/)
 })
 
 test('signed_in_names_who_and_offers_sign_out', async () => {

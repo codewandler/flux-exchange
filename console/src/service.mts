@@ -45,6 +45,9 @@ export const CONNECTIONS_ENDPOINT = '/api/connections'
  */
 export const SIGNIN_ENDPOINT = '/api/signin'
 
+/** The anonymous fact that decides whether the console may offer the sign-in navigation. */
+export const SIGNIN_AVAILABILITY_ENDPOINT = '/api/signin/availability'
+
 /** The reserved service name, which every published address elides. Vocabulary, not data. */
 const RESERVED_SERVICE = 'default'
 
@@ -535,6 +538,32 @@ export type SessionState =
   | { status: 'loading' }
   | { status: 'ready'; principal: Principal | null }
   | { status: 'failed'; failure: ServiceFailure }
+
+/** Whether this deployment can turn a human into a principal, kept separate from session state. */
+export type SignInAvailabilityState =
+  | { status: 'loading' }
+  | { status: 'ready'; available: boolean }
+  | { status: 'failed'; failure: ServiceFailure }
+
+/** Read the deployment's sign-in fact without guessing it from the session response. */
+export async function loadSignInAvailability(
+  options: LoadOptions = {}
+): Promise<SignInAvailabilityState> {
+  const answered = await read(SIGNIN_AVAILABILITY_ENDPOINT, options)
+  if (!answered.ok) return { status: 'failed', failure: answered.failure }
+  if (!isObject(answered.body) || typeof answered.body.sign_in_available !== 'boolean') {
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable',
+        endpoint: SIGNIN_AVAILABILITY_ENDPOINT,
+        status: 200,
+        detail: 'the response carries no boolean sign_in_available field',
+      },
+    }
+  }
+  return { status: 'ready', available: answered.body.sign_in_available }
+}
 
 /** A principal in a `GET /api/session` body, or `null` when the body carries none this can read. */
 function readPrincipal(body: unknown): Principal | null {

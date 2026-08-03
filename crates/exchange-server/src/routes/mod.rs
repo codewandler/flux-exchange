@@ -21,6 +21,7 @@ mod grants;
 mod health;
 mod identity;
 mod invoke;
+mod metrics;
 mod onboarding;
 mod service_accounts;
 mod signin;
@@ -35,7 +36,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, MethodRouter};
 use axum::{Json, Router};
-use exchange_host::{IdentityError, PrincipalKind};
+use exchange_host::IdentityError;
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -50,6 +51,7 @@ use crate::state::AppState;
 /// The feature modules this app is assembled from. **This is the merge site.**
 const MODULES: &[Module] = &[
     health::MODULE,
+    metrics::MODULE,
     catalogue::MODULE,
     identity::MODULE,
     signin::MODULE,
@@ -97,8 +99,8 @@ impl Route {
 
         let admitted = match self.access {
             Access::Anonymous => return route,
-            Access::Principal => None,
-            Access::PrincipalOfKind(kinds) => Some(kinds),
+            Access::Principal => Admitted::Any,
+            Access::Operator => Admitted::Operator,
         };
 
         // `route_layer` and not `layer`: the guard must run for this route and leave an
@@ -110,12 +112,12 @@ impl Route {
     }
 }
 
-/// Which kinds of principal a guarded route admits. `None` is every kind.
-///
-/// `None` rather than a written-out list of all three, so [`Access::Principal`] cannot silently
-/// stop admitting a kind that gets added to [`PrincipalKind`] later — a route that admits everyone
-/// says so by holding nothing, not by holding a list somebody has to remember to extend.
-type Admitted = Option<&'static [PrincipalKind]>;
+/// Which deployment authority a guarded route requires.
+#[derive(Clone, Copy)]
+enum Admitted {
+    Any,
+    Operator,
+}
 
 /// Whether a route answers a caller the host could not resolve to a principal, and which kinds of
 /// principal it answers at all.
@@ -137,7 +139,7 @@ type Admitted = Option<&'static [PrincipalKind]>;
 /// with a connection; this decides whether a principal may exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
-    /// Answers without a principal. Health is the only one, and a test enforces that.
+    /// Answers without a principal. The exact small surface is enforced by a test.
     Anonymous,
     /// Refused unless the identity port resolves a principal — of **any** kind.
     ///
@@ -145,12 +147,9 @@ pub enum Access {
     /// `tests::the_surface_publishes_a_route_that_requires_a_principal` keeps at least one so the
     /// enumeration above never becomes a comparison against an empty set.
     Principal,
-    /// Refused unless the identity port resolves a principal **and** its kind is one of these.
-    ///
-    /// The narrower form, for a route where the *kind* of caller is the question. `/api/agents` is
-    /// the one that exists: minting creates a principal, and a principal that can create principals
-    /// is one whose revocation is not a complete remedy. See [`agents`] for the argument.
-    PrincipalOfKind(&'static [PrincipalKind]),
+    /// Refused unless a human principal's immutable id appears in the deployment-owned operator
+    /// policy. This is a role axis, deliberately separate from principal kind.
+    Operator,
 }
 
 /// Every route the assembled app publishes, paired with the module that publishes it.
@@ -333,7 +332,8 @@ pub(super) fn rate_limited(refusal: crate::traffic::TrafficRefusal) -> Response 
 /// `connections::tests::an_agent_may_not_write_a_connection_setting_and_the_refusal_is_logged`
 /// asserts an operator would see it. A test that spelled the sentence a second time would go on
 /// passing after the guard stopped emitting anything at all.
-pub(super) const KIND_REFUSED: &str = "a principal of a kind this route does not admit was refused";
+pub(super) const KIND_REFUSED: &str =
+    "an authenticated principal was refused by the route's declared authority policy";
 
 /// Refuse anything this host cannot attribute to a principal — or attributes to the wrong kind of
 /// one.
@@ -378,6 +378,20 @@ async fn require_principal(
             Err(IdentityError::Unreachable(reason))
         }
     };
+    let resolved = match resolved {
+        Ok(Some(principal)) if !state.admits_principal_tenant(&principal) => {
+            // Internal evidence may identify the actor and both tenants; the wire answer remains
+            // the same generic credential refusal as every other failed authentication. Most
+            // importantly, never repair this by substituting the configured tenant.
+            warn!(
+                %principal,
+                setting = crate::tenancy::TENANT_SETTING,
+                "an authenticated principal was refused because its tenant disagrees with the single-tenant deployment"
+            );
+            Err(IdentityError::Rejected)
+        }
+        other => other,
+    };
 
     if state.identity().is_none() && state.service_accounts().is_none() {
         if let Err(error) = record_audit(
@@ -398,7 +412,7 @@ async fn require_principal(
 
     match resolved {
         Ok(Some(principal)) => match admitted {
-            Some(kinds) if !kinds.contains(&principal.kind()) => {
+            Admitted::Operator if !state.is_operator(&principal) => {
                 if let Err(error) = record_audit(
                     &state,
                     &request_id,
@@ -419,12 +433,8 @@ async fn require_principal(
                 }) {
                     return audit_unavailable(error);
                 }
-                // Identified, and refused anyway. To the log, because an agent reaching for a
-                // route only a human may call is the shape of a leaked token being used — and an
-                // operator who cannot see it happening has nothing to revoke. The caller's own id
-                // and tenant belong here and not in the answer.
                 warn!(%principal, "{KIND_REFUSED}");
-                refuse_kind(kinds)
+                refuse_operator()
             }
             _ => {
                 if let Err(error) = record_audit(
@@ -623,11 +633,25 @@ fn audited_action(
                 connector: (*connector).to_owned(),
             },
         )),
-        (&Method::POST | &Method::PUT, [connector, "instances", label])
+        (&Method::POST, [connector, "instances", label])
             if !connector.is_empty() && !label.is_empty() =>
         {
             Some((
                 AuditAction::ConnectionCreated,
+                AuditTarget::ConnectionInstance {
+                    connector: (*connector).to_owned(),
+                    label: (*label).to_owned(),
+                },
+            ))
+        }
+        (&Method::PUT, [connector, "instances", label])
+            if !connector.is_empty() && !label.is_empty() =>
+        {
+            // Renaming changes no credential and therefore cannot become supplier evidence. The
+            // body is intentionally unavailable at this boundary, so the non-secret target is the
+            // existing label the request addressed.
+            Some((
+                AuditAction::ConnectionLabeled,
                 AuditTarget::ConnectionInstance {
                     connector: (*connector).to_owned(),
                     label: (*label).to_owned(),
@@ -774,33 +798,16 @@ fn refuse(status: StatusCode, reason: &str) -> Response {
     (status, Json(json!({ "error": reason }))).into_response()
 }
 
-/// Refuse a caller this host **did** identify, because its kind is not one this route admits.
+/// Refuse a resolved caller that lacks deployment operator authority.
 ///
-/// `403` and not `401`: the credential was good, and telling a caller to authenticate again when
-/// authenticating again cannot help is how an operator spends an afternoon rotating a working
-/// token.
-///
-/// # What it says, and what it must not
-///
-/// It quotes the **rule** — which kinds this route admits, in the wire spelling `PrincipalKind`
-/// serialises — and nothing else. Not the caller's own id, not its tenant, not what this host
-/// holds, not whether the thing it asked to create already exists. That is
-/// `an_anonymous_caller_is_refused_and_told_nothing`'s discipline applied one step later: an
-/// identified caller may be told what would have worked, in the same way an unusable identifier is
-/// refused by quoting the rule rather than the value, but a refusal is never a place to learn what
-/// exists. Derived from the declaration rather than written out, so the rule and the sentence
-/// describing it cannot drift.
-///
-/// `pub(super)` so `agents` answers its own unreachable store-level refusal in these exact terms —
-/// see [`service_accounts::MAY_MINT`].
-pub(super) fn refuse_kind(admitted: &'static [PrincipalKind]) -> Response {
-    let admitted: Vec<String> = admitted.iter().map(PrincipalKind::to_string).collect();
-
+/// Kept in one function because the route guard and the Service Account store's defensive kind
+/// check can meet the same fact. The wire answer names the configuration to fix, never the caller.
+pub(super) fn refuse_operator() -> Response {
     refuse(
         StatusCode::FORBIDDEN,
         &format!(
-            "this route admits only a principal of kind: {}",
-            admitted.join(", "),
+            "this route requires an operator configured by {}",
+            crate::operator::OPERATOR_SUBJECTS_ENV
         ),
     )
 }
@@ -817,8 +824,8 @@ mod tests {
     use axum::routing::{get, post};
     use exchange_host::{
         address_path, admit_grant, admit_runtime, async_trait, ConnectorSurface, CredentialRef,
-        Deployment, Grant, GrantRefusal, Grants, OperationFacts, Principal, Secret, SecretStore,
-        StoreError, Tenant,
+        Deployment, Grant, GrantRefusal, Grants, OperationFacts, Principal, PrincipalKind, Secret,
+        SecretStore, StoreError, Tenant,
     };
     use serde_json::Value;
     use tower::Service;
@@ -1203,6 +1210,9 @@ mod tests {
             // Liveness: an operator has to be able to ask whether the process is up before it can
             // tell them anything else.
             ("health", "/health"),
+            // Fixed-cardinality process counters. The document has no caller-selected labels and
+            // is scraped by the deployment edge without giving that scraper a tenant identity.
+            ("metrics", "/metrics"),
             // The catalogue: what this binary *could* run, never what a caller may run.
             ("catalogue", "/api/catalogue/connectors"),
             ("catalogue", "/api/catalogue/connectors/{id}/operations"),
@@ -1246,6 +1256,11 @@ mod tests {
             // identically. `crate::routes::signin::availability` carries the long form, including
             // why this is not a field on `/api/session`.
             ("signin", "/api/signin/availability"),
+            // The local-users form target. It must be anonymous because it is the step that proves
+            // the generated secret and creates the first session. Its body carries only user and
+            // secret to the verifier-backed identity, is globally rate-limited with sign-in, and
+            // answers wrong-user and wrong-secret identically.
+            ("signin", "/api/signin/local"),
             // The agent descriptor. X-42's widening, and the one on this list that had to be
             // argued field by field rather than route by route — `crate::routes::onboarding`
             // carries that argument, and the types there are `deny_unknown_fields` so a field
@@ -1313,6 +1328,15 @@ mod tests {
                 Method::POST,
                 "/api/connections/github/instances/work",
                 AuditAction::ConnectionCreated,
+                AuditTarget::ConnectionInstance {
+                    connector: "github".to_owned(),
+                    label: "work".to_owned(),
+                },
+            ),
+            (
+                Method::PUT,
+                "/api/connections/github/instances/work",
+                AuditAction::ConnectionLabeled,
                 AuditTarget::ConnectionInstance {
                     connector: "github".to_owned(),
                     label: "work".to_owned(),
@@ -1424,18 +1448,9 @@ mod tests {
         assert_eq!(
             routes,
             vec![
-                (
-                    "/api/service-accounts",
-                    Access::PrincipalOfKind(service_accounts::MAY_MINT),
-                ),
-                (
-                    "/api/service-accounts/{id}",
-                    Access::PrincipalOfKind(service_accounts::MAY_MINT),
-                ),
-                (
-                    "/api/agents",
-                    Access::PrincipalOfKind(service_accounts::MAY_MINT),
-                ),
+                ("/api/service-accounts", Access::Operator),
+                ("/api/service-accounts/{id}", Access::Operator),
+                ("/api/agents", Access::Operator),
             ],
             "the canonical resource and its one-release compatibility alias must stay published",
         );
@@ -1568,10 +1583,14 @@ mod tests {
     /// caused it. The assertion still fails — a `Vec` keeps count and order — but the message is
     /// read alongside the table, not on its own.
     #[test]
-    fn the_kind_gated_surface_is_only_what_was_declared() {
-        /// Every route that admits fewer than all kinds. Adding a line here is the decision; the
+    fn the_operator_surface_is_only_what_was_declared() {
+        /// Every route that requires deployment operator authority. Adding a line is the decision;
         /// assertion below is only the enforcement.
-        const KIND_GATED: &[(&str, &str, &[PrincipalKind])] = &[
+        const OPERATOR_GATED: &[(&str, &str)] = &[
+            // X-91 makes connection inventory administrative too: knowing which vendor accounts
+            // are held is operator state, not ordinary-member catalogue access.
+            ("connections", "/api/connections"),
+            ("connections", "/api/connections/{connector}"),
             // Creating a connection. Only a signed-in human, because supplying the credential
             // decides which account this tenant's operations run under — and **nothing records
             // who supplied one**, so `GET /api/connections` reads identically either way and
@@ -1579,19 +1598,15 @@ mod tests {
             // path as the two entries missing from this list: `GET` and `DELETE` on
             // `/api/connections/{connector}` stay open to every kind, which is why the path is
             // declared twice. See `connections::MAY_SUPPLY_A_CREDENTIAL`.
-            (
-                "connections",
-                "/api/connections/{connector}",
-                connections::MAY_SUPPLY_A_CREDENTIAL,
-            ),
+            ("connections", "/api/connections/{connector}"),
             // Rotating one credential. The same argument, and the more invisible half of it: a
             // rotation replaces the value in place, with no observable state in which anything is
             // missing, and it exists for revoking a leaked secret — an operator's act.
             (
                 "connections",
                 "/api/connections/{connector}/credentials/{credential}",
-                connections::MAY_SUPPLY_A_CREDENTIAL,
             ),
+            ("connections", "/api/connections/{connector}/settings"),
             // Writing a connection setting. Only a signed-in human, because the value is
             // substituted into the operation's own request — so whoever writes it chooses the
             // origin this host sends that tenant's credential to, and an agent's token grants
@@ -1600,52 +1615,40 @@ mod tests {
             (
                 "connections",
                 "/api/connections/{connector}/settings/{service}/{field}",
-                connections::MAY_CONFIGURE,
             ),
             // Naming, creating and removing connection instances changes which external account a
             // tenant reaches. The item path also has open GET and DELETE declarations; only its
             // POST/PUT management declaration appears here.
+            ("connections", "/api/connections/{connector}/label"),
             (
                 "connections",
-                "/api/connections/{connector}/label",
-                connections::MAY_CONFIGURE,
+                "/api/connections/{connector}/instances/{label}",
             ),
             (
                 "connections",
                 "/api/connections/{connector}/instances/{label}",
-                connections::MAY_CONFIGURE,
+            ),
+            (
+                "connections",
+                "/api/connections/{connector}/instances/{label}/settings",
             ),
             // Instance-specific settings and rotation carry exactly the same authority as their
             // sole-connection counterparts above. The settings collection is read-only and open.
             (
                 "connections",
                 "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
-                connections::MAY_CONFIGURE,
             ),
             (
                 "connections",
                 "/api/connections/{connector}/instances/{label}/credentials/{credential}",
-                connections::MAY_SUPPLY_A_CREDENTIAL,
             ),
             // Managing Service Accounts. Only a signed-in human, because a principal that can
             // create principals makes revocation (X-38) an incomplete remedy that an operator
             // cannot see — and `Service` is refused for the same reason one level up, since this
             // host mints, verifies and revokes nothing for a service.
-            (
-                "service-accounts",
-                "/api/service-accounts",
-                service_accounts::MAY_MINT,
-            ),
-            (
-                "service-accounts",
-                "/api/service-accounts/{id}",
-                service_accounts::MAY_MINT,
-            ),
-            (
-                "service-accounts",
-                "/api/agents",
-                service_accounts::MAY_MINT,
-            ),
+            ("service-accounts", "/api/service-accounts"),
+            ("service-accounts", "/api/service-accounts/{id}"),
+            ("service-accounts", "/api/agents"),
             // Reading and editing what a tenant may run (X-62). Only a signed-in human, and this
             // is the entry that makes the four above worth having: whoever may edit a grant
             // decides which operations run at all, for every principal of the tenant and across
@@ -1662,145 +1665,141 @@ mod tests {
             // Both verbs of `/api/grants` are one declaration, unlike the two entries above for
             // `/api/connections/{connector}`: they admit the same kinds, and X-61 records what a
             // duplicated path costs the anonymous enumeration next door.
-            ("grants", "/api/grants", grants::MAY_GRANT),
+            ("grants", "/api/grants"),
             // Evaluating a grant before saving it. Gated with the write rather than left open,
             // because a proposed policy is still a policy — and because a surface that let an
             // agent enumerate which selector admits which operation is the same disclosure the
             // read above is closed for, reached one step sideways.
-            ("grants", "/api/grants/preview", grants::MAY_GRANT),
+            ("grants", "/api/grants/preview"),
             // Workflow definitions, immutable versions and run inspection are tenant policy and
             // operator state. Agents receive a published workflow only as the ordinary virtual
             // operation admitted through `invoke`; they cannot rewrite it, inspect another run or
             // cancel one. Keeping the whole module at `User` also prevents an agent learning a
             // tenant's authored program through the editor catalogue and version routes.
-            ("workflows", "/api/workflows", workflows::MAY_AUTHOR),
-            (
-                "workflows",
-                "/api/workflows/editor-catalog",
-                workflows::MAY_AUTHOR,
-            ),
-            (
-                "workflows",
-                "/api/workflows/{workflow}",
-                workflows::MAY_AUTHOR,
-            ),
-            (
-                "workflows",
-                "/api/workflows/{workflow}/validate",
-                workflows::MAY_AUTHOR,
-            ),
-            (
-                "workflows",
-                "/api/workflows/{workflow}/publish",
-                workflows::MAY_AUTHOR,
-            ),
-            (
-                "workflows",
-                "/api/workflows/{workflow}/versions",
-                workflows::MAY_AUTHOR,
-            ),
-            (
-                "workflows",
-                "/api/workflows/{workflow}/versions/{version}",
-                workflows::MAY_AUTHOR,
-            ),
-            (
-                "workflows",
-                "/api/workflows/{workflow}/runs",
-                workflows::MAY_AUTHOR,
-            ),
-            ("workflows", "/api/workflow-runs", workflows::MAY_AUTHOR),
-            (
-                "workflows",
-                "/api/workflow-runs/{run}",
-                workflows::MAY_AUTHOR,
-            ),
-            (
-                "workflows",
-                "/api/workflow-runs/{run}/cancel",
-                workflows::MAY_AUTHOR,
-            ),
+            ("workflows", "/api/workflows"),
+            ("workflows", "/api/workflows/editor-catalog"),
+            ("workflows", "/api/workflows/{workflow}"),
+            ("workflows", "/api/workflows/{workflow}/validate"),
+            ("workflows", "/api/workflows/{workflow}/publish"),
+            ("workflows", "/api/workflows/{workflow}/versions"),
+            ("workflows", "/api/workflows/{workflow}/versions/{version}"),
+            ("workflows", "/api/workflows/{workflow}/runs"),
+            ("workflows", "/api/workflow-runs"),
+            ("workflows", "/api/workflow-runs/{run}"),
+            ("workflows", "/api/workflow-runs/{run}/cancel"),
             // Creating, changing and deleting a persistent vendor channel selects an independently
             // running connection for the whole tenant. An agent may consume specifically granted
             // events, but may not widen the event set or create another credential-spending loop.
-            ("channels", "/api/channels", channels::OPERATORS),
-            ("channels", "/api/channels/{id}", channels::OPERATORS),
+            ("channels", "/api/channels"),
+            ("channels", "/api/channels/{id}"),
         ];
 
         let gated: Vec<_> = published()
-            .filter_map(|(module, route)| match route.access {
-                Access::PrincipalOfKind(kinds) => Some((module.name, route.path, kinds)),
-                Access::Anonymous | Access::Principal => None,
-            })
+            .filter(|(_, route)| route.access == Access::Operator)
+            .map(|(module, route)| (module.name, route.path))
             .collect();
 
         assert_eq!(
-            gated, KIND_GATED,
-            "the set of routes that admit only some kinds of principal changed; every entry needs \
-             an argument written beside it in KIND_GATED, and these are what are gated: {gated:?}",
+            gated, OPERATOR_GATED,
+            "the operator route boundary changed; every entry needs an argument in \
+             OPERATOR_GATED, and these are what are gated: {gated:?}",
         );
     }
 
-    /// The kind gate's own guard, in the shape `the_declared_access_is_what_decides_the_answer`
-    /// uses: run the mechanism against a caller it must refuse and one it must admit, through the
-    /// **same handler**, so only the declared access can explain the difference.
-    ///
-    /// Without this, `the_kind_gated_surface_is_only_what_was_declared` is a test about a field's
-    /// value: a `PrincipalOfKind` the guard never consulted would satisfy it exactly as happily.
+    /// **X-91's failing-first role test.** Two organization members share the same user kind; only
+    /// the immutable subject in deployment policy reaches an administrative route. Ordinary
+    /// authenticated access remains open, and a non-human with the same id cannot inherit the role.
     #[tokio::test]
-    async fn a_declared_kind_is_what_decides_the_answer() {
+    async fn operator_authority_is_a_policy_axis_separate_from_user_kind() {
         fn open() -> MethodRouter<AppState> {
             get(|| async { "reached" })
         }
 
-        const ONLY_A_USER: &[PrincipalKind] = &[PrincipalKind::User];
-
         const SPY: Module = Module {
-            name: "spy",
+            name: "operator-spy",
             routes: &[
                 Route {
-                    path: "/spy-any-kind",
+                    path: "/spy-member",
                     access: Access::Principal,
                     method_router: open,
                 },
                 Route {
-                    path: "/spy-only-a-user",
-                    access: Access::PrincipalOfKind(ONLY_A_USER),
+                    path: "/spy-operator",
+                    access: Access::Operator,
                     method_router: open,
                 },
             ],
         };
 
-        let state = AppState::with_development_identity(std::sync::Arc::new(
-            crate::dev_identity::DevIdentity::from_roster("user:alice@acme,agent:bot@acme")
-                .expect("a well-formed roster"),
-        ));
+        let identity = std::sync::Arc::new(
+            crate::dev_identity::DevIdentity::from_roster(
+                "user:operator@acme,user:member@acme,service_account:service@acme",
+            )
+            .expect("a well-formed roster"),
+        );
+        let state = AppState::with_development_identity(identity)
+            .with_operator_policy(crate::operator::OperatorPolicy::one("operator"));
         let app = SPY.router(&state).with_state(state);
 
         for (handle, path, expected) in [
-            ("alice", "/spy-any-kind", StatusCode::OK),
-            ("bot", "/spy-any-kind", StatusCode::OK),
-            ("alice", "/spy-only-a-user", StatusCode::OK),
-            ("bot", "/spy-only-a-user", StatusCode::FORBIDDEN),
+            ("member", "/spy-member", StatusCode::OK),
+            ("member", "/spy-operator", StatusCode::FORBIDDEN),
+            ("operator", "/spy-operator", StatusCode::OK),
+            ("service", "/spy-operator", StatusCode::FORBIDDEN),
         ] {
             let (status, body) = authenticated_get(app.clone(), path, handle).await;
-
-            assert_eq!(
-                status, expected,
-                "`{handle}` at `{path}`: only the declared access differs between these routes, \
-                 and `/spy-any-kind` answering both is what stops this passing for a guard that \
-                 refuses everyone: {body}",
-            );
-
+            assert_eq!(status, expected, "{handle} at {path}: {body}");
             if status == StatusCode::FORBIDDEN {
-                // `403` and not `401`: the credential was good. And the refusal quotes the rule —
-                // which kinds are admitted — and never the caller, its tenant, or what exists.
                 assert!(
-                    body.contains("user") && !body.contains("bot") && !body.contains("acme"),
-                    "the refusal must quote the rule and name nothing else: {body}",
+                    body.contains(crate::operator::OPERATOR_SUBJECTS_ENV),
+                    "{body}"
                 );
+                assert!(!body.contains(handle) && !body.contains("acme"), "{body}");
             }
         }
+
+        assert!(
+            published().any(|(_, route)| {
+                route.path == "/api/operations/{operation}/invoke"
+                    && route.access == Access::Principal
+            }),
+            "grant-gated invocation remains ordinary authenticated access"
+        );
+    }
+
+    /// X-59's full guard seam. The identity provider can authenticate both credentials, but a
+    /// single-tenant deployment resolves only the principal that already belongs to its startup
+    /// tenant. The mismatch is a generic authentication refusal, never a translated principal.
+    #[tokio::test]
+    async fn single_tenant_policy_refuses_a_valid_credential_from_another_tenant() {
+        fn open() -> MethodRouter<AppState> {
+            get(|| async { "reached" })
+        }
+
+        const SPY: Module = Module {
+            name: "single-tenant-spy",
+            routes: &[Route {
+                path: "/spy-principal",
+                access: Access::Principal,
+                method_router: open,
+            }],
+        };
+
+        let identity = Arc::new(
+            crate::dev_identity::DevIdentity::from_roster("user:alice@acme,user:alice-beta@beta")
+                .expect("a well-formed roster"),
+        );
+        let state = AppState::with_development_identity(identity).with_tenancy(
+            crate::tenancy::Tenancy::single("acme").expect("a literal startup tenant"),
+        );
+        let app = SPY.router(&state).with_state(state);
+
+        let (admitted, _) = authenticated_get(app.clone(), "/spy-principal", "alice").await;
+        let (refused, body) = authenticated_get(app, "/spy-principal", "alice-beta").await;
+
+        assert_eq!(admitted, StatusCode::OK);
+        assert_eq!(refused, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(!body.contains("beta") && !body.contains("acme"), "{body}");
     }
 
     /// The other half of the Acceptance's first item: the route an operator checks must answer.
@@ -2022,14 +2021,8 @@ mod tests {
         assert_eq!(
             editable,
             vec![
-                (
-                    "/api/grants",
-                    Access::PrincipalOfKind(connections::MAY_SUPPLY_A_CREDENTIAL),
-                ),
-                (
-                    "/api/grants/preview",
-                    Access::PrincipalOfKind(connections::MAY_SUPPLY_A_CREDENTIAL),
-                ),
+                ("/api/grants", Access::Operator),
+                ("/api/grants/preview", Access::Operator),
             ],
             "nothing on this surface reads or edits a grant, so a deployment runs nothing at all \
              until somebody hand-writes the grant file",
@@ -2068,7 +2061,9 @@ mod tests {
             "an agent must not be able to decide what its own tenant may run: {body}",
         );
         assert!(
-            body.contains("user") && !body.contains("bot") && !body.contains("acme"),
+            body.contains(crate::operator::OPERATOR_SUBJECTS_ENV)
+                && !body.contains("bot")
+                && !body.contains("acme"),
             "the refusal must quote the rule and name nothing else: {body}",
         );
         assert!(

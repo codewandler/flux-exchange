@@ -31,6 +31,19 @@ primary_region = 'fra'
   # such an implementation yet.
   min_machines_running = 1
 
+  # The Fly Proxy is the configured immediate edge. It stops forwarding at this bound before an
+  # anonymous flood can create unbounded in-process request occupancy. The application retains its
+  # stricter sign-in and invocation limits as the final backstop and does not trust forwarding
+  # headers to manufacture per-address identities.
+  [http_service.concurrency]
+    type = 'requests'
+    soft_limit = 64
+    hard_limit = 96
+
+[metrics]
+  port = 8080
+  path = '/metrics'
+
 [[vm]]
   size = 'shared-cpu-1x'
   memory = '512mb'
@@ -50,6 +63,12 @@ primary_region = 'fra'
 [mounts]
   source = 'flux_exchange_data'
   destination = '/data'
+  # Fly takes one automatic snapshot per day. Retain two weeks so the RPO has several independent
+  # points and a bad write discovered days later is not immediately irreversible. This declaration
+  # applies when Fly creates a future volume; the existing volume must also be updated and verified
+  # with `fly volumes update` as described in the recovery runbook.
+  scheduled_snapshots = true
+  snapshot_retention = 14
   auto_extend_size_threshold = 0
 
 [[services.ports]]

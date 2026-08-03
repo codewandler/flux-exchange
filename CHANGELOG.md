@@ -6,7 +6,41 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-08-03
+
+Wave #1 closes the first ten security, deployment and self-hosting stories selected from the ready
+board: X-58, X-59, X-60, X-68, X-74, X-90, X-91, X-93, X-94 and X-96.
+
+### Fixed
+
+- **Sign-in callback diagnostics now match their documented provider boundary** (X-68). An explicit
+  federated-provider refusal remains a credential failure while a development host has no provider
+  answer to reject; tests pin that intentional distinction and prove neither path issues a session
+  or reflects the provider's error. The anonymous development sign-in page's withholding guard now
+  explicitly covers the development identity roster variable.
+
 ### Changed
+
+- **Authentication no longer decides either the deployment tenant or operator authority** (X-59,
+  X-91). `FLUX_EXCHANGE_TENANT` selects a provider-independent single tenant and refuses a
+  principal from any other tenant without rewriting it. Administrative routes independently
+  require an immutable id in `FLUX_EXCHANGE_OPERATOR_SUBJECTS`; an absent or malformed policy
+  fails closed, while ordinary members retain session, catalogue and grant-gated invocation.
+
+- **Google Workspace admission is checked from the signed token** (X-90).
+  `FLUX_EXCHANGE_OIDC_HOSTED_DOMAIN` is an authorization-request hint and, separately, an exact
+  requirement on the verified `hd` claim. Email and email suffixes grant nothing, identity remains
+  the immutable `sub`, and the requested scope is now only `openid`.
+
+- **Connection reads carry value-free supplier evidence** (X-60). The latest successful durable
+  credential-supply audit event projects its principal and timestamp; missing or aged-out evidence
+  says `unknown` without making a held connection unusable or inventing an owner. Instance renames
+  no longer masquerade as credential creation.
+
+- **Hazardous credential acquisition is fail-closed before a connector can expose it** (X-74).
+  The published host owns a typed `AuthPosture`; the server reads
+  `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS`, rejects unknown values at startup, and otherwise refuses a
+  declared shared-resource-owner-secret acquisition unless explicitly opted in.
 
 - **The roadmap now makes Exchange the hosted runtime for every connector kind** (X-111, X-112).
   HTTP invocation and generated socket channels are delivered slices; filed follow-ups cover the
@@ -15,6 +49,25 @@ All notable changes to this project are documented in this file. The format is b
   adapters remain owned by flux-connectors rather than becoming a second Exchange catalogue.
 
 ### Added
+
+- **Verifier-backed local users can safely sign in on a reachable self-hosted deployment** (X-58).
+  `flux-exchange local-user-secret <user> <tenant>` generates a one-time 256-bit opaque secret and
+  verifier-only JSON entry for the owner-only file named by `FLUX_EXCHANGE_LOCAL_USERS`. Wrong and
+  unknown credentials are indistinguishable; the same-origin form issues only the ordinary secure
+  HttpOnly session cookie, and the console now withholds sign-in when no provider is usable.
+
+- **Traffic admission is fair, observable and still bounded** (X-96). Each resolved
+  `(tenant, kind, id)` has its own rolling invocation budget beneath the unchanged process-wide
+  rate/concurrency ceilings. Fly Proxy supplies the anonymous occupancy bound; `/metrics` exposes
+  fixed-cardinality admission, refusal and active-work series; sustained saturation warns without
+  tokens, bodies or identity labels. Forwarding headers select no bucket.
+
+- **Production is an attributable, digest-pinned workflow and persistent state has a tested
+  recovery contract** (X-93, X-94). The protected production environment accepts a full commit from
+  protected `main`, reruns the gate, builds locked digest-pinned layers, produces an SPDX SBOM,
+  scans before push, deploys the immutable image digest and records identifier-safe provenance with
+  rollback. Daily snapshot verification enforces encrypted scheduled recovery points, 14-day
+  retention and a 24-hour RPO; the runbook defines a timed isolated restore drill and 60-minute RTO.
 
 - **Authority evidence now survives the process in an owner-only SQLite audit journal** (X-95).
   Authentication, authorization, Service Account lifecycle, connection/credential/settings and

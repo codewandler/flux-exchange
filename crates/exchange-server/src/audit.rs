@@ -449,6 +449,53 @@ impl AuditJournal {
         )
     }
 
+    /// The latest retained successful write that supplied one credential for a tenant connection.
+    ///
+    /// The tenant predicate is part of the query rather than a filter over its result: target
+    /// values deliberately omit tenant identifiers, so taking a global latest row first could
+    /// disclose another tenant's actor or hide the caller's own evidence behind it. A connection
+    /// creation supplies every credential the request wrote; a later credential rotation wins.
+    /// Absence is `Ok(None)` because the credential store, not this journal, decides whether the
+    /// connection exists.
+    pub fn latest_credential_supplier(
+        &self,
+        tenant: &str,
+        connector: &str,
+        credential: &str,
+        instance_label: Option<&str>,
+    ) -> Result<Option<Record>, AuditError> {
+        let (created_kind, created_value, rotated_kind, rotated_value) = match instance_label {
+            Some(label) => (
+                "connection_instance",
+                format!("{connector}/{label}"),
+                "instance_credential",
+                format!("{connector}/{label}/{credential}"),
+            ),
+            None => (
+                "connection",
+                connector.to_owned(),
+                "credential",
+                format!("{connector}/{credential}"),
+            ),
+        };
+        let records = self.query(
+            "SELECT record_json FROM audit_records
+             WHERE actor_tenant = ?1 AND outcome = 'succeeded' AND (
+                 (action = 'connection_created' AND target_kind = ?2 AND target_value = ?3) OR
+                 (action = 'credential_rotated' AND target_kind = ?4 AND target_value = ?5)
+             )
+             ORDER BY timestamp_unix DESC, rowid DESC LIMIT 1",
+            params![
+                tenant,
+                created_kind,
+                created_value,
+                rotated_kind,
+                rotated_value
+            ],
+        )?;
+        Ok(records.into_iter().next())
+    }
+
     fn query<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<Vec<Record>, AuditError> {
         let state = self.inner.lock().map_err(|_| AuditError::Poisoned)?;
         let mut statement = state

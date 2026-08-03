@@ -1,12 +1,12 @@
 ---
 id: X-68
 title: "The sign-in callback is the oracle it says it is"
-status: ready
+status: done
 priority: 2
 epic: local-identity
 design: docs/designs/local-identity.md
 areas: [exchange-server]
-note: "found by X-57's review, 2026-08-01: the callback's comment says it 'stays the oracle for nothing', but ?error=access_denied answers 401 on a federated host and 400 on a development one — and the withheld-variable guard does not list the dev roster's own variable"
+note: "delivered in Wave #1: the provider-error distinction is intentional and pinned; the development roster variable is covered by the anonymous-page withholding guard"
 ---
 
 # The sign-in callback is the oracle it says it is
@@ -40,15 +40,18 @@ particular page* is the one the guard would not catch.** A list that omits its o
 whose reach is narrower than its name, which this repository has now corrected five times.
 
 ## Acceptance
-- [ ] **Failing-first test** — the `error=` arm is driven on both a federated and a development host,
+- [x] **Failing-first test** — the `error=` arm is driven on both a federated and a development host,
       and whichever property is chosen is asserted. It is untested today in either shape.
-- [ ] The comment either becomes true, or is narrowed to the claim that is true and names what it does
+- [x] The comment either becomes true, or is narrowed to the claim that is true and names what it does
       not cover. **Do not widen the code to match the comment without deciding that is right** — making
       both hosts answer identically here may be the better answer, or may lose a distinction an
       operator needs.
-- [ ] `WITHHELD_FROM_THE_PAGE` covers `DEV_IDENTITY_ENV`, and the test proves the guard fires on it —
+- [x] `WITHHELD_FROM_THE_PAGE` covers `DEV_IDENTITY_ENV`, and the test proves the guard fires on it —
       add it to the page temporarily and watch the test go red.
 
 ## Notes
 - Both are loopback-bounded and neither is exploitable. This is about the gap between what the code
   says and what it does, on the route where that gap is least affordable.
+- Wave #1 keeps the existing distinction: a federated provider's explicit refusal is a `401`
+  credential failure, while a development host with no provider answers `400`. The new test pins
+  both responses, their lack of cookies, and the non-disclosure of the caller-supplied error value.

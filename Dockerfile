@@ -9,9 +9,9 @@
 # browser never attaches one cross-origin.
 
 # ─── the console ─────────────────────────────────────────────────────────────────────────────────
-# Node 22 to match `.github/workflows/pages.yml`, which pins the same major for `web/`. `npm ci`
-# rather than `npm install`, so the committed lockfile decides.
-FROM node:22-bookworm-slim AS console
+# Node 22/bookworm-slim, pinned to the 2026-08-03 OCI index digest. The readable tag says what to
+# update; the digest says exactly what production builds. `npm ci` makes the lockfile authoritative.
+FROM node:22-bookworm-slim@sha256:f32b81066cde10a75dbac96646099533316d94bac4150c55da1636e1f0ffdc46 AS console
 WORKDIR /console
 COPY console/package.json console/package-lock.json ./
 RUN npm ci
@@ -22,7 +22,8 @@ RUN npm run build
 # 1.88 is the MSRV in `Cargo.toml`'s `rust-version`, and X-33's CI job builds against whatever that
 # says. Do not raise this to make a build pass: the number is observed, not chosen, and raising it is
 # a compatibility break for consumers of the published crate that belongs in the CHANGELOG.
-FROM rust:1.88-bookworm AS build
+# rust:1.88-bookworm, pinned to the 2026-08-03 OCI index digest.
+FROM rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 AS build
 WORKDIR /src
 
 # The manifests first, so a source-only change does not re-resolve the dependency graph. Every
@@ -33,7 +34,7 @@ COPY crates/exchange-server/Cargo.toml crates/exchange-server/
 RUN mkdir -p crates/exchange-host/src crates/exchange-server/src \
     && echo '' > crates/exchange-host/src/lib.rs \
     && echo 'fn main() {}' > crates/exchange-server/src/main.rs \
-    && cargo build --release --bin flux-exchange \
+    && cargo build --release --locked --bin flux-exchange \
     && rm -rf crates/exchange-host/src crates/exchange-server/src
 
 COPY crates/ crates/
@@ -41,10 +42,11 @@ COPY crates/ crates/
 # to force a rebuild. Without this the image ships a binary whose `main` is empty — and it starts,
 # exits 0, and looks like a crash-looping app with no error anywhere.
 RUN touch crates/exchange-host/src/lib.rs crates/exchange-server/src/main.rs \
-    && cargo build --release --bin flux-exchange
+    && cargo build --release --locked --bin flux-exchange
 
 # ─── what runs ───────────────────────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+# debian:bookworm-slim, pinned to the 2026-08-03 OCI index digest.
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
 # `ca-certificates` is not optional: this host completes an OIDC token exchange over https and
 # validates the provider's chain. Without it every sign-in fails at the token endpoint, which reads

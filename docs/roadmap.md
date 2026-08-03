@@ -5,8 +5,8 @@ the [board](stories/README.md); this document is the narrative around it.
 
 ## Status
 
-_As of 2026-08-03:_ **v0.16.0 — Service Accounts, gated operations, versioned workflows and
-generated connector channels.**
+_As of 2026-08-03:_ **v0.16.1 — Wave #1: safer identity, fair traffic, attributable deploys and
+tested recovery.**
 `cargo run -- --dev` is the loopback single-tenant shorthand; reachable binds still require a real
 identity provider. Complete OIDC sign-in, per-tenant connections and settings, metadata grants,
 ordinary connector invocation, immutable workflow publication, durable value-free workflow run

@@ -38,6 +38,7 @@ import {
   loadDeclaration,
   loadGrants,
   loadSession,
+  loadSignInAvailability,
   loadWorkflows,
   publishWorkflow,
   previewGrant,
@@ -66,6 +67,7 @@ import {
   type ProposedGrant,
   type RotationOutcome,
   type SessionState,
+  type SignInAvailabilityState,
   type WorkflowDraft,
   type WorkflowMutation,
   type WorkflowsState,
@@ -95,6 +97,7 @@ import Workflows from './Workflows.vue'
 // every operation in a catalogue deeply reactive would buy nothing and cost a walk of the document.
 const catalogue = shallowRef<CatalogueState>({ status: 'loading' })
 const session = shallowRef<SessionState>({ status: 'loading' })
+const signInAvailability = shallowRef<SignInAvailabilityState>({ status: 'loading' })
 const connections = shallowRef<ConnectionsState>({ status: 'loading' })
 const workflows = shallowRef<WorkflowsState>({ status: 'loading' })
 const editorCatalog = shallowRef<EditorCatalogState>({ status: 'loading' })
@@ -120,6 +123,11 @@ async function reloadCatalogue() {
 async function reloadSession() {
   session.value = { status: 'loading' }
   session.value = await loadSession()
+}
+
+async function reloadSignInAvailability() {
+  signInAvailability.value = { status: 'loading' }
+  signInAvailability.value = await loadSignInAvailability()
 }
 
 async function reloadConnections() {
@@ -162,7 +170,7 @@ onMounted(async () => {
   // Both at once. The catalogue is anonymous and the session is not, so neither waits on the other
   // — and a slow identity provider must not delay the one view that never needed a principal.
   void reloadCatalogue()
-  await reloadSession()
+  await Promise.all([reloadSession(), reloadSignInAvailability()])
 })
 
 // Connections are tenant data and `/api/connections` requires a principal, so this is not asked
@@ -450,7 +458,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
 
 <template>
   <div class="console" :class="{ 'console--wide': route.name === 'workflows' || route.name === 'activity' || route.name === 'channels' }">
-    <ConsoleShell :session="session" :active="active" @sign-out="endSession" @retry-session="reloadSession">
+    <ConsoleShell :session="session" :sign-in-availability="signInAvailability" :active="active" @sign-out="endSession" @retry-session="reloadSession">
       <template #theme>
         <button type="button" :aria-pressed="isDark" @click="toggleTheme()">
           {{ isDark ? 'Light' : 'Dark' }}
