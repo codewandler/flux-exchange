@@ -195,6 +195,7 @@ jobs:
           upload-release-assets: false
 
       - name: Refuse every known image vulnerability
+        id: scan
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         with:
           image: ${{ steps.image.outputs.image }}
@@ -203,6 +204,27 @@ jobs:
           output-format: json
           output-file: production-vulnerabilities.json
           config: .grype.yaml
+
+      - name: Summarize a refused image without hiding the finding
+        if: ${{ failure() && steps.scan.outcome == 'failure' }}
+        run: |
+          set -euo pipefail
+          test -s production-vulnerabilities.json
+          jq -r '.matches[] |
+            [.vulnerability.id, .vulnerability.severity, .artifact.name, .artifact.version,
+             ((.vulnerability.fix.versions // []) | join(","))] | @tsv' \
+            production-vulnerabilities.json | sort -u
+
+      - name: Retain refused scan evidence
+        if: ${{ failure() && steps.scan.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-scan-failure-${{ env.SOURCE_SHA }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            production.spdx.json
+            production-vulnerabilities.json
 
       - name: Push the scanned image and resolve its immutable digest
         id: pushed
