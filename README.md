@@ -67,8 +67,9 @@ want a team to share an integration, an agent to use it unattended, or an audito
 happened.
 
 [flux-connectors](https://github.com/codewandler/flux-connectors) describes what vendors can do.
-flux runs it. Neither of them holds a credential on anybody's behalf, and neither should — that is
-a third job, and this is it.
+Flux supplies the language, agent loop and guarded runtime substrate. Exchange executes every
+official external integration while holding the tenant's credential; neither Flux nor the connector
+declaration holds one on anybody's behalf.
 
 The boundary, one question each:
 
@@ -109,10 +110,12 @@ MultiTenant
 
 HTTP is the first delivered outbound runtime, not the product boundary. Every official integration
 — including Docker, Kubernetes, SQL, Prometheus and other rich protocols — is moving to a connector
-whose runtime is declared upstream. This service will execute or delegate those same connector
-addresses through the X-111 program; it will not grow a second Exchange-specific adapter catalogue.
-The current generated WebSocket channel path is the first hosted rich-protocol slice, while general
-socket/process/container/plugin dispatch, streamed results and leases remain planned work.
+whose runtime is declared upstream. Exchange is the sole official-integration execution placement;
+it executes or delegates those connector addresses through the X-111 program and will not grow a
+second vendor-adapter catalogue. Flux contributes the guarded substrate and embeds the Exchange
+client, but it has no local vendor/plugin fallback. The current generated WebSocket channel path is
+the first rich-protocol slice, while general socket/process/container/plugin dispatch, streamed
+results and leases remain planned work.
 
 **A grant selects operations by declared metadata, not by name.** A grant written as a list of ids
 is a list somebody maintains, and it stops covering a connector the moment that connector gains an
@@ -135,9 +138,10 @@ boot. No released connector declares a hazard yet; upstream C-440 will make the 
 | `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant labelled connection instances and grants, Service Account lifecycle and bearer authentication, ordinary invocation, workflow authoring/publication, durable SQLite run records and typed 30-day audit evidence, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
 | `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows, Activity and Channels. The workflow editor uses the upstream Flux graph contract, protects unsaved drafts, retains exact source, and paints durable value-free run events back onto nodes. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
-**Not built, despite being described in the design:** rich outbound runtime-plan dispatch, webhook channels,
-durable event replay/inboxes, general operation streams, isolated per-tenant workers,
-leases-in-anger, runtime artifact installation/attestation, and the catalogue loader. Stored workflows,
+**Not built, despite being described in the design:** the authenticated effective Service Account
+catalogue, rich outbound runtime-plan dispatch, webhook channels, durable event replay/inboxes,
+general operation streams, isolated per-tenant workers, leases-in-anger, and runtime artifact
+installation/attestation. Stored workflows,
 workflow execution records and generated WebSocket channels moved off this list in X-98 and X-101.
 The credential store has moved off this
 list and is described below, and X-47 moved

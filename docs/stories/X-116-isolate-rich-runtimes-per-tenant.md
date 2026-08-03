@@ -34,3 +34,6 @@ them to an authenticated, operator-controlled per-tenant isolation boundary.
 ## Notes
 
 - Flux C-399 supplies the generic remote guarded-IO seam; C-397 supplies container placement.
+- This hosted-isolation milestone is not a prerequisite for X-113's HTTP path, X-115's local
+  single-tenant execution or X-120's migration-corpus proof. It remains the fail-closed requirement
+  before a shared multi-tenant Exchange may run local rich runtimes.
