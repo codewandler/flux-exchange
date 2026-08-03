@@ -63,7 +63,10 @@ pub enum Action {
     ServiceAccountRevoked,
     ConnectionLabeled,
     ConnectionCreated,
+    CredentialAcquired,
     CredentialRotated,
+    CredentialRefreshed,
+    CredentialRefreshCommitLost,
     ConnectionRemoved,
     SettingSet,
     SettingCleared,
@@ -83,7 +86,10 @@ impl Action {
             Self::ServiceAccountRevoked => "service_account_revoked",
             Self::ConnectionLabeled => "connection_labeled",
             Self::ConnectionCreated => "connection_created",
+            Self::CredentialAcquired => "credential_acquired",
             Self::CredentialRotated => "credential_rotated",
+            Self::CredentialRefreshed => "credential_refreshed",
+            Self::CredentialRefreshCommitLost => "credential_refresh_commit_lost",
             Self::ConnectionRemoved => "connection_removed",
             Self::SettingSet => "setting_set",
             Self::SettingCleared => "setting_cleared",
@@ -449,12 +455,13 @@ impl AuditJournal {
         )
     }
 
-    /// The latest retained successful write that supplied one credential for a tenant connection.
+    /// The latest retained successful write that established one credential for a connection.
     ///
     /// The tenant predicate is part of the query rather than a filter over its result: target
     /// values deliberately omit tenant identifiers, so taking a global latest row first could
     /// disclose another tenant's actor or hide the caller's own evidence behind it. A connection
-    /// creation supplies every credential the request wrote; a later credential rotation wins.
+    /// static creation supplies every credential the request wrote; acquisition and refresh
+    /// instead record who initiated vendor minting, and a later write of either kind wins.
     /// Absence is `Ok(None)` because the credential store, not this journal, decides whether the
     /// connection exists.
     pub fn latest_credential_supplier(
@@ -481,8 +488,8 @@ impl AuditJournal {
         let records = self.query(
             "SELECT record_json FROM audit_records
              WHERE actor_tenant = ?1 AND outcome = 'succeeded' AND (
-                 (action = 'connection_created' AND target_kind = ?2 AND target_value = ?3) OR
-                 (action = 'credential_rotated' AND target_kind = ?4 AND target_value = ?5)
+                 (action IN ('connection_created', 'credential_acquired') AND target_kind = ?2 AND target_value = ?3) OR
+                 (action IN ('credential_rotated', 'credential_refreshed') AND target_kind = ?4 AND target_value = ?5)
              )
              ORDER BY timestamp_unix DESC, rowid DESC LIMIT 1",
             params![
@@ -617,7 +624,11 @@ impl AuditJournal {
                 )
             }),
             (
-                Action::ConnectionCreated | Action::CredentialRotated | Action::ConnectionRemoved,
+                Action::ConnectionCreated
+                | Action::CredentialAcquired
+                | Action::CredentialRotated
+                | Action::CredentialRefreshed
+                | Action::ConnectionRemoved,
                 Outcome::Succeeded,
             ) => Some((
                 AlertPolicy::CredentialChanged,

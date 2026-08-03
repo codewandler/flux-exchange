@@ -517,7 +517,7 @@ export async function loadCatalogue(options: LoadOptions = {}): Promise<Catalogu
  * than from anything a caller controls. See `exchange_host::Principal`.
  */
 export interface Principal {
-  /** `user`, `agent` or `service` — what kind of caller this is. */
+  /** `user`, `service_account` or `service` — what kind of caller this is. */
   kind: string
   /** Its stable identifier within the tenant. */
   id: string
@@ -667,6 +667,8 @@ export interface HeldCredential {
 export interface Connection {
   connector: string
   vendor: string
+  /** The operator-owned name of this instance, or `null` for an unnamed legacy connection. */
+  label: string | null
   /** The authority its credentials are addressed under, or `null` when the connector declares none. */
   authority: string | null
   credentials: HeldCredential[]
@@ -719,6 +721,7 @@ function readConnection(entry: unknown): Connection | string {
   return {
     connector: entry.connector,
     vendor: typeof entry.vendor === 'string' ? entry.vendor : entry.connector,
+    label: typeof entry.label === 'string' ? entry.label : null,
     authority: typeof entry.authority === 'string' ? entry.authority : null,
     credentials,
   }
@@ -1213,6 +1216,12 @@ export interface HeldChannel {
   status: 'starting' | 'running' | 'retrying' | 'refused' | 'stopped'
 }
 
+/** The only connection projection a channel form receives. */
+export interface ChannelConnectionLabel {
+  connector: string
+  label: string
+}
+
 export type ChannelDeclarationsState =
   | { status: 'loading' }
   | { status: 'ready'; declarations: ChannelDeclaration[] }
@@ -1228,6 +1237,16 @@ export type ChannelMutation =
   | { status: 'removed' }
   | { status: 'refused'; refusal: ServiceRefusal }
   | { status: 'failed'; failure: ServiceFailure }
+
+/** Reduce connection management state to the operator labels accepted by channel writes. */
+export function channelConnectionLabels(state: ConnectionsState): ChannelConnectionLabel[] {
+  if (state.status !== 'ready') return []
+  return state.connections.flatMap((connection) =>
+    connection.label === null
+      ? []
+      : [{ connector: connection.connector, label: connection.label }]
+  )
+}
 
 function readChannelDeclaration(connector: string, value: unknown): ChannelDeclaration[] | string {
   if (!isObject(value) || !Array.isArray(value.channels)) return 'no `channels` array in the body'
@@ -1261,8 +1280,13 @@ function readChannelDeclaration(connector: string, value: unknown): ChannelDecla
 }
 
 function readHeldChannel(value: unknown): HeldChannel | string {
-  if (!isObject(value) || typeof value.id !== 'string' || typeof value.connector !== 'string') {
-    return 'a channel has no `id` or `connector`'
+  if (
+    !isObject(value) ||
+    typeof value.id !== 'string' ||
+    typeof value.connector !== 'string' ||
+    typeof value.connection !== 'string'
+  ) {
+    return 'a channel has no `id`, `connector` or connection label'
   }
   const statuses = ['starting', 'running', 'retrying', 'refused', 'stopped'] as const
   if (!statuses.includes(value.status as typeof statuses[number])) return `channel \`${value.id}\` has an unknown status`
@@ -1272,7 +1296,7 @@ function readHeldChannel(value: unknown): HeldChannel | string {
   return {
     id: value.id,
     connector: value.connector,
-    connection: typeof value.connection === 'string' ? value.connection : value.connector,
+    connection: value.connection,
     binding: typeof value.binding === 'string' ? value.binding : '',
     events: value.events as string[],
     status: value.status as HeldChannel['status'],
@@ -1335,12 +1359,12 @@ async function writeChannel(endpoint: string, method: string, body: unknown, opt
     : { status: 'saved', channel }
 }
 
-export async function createChannel(connector: string, binding: string, events: string[], options: LoadOptions = {}): Promise<ChannelMutation> {
-  return writeChannel(CHANNELS_ENDPOINT, 'POST', { connector, binding, events }, options)
+export async function createChannel(connector: string, connection: string, binding: string, events: string[], options: LoadOptions = {}): Promise<ChannelMutation> {
+  return writeChannel(CHANNELS_ENDPOINT, 'POST', { connector, connection, binding, events }, options)
 }
 
-export async function updateChannel(channel: HeldChannel, events: string[], options: LoadOptions = {}): Promise<ChannelMutation> {
-  return writeChannel(channelEndpoint(channel.id), 'PUT', { events }, options)
+export async function updateChannel(channel: HeldChannel, connection: string, events: string[], options: LoadOptions = {}): Promise<ChannelMutation> {
+  return writeChannel(channelEndpoint(channel.id), 'PUT', { connection, events }, options)
 }
 
 export async function removeChannel(channel: HeldChannel, options: LoadOptions = {}): Promise<ChannelMutation> {
@@ -2064,7 +2088,7 @@ export interface NewServiceAccount {
 }
 
 /**
- * An agent this host has just minted, as `POST /api/service-accounts` answers with one.
+ * A Service Account this host has just minted, as `POST /api/service-accounts` answers with one.
  *
  * `shown` is in the body and is deliberately **not** read. The service says `"shown": "once"`, and a
  * page that only stated the one-shot property when the service remembered to say so would fall
@@ -2099,14 +2123,14 @@ export type MintOutcome =
   | { status: 'refused'; refusal: ServiceRefusal }
   | { status: 'failed'; failure: ServiceFailure }
 
-/** A minted agent in a `201` body, or the reason the body is not one. */
+/** A minted Service Account in a `201` body, or the reason the body is not one. */
 function readMinted(body: unknown): MintedServiceAccount | string {
   if (!isObject(body)) return 'the body is not an object'
   const principal = readPrincipal(body)
   if (!principal) return 'no `principal` with an `id` and a `tenant` in the body'
   if (typeof body.token !== 'string' || body.token === '') {
     // Not a mint that produced no token: a `201` this console could not read. Rendering it as a
-    // successful mint with an empty token would leave an agent existing on this host that the
+    // successful mint with an empty token would leave a Service Account existing on this host that the
     // operator has no credential for and no way to discover.
     return 'no `token` in the body'
   }

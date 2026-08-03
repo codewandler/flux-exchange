@@ -145,7 +145,8 @@ fly volumes create flux_exchange_data --size 1 --region fra
 The volume is created **by hand, once**, and `fly.toml` does not create one. A deploy that silently
 created a fresh empty volume would present as *every credential vanished*.
 
-Then the configuration. Six OIDC values are not secret and go in the clear; the seventh never does:
+Then the configuration. Seven required OIDC values are not secret and go in the clear; Google
+production also sets the optional hosted-domain hint/claim requirement. The client secret never does:
 
 ```bash
 fly config env set \

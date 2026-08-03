@@ -45,8 +45,6 @@ pub const DEV_IDENTITY_ENV: &str = "FLUX_EXCHANGE_DEV_IDENTITY";
 const KINDS: &[(&str, PrincipalKind)] = &[
     ("user", PrincipalKind::User),
     ("service_account", PrincipalKind::ServiceAccount),
-    // v0.16 compatibility for development rosters written before X-107.
-    ("agent", PrincipalKind::ServiceAccount),
     ("service", PrincipalKind::Service),
 ];
 
@@ -305,7 +303,7 @@ mod tests {
     /// on: a handle resolves to a principal whose tenant was fixed at startup.
     #[tokio::test]
     async fn a_handle_resolves_to_the_principal_the_roster_armed() {
-        let dev = DevIdentity::from_roster("user:alice@acme,agent:triage-bot@globex")
+        let dev = DevIdentity::from_roster("user:alice@acme,service_account:triage-bot@globex")
             .expect("a well-formed roster");
 
         let alice = dev
@@ -440,7 +438,14 @@ mod tests {
         assert!(message.contains("root:alice@acme"), "{message}");
         assert!(message.contains(DEV_IDENTITY_ENV), "{message}");
         assert!(message.contains("user"), "{message}");
-        assert!(message.contains("agent"), "{message}");
+        assert!(message.contains("service_account"), "{message}");
         assert!(message.contains("service"), "{message}");
+
+        let retired = DevIdentity::from_roster("agent:triage-bot@acme")
+            .map(|_| ())
+            .expect_err("the retired principal spelling must not arm a development identity")
+            .to_string();
+        assert!(retired.contains("agent:triage-bot@acme"), "{retired}");
+        assert!(retired.contains("service_account"), "{retired}");
     }
 }

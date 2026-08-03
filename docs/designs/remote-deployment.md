@@ -79,8 +79,8 @@ silently.
 
 **What a redeploy destroys.** Sessions are `Mutex<HashMap<…>>` in memory (`session.rs:173`) and are
 not persisted, so every deploy signs everyone out — acceptable, and it must be *written down* or it
-reads as a bug. Service Accounts (with the v0.16 `FLUX_EXCHANGE_AGENTS` compatibility spelling),
-credentials, connection labels, settings and grants are all on disk and survive, provided the volume
+reads as a bug. Service Accounts, credentials, connection labels, settings and grants are all on
+disk and survive, provided the volume
 is mounted before the process starts.
 
 ### Transport, which fly gets right by accident of the design

@@ -561,10 +561,17 @@ mod tests {
         // Resolving the bearer is exercised through the session route: it is the smallest call
         // that both runs authentication and returns the principal it resolved.
         ("authenticate", Some("/api/session")),
+        ("connections", Some("/api/connections")),
+        ("grants", Some("/api/grants")),
         ("invoke", Some("/api/operations/{operation}/invoke")),
         ("subscribe", Some("/api/subscribe")),
+        ("workflows", Some("/api/workflows")),
         // Workflow runs are durable and tenant-scoped; the collection is the capability's entry.
         ("read-what-happened", Some("/api/workflow-runs")),
+        // These are part of the intended surface, but no route serves either one yet. The
+        // descriptor's withheld reason points at the story that would make each row live.
+        ("agents", None),
+        ("leases", None),
     ];
 
     /// Every published route that backs **no** capability, and why it is not one.
@@ -618,22 +625,15 @@ mod tests {
             "the verifier-backed human form target. It creates the browser session through the same sign-in capability fact and is never a call an agent makes.",
         ),
         (
-            "/api/connections",
-            "wiring a tenant up is the *human's* job — `docs/vision.md`: people sign in to wire \
-             things up, agents call operations all day. An agent holding a token is deliberately \
-             not told to go and manage its tenant's connections.",
-        ),
-        (
             "/api/service-accounts/{id}",
             "revocation is the item half of the create-service-account capability and an operator \
              action, not a separate capability an Agent receives.",
         ),
         (
-            "/api/agents",
-            "the v0.16 compatibility alias for creating a Service Account. The descriptor teaches \
-             only the canonical resource and this alias is removed in v0.17.",
+            "/api/connections/{connector}",
+            "the connector item is create, inspect and delete beneath the connections capability; \
+             it is operator work rather than another public capability.",
         ),
-        ("/api/connections/{connector}", "as above."),
         (
             "/api/connections/{connector}/label",
             "as above; naming the sole connection is operator metadata.",
@@ -665,30 +665,26 @@ mod tests {
             "as above.",
         ),
         (
-            "/api/grants",
-            "what a tenant may run, and where a human changes it (X-62). Not a capability, and \
-             emphatically not one an agent is invited to reach: `grants::MAY_GRANT` admits a \
-             `User` alone on both verbs, because deciding which operations run is more authority \
-             than supplying a credential, and because `exchange_host::admit_grant` deliberately \
-             withholds a tenant's policy from a refused caller so an agent cannot enumerate it. \
-             The `invoke` capability's own `warn` names this route, which is where an agent author \
-             is told to send the human who holds the tenant.",
-        ),
-        (
             "/api/grants/preview",
-            "what a proposed grant would admit, before it is saved. The same caller and the same \
-             argument as the line above; it is a console affordance for the human editing a \
-             policy, not a step in what an agent does.",
+            "what a proposed grant would admit before it is saved; it is the preview half of the \
+             grants capability rather than another capability.",
         ),
         (
-            "/api/workflows",
-            "workflow authoring is a signed-in human's job. Agents receive the published workflow \
-             as an ordinary operation and never mutate its stored program.",
+            "/api/workflows/editor-catalog",
+            "the authoring vocabulary beneath the workflows capability, not a capability of its own.",
         ),
-        ("/api/workflows/editor-catalog", "as above."),
-        ("/api/workflows/{workflow}", "as above."),
-        ("/api/workflows/{workflow}/validate", "as above."),
-        ("/api/workflows/{workflow}/publish", "as above."),
+        (
+            "/api/workflows/{workflow}",
+            "the draft item beneath the workflows capability; agents never mutate its stored Program.",
+        ),
+        (
+            "/api/workflows/{workflow}/validate",
+            "the validation action beneath the workflows capability, not a separate capability.",
+        ),
+        (
+            "/api/workflows/{workflow}/publish",
+            "the publication action beneath the workflows capability, not a separate capability.",
+        ),
         (
             "/api/workflows/{workflow}/versions",
             "immutable publication history is an authoring and inspection affordance for a \
@@ -862,14 +858,11 @@ mod tests {
     /// spelling of this test drove it anonymously and the control caught it: on a guarded route the
     /// `route_layer` runs *before* the method router, so an unidentified caller gets `401` for
     /// every method and a `PATCH` this host serves nowhere is indistinguishable from the `POST` it
-    /// does. Anonymously, this test would have passed for `DELETE /api/agents` — the exact defect
-    /// it exists to catch. A rostered `user:` handle is the weakest caller that gets past both
-    /// guards on this surface (`/api/agents` is [`Access::PrincipalOfKind`]`(`[`MAY_MINT`]`)`,
-    /// which is `User` alone), and nothing is minted, stored or dispatched to get there: no agent
-    /// store and no credential store are bound, and the requests carry no body.
-    ///
-    /// [`Access::PrincipalOfKind`]: super::Access::PrincipalOfKind
-    /// [`MAY_MINT`]: super::agents::MAY_MINT
+    /// does. Anonymously, this test would have passed for a nonexistent method on the guarded
+    /// Service Account route — the exact defect it exists to catch. A rostered `user:` handle is
+    /// the weakest caller that gets past its operator guard, and nothing is minted, stored or
+    /// dispatched to get there: no Service Account store and no credential store are bound, and
+    /// the requests carry no body.
     #[tokio::test]
     async fn every_published_call_reaches_a_handler_for_the_method_it_names() {
         let document: Onboarding = serde_json::from_str(DERIVED).expect("a JSON document");

@@ -209,7 +209,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put, MethodRouter};
@@ -217,8 +217,9 @@ use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
     address_path, admit_tenant_occupancy, declared_settings, host_pinning, stored_bytes,
-    ConnectionLabel, ConnectionRefusal, ConnectorDeclaration, CredentialRef, CredentialScope,
-    DeclaredCredential, DeclaredSetting, HostPinning, InstanceId, Principal, RegistryRefusal,
+    AcquisitionRefusal, AuthPostureRefusal, ConnectionLabel, ConnectionRefusal,
+    ConnectorDeclaration, CredentialRef, CredentialScope, DeclaredCredential, DeclaredSetting,
+    HostPinning, InstanceId, PasswordRedemption, Principal, RefreshRedemption, RegistryRefusal,
     Secret, SecretBatch, SecretStore, SettingsRefusal, StoreError, Tenant, TenantInstances,
 };
 use serde::Deserialize;
@@ -226,6 +227,9 @@ use serde_json::{json, Value};
 use tracing::{error, warn};
 
 use super::{Access, Module, Route};
+use crate::audit::{
+    Action as AuditAction, Outcome as AuditOutcome, RequestId, Target as AuditTarget,
+};
 use crate::state::AppState;
 
 /// The setting that names the credential store, quoted when none is bound.
@@ -585,7 +589,23 @@ fn instance_credential_route() -> MethodRouter<AppState> {
 #[derive(Deserialize)]
 struct NewConnection {
     /// Declared credential name to value. At least one, and every name declared by the connector.
+    #[serde(default)]
     credentials: BTreeMap<String, String>,
+    /// Resource-owner values used once by an explicitly bound acquisition performer.
+    #[serde(default)]
+    acquisition: Option<PasswordAcquisition>,
+}
+
+/// Password acquisition input. No `Debug`: both strings are converted to [`Secret`] immediately.
+#[derive(Deserialize)]
+struct PasswordAcquisition {
+    username: String,
+    password: String,
+}
+
+#[derive(Default, Deserialize)]
+struct AcquisitionQuery {
+    acquire: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -609,7 +629,8 @@ struct LabelBody {
 #[derive(Deserialize)]
 struct RotatedCredential {
     /// The value to put at the credential's existing address.
-    value: String,
+    #[serde(default)]
+    value: Option<String>,
 }
 
 /// Every connection this tenant holds.
@@ -689,6 +710,7 @@ async fn create(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Path(connector): Path<String>,
+    Query(query): Query<AcquisitionQuery>,
     Json(body): Json<NewConnection>,
 ) -> Response {
     let Some(provider) = catalogued(&connector) else {
@@ -697,6 +719,31 @@ async fn create(
     let Some(store) = state.credentials() else {
         return no_store();
     };
+
+    if query.acquire.as_deref() == Some("password") {
+        if !body.credentials.is_empty() {
+            return acquisition_shape_refused(
+                provider,
+                "password acquisition cannot also carry pasted credentials",
+            );
+        }
+        let Some(acquisition) = body.acquisition else {
+            return acquisition_shape_refused(
+                provider,
+                "password acquisition requires `acquisition.username` and `acquisition.password`",
+            );
+        };
+        return create_acquired_connection(&state, store, &principal, provider, acquisition).await;
+    }
+    if query.acquire.is_some() {
+        return acquisition_shape_refused(provider, "unknown credential acquisition mode");
+    }
+    if body.acquisition.is_some() {
+        return acquisition_shape_refused(
+            provider,
+            "an acquisition body requires `?acquire=password`",
+        );
+    }
 
     let declared = declared_credentials(provider);
     let declaration = declaration(provider, &declared);
@@ -796,6 +843,588 @@ async fn create(
         Json(view(provider, &addresses, &stored)),
     )
         .into_response()
+}
+
+const ACQUISITION_SERVICE: &str = "exchange-acquisition";
+const REFRESH_TOKEN_LEAF: &str = "refresh_token";
+const EXPIRES_AT_LEAF: &str = "expires_at";
+const MANAGED_LEAF: &str = "managed";
+const MANAGED_VALUE: &str = "v1";
+const MAX_EXPIRY_VALUE_BYTES: usize = 20;
+const MAX_REFRESH_COMMIT_BYTES: usize =
+    2 * exchange_host::MAX_CREDENTIAL_VALUE_BYTES + MAX_EXPIRY_VALUE_BYTES + MANAGED_VALUE.len();
+
+async fn create_acquired_connection(
+    state: &AppState,
+    store: &Arc<dyn SecretStore>,
+    principal: &Principal,
+    provider: &'static Provider,
+    acquisition: PasswordAcquisition,
+) -> Response {
+    let Some(binding) = state.acquisitions().get(provider.id) else {
+        return acquisition_shape_refused(
+            provider,
+            "this connector has no released credential-acquisition declaration bound",
+        );
+    };
+    if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+        return auth_posture_refused(&refusal);
+    }
+
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let addresses = match declaration.addresses(principal.tenant()) {
+        Ok(addresses) => addresses,
+        Err(refusal) => return connection_refused(&refusal),
+    };
+    let access_reference = match declaration.address_of(principal.tenant(), binding.credential()) {
+        Ok(reference) => reference,
+        Err(refusal) => return connection_refused(&refusal),
+    };
+    let companions = match acquisition_companions(&access_reference) {
+        Ok(references) => references,
+        Err(response) => return *response,
+    };
+
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    match held(store, &addresses).await {
+        Err(error) => return store_failed(&error),
+        Ok(held) if !held.is_empty() => return already_connected(provider, &addresses),
+        Ok(_) => {}
+    }
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+
+    // Turn request strings into redacting values before the performer can observe them. These are
+    // borrowed for the one outbound call and fall out of scope without ever entering a store.
+    let username = Secret::new(&acquisition.username);
+    let password = Secret::new(&acquisition.password);
+    let acquired = match binding
+        .performer()
+        .redeem_password(PasswordRedemption::new(&username, &password))
+        .await
+    {
+        Ok(acquired) => acquired,
+        Err(refusal) => return acquisition_refused(refusal),
+    };
+    drop(password);
+    drop(username);
+    let (access_token, refresh_token, expires_at) = acquired.into_parts();
+    if let Err(response) = admit_acquired_value(provider, binding.credential(), &access_token) {
+        return *response;
+    }
+    if let Some(refresh_token) = refresh_token.as_ref() {
+        if let Err(response) = admit_acquired_value(provider, "refresh_token", refresh_token) {
+            return *response;
+        }
+    }
+    let expiry = expires_at.map(|value| Secret::new(value.to_string()));
+    let adding = stored_bytes(&access_token)
+        + refresh_token.as_ref().map_or(0, stored_bytes)
+        + expiry.as_ref().map_or(0, stored_bytes)
+        + MANAGED_VALUE.len();
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) = admit_tenant_occupancy(held_bytes, adding) {
+        return connection_refused(&refusal);
+    }
+
+    let scope = match CredentialScope::new(access_reference.tenant(), access_reference.authority())
+    {
+        Ok(scope) => scope,
+        Err(reason) => return acquisition_batch_refused(reason),
+    };
+    let mut batch = SecretBatch::new(scope);
+    if let Err(reason) = batch.put(access_reference.clone(), access_token) {
+        return acquisition_batch_refused(reason);
+    }
+    if let Some(refresh_token) = refresh_token {
+        if let Err(reason) = batch.put(companions.refresh.clone(), refresh_token) {
+            return acquisition_batch_refused(reason);
+        }
+    }
+    if let Some(expiry) = expiry {
+        if let Err(reason) = batch.put(companions.expiry.clone(), expiry) {
+            return acquisition_batch_refused(reason);
+        }
+    }
+    if let Err(reason) = batch.put(companions.managed, Secret::new(MANAGED_VALUE)) {
+        return acquisition_batch_refused(reason);
+    }
+    if let Err(error) = store.apply(&batch).await {
+        return store_failed(&error);
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "connector": provider.id,
+            "credential": binding.credential(),
+            "address": address_path(&access_reference),
+            "acquired": true,
+            "expires_at": expires_at,
+        })),
+    )
+        .into_response()
+}
+
+struct RefreshAcquisition<'a> {
+    state: &'a AppState,
+    store: &'a Arc<dyn SecretStore>,
+    principal: &'a Principal,
+    request_id: &'a RequestId,
+}
+
+async fn refresh_acquired_connection(
+    context: RefreshAcquisition<'_>,
+    provider: &'static Provider,
+    credential: &str,
+    instances: TenantInstances<'_>,
+    audit_target: AuditTarget,
+) -> Response {
+    let RefreshAcquisition {
+        state,
+        store,
+        principal,
+        request_id,
+    } = context;
+    let Some(binding) = state.acquisitions().get(provider.id) else {
+        return acquisition_shape_refused(
+            provider,
+            "this connector has no released credential-acquisition declaration bound",
+        );
+    };
+    if credential != binding.credential() {
+        return acquisition_shape_refused(
+            provider,
+            "refresh must name the acquired access credential",
+        );
+    }
+    if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+        return auth_posture_refused(&refusal);
+    }
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let access_reference =
+        match declaration.address_of_for(principal.tenant(), binding.credential(), instances) {
+            Ok(reference) => reference,
+            Err(refusal) => return connection_refused(&refusal),
+        };
+    let companions = match acquisition_companions(&access_reference) {
+        Ok(references) => references,
+        Err(response) => return *response,
+    };
+    let current_access = match store.get(&access_reference).await {
+        Ok(secret) => secret,
+        Err(error) if error.is_not_found() => {
+            return nothing_to_rotate(provider, credential, &access_reference)
+        }
+        Err(error) => return store_failed(&error),
+    };
+    let current_refresh = match store.get(&companions.refresh).await {
+        Ok(secret) => secret,
+        Err(error) if error.is_not_found() => {
+            return refuse(
+                StatusCode::CONFLICT,
+                "this acquired connection has no refresh token; reconnect with the password acquisition",
+                json!({ "connector": provider.id, "code": "refresh_token_unavailable" }),
+            )
+        }
+        Err(error) => return store_failed(&error),
+    };
+    let current_expiry = match store.get(&companions.expiry).await {
+        Ok(secret) => Some(secret),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return store_failed(&error),
+    };
+    let current_marker = match store.get(&companions.managed).await {
+        Ok(secret) => Some(secret),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return store_failed(&error),
+    };
+
+    // Everything this host can decide is decided before the vendor is allowed to rotate its
+    // refresh token. Reserve the worst legal result rather than learning after the call that an
+    // otherwise-valid larger token no longer fits. The final batch can still fail due to an
+    // external store outage; that unavoidable case has a separate non-retryable refusal below.
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+    let replacing = stored_bytes(&current_access)
+        + stored_bytes(&current_refresh)
+        + current_expiry.as_ref().map_or(0, stored_bytes)
+        + current_marker.as_ref().map_or(0, stored_bytes);
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) = admit_tenant_occupancy(
+        held_bytes.saturating_sub(replacing),
+        MAX_REFRESH_COMMIT_BYTES,
+    ) {
+        return connection_refused(&refusal);
+    }
+    let scope = match CredentialScope::new(access_reference.tenant(), access_reference.authority())
+    {
+        Ok(scope) => scope,
+        Err(reason) => return acquisition_batch_refused(reason),
+    };
+    if let Err(error) = store.apply(&SecretBatch::new(scope.clone())).await {
+        return store_failed(&error);
+    }
+
+    let acquired = match binding
+        .performer()
+        .redeem_refresh(RefreshRedemption::new(&current_refresh))
+        .await
+    {
+        Ok(acquired) => acquired,
+        Err(AcquisitionRefusal::RefreshOutcomeUnusable) => {
+            return refresh_commit_lost(
+                state,
+                request_id,
+                principal,
+                audit_target,
+                provider,
+                StatusCode::BAD_GATEWAY,
+                "the vendor accepted refresh but returned unusable rotated state",
+            )
+        }
+        Err(refusal) => return acquisition_refused(refusal),
+    };
+    let (access_token, rotated_refresh, expires_at) = acquired.into_parts();
+    if let Err(response) = admit_acquired_value(provider, binding.credential(), &access_token) {
+        drop(response);
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::BAD_GATEWAY,
+            "the vendor returned an access token outside the host credential bound",
+        );
+    }
+    let Some(next_refresh) = rotated_refresh.filter(|value| !value.expose_secret().is_empty())
+    else {
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::BAD_GATEWAY,
+            "the vendor did not return a rotated refresh token",
+        );
+    };
+    if let Err(response) = admit_acquired_value(provider, "refresh_token", &next_refresh) {
+        drop(response);
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::BAD_GATEWAY,
+            "the vendor returned a refresh token outside the host credential bound",
+        );
+    }
+    let next_expiry = expires_at.map(|value| Secret::new(value.to_string()));
+    let mut batch = SecretBatch::new(scope);
+    if let Err(reason) = batch.put(access_reference.clone(), access_token) {
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("the local refresh batch could not include its access token: {reason}"),
+        );
+    }
+    if let Err(reason) = batch.put(companions.refresh, next_refresh) {
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("the local refresh batch could not include its refresh token: {reason}"),
+        );
+    }
+    match next_expiry {
+        Some(expiry) => {
+            if let Err(reason) = batch.put(companions.expiry, expiry) {
+                return refresh_commit_lost(
+                    state,
+                    request_id,
+                    principal,
+                    audit_target,
+                    provider,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!("the local refresh batch could not include expiry: {reason}"),
+                );
+            }
+        }
+        None => {
+            if let Err(reason) = batch.delete(companions.expiry) {
+                return refresh_commit_lost(
+                    state,
+                    request_id,
+                    principal,
+                    audit_target,
+                    provider,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!("the local refresh batch could not clear expiry: {reason}"),
+                );
+            }
+        }
+    }
+    if current_marker.is_none() {
+        if let Err(reason) = batch.put(companions.managed, Secret::new(MANAGED_VALUE)) {
+            return refresh_commit_lost(
+                state,
+                request_id,
+                principal,
+                audit_target,
+                provider,
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("the local refresh batch could not mark managed state: {reason}"),
+            );
+        }
+    }
+    if let Err(error) = store.apply(&batch).await {
+        error!(%error, connector = provider.id, "a vendor-rotated refresh could not be committed locally");
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the local credential store refused the vendor-rotated credential",
+        );
+    }
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
+    Json(json!({
+        "connector": provider.id,
+        "credential": binding.credential(),
+        "address": address_path(&access_reference),
+        "acquired": true,
+        "expires_at": expires_at,
+    }))
+    .into_response()
+}
+
+struct AcquisitionCompanions {
+    refresh: CredentialRef,
+    expiry: CredentialRef,
+    managed: CredentialRef,
+}
+
+fn acquisition_companions(access: &CredentialRef) -> Result<AcquisitionCompanions, Box<Response>> {
+    let build = |leaf| match access.instance() {
+        Some(instance) => CredentialRef::for_instance(
+            access.tenant(),
+            access.authority(),
+            instance.as_str(),
+            ACQUISITION_SERVICE,
+            leaf,
+        ),
+        None => CredentialRef::new(
+            access.tenant(),
+            access.authority(),
+            ACQUISITION_SERVICE,
+            leaf,
+        ),
+    };
+    let refresh =
+        build(REFRESH_TOKEN_LEAF).map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+    let expiry =
+        build(EXPIRES_AT_LEAF).map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+    let managed =
+        build(MANAGED_LEAF).map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+    Ok(AcquisitionCompanions {
+        refresh,
+        expiry,
+        managed,
+    })
+}
+
+async fn append_acquisition_companion_moves(
+    store: &Arc<dyn SecretStore>,
+    source_access: &CredentialRef,
+    destination_access: &CredentialRef,
+    batch: &mut SecretBatch,
+) -> Result<(), Box<Response>> {
+    let sources = acquisition_companions(source_access)?;
+    let destinations = acquisition_companions(destination_access)?;
+    let mut found = false;
+    let mut marker_found = false;
+    for (source, destination, is_marker) in [
+        (sources.refresh, destinations.refresh, false),
+        (sources.expiry, destinations.expiry, false),
+        (sources.managed, destinations.managed.clone(), true),
+    ]
+    .into_iter()
+    {
+        match store.get(&source).await {
+            Ok(_) => {
+                found = true;
+                marker_found |= is_marker;
+                batch
+                    .move_secret(source, destination)
+                    .map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(Box::new(store_failed(&error))),
+        }
+    }
+    // Upgrade pre-marker acquisition state while it is already moving atomically. This makes the
+    // convention self-describing after the first migration without relying on a live binding.
+    if found && !marker_found {
+        batch
+            .put(destinations.managed, Secret::new(MANAGED_VALUE))
+            .map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+    }
+    Ok(())
+}
+
+async fn managed_rotation_refusal(
+    store: &Arc<dyn SecretStore>,
+    provider: &'static Provider,
+    reference: &CredentialRef,
+) -> Option<Response> {
+    let companions = match acquisition_companions(reference) {
+        Ok(companions) => companions,
+        Err(response) => return Some(*response),
+    };
+    for companion in [companions.refresh, companions.expiry, companions.managed] {
+        match store.get(&companion).await {
+            Ok(_) => {
+                return Some(refuse(
+                    StatusCode::CONFLICT,
+                    "this credential is managed by vendor acquisition; refresh it or disconnect and reconnect instead of pasting over its access token",
+                    json!({
+                        "connector": provider.id,
+                        "code": "acquired_credential_requires_refresh",
+                    }),
+                ));
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Some(store_failed(&error)),
+        }
+    }
+    None
+}
+
+fn admit_acquired_value(
+    provider: &'static Provider,
+    credential: &str,
+    secret: &Secret,
+) -> Result<(), Box<Response>> {
+    let bytes = stored_bytes(secret);
+    if bytes <= exchange_host::MAX_CREDENTIAL_VALUE_BYTES {
+        return Ok(());
+    }
+    Err(Box::new(connection_refused(
+        &ConnectionRefusal::CredentialTooLarge {
+            connector: provider.id.to_owned(),
+            credential: credential.to_owned(),
+            bytes,
+            limit: exchange_host::MAX_CREDENTIAL_VALUE_BYTES,
+        },
+    )))
+}
+
+fn auth_posture_refused(refusal: &AuthPostureRefusal) -> Response {
+    refuse(
+        StatusCode::FORBIDDEN,
+        refusal.to_string(),
+        json!({ "code": "authentication_hazard_not_allowed" }),
+    )
+}
+
+fn acquisition_refused(refusal: AcquisitionRefusal) -> Response {
+    let status = match refusal {
+        AcquisitionRefusal::MfaRequired => StatusCode::CONFLICT,
+        AcquisitionRefusal::CredentialsRejected => StatusCode::UNAUTHORIZED,
+        AcquisitionRefusal::VendorRejected | AcquisitionRefusal::InvalidResponse => {
+            StatusCode::BAD_GATEWAY
+        }
+        AcquisitionRefusal::RefreshOutcomeUnusable => StatusCode::BAD_GATEWAY,
+        AcquisitionRefusal::Unreachable => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    refuse(
+        status,
+        refusal.to_string(),
+        json!({ "code": refusal.code() }),
+    )
+}
+
+fn refresh_commit_lost(
+    state: &AppState,
+    request_id: &RequestId,
+    principal: &Principal,
+    target: AuditTarget,
+    provider: &'static Provider,
+    status: StatusCode,
+    internal_reason: &str,
+) -> Response {
+    error!(
+        connector = provider.id,
+        reason = internal_reason,
+        "a vendor refresh may have invalidated the locally stored refresh token"
+    );
+    if let Some(journal) = state.audit() {
+        if let Err(error) = journal.record(
+            request_id,
+            AuditAction::CredentialRefreshCommitLost,
+            AuditOutcome::Refused,
+            Some(principal),
+            target,
+        ) {
+            return super::audit_unavailable(error);
+        }
+    }
+    refuse(
+        status,
+        "the vendor may have rotated this credential, but the new state could not be committed locally; do not retry the stored refresh token — reconnect the credential",
+        json!({
+            "connector": provider.id,
+            "code": "refresh_commit_lost",
+            "retryable": false,
+            "credential_state": "uncertain",
+        }),
+    )
+}
+
+fn acquisition_shape_refused(provider: &'static Provider, reason: &'static str) -> Response {
+    refuse(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        reason,
+        json!({ "connector": provider.id, "code": "invalid_acquisition_request" }),
+    )
+}
+
+fn acquisition_batch_refused(reason: impl Into<String>) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        format!(
+            "the derived acquisition state cannot be stored atomically: {}",
+            reason.into()
+        ),
+        json!({ "code": "acquisition_state_unaddressable" }),
+    )
 }
 
 /// Take back the values this request had already written, and report whether that succeeded.
@@ -1066,9 +1695,20 @@ fn add_supplier_attribution(
         let attribution = match evidence.and_then(|record| {
             record
                 .actor
-                .map(|actor| (actor.kind, actor.id, record.timestamp))
+                .map(|actor| (record.action, actor.kind, actor.id, record.timestamp))
         }) {
-            Some((kind, id, at)) => json!({
+            Some((
+                crate::audit::Action::CredentialAcquired
+                | crate::audit::Action::CredentialRefreshed,
+                kind,
+                id,
+                at,
+            )) => json!({
+                "status": "acquired",
+                "initiated_by": { "kind": kind, "id": id },
+                "at": at,
+            }),
+            Some((_, kind, id, at)) => json!({
                 "status": "known",
                 "principal": { "kind": kind, "id": id },
                 "at": at,
@@ -1139,6 +1779,134 @@ pub(super) async fn invocation_instance(
         };
     }
     Err(unknown_label(provider, &label))
+}
+
+/// Resolve a management label to the immutable connection identity a channel persists.
+///
+/// Unlike invocation, a sole legacy address still needs its registry UUID: the address elides that
+/// level for compatibility, but a durable channel must retain the identity that survives a later
+/// first-to-second migration. No request spelling is ever parsed as a UUID here.
+pub(super) async fn channel_instance(
+    state: &AppState,
+    principal: &Principal,
+    provider: &'static Provider,
+    supplied: Option<&str>,
+) -> Result<InstanceId, Response> {
+    let Some(registry) = state.connection_registry() else {
+        return Err(no_registry());
+    };
+    let Some(store) = state.credentials() else {
+        return Err(no_store());
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = inventory(store, principal.tenant(), &declaration).await?;
+
+    if inventory.count() == 0 {
+        return Err(refuse(
+            StatusCode::NOT_FOUND,
+            format!("this tenant holds no connection to `{}`", provider.id),
+            json!({ "connector": provider.id }),
+        ));
+    }
+    if supplied.is_none() && inventory.count() > 1 {
+        return Err(refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "this tenant holds {} connections to `{}`; choose a connection label rather than letting this host choose an account",
+                inventory.count(), provider.id
+            ),
+            json!({ "connector": provider.id, "code": "ambiguous_connection" }),
+        ));
+    }
+
+    let entries = registry
+        .entries(principal.tenant(), provider.id)
+        .map_err(|refusal| registry_refused(&refusal))?;
+    let selected = match supplied {
+        Some(supplied) => {
+            let label = ConnectionLabel::new(supplied.to_owned())
+                .map_err(|refusal| registry_refused(&refusal))?;
+            entries
+                .iter()
+                .find(|entry| entry.label == label)
+                .ok_or_else(|| unknown_label(provider, &label))?
+        }
+        None => {
+            let held = if inventory.legacy.is_empty() {
+                inventory.instances.keys().next()
+            } else {
+                None
+            };
+            let mut matching = entries.iter().filter(|entry| {
+                held.map_or(!inventory.legacy.is_empty(), |instance| {
+                    entry.instance == *instance
+                })
+            });
+            let Some(selected) = matching.next() else {
+                return Err(refuse(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "the sole `{}` connection has no stable operator label; label it before binding a channel",
+                        provider.id
+                    ),
+                    json!({ "connector": provider.id, "code": "connection_needs_label" }),
+                ));
+            };
+            if matching.next().is_some() {
+                return Err(refuse(
+                    StatusCode::CONFLICT,
+                    "the connection registry does not identify one sole connection",
+                    json!({ "connector": provider.id }),
+                ));
+            }
+            selected
+        }
+    };
+
+    if inventory.holds(&selected.instance)
+        || (inventory.count() == 1
+            && !inventory.legacy.is_empty()
+            && names_only_legacy(
+                registry,
+                principal.tenant(),
+                provider.id,
+                &selected.instance,
+            )
+            .map_err(|response| *response)?)
+    {
+        Ok(selected.instance.clone())
+    } else {
+        Err(unknown_label(provider, &selected.label))
+    }
+}
+
+/// Project an immutable channel binding back to its current operator label.
+pub(super) fn channel_label(
+    state: &AppState,
+    tenant: &Tenant,
+    connector: &str,
+    instance: &InstanceId,
+) -> Result<String, Box<Response>> {
+    let Some(registry) = state.connection_registry() else {
+        return Err(Box::new(no_registry()));
+    };
+    let entries = registry
+        .entries(tenant, connector)
+        .map_err(|refusal| Box::new(registry_refused(&refusal)))?;
+    entries
+        .into_iter()
+        .find(|entry| entry.instance == *instance)
+        .map(|entry| entry.label.to_string())
+        .ok_or_else(|| {
+            Box::new(refuse(
+                StatusCode::CONFLICT,
+                format!(
+                    "channel connection for `{connector}` has no current operator label; refusing rather than exposing or guessing its UUID"
+                ),
+                json!({ "connector": connector, "code": "channel_connection_unlabelled" }),
+            ))
+        })
 }
 
 fn names_only_legacy(
@@ -1280,6 +2048,7 @@ async fn create_instance(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Path((connector, label)): Path<(String, String)>,
+    Query(query): Query<AcquisitionQuery>,
     Json(body): Json<NewConnection>,
 ) -> Response {
     let Some(provider) = catalogued(&connector) else {
@@ -1295,7 +2064,36 @@ async fn create_instance(
         Ok(label) => label,
         Err(refusal) => return registry_refused(&refusal),
     };
-    if body.credentials.is_empty() {
+    let NewConnection {
+        credentials,
+        acquisition,
+    } = body;
+    let password_acquisition = if query.acquire.as_deref() == Some("password") {
+        if !credentials.is_empty() {
+            return acquisition_shape_refused(
+                provider,
+                "password acquisition cannot also carry pasted credentials",
+            );
+        }
+        let Some(acquisition) = acquisition else {
+            return acquisition_shape_refused(
+                provider,
+                "password acquisition requires `acquisition.username` and `acquisition.password`",
+            );
+        };
+        Some(acquisition)
+    } else if query.acquire.is_some() {
+        return acquisition_shape_refused(provider, "unknown credential acquisition mode");
+    } else {
+        if acquisition.is_some() {
+            return acquisition_shape_refused(
+                provider,
+                "an acquisition body requires `?acquire=password`",
+            );
+        }
+        None
+    };
+    if password_acquisition.is_none() && credentials.is_empty() {
         return refuse(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
@@ -1383,15 +2181,66 @@ async fn create_instance(
     held_ids.push(instance.clone());
     held_ids.sort();
 
-    let writes = match declaration.writes_for(
-        principal.tenant(),
-        TenantInstances::held(&held_ids, Some(&instance)),
-        &body.credentials,
-    ) {
-        Ok(writes) => writes,
-        Err(refusal) => return connection_refused(&refusal),
+    let instances = TenantInstances::held(&held_ids, Some(&instance));
+    let mut acquisition_companion_writes = Vec::new();
+    let writes = if let Some(acquisition) = password_acquisition {
+        let Some(binding) = state.acquisitions().get(provider.id) else {
+            return acquisition_shape_refused(
+                provider,
+                "this connector has no released credential-acquisition declaration bound",
+            );
+        };
+        if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+            return auth_posture_refused(&refusal);
+        }
+        let reference =
+            match declaration.address_of_for(principal.tenant(), binding.credential(), instances) {
+                Ok(reference) => reference,
+                Err(refusal) => return connection_refused(&refusal),
+            };
+        let username = Secret::new(&acquisition.username);
+        let password = Secret::new(&acquisition.password);
+        let acquired = match binding
+            .performer()
+            .redeem_password(PasswordRedemption::new(&username, &password))
+            .await
+        {
+            Ok(acquired) => acquired,
+            Err(refusal) => return acquisition_refused(refusal),
+        };
+        drop(password);
+        drop(username);
+        let (access, refresh, expires_at) = acquired.into_parts();
+        if let Err(response) = admit_acquired_value(provider, binding.credential(), &access) {
+            return *response;
+        }
+        let companions = match acquisition_companions(&reference) {
+            Ok(companions) => companions,
+            Err(response) => return *response,
+        };
+        if let Some(refresh) = refresh {
+            if let Err(response) = admit_acquired_value(provider, "refresh_token", &refresh) {
+                return *response;
+            }
+            acquisition_companion_writes.push((companions.refresh, refresh));
+        }
+        if let Some(expires_at) = expires_at {
+            acquisition_companion_writes
+                .push((companions.expiry, Secret::new(expires_at.to_string())));
+        }
+        acquisition_companion_writes.push((companions.managed, Secret::new(MANAGED_VALUE)));
+        vec![(reference, access)]
+    } else {
+        match declaration.writes_for(principal.tenant(), instances, &credentials) {
+            Ok(writes) => writes,
+            Err(refusal) => return connection_refused(&refusal),
+        }
     };
-    let adding: usize = writes.iter().map(|(_, secret)| stored_bytes(secret)).sum();
+    let adding: usize = writes
+        .iter()
+        .chain(acquisition_companion_writes.iter())
+        .map(|(_, secret)| stored_bytes(secret))
+        .sum();
     let held_bytes = match occupied(store, principal.tenant()).await {
         Ok(bytes) => bytes,
         Err(error) => return store_failed(&error),
@@ -1426,6 +2275,11 @@ async fn create_instance(
                 Ok(destination) => destination,
                 Err(response) => return *response,
             };
+            if let Err(response) =
+                append_acquisition_companion_moves(store, source, &destination, &mut batch).await
+            {
+                return *response;
+            }
             if let Err(reason) = batch.move_secret(source.clone(), destination) {
                 return refuse(StatusCode::CONFLICT, reason, json!({}));
             }
@@ -1434,6 +2288,11 @@ async fn create_instance(
     for (reference, secret) in &writes {
         if let Err(reason) = batch.put(reference.clone(), secret.clone()) {
             return refuse(StatusCode::CONFLICT, reason, json!({}));
+        }
+    }
+    for (reference, secret) in &acquisition_companion_writes {
+        if let Err(reason) = batch.put(reference.clone(), secret.clone()) {
+            return acquisition_batch_refused(reason);
         }
     }
     let migrating_first = (!inventory.legacy.is_empty()).then(|| {
@@ -1583,6 +2442,26 @@ async fn remove_instance(
     let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
+    if state.channels().is_some_and(|channels| {
+        channels
+            .store()
+            .held(principal.tenant())
+            .iter()
+            .any(|record| record.connector() == provider.id && record.connection() == &instance)
+    }) {
+        return refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connection `{}` cannot be deleted while a durable channel binds it; remove or rebind the channel first",
+                label.as_str()
+            ),
+            json!({
+                "connector": provider.id,
+                "label": label.as_str(),
+                "code": "connection_in_use_by_channel",
+            }),
+        );
+    }
     let declared = declared_credentials(provider);
     let declaration = declaration(provider, &declared);
     let inventory = match inventory(store, principal.tenant(), &declaration).await {
@@ -1615,8 +2494,31 @@ async fn remove_instance(
         Ok(scope) => scope,
         Err(reason) => return refuse(StatusCode::CONFLICT, reason, json!({})),
     };
-    let mut batch = SecretBatch::new(scope);
+    let mut selected_with_companions = Vec::new();
     for reference in selected {
+        let companions = match acquisition_companions(&reference) {
+            Ok(companions) => companions,
+            Err(response) => return *response,
+        };
+        let mut companion_held = false;
+        for companion in [&companions.refresh, &companions.expiry, &companions.managed] {
+            match store.get(companion).await {
+                Ok(_) => companion_held = true,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return store_failed(&error),
+            }
+        }
+        if companion_held {
+            selected_with_companions.extend([
+                companions.refresh,
+                companions.expiry,
+                companions.managed,
+            ]);
+        }
+        selected_with_companions.push(reference);
+    }
+    let mut batch = SecretBatch::new(scope);
+    for reference in selected_with_companions {
         if let Err(reason) = batch.delete(reference) {
             return refuse(StatusCode::CONFLICT, reason, json!({}));
         }
@@ -1633,6 +2535,11 @@ async fn remove_instance(
                 Ok(destination) => destination,
                 Err(response) => return *response,
             };
+            if let Err(response) =
+                append_acquisition_companion_moves(store, source, &destination, &mut batch).await
+            {
+                return *response;
+            }
             if let Err(reason) = batch.move_secret(source.clone(), destination) {
                 return refuse(StatusCode::CONFLICT, reason, json!({}));
             }
@@ -1697,7 +2604,9 @@ async fn remove_instance(
 async fn rotate(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Extension(request_id): Extension<RequestId>,
     Path((connector, credential)): Path<(String, String)>,
+    Query(query): Query<AcquisitionQuery>,
     Json(body): Json<RotatedCredential>,
 ) -> Response {
     let Some(provider) = catalogued(&connector) else {
@@ -1705,6 +2614,40 @@ async fn rotate(
     };
     let Some(store) = state.credentials() else {
         return no_store();
+    };
+
+    if query.acquire.as_deref() == Some("refresh") {
+        if body.value.is_some() {
+            return acquisition_shape_refused(
+                provider,
+                "refresh acquisition cannot also carry a pasted credential",
+            );
+        }
+        let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+            return change_in_flight(provider);
+        };
+        return refresh_acquired_connection(
+            RefreshAcquisition {
+                state: &state,
+                store,
+                principal: &principal,
+                request_id: &request_id,
+            },
+            provider,
+            &credential,
+            TenantInstances::sole(),
+            AuditTarget::Credential {
+                connector: provider.id.to_owned(),
+                credential: credential.clone(),
+            },
+        )
+        .await;
+    }
+    if query.acquire.is_some() {
+        return acquisition_shape_refused(provider, "unknown credential acquisition mode");
+    }
+    let Some(value) = body.value.as_deref() else {
+        return acquisition_shape_refused(provider, "credential rotation requires `value`");
     };
 
     let declared = declared_credentials(provider);
@@ -1719,11 +2662,13 @@ async fn rotate(
     // is not a check this handler remembers to make and the name in the path is refused here if
     // the connector does not declare it. It is also what keeps `{credential}` from reaching the
     // address — the address is composed from the *declared* leaf this lookup returns.
-    let (reference, secret) =
-        match declaration.write_of(principal.tenant(), &credential, &body.value) {
-            Ok(write) => write,
-            Err(refusal) => return connection_refused(&refusal),
-        };
+    let (reference, secret) = match declaration.write_of(principal.tenant(), &credential, value) {
+        Ok(write) => write,
+        Err(refusal) => return connection_refused(&refusal),
+    };
+    if let Some(refusal) = managed_rotation_refusal(store, provider, &reference).await {
+        return refusal;
+    }
 
     // The claim `create` and `remove` take, for the same reason and against the same neighbours: a
     // rotation deciding against a value a `DELETE` is in the middle of destroying would put a
@@ -1793,7 +2738,9 @@ async fn rotate(
 async fn rotate_instance(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Extension(request_id): Extension<RequestId>,
     Path((connector, label, credential)): Path<(String, String, String)>,
+    Query(query): Query<AcquisitionQuery>,
     Json(body): Json<RotatedCredential>,
 ) -> Response {
     let Some(provider) = catalogued(&connector) else {
@@ -1820,11 +2767,45 @@ async fn rotate_instance(
         Some(instance) => TenantInstances::held(&ids, Some(instance)),
         None => TenantInstances::sole(),
     };
+    if query.acquire.as_deref() == Some("refresh") {
+        if body.value.is_some() {
+            return acquisition_shape_refused(
+                provider,
+                "refresh acquisition cannot also carry a pasted credential",
+            );
+        }
+        return refresh_acquired_connection(
+            RefreshAcquisition {
+                state: &state,
+                store,
+                principal: &principal,
+                request_id: &request_id,
+            },
+            provider,
+            &credential,
+            instances,
+            AuditTarget::InstanceCredential {
+                connector: provider.id.to_owned(),
+                label: label.clone(),
+                credential: credential.clone(),
+            },
+        )
+        .await;
+    }
+    if query.acquire.is_some() {
+        return acquisition_shape_refused(provider, "unknown credential acquisition mode");
+    }
+    let Some(value) = body.value.as_deref() else {
+        return acquisition_shape_refused(provider, "credential rotation requires `value`");
+    };
     let (reference, secret) =
-        match declaration.write_of_for(principal.tenant(), &credential, &body.value, instances) {
+        match declaration.write_of_for(principal.tenant(), &credential, value, instances) {
             Ok(write) => write,
             Err(refusal) => return connection_refused(&refusal),
         };
+    if let Some(refusal) = managed_rotation_refusal(store, provider, &reference).await {
+        return refusal;
+    }
     let replacing = match store.get(&reference).await {
         Ok(current) => stored_bytes(&current),
         Err(error) if error.is_not_found() => {
@@ -1886,6 +2867,30 @@ async fn remove(
         return change_in_flight(provider);
     };
 
+    // The legacy route can address only the sole unqualified connection. A durable channel holds
+    // that connection's future UUID even while the address elides it, so any record for this
+    // tenant/connector blocks deletion. Refusing is the only atomic answer across independent
+    // channel and credential stores.
+    if state.channels().is_some_and(|channels| {
+        channels
+            .store()
+            .held(principal.tenant())
+            .iter()
+            .any(|record| record.connector() == provider.id)
+    }) {
+        return refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connection to `{}` cannot be deleted while a durable channel binds it; remove or rebind the channel first",
+                provider.id
+            ),
+            json!({
+                "connector": provider.id,
+                "code": "connection_in_use_by_channel",
+            }),
+        );
+    }
+
     let held_before = match held(store, &addresses).await {
         Err(error) => return store_failed(&error),
         // A `404` and not a `204`: deleting something that is not there is indistinguishable from
@@ -1911,12 +2916,40 @@ async fn remove(
     let mut left_behind = Vec::new();
     let mut failure = None;
 
-    for (declared, reference) in &addresses {
+    let mut delete_targets: Vec<(CredentialRef, bool)> = addresses
+        .iter()
+        .map(|(declared, reference)| {
+            (
+                reference.clone(),
+                held_before.iter().any(|name| name == declared.name),
+            )
+        })
+        .collect();
+    for (_, reference) in &addresses {
+        let companions = match acquisition_companions(reference) {
+            Ok(companions) => companions,
+            Err(response) => return *response,
+        };
+        let mut held_companions = Vec::new();
+        for companion in [companions.refresh, companions.expiry, companions.managed] {
+            let held = match store.get(&companion).await {
+                Ok(_) => true,
+                Err(error) if error.is_not_found() => false,
+                Err(error) => return store_failed(&error),
+            };
+            held_companions.push((companion, held));
+        }
+        if held_companions.iter().any(|(_, held)| *held) {
+            delete_targets.extend(held_companions);
+        }
+    }
+
+    for (reference, was_held) in &delete_targets {
         match store.delete(reference).await {
             // Only what the probe saw a value at is reported destroyed. Deleting an address that
             // held nothing is a no-op, and calling it "destroyed" would overstate what happened to
             // an operator counting which of their secrets are now revoked.
-            Ok(()) if held_before.iter().any(|name| name == declared.name) => {
+            Ok(()) if *was_held => {
                 destroyed.push(address_path(reference));
             }
             Ok(()) => {}
@@ -3227,8 +4260,9 @@ mod tests {
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        async_trait, ConnectionSettings as _, Layout as _, TenantLayout,
-        MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES, TENANTS_ROOT,
+        async_trait, AcquiredCredential, AuthHazard, AuthPosture, ConnectionSettings as _,
+        CredentialAcquirer, Layout as _, TenantLayout, MAX_CREDENTIAL_VALUE_BYTES,
+        MAX_TENANT_STORE_BYTES, TENANTS_ROOT,
     };
     use tower::Service;
 
@@ -3240,7 +4274,7 @@ mod tests {
     /// because a kind gate cannot be tested against a roster with only one kind in it: every
     /// assertion that an agent is refused is worth nothing unless a caller of another kind reaches
     /// the same address and is admitted.
-    const ROSTER: &str = "user:alice@acme,user:bob@globex,agent:triage-bot@acme";
+    const ROSTER: &str = "user:alice@acme,user:bob@globex,service_account:triage-bot@acme";
 
     /// The value a test stores. Never a real secret, and asserted absent from every answer a
     /// different tenant receives — and from every refusal anyone receives.
@@ -3570,12 +4604,135 @@ mod tests {
         (app, store)
     }
 
+    #[tokio::test]
+    async fn a_bound_channel_blocks_instance_deletion_and_survives_label_rename() {
+        use std::collections::BTreeSet;
+
+        use crate::channel::{
+            ChannelDeclarations, ChannelEventSink, ChannelPlacement, ChannelPlacementResolver,
+            ChannelRunError, ChannelRunner, ChannelSupervisor,
+        };
+        use exchange_host::{
+            ChannelId, ChannelRecord, Channels, ConnectionRegistry, MemoryChannels, PrincipalKind,
+        };
+        use tokio_util::sync::CancellationToken;
+
+        struct NoDeclarations;
+        impl ChannelDeclarations for NoDeclarations {
+            fn events(&self, _: &str, _: &str) -> Option<BTreeSet<String>> {
+                None
+            }
+        }
+        struct NoPlacement;
+        impl ChannelPlacementResolver for NoPlacement {
+            fn resolve(&self, _: &ChannelRecord) -> Result<ChannelPlacement, ChannelRunError> {
+                Err(ChannelRunError::NoPlacement)
+            }
+        }
+        struct NeverRuns;
+        #[async_trait]
+        impl ChannelRunner for NeverRuns {
+            async fn run(
+                &self,
+                _: ChannelRecord,
+                _: ChannelPlacement,
+                _: Arc<dyn ChannelEventSink>,
+                _: CancellationToken,
+            ) -> Result<(), ChannelRunError> {
+                unreachable!("the deletion check does not start a channel")
+            }
+        }
+
+        let tenant = Tenant::new("acme").expect("tenant");
+        let instance = InstanceId::parse("11111111-1111-4111-8111-111111111111").expect("instance");
+        let credential = CredentialRef::for_instance(
+            tenant.as_str(),
+            "com.zendesk.api",
+            instance.as_str(),
+            "default",
+            "api_token",
+        )
+        .expect("reference");
+        let store = Arc::new(TestStore::default());
+        store.place(address_path(&credential), 16);
+        let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+        let label = ConnectionLabel::new("primary").expect("label");
+        ConnectionRegistry::assign(registry.as_ref(), &tenant, "zendesk", &label, &instance)
+            .expect("registry row");
+        let records = Arc::new(MemoryChannels::default());
+        records
+            .set(
+                ChannelRecord::new(
+                    ChannelId::new("ch_primary").expect("channel id"),
+                    tenant.clone(),
+                    "zendesk",
+                    instance.clone(),
+                    "events",
+                    ["changed".to_owned()].into_iter().collect(),
+                )
+                .expect("channel record"),
+            )
+            .expect("persist channel");
+        let supervisor = ChannelSupervisor::new(
+            records.clone(),
+            Arc::new(NoDeclarations),
+            Arc::new(NoPlacement),
+            Arc::new(NeverRuns),
+        );
+        let state = AppState::without_identity()
+            .with_credentials(store.clone())
+            .with_connection_registry(registry.clone())
+            .with_channels(supervisor);
+        let principal = Principal::new(PrincipalKind::User, "operator", tenant.clone());
+
+        let response = remove_instance(
+            State(state.clone()),
+            Extension(principal.clone()),
+            Path(("zendesk".to_owned(), label.to_string())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(store.at(&address_path(&credential)).is_some());
+        assert_eq!(store.deletes(), 0);
+        assert_eq!(
+            ConnectionRegistry::resolve(registry.as_ref(), &tenant, "zendesk", &label)
+                .expect("registry")
+                .as_ref(),
+            Some(&instance)
+        );
+
+        let renamed = ConnectionLabel::new("renamed").expect("label");
+        let response = rename_instance(
+            State(state.clone()),
+            Extension(principal),
+            Path(("zendesk".to_owned(), label.to_string())),
+            Json(LabelBody {
+                label: renamed.to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            records
+                .get(&tenant, &ChannelId::new("ch_primary").expect("channel id"))
+                .expect("channel remains durable")
+                .connection(),
+            &instance
+        );
+        assert_eq!(
+            channel_label(&state, &tenant, "zendesk", &instance).expect("current label"),
+            renamed.to_string()
+        );
+        assert!(store.at(&address_path(&credential)).is_some());
+    }
+
     /// A connection surface backed by a caller-supplied store and durable evidence journal.
     fn audited_app(store: Arc<TestStore>, journal: Arc<crate::audit::AuditJournal>) -> Router {
         super::super::app(
             AppState::with_development_identity(Arc::new(
                 DevIdentity::from_roster(
-                    "user:alice@acme,user:carol@acme,user:bob@globex,agent:triage-bot@acme",
+                    "user:alice@acme,user:carol@acme,user:bob@globex,service_account:triage-bot@acme",
                 )
                 .expect("a well-formed roster"),
             ))
@@ -3709,13 +4866,17 @@ mod tests {
     /// Every kind-refusal this host logged while a test ran.
     ///
     /// Hand-rolled rather than pulled in, for [`Scratch`]'s reason: a capturing layer is thirty
-    /// lines and a test dependency is forever. It records `WARN` and above only, which is the level
-    /// the guard refuses at, and it records the event's **fields** — so what a test asserts is the
-    /// line an operator would actually read, including which principal it names.
+    /// lines and a test dependency is forever. It records every event's **fields** — so credential
+    /// tests cover debug output too, while authorization tests can select the warning line an
+    /// operator would actually read, including which principal it names.
     #[derive(Clone, Default)]
     struct Warnings(Arc<Mutex<Vec<String>>>);
 
     impl Warnings {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().expect("no test poisons this").clone()
+        }
+
         /// The recorded lines that are the guard's kind-refusal, in the order they were emitted.
         fn kind_refusals(&self) -> Vec<String> {
             self.0
@@ -3734,10 +4895,6 @@ mod tests {
             event: &tracing::Event<'_>,
             _: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            if *event.metadata().level() > tracing::Level::WARN {
-                return;
-            }
-
             let mut line = String::new();
             event.record(&mut FieldsAsText(&mut line));
             self.0.lock().expect("no test poisons this").push(line);
@@ -7581,6 +8738,8 @@ mod tests {
 
         use exchange_host::CredentialStore;
 
+        use crate::credential_acquisition::{AcquisitionBinding, AcquisitionBindings};
+
         /// A scratch directory under the system temporary directory, removed on drop.
         ///
         /// Under `temp_dir` and not under the workspace, because `CredentialStore::bind` refuses a
@@ -7618,6 +8777,780 @@ mod tests {
                 ))
                 .with_credentials(store.secrets()),
             )
+        }
+
+        struct RecordingAcquirer {
+            password_calls: Arc<AtomicU64>,
+            refresh_calls: Arc<AtomicU64>,
+            refusal: Option<AcquisitionRefusal>,
+        }
+
+        #[async_trait]
+        impl CredentialAcquirer for RecordingAcquirer {
+            async fn redeem_password(
+                &self,
+                _: PasswordRedemption<'_>,
+            ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+                self.password_calls.fetch_add(1, Ordering::Relaxed);
+                if let Some(refusal) = self.refusal {
+                    return Err(refusal);
+                }
+                Ok(AcquiredCredential::new(
+                    Secret::new("access-one"),
+                    Some(Secret::new("refresh-one")),
+                    Some(1_900_000_000),
+                ))
+            }
+
+            async fn redeem_refresh(
+                &self,
+                _: RefreshRedemption<'_>,
+            ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+                self.refresh_calls.fetch_add(1, Ordering::Relaxed);
+                if let Some(refusal) = self.refusal {
+                    return Err(refusal);
+                }
+                Ok(AcquiredCredential::new(
+                    Secret::new("access-two"),
+                    Some(Secret::new("refresh-two")),
+                    Some(1_900_003_600),
+                ))
+            }
+        }
+
+        fn acquisition_app(
+            store: &CredentialStore,
+            posture: AuthPosture,
+            refusal: Option<AcquisitionRefusal>,
+            audit: Option<Arc<crate::audit::AuditJournal>>,
+        ) -> (Router, Arc<AtomicU64>, Arc<AtomicU64>) {
+            let password_calls = Arc::new(AtomicU64::new(0));
+            let refresh_calls = Arc::new(AtomicU64::new(0));
+            let performer = Arc::new(RecordingAcquirer {
+                password_calls: Arc::clone(&password_calls),
+                refresh_calls: Arc::clone(&refresh_calls),
+                refusal,
+            });
+            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
+                "babelforce",
+                "babelforce.access_token",
+                AuthHazard::ResourceOwnerSecretShared,
+                performer,
+            )])
+            .expect("one acquisition binding");
+            let mut state = AppState::with_development_identity(Arc::new(
+                DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+            ))
+            .with_credentials(store.secrets())
+            .with_credential_acquisition(posture, Arc::new(bindings));
+            if let Some(audit) = audit {
+                state = state.with_audit(audit);
+            }
+            let app = super::super::super::app(state);
+            (app, password_calls, refresh_calls)
+        }
+
+        #[tokio::test]
+        async fn fail_closed_posture_refuses_before_the_performer_is_called() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let (app, calls, _) = acquisition_app(&store, AuthPosture::fail_closed(), None, None);
+
+            let (status, refusal) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": {
+                        "username": "alice@example.test",
+                        "password": "never-persist-this"
+                    }
+                })),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+            assert!(!refusal.to_string().contains("never-persist-this"));
+            let scope = CredentialScope::new("acme", "com.babelforce.api")
+                .expect("babelforce credential scope");
+            assert!(
+                store
+                    .secrets()
+                    .references(&scope)
+                    .await
+                    .expect("empty store inventory")
+                    .is_empty(),
+                "posture refusal must not write acquisition state"
+            );
+        }
+
+        #[tokio::test]
+        async fn password_acquisition_persists_only_tokens_and_refresh_rotates_the_pair() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (app, password_calls, refresh_calls) = acquisition_app(&store, posture, None, None);
+
+            let (status, created) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": {
+                        "username": "alice@example.test",
+                        "password": "never-persist-this"
+                    }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            assert_eq!(password_calls.load(Ordering::Relaxed), 1);
+            assert!(!created.to_string().contains("never-persist-this"));
+
+            let access =
+                CredentialRef::new("acme", "com.babelforce.api", "default", "access_token")
+                    .expect("ordinary access-token address");
+            let refresh = CredentialRef::new(
+                "acme",
+                "com.babelforce.api",
+                ACQUISITION_SERVICE,
+                REFRESH_TOKEN_LEAF,
+            )
+            .expect("refresh companion address");
+            let expiry = CredentialRef::new(
+                "acme",
+                "com.babelforce.api",
+                ACQUISITION_SERVICE,
+                EXPIRES_AT_LEAF,
+            )
+            .expect("expiry companion address");
+            let managed = CredentialRef::new(
+                "acme",
+                "com.babelforce.api",
+                ACQUISITION_SERVICE,
+                MANAGED_LEAF,
+            )
+            .expect("managed companion address");
+            let secrets = store.secrets();
+            assert_eq!(
+                secrets
+                    .get(&access)
+                    .await
+                    .expect("stored access")
+                    .expose_secret(),
+                "access-one"
+            );
+            assert_eq!(
+                secrets
+                    .get(&refresh)
+                    .await
+                    .expect("stored refresh")
+                    .expose_secret(),
+                "refresh-one"
+            );
+            assert_eq!(
+                secrets
+                    .get(&expiry)
+                    .await
+                    .expect("stored expiry")
+                    .expose_secret(),
+                "1900000000"
+            );
+            assert_eq!(
+                secrets
+                    .get(&managed)
+                    .await
+                    .expect("managed marker")
+                    .expose_secret(),
+                MANAGED_VALUE,
+            );
+            let on_disk = std::fs::read_to_string(store.path()).expect("credential store file");
+            assert!(!on_disk.contains("never-persist-this"));
+            assert!(!on_disk.contains("alice@example.test"));
+
+            let (status, refused) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token",
+                Some(json!({ "value": "pasted-over-managed-token" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "acquired_credential_requires_refresh");
+            assert_eq!(
+                secrets
+                    .get(&access)
+                    .await
+                    .expect("unchanged managed access")
+                    .expose_secret(),
+                "access-one",
+            );
+
+            let (status, refreshed) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token?acquire=refresh",
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{refreshed}");
+            assert_eq!(refresh_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                secrets
+                    .get(&access)
+                    .await
+                    .expect("rotated access")
+                    .expose_secret(),
+                "access-two"
+            );
+            assert_eq!(
+                secrets
+                    .get(&refresh)
+                    .await
+                    .expect("rotated refresh")
+                    .expose_secret(),
+                "refresh-two"
+            );
+            assert_eq!(
+                secrets
+                    .get(&expiry)
+                    .await
+                    .expect("rotated expiry")
+                    .expose_secret(),
+                "1900003600"
+            );
+
+            drop(app);
+            let restarted = file_backed_app(&store);
+            let (status, refused) = call(
+                &restarted,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token",
+                Some(json!({ "value": "restart-must-not-orphan-managed-state" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "acquired_credential_requires_refresh");
+
+            let (status, removed) = call(
+                &restarted,
+                "alice",
+                Method::DELETE,
+                "/api/connections/babelforce",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{removed}");
+            let scope = CredentialScope::new("acme", "com.babelforce.api")
+                .expect("babelforce credential scope");
+            assert!(
+                secrets
+                    .references(&scope)
+                    .await
+                    .expect("post-removal inventory")
+                    .is_empty(),
+                "disconnect must remove the access, refresh, and expiry records together",
+            );
+        }
+
+        #[tokio::test]
+        async fn mfa_and_wrong_password_are_distinct_value_free_refusals() {
+            for (refusal, expected_status, expected_code) in [
+                (
+                    AcquisitionRefusal::MfaRequired,
+                    StatusCode::CONFLICT,
+                    "mfa_required",
+                ),
+                (
+                    AcquisitionRefusal::CredentialsRejected,
+                    StatusCode::UNAUTHORIZED,
+                    "credentials_rejected",
+                ),
+            ] {
+                let scratch = Scratch::new();
+                let store = scratch.store();
+                let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+                let (app, _, _) = acquisition_app(&store, posture, Some(refusal), None);
+                let (status, answer) = call(
+                    &app,
+                    "alice",
+                    Method::POST,
+                    "/api/connections/babelforce?acquire=password",
+                    Some(json!({
+                        "acquisition": {
+                            "username": "alice@example.test",
+                            "password": "rejected-password"
+                        }
+                    })),
+                )
+                .await;
+                assert_eq!(status, expected_status, "{answer}");
+                assert_eq!(answer["code"], expected_code);
+                assert!(!answer.to_string().contains("rejected-password"));
+            }
+        }
+
+        #[tokio::test]
+        async fn acquisition_refusal_and_every_captured_log_field_exclude_presented_credentials() {
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (app, _, _) = acquisition_app(
+                &store,
+                posture,
+                Some(AcquisitionRefusal::CredentialsRejected),
+                None,
+            );
+            let events = Warnings::default();
+            let _capture = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(events.clone()),
+            );
+            let username = "log-secret-user@example.test";
+            let password = "log-secret-password";
+            let (status, answer) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": { "username": username, "password": password }
+                })),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{answer}");
+            for rendered in std::iter::once(answer.to_string()).chain(events.lines()) {
+                assert!(
+                    !rendered.contains(username),
+                    "credential leaked: {rendered}"
+                );
+                assert!(
+                    !rendered.contains(password),
+                    "credential leaked: {rendered}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn acquired_credentials_are_initiated_by_a_human_but_not_supplied_by_one() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let scratch = Scratch::new();
+            std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only audit scratch directory");
+            let store = scratch.store();
+            let journal = Arc::new(
+                crate::audit::AuditJournal::bind(scratch.0.join("audit.sqlite3"))
+                    .expect("fixture audit journal"),
+            );
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (app, _, _) = acquisition_app(&store, posture, None, Some(Arc::clone(&journal)));
+
+            let (status, created) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": {
+                        "username": "alice@example.test",
+                        "password": "not-a-supplier-value"
+                    }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+
+            let (status, shown) = call(
+                &app,
+                "alice",
+                Method::GET,
+                "/api/connections/babelforce",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{shown}");
+            let provenance = &shown["credentials"][0]["last_supplied"];
+            assert_eq!(provenance["status"], "acquired");
+            assert_eq!(
+                provenance["initiated_by"],
+                json!({ "kind": "user", "id": "alice" }),
+            );
+            assert!(provenance.get("principal").is_none());
+            assert!(provenance["at"].as_str().is_some());
+            let records = journal
+                .by_target("connection", "babelforce", 20)
+                .expect("acquisition evidence");
+            assert!(records.iter().any(|record| {
+                record.action == crate::audit::Action::CredentialAcquired
+                    && record.outcome == crate::audit::Outcome::Succeeded
+            }));
+        }
+
+        #[tokio::test]
+        async fn a_managed_marker_survives_without_refresh_or_expiry_and_blocks_static_overwrite() {
+            struct AccessOnly;
+
+            #[async_trait]
+            impl CredentialAcquirer for AccessOnly {
+                async fn redeem_password(
+                    &self,
+                    _: PasswordRedemption<'_>,
+                ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+                    Ok(AcquiredCredential::new(
+                        Secret::new("access-only"),
+                        None,
+                        None,
+                    ))
+                }
+
+                async fn redeem_refresh(
+                    &self,
+                    _: RefreshRedemption<'_>,
+                ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+                    Err(AcquisitionRefusal::CredentialsRejected)
+                }
+            }
+
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
+                "babelforce",
+                "babelforce.access_token",
+                AuthHazard::ResourceOwnerSecretShared,
+                Arc::new(AccessOnly),
+            )])
+            .expect("one acquisition binding");
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(store.secrets())
+                .with_credential_acquisition(
+                    AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]),
+                    Arc::new(bindings),
+                ),
+            );
+            let (status, answer) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": { "username": "alice", "password": "one-use" }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+            drop(app);
+
+            let restarted = file_backed_app(&store);
+            let (status, refused) = call(
+                &restarted,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token",
+                Some(json!({ "value": "must-not-overwrite" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "acquired_credential_requires_refresh");
+
+            let scope =
+                CredentialScope::new("acme", "com.babelforce.api").expect("babelforce scope");
+            let references = store
+                .secrets()
+                .references(&scope)
+                .await
+                .expect("managed inventory");
+            assert_eq!(
+                references.len(),
+                2,
+                "access plus the managed marker: {references:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_post_refresh_store_failure_is_audited_as_non_retryable_credential_loss() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            struct FailCommitAfterProbe {
+                inner: Arc<dyn SecretStore>,
+                applies: AtomicU64,
+            }
+
+            #[async_trait]
+            impl SecretStore for FailCommitAfterProbe {
+                async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+                    self.inner.get(reference).await
+                }
+
+                async fn put(
+                    &self,
+                    reference: &CredentialRef,
+                    secret: &Secret,
+                ) -> Result<(), StoreError> {
+                    self.inner.put(reference, secret).await
+                }
+
+                async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+                    self.inner.delete(reference).await
+                }
+
+                async fn references(
+                    &self,
+                    scope: &CredentialScope,
+                ) -> Result<Vec<CredentialRef>, StoreError> {
+                    self.inner.references(scope).await
+                }
+
+                async fn apply(&self, batch: &SecretBatch) -> Result<(), StoreError> {
+                    if self.applies.fetch_add(1, Ordering::Relaxed) == 0 {
+                        return self.inner.apply(batch).await;
+                    }
+                    Err(StoreError::Unreachable {
+                        path: "test refresh commit".to_owned(),
+                        reason: "the post-vendor commit fails deliberately".to_owned(),
+                    })
+                }
+            }
+
+            let scratch = Scratch::new();
+            std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only audit scratch directory");
+            let store = scratch.store();
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (create_app, _, _) = acquisition_app(&store, posture.clone(), None, None);
+            let (status, answer) = call(
+                &create_app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": { "username": "alice", "password": "one-use" }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+            drop(create_app);
+
+            let performer = Arc::new(RecordingAcquirer {
+                password_calls: Arc::new(AtomicU64::new(0)),
+                refresh_calls: Arc::new(AtomicU64::new(0)),
+                refusal: None,
+            });
+            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
+                "babelforce",
+                "babelforce.access_token",
+                AuthHazard::ResourceOwnerSecretShared,
+                performer,
+            )])
+            .expect("one acquisition binding");
+            let journal = Arc::new(
+                crate::audit::AuditJournal::bind(scratch.0.join("refresh-audit.sqlite3"))
+                    .expect("fixture audit journal"),
+            );
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(Arc::new(FailCommitAfterProbe {
+                    inner: store.secrets(),
+                    applies: AtomicU64::new(0),
+                }))
+                .with_credential_acquisition(posture, Arc::new(bindings))
+                .with_audit(Arc::clone(&journal)),
+            );
+            let (status, lost) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token?acquire=refresh",
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{lost}");
+            assert_eq!(lost["code"], "refresh_commit_lost");
+            assert_eq!(lost["retryable"], false);
+            assert_eq!(lost["credential_state"], "uncertain");
+            let records = journal
+                .by_target("credential", "babelforce/babelforce.access_token", 20)
+                .expect("refresh audit evidence");
+            assert!(records.iter().any(|record| {
+                record.action == crate::audit::Action::CredentialRefreshCommitLost
+                    && record.outcome == crate::audit::Outcome::Refused
+            }));
+        }
+
+        #[tokio::test]
+        async fn refresh_reserves_the_largest_valid_rotation_before_the_vendor_call() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (app, _, refresh_calls) = acquisition_app(&store, posture, None, None);
+            let (status, answer) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": { "username": "alice", "password": "one-use" }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+
+            let secrets = store.secrets();
+            for index in 0..6 {
+                let reference = CredentialRef::new(
+                    "acme",
+                    "com.zendesk.api",
+                    &format!("filler-{index}"),
+                    "token",
+                )
+                .expect("filler credential address");
+                secrets
+                    .put(
+                        &reference,
+                        &Secret::new("x".repeat(MAX_CREDENTIAL_VALUE_BYTES)),
+                    )
+                    .await
+                    .expect("filler credential");
+            }
+
+            let (status, refused) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token?acquire=refresh",
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(
+                refresh_calls.load(Ordering::Relaxed),
+                0,
+                "local quota refusal must precede vendor-side refresh rotation",
+            );
+        }
+
+        #[tokio::test]
+        async fn instance_migrations_move_and_remove_acquisition_companions_with_the_access_token()
+        {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let performer = Arc::new(RecordingAcquirer {
+                password_calls: Arc::new(AtomicU64::new(0)),
+                refresh_calls: Arc::new(AtomicU64::new(0)),
+                refusal: None,
+            });
+            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
+                "babelforce",
+                "babelforce.access_token",
+                AuthHazard::ResourceOwnerSecretShared,
+                performer,
+            )])
+            .expect("one acquisition binding");
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(store.secrets())
+                .with_connection_registry(registry.clone())
+                .with_credential_acquisition(
+                    AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]),
+                    Arc::new(bindings),
+                ),
+            );
+            let body = || {
+                Some(json!({
+                    "acquisition": {
+                        "username": "alice@example.test",
+                        "password": "migration-password"
+                    }
+                }))
+            };
+
+            let (status, answer) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce/instances/prod?acquire=password",
+                body(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+            drop(app);
+
+            // No acquisition binding after restart. The stored marker/address convention must be
+            // sufficient to migrate the first connection's companions while a static second
+            // connection is added.
+            let restarted = instance_app(&store, registry);
+            let (status, answer) = call(
+                &restarted,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce/instances/sandbox",
+                Some(json!({
+                    "credentials": { "babelforce.access_token": "static-second" }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+
+            let scope = CredentialScope::new("acme", "com.babelforce.api")
+                .expect("babelforce credential scope");
+            let secrets = store.secrets();
+            let references = secrets
+                .references(&scope)
+                .await
+                .expect("two-instance acquisition inventory");
+            assert_eq!(references.len(), 5, "{references:?}");
+            assert!(references
+                .iter()
+                .all(|reference| reference.instance().is_some()));
+
+            let (status, removed) = call(
+                &restarted,
+                "alice",
+                Method::DELETE,
+                "/api/connections/babelforce/instances/sandbox",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{removed}");
+            let references = secrets
+                .references(&scope)
+                .await
+                .expect("collapsed acquisition inventory");
+            assert_eq!(references.len(), 4, "{references:?}");
+            assert!(references
+                .iter()
+                .all(|reference| reference.instance().is_none()));
+
+            let (status, removed) = call(
+                &restarted,
+                "alice",
+                Method::DELETE,
+                "/api/connections/babelforce/instances/prod",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{removed}");
+            assert!(secrets
+                .references(&scope)
+                .await
+                .expect("removed acquisition inventory")
+                .is_empty());
         }
 
         fn instance_app(

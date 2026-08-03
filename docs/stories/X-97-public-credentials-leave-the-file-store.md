@@ -1,11 +1,12 @@
 ---
 id: X-97
 title: "Public credentials leave the file store"
-status: ready
+status: in-progress
 priority: 2
 epic: remote-deployment
 areas: [exchange-host, exchange-server, deployment]
 note: "The file store is honest and mode-safe but application-plaintext; the existing SecretStore port is the seam for a managed Vault-class backend."
+design: docs/designs/managed-secret-backend.md
 ---
 
 # Public credentials leave the file store
@@ -35,3 +36,16 @@ and auditability no longer reduce to one plaintext file and its platform volume.
       dependency surface narrow.
 - [ ] Produce a versioned Fly release and live-verify managed reads/writes/rotation, refusal when the
       backend is unavailable, and completion of old-store decommissioning.
+
+## Notes
+
+- 2026-08-03 — Design selected AWS Secrets Manager behind the existing `SecretStore` port, with Fly
+  Machine OIDC exchanged through STS web identity, app-scoped audience/subject trust, a
+  deployment-scoped IAM/KMS policy, and a versioned scope manifest as the atomic commit point.
+  Implementation, migration, vendor rotation, Fly verification, and decommissioning remain open.
+- The current compatible Rust line is designed around exact `aws-sdk-secretsmanager` 1.99.0 and
+  `aws-config` 1.8.13 pins. The implementation must prove their complete locked graph on Rust 1.88;
+  it must not raise the workspace MSRV to admit the current SDK release.
+- `SecretBatch` keeps its checked mutations private to `connector-secrets`, so the atomic adapter
+  must first ship there as a crates.io release. Exchange will propagate that optional store feature;
+  it will not add a second mutation API or use a sibling path/git dependency.

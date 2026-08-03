@@ -312,7 +312,7 @@ mod tests {
     use crate::traffic::Traffic;
 
     /// The development roster this module's tests sign in through.
-    const ROSTER: &str = "agent:triage-bot@acme";
+    const ROSTER: &str = "service_account:triage-bot@acme";
 
     /// A bound credential store that holds nothing.
     ///

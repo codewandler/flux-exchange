@@ -1,7 +1,7 @@
 ---
 id: X-76
 title: "A vendor behaviour no document declares is a named quirk of one endpoint, never a field on the vocabulary"
-status: ready
+status: in-progress
 priority: 3
 epic: credential-acquisition
 design: docs/designs/credential-acquisition.md
@@ -82,6 +82,14 @@ than of one operation.
 - 2026-08-02 — **answered from the vendor's implementation, and the story rescoped.** The parameter
   exists; the document is what is incomplete. Owner-decided the same day: quirk of the endpoint, not a
   field on the vocabulary.
+- 2026-08-03 — implementation started as an endpoint-binding-only quirk. The host acquisition port
+  carries returned expiry but no requested lifetime; request-side `expires_in` and refresh
+  `account_id` exist only inside the babelforce HTTP binding configuration.
+- 2026-08-03 — the concrete HTTP performer now proves the ordinary endpoint receives neither field,
+  while the babelforce-bound performer adds them only for the measured password/refresh forms.
+  Returned `expire_time` is explicitly normalized from absolute UTC milliseconds, `expires_in=-1`
+  means no expiry, and every other negative duration refuses. The upstream documentation gap and
+  release of C-440 remain external completion conditions, so this story stays in progress.
 
 ## Notes
 - Upstream counterpart: **C-440** in flux-connectors, which is where the declaration lands — its

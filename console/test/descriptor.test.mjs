@@ -279,6 +279,39 @@ test('the_descriptor_is_derived_and_not_a_coincidence', () => {
   }
 })
 
+test('the_public_surface_capabilities_are_each_derived_from_their_own_backing_fact', () => {
+  const document = JSON.parse(descriptorJson(SURFACES))
+  const capability = (from, id) => {
+    const found = from.capabilities.find((entry) => entry.id === id)
+    assert.ok(found, `the descriptor does not publish the public \`${id}\` capability (X-65)`)
+    return found
+  }
+
+  for (const id of ['connections', 'grants', 'workflows']) {
+    assert.equal(capability(document, id).live, true, `the served \`${id}\` surface is withheld`)
+    const withdrawn = JSON.parse(
+      descriptorJson(asIf(id, { served: false, absent: `hypothetical ${id} withdrawal` }))
+    )
+    assert.equal(
+      capability(withdrawn, id).live,
+      false,
+      `marking the \`${id}\` surface unserved does not withdraw its public status`
+    )
+    assert.equal(capability(withdrawn, id).call, null)
+    assert.equal(capability(withdrawn, id).withheld, `hypothetical ${id} withdrawal`)
+  }
+
+  for (const [id, story] of [
+    ['agents', 'X-108'],
+    ['leases', 'X-118'],
+  ]) {
+    const planned = capability(document, id)
+    assert.equal(planned.live, false)
+    assert.equal(planned.call, null)
+    assert.match(planned.withheld, new RegExp(`\\b${story}\\b`))
+  }
+})
+
 // ---------------------------------------------------------------------------------------------
 // It is published to strangers, so it holds nothing that belongs to anyone.
 // ---------------------------------------------------------------------------------------------

@@ -179,11 +179,9 @@ export interface Step {
  *
  * **The order is the argument.** Reading the catalogue first, because it is the one thing that works
  * with no credential at all and it answers "is there anything here I want?" before anything else.
- * Then the identity, which is the concrete step that works today. Then authenticating, calling,
- * subscribing and reading back — the four that do not, in the order they would.
- *
- * It is short on purpose. A long tutorial for a platform this young would be describing something
- * that does not exist.
+ * Then identity, the human-owned setup surfaces, the two remote-binding verbs and the durable
+ * workflow record. Planned Agent and Lease capabilities stay in this same model so the public
+ * surface can name the intended shape without turning prose into a promise.
  */
 export const STEPS: readonly Step[] = [
   {
@@ -249,6 +247,51 @@ export const STEPS: readonly Step[] = [
       warn:
         'A Service Account receives no authority merely by authenticating. Tenant grants still ' +
         'decide which declared operations and channels it may use.',
+    },
+    pending: '',
+  },
+  {
+    id: 'connections',
+    title: 'Manage connections and credentials',
+    summary:
+      'Inspect and wire this tenant’s connector instances while credential values remain ' +
+      'write-only and every address is derived from the resolved principal’s tenant.',
+    surface: 'connections',
+    call: {
+      method: 'GET',
+      endpoint: '/api/connections',
+      caller:
+        'An operator authorized for this tenant. Service Accounts and other automation do not ' +
+        'receive connection-management authority.',
+      note:
+        'The collection returns connector instances, labels, declared credential addresses and ' +
+        'whether each credential is held, plus value-free supplier evidence. It never returns a ' +
+        'credential or setting value.',
+      warn:
+        'Writing or deleting connection state changes the authority later invocations use. Those ' +
+        'verbs are operator-scoped independently of this readable collection entry point.',
+    },
+    pending: '',
+  },
+  {
+    id: 'grants',
+    title: 'Manage grants',
+    summary:
+      'Inspect and edit the tenant’s fail-closed policy over connector-declared risk, effects and ' +
+      'idempotency rather than lists of operation names.',
+    surface: 'grants',
+    call: {
+      method: 'GET',
+      endpoint: '/api/grants',
+      caller:
+        'An operator authorized for this tenant. An agent cannot read policy it could use to plan ' +
+        'around a refusal and cannot widen its own authority.',
+      note:
+        'The collection is the tenant’s current grant document. PUT replaces it and POST ' +
+        '/api/grants/preview evaluates a proposed selector without saving it.',
+      warn:
+        'With no admitted grant, invocation and inbound subscription refuse before credential ' +
+        'material is read or vendor traffic is delivered.',
     },
     pending: '',
   },
@@ -322,6 +365,28 @@ export const STEPS: readonly Step[] = [
     pending: '',
   },
   {
+    id: 'workflows',
+    title: 'Store and publish workflows',
+    summary:
+      'Author, validate and publish immutable tenant-local Flux Programs; triggers, conditions ' +
+      'and schedules remain Program semantics rather than a second Exchange execution model.',
+    surface: 'workflows',
+    call: {
+      method: 'GET',
+      endpoint: '/api/workflows',
+      caller:
+        'An operator authorized for this tenant. Agents invoke a published workflow through the ' +
+        'ordinary operation and grant boundary; they do not mutate its stored Program.',
+      note:
+        'The collection lists tenant workflow drafts and immutable published versions. Run ' +
+        'records are read separately through /api/workflow-runs.',
+      warn:
+        'Publishing freezes the Program and its derived requirements. It does not create a ' +
+        'parallel trigger or scheduling runtime inside Exchange.',
+    },
+    pending: '',
+  },
+  {
     id: 'read-what-happened',
     title: 'Read back what you did',
     summary:
@@ -341,6 +406,25 @@ export const STEPS: readonly Step[] = [
       warn: '',
     },
     pending: '',
+  },
+  {
+    id: 'agents',
+    title: 'Host Managed Agents',
+    summary:
+      'Run a model, authored loop and bounded operation and datasource capabilities as a Managed ' +
+      'Agent inside an installed Flux App.',
+    surface: null,
+    call: null,
+    pending: 'Planned in X-108, “Host installed Flux Apps and Managed Agents.”',
+  },
+  {
+    id: 'leases',
+    title: 'Hold runtime leases',
+    summary:
+      'Hold a caller-grant-scoped pull resource until its holder releases it or its TTL passes.',
+    surface: null,
+    call: null,
+    pending: 'Planned in X-118, “Make leases own rich runtime resources.”',
   },
 ]
 

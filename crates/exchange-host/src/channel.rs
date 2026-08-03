@@ -6,9 +6,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
+use connector_address::InstanceId;
+use connector_catalog::{provider, ProviderKey};
 use connector_pack::{ConfigStore, Configuration, Credentials, PreparedChannelPlan};
-use connector_secrets::SecretStore;
-use serde::{Deserialize, Serialize};
+use connector_secrets::{CredentialScope, SecretStore};
+use serde::ser::SerializeStruct as _;
+use serde::{Deserialize, Serialize, Serializer};
 
 use crate::Tenant;
 
@@ -49,14 +52,30 @@ impl std::fmt::Display for ChannelId {
 }
 
 /// Persistent operator-owned state for one vendor channel.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelRecord {
     id: ChannelId,
     tenant: Tenant,
     connector: String,
-    connection: String,
+    connection: InstanceId,
     binding: String,
     events: BTreeSet<String>,
+}
+
+impl Serialize for ChannelRecord {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut record = serializer.serialize_struct("ChannelRecord", 6)?;
+        record.serialize_field("id", &self.id)?;
+        record.serialize_field("tenant", &self.tenant)?;
+        record.serialize_field("connector", &self.connector)?;
+        record.serialize_field("connection", self.connection.as_str())?;
+        record.serialize_field("binding", &self.binding)?;
+        record.serialize_field("events", &self.events)?;
+        record.end()
+    }
 }
 
 impl ChannelRecord {
@@ -66,12 +85,11 @@ impl ChannelRecord {
         id: ChannelId,
         tenant: Tenant,
         connector: impl Into<String>,
-        connection: impl Into<String>,
+        connection: InstanceId,
         binding: impl Into<String>,
         events: BTreeSet<String>,
     ) -> Result<Self, ChannelRefusal> {
         let connector = declared_name(connector.into())?;
-        let connection = declared_name(connection.into())?;
         let binding = declared_name(binding.into())?;
         if events.is_empty() || events.len() > MAX_EVENTS {
             return Err(ChannelRefusal::InvalidEventSet);
@@ -108,7 +126,7 @@ impl ChannelRecord {
     }
 
     /// Existing connection reference within the record's tenant.
-    pub fn connection(&self) -> &str {
+    pub fn connection(&self) -> &InstanceId {
         &self.connection
     }
 
@@ -133,6 +151,17 @@ impl ChannelRecord {
             return Err(ChannelRefusal::InvalidEventSet);
         }
         self.events = events;
+        Ok(self)
+    }
+
+    /// Rebind to another host-resolved immutable connection while replacing the event subset.
+    pub fn with_connection_and_events(
+        mut self,
+        connection: InstanceId,
+        events: BTreeSet<String>,
+    ) -> Result<Self, ChannelRefusal> {
+        self = self.with_events(events)?;
+        self.connection = connection;
         Ok(self)
     }
 }
@@ -176,10 +205,56 @@ impl ConnectorChannelPlanner {
         record: &ChannelRecord,
     ) -> Result<PreparedChannelPlan, ChannelPlanRefusal> {
         let tenant = record.tenant().as_str();
-        let credentials = Credentials::new(Arc::clone(&self.credentials), tenant)
+        let provider = provider(ProviderKey::id(record.connector())).ok_or(ChannelPlanRefusal)?;
+        let authority = provider.authority.ok_or(ChannelPlanRefusal)?;
+        let scope = CredentialScope::new(tenant, authority).map_err(|_| ChannelPlanRefusal)?;
+        let references = self
+            .credentials
+            .references(&scope)
+            .await
             .map_err(|_| ChannelPlanRefusal)?;
-        let settings = Configuration::new(Arc::clone(&self.settings), tenant)
-            .map_err(|_| ChannelPlanRefusal)?;
+        let mut legacy = false;
+        let mut instances = BTreeSet::new();
+        for reference in references {
+            let declared = reference.is_default_service()
+                && provider
+                    .auth
+                    .iter()
+                    .any(|credential| credential.leaf == reference.credential());
+            if !declared {
+                continue;
+            }
+            match reference.instance() {
+                Some(instance) => {
+                    instances.insert(instance.clone());
+                }
+                None => legacy = true,
+            }
+        }
+        if legacy && !instances.is_empty() {
+            return Err(ChannelPlanRefusal);
+        }
+        let selected = if legacy {
+            None
+        } else if instances.contains(record.connection()) {
+            Some(record.connection())
+        } else {
+            return Err(ChannelPlanRefusal);
+        };
+        let (credentials, settings) = match selected {
+            Some(instance) => (
+                Credentials::for_instance(Arc::clone(&self.credentials), tenant, instance.as_str())
+                    .map_err(|_| ChannelPlanRefusal)?,
+                Configuration::for_instance(Arc::clone(&self.settings), tenant, instance.as_str())
+                    .map_err(|_| ChannelPlanRefusal)?,
+            ),
+            None => (
+                Credentials::new(Arc::clone(&self.credentials), tenant)
+                    .map_err(|_| ChannelPlanRefusal)?,
+                Configuration::new(Arc::clone(&self.settings), tenant)
+                    .map_err(|_| ChannelPlanRefusal)?,
+            ),
+        };
 
         connector_pack::channel_plan(record.connector(), record.binding(), credentials, settings)
             .await
@@ -313,7 +388,7 @@ mod file {
                 ChannelId::new(wire.id).map_err(|_| ChannelStoreError::Invalid)?,
                 Tenant::new(wire.tenant).map_err(|_| ChannelStoreError::Invalid)?,
                 wire.connector,
-                wire.connection,
+                InstanceId::parse(&wire.connection).map_err(|_| ChannelStoreError::Invalid)?,
                 wire.binding,
                 wire.events,
             )
@@ -327,7 +402,7 @@ mod file {
                 id: record.id.to_string(),
                 tenant: record.tenant.to_string(),
                 connector: record.connector.clone(),
-                connection: record.connection.clone(),
+                connection: record.connection.to_string(),
                 binding: record.binding.clone(),
                 events: record.events.clone(),
             }
@@ -498,18 +573,143 @@ mod file {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use connector_pack::Field;
+    use connector_secrets::{CredentialRef, CredentialScope, InstanceId, Secret, StoreError};
+
     use super::*;
+
+    const FIRST_INSTANCE: &str = "11111111-1111-4111-8111-111111111111";
+    const SECOND_INSTANCE: &str = "22222222-2222-4222-8222-222222222222";
 
     fn record(tenant: &str, id: &str) -> ChannelRecord {
         ChannelRecord::new(
             ChannelId::new(id).expect("id"),
             Tenant::new(tenant).expect("tenant"),
             "asterisk",
-            "asterisk",
+            InstanceId::parse(FIRST_INSTANCE).expect("instance"),
             "ari-events",
             ["channel-created".to_string()].into_iter().collect(),
         )
         .expect("record")
+    }
+
+    struct RecordingSecrets {
+        references: Vec<CredentialRef>,
+        reads: Mutex<Vec<CredentialRef>>,
+    }
+
+    #[async_trait]
+    impl SecretStore for RecordingSecrets {
+        async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+            self.reads.lock().expect("reads").push(reference.clone());
+            Ok(Secret::new("not-a-real-password"))
+        }
+
+        async fn put(&self, _: &CredentialRef, _: &Secret) -> Result<(), StoreError> {
+            unreachable!("planning writes no credential")
+        }
+
+        async fn delete(&self, _: &CredentialRef) -> Result<(), StoreError> {
+            unreachable!("planning deletes no credential")
+        }
+
+        async fn references(&self, _: &CredentialScope) -> Result<Vec<CredentialRef>, StoreError> {
+            Ok(self.references.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingConfig {
+        reads: Mutex<Vec<Option<String>>>,
+    }
+
+    impl ConfigStore for RecordingConfig {
+        fn get(&self, _: &str, _: &str, _: &str, _: Field<'_>) -> Option<String> {
+            self.reads.lock().expect("reads").push(None);
+            Some("legacy".to_owned())
+        }
+
+        fn get_for_instance(
+            &self,
+            _: &str,
+            _: &str,
+            instance: Option<&InstanceId>,
+            _: &str,
+            field: Field<'_>,
+        ) -> Option<String> {
+            self.reads
+                .lock()
+                .expect("reads")
+                .push(instance.map(ToString::to_string));
+            let prefix = instance?.as_str().split('-').next()?;
+            match field {
+                Field::Endpoint("host") => Some(format!("pbx-{prefix}.example.com")),
+                Field::Username("asterisk.password") => Some(format!("user-{prefix}")),
+                Field::ChannelQuery {
+                    channel: "ari-events",
+                    parameter: "app",
+                } => Some(format!("app-{prefix}")),
+                _ => None,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn two_channels_select_distinct_credential_and_configuration_instances() {
+        let tenant = Tenant::new("alpha").expect("tenant");
+        let reference = |instance: &str| {
+            CredentialRef::for_instance(
+                tenant.as_str(),
+                "org.asterisk.ari",
+                instance,
+                "default",
+                "password",
+            )
+            .expect("reference")
+        };
+        let secrets = Arc::new(RecordingSecrets {
+            references: vec![reference(FIRST_INSTANCE), reference(SECOND_INSTANCE)],
+            reads: Mutex::new(Vec::new()),
+        });
+        let configuration = Arc::new(RecordingConfig::default());
+        let planner = ConnectorChannelPlanner::new(secrets.clone(), configuration.clone());
+        let channel = |id: &str, instance: &str| {
+            ChannelRecord::new(
+                ChannelId::new(id).expect("id"),
+                tenant.clone(),
+                "asterisk",
+                InstanceId::parse(instance).expect("instance"),
+                "ari-events",
+                ["channel-created".to_owned()].into_iter().collect(),
+            )
+            .expect("record")
+        };
+
+        planner
+            .prepare(&channel("ch_first", FIRST_INSTANCE))
+            .await
+            .expect("first plan");
+        planner
+            .prepare(&channel("ch_second", SECOND_INSTANCE))
+            .await
+            .expect("second plan");
+
+        let credential_reads = secrets.reads.lock().expect("reads");
+        assert_eq!(
+            *credential_reads,
+            vec![reference(FIRST_INSTANCE), reference(SECOND_INSTANCE)]
+        );
+        let configuration_reads = configuration.reads.lock().expect("reads");
+        assert!(configuration_reads.iter().all(Option::is_some));
+        assert!(configuration_reads
+            .iter()
+            .any(|read| read.as_deref() == Some(FIRST_INSTANCE)));
+        assert!(configuration_reads
+            .iter()
+            .any(|read| read.as_deref() == Some(SECOND_INSTANCE)));
     }
 
     #[test]
@@ -535,6 +735,13 @@ mod tests {
             changed.events(),
             &["channel-destroyed".to_string()].into_iter().collect()
         );
+    }
+
+    #[test]
+    fn a_serialized_record_carries_the_uuid_as_an_address_component() {
+        let value = serde_json::to_value(record("alpha", "ch_1")).expect("record JSON");
+        assert_eq!(value["connection"], FIRST_INSTANCE);
+        assert!(value.get("connection_label").is_none());
     }
 
     #[cfg(unix)]

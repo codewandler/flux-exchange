@@ -105,9 +105,9 @@
 //!   the page. The remedy is the revocation route on this same resource.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, MethodRouter};
+use axum::routing::{delete, get, MethodRouter};
 use axum::{Extension, Json};
 use exchange_host::Principal;
 use serde::Deserialize;
@@ -131,7 +131,7 @@ pub(super) const MODULE: Module = Module {
             // proxies `/api` to this host, so anything outside that prefix is answered by the SPA
             // fallback instead.
             //
-            // A collection path with **no parameter**. There is nothing about *which* agent a mint
+            // A collection path with **no parameter**. There is nothing about *which* Service Account a mint
             // could take, and in particular nothing a tenant could be spelled into —
             // `super::tests::no_published_route_takes_a_tenant_in_its_path` walks the whole surface,
             // and this route gives it nothing to find.
@@ -147,11 +147,6 @@ pub(super) const MODULE: Module = Module {
             access: Access::Operator,
             method_router: item,
         },
-        Route {
-            path: "/api/agents",
-            access: Access::Operator,
-            method_router: legacy_collection,
-        },
     ],
 };
 
@@ -161,10 +156,6 @@ fn collection() -> MethodRouter<AppState> {
 
 fn item() -> MethodRouter<AppState> {
     delete(revoke)
-}
-
-fn legacy_collection() -> MethodRouter<AppState> {
-    post(mint_legacy)
 }
 
 /// What a caller supplies when it mints a Service Account.
@@ -238,16 +229,6 @@ async fn mint(
     }
 }
 
-/// The v0.16 create alias. It produces the canonical principal and advertises its replacement on
-/// every response, including refusals.
-async fn mint_legacy(
-    state: State<AppState>,
-    principal: Extension<Principal>,
-    body: Json<NewServiceAccount>,
-) -> Response {
-    deprecated(mint(state, principal, body).await)
-}
-
 async fn list(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -313,24 +294,6 @@ fn refuse_management(error: ServiceAccountError) -> Response {
             )
         }
     }
-}
-
-fn deprecated(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        HeaderName::from_static("deprecation"),
-        HeaderValue::from_static("true"),
-    );
-    response.headers_mut().insert(
-        HeaderName::from_static("link"),
-        HeaderValue::from_static("</api/service-accounts>; rel=\"successor-version\""),
-    );
-    response.headers_mut().insert(
-        HeaderName::from_static("warning"),
-        HeaderValue::from_static(
-            "299 flux-exchange \"/api/agents is deprecated and will be removed in v0.17\"",
-        ),
-    );
-    response
 }
 
 /// A refusal as the caller sees it, per kind of failure.
@@ -427,7 +390,8 @@ mod tests {
     ///
     /// The development roster can produce every kind without needing separate credential fixtures,
     /// so this is what lets the human-only lifecycle rule be asserted over the wire.
-    const EVERY_KIND_ROSTER: &str = "user:alice@acme,agent:incumbent@acme,service:ingest@acme";
+    const EVERY_KIND_ROSTER: &str =
+        "user:alice@acme,service_account:incumbent@acme,service:ingest@acme";
 
     /// What a hostile caller claims, down every vector. It is never a tenant that exists.
     const CLAIMED: &str = "attacker";
@@ -538,7 +502,7 @@ mod tests {
     /// other two from passing vacuously.
     ///
     /// **Asserted against the store, not only the status.** A `403` that had already written the
-    /// agent would be the whole defect wearing the right status code, and the store is the thing
+    /// Service Account would be the whole defect wearing the right status code, and the store is the thing
     /// `resolve` reads — so what is on disk is what decides whether a successor exists.
     #[tokio::test]
     async fn only_a_user_mints_and_no_other_kind_creates_a_successor() {
@@ -569,7 +533,7 @@ mod tests {
         //
         // The Service Account is the story's case — a leaked token minting successors is what makes
         // revocation (X-38) an incomplete remedy, invisibly, because a successor is an ordinary
-        // agent with no recorded relationship to the one that was revoked.
+        // Service Account with no recorded relationship to the one that was revoked.
         //
         // The service is the same question one level up, and it is decided rather than omitted:
         // see this module's documentation for why refusing is the answer.
@@ -798,7 +762,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_legacy_create_alias_is_visibly_deprecated_and_mints_the_canonical_kind() {
+    async fn the_retired_create_alias_is_not_a_route() {
         let scratch = Scratch::new("legacy-alias");
         let (status, headers, body) = call(
             armed(&scratch),
@@ -814,14 +778,8 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::CREATED, "{body}");
-        assert_eq!(body["principal"]["kind"], "service_account");
-        assert_eq!(headers.get("deprecation").unwrap(), "true");
-        assert!(headers["link"]
-            .to_str()
-            .unwrap()
-            .contains("/api/service-accounts"));
-        assert!(headers["warning"].to_str().unwrap().contains("v0.17"));
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(headers.get("deprecation").is_none());
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1071,7 +1029,7 @@ mod tests {
     /// the host says it cannot hold the record — and a token it could not record is one nobody
     /// could revoke.
     #[tokio::test]
-    async fn a_composition_with_no_agent_store_refuses_and_names_the_setting() {
+    async fn a_composition_with_no_service_account_store_refuses_and_names_the_setting() {
         let app = app(AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         )));

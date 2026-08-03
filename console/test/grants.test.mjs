@@ -777,21 +777,21 @@ test('revoking_sends_the_set_without_that_connector', async () => {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * An agent is told why there is no listing, rather than being shown one that failed.
+ * A Service Account is told why there is no listing, rather than being shown one that failed.
  *
  * `routes::grants::MAY_GRANT` admits a `User` on the **read** as well as the write, which is the
  * half that is easy to get wrong — `admit_grant` withholds a tenant's policy from a refused caller
  * so that a token cannot enumerate it one call at a time, and a read open to every kind would hand
  * the whole of it over at once. So the screen must not ask, and must say why.
  */
-test('an_agent_is_told_why_there_is_no_listing', () => {
-  const view = screen({ session: { status: 'ready', principal: user('agent') } })
+test('a_service_account_is_told_why_there_is_no_listing', () => {
+  const view = screen({ session: { status: 'ready', principal: user('service_account') } })
   const shown = rendered(view.root)
 
   assert.equal(at(view.root, 'gate').props['data-state'], 'may-not-grant')
-  assert.equal(at(view.root, 'form'), null, 'an agent is offered a form the service would refuse')
-  assert.equal(at(view.root, 'held'), null, 'an agent is shown a tenant’s policy')
-  assert.equal(at(view.root, 'empty'), null, 'an agent is told this tenant holds nothing, which is a fact about the tenant')
+  assert.equal(at(view.root, 'form'), null, 'a Service Account is offered a form the service would refuse')
+  assert.equal(at(view.root, 'held'), null, 'a Service Account is shown a tenant’s policy')
+  assert.equal(at(view.root, 'empty'), null, 'a Service Account is told this tenant holds nothing, which is a fact about the tenant')
   assert.match(shown, /enumerate/, 'the refusal does not say why the read is closed, so it reads as arbitrary')
 })
 

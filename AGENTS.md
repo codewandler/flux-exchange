@@ -42,7 +42,7 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.16.2. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
+**v0.17.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
 authentication, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
@@ -86,11 +86,12 @@ implies a working service costs more than an honest gap.
 
 ⚠ **Hazardous credential acquisition is fail-closed** (X-74). Unset,
 `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` permits no declared hazard; an unknown entry refuses startup and
-names it. `resource_owner_secret_shared` is the only recognised opt-in. Once X-75 makes that
-acquisition reachable, omitting the opt-in will look like a connection outage: the host answers its
-own `403` refusal naming the connector and hazard before any vendor request, distinct from the vendor
-rejecting credentials. No released connector declares a hazard until upstream C-440 lands, so the
-current path is fixture-tested rather than live.
+names it. `resource_owner_secret_shared` is the only recognised opt-in. X-75's injectable server seam
+exists, but no released connector declares the acquisition until upstream C-440 lands, so the
+production registry remains empty and the current path is fixture-tested rather than vendor-live.
+Once a released declaration activates it, omitting the opt-in will look like a connection outage:
+the host answers its own `403` refusal naming the connector and hazard before any vendor request,
+distinct from the vendor rejecting credentials.
 
 ## Build / test / run
 
@@ -233,8 +234,8 @@ Each is stated in `docs/vision.md` and several are already enforced by tests in
   this from the manifest. Do not add an override.
 - **Grants select by declared metadata, not by name**, and an explicit `deny` beats an explicit
   `allow`.
-- **A Service Account token grants access to an operation, never to a credential.** The current
-  `/api/agents` name is legacy migration debt; **Agent** is reserved for Flux's model + loop + bounded
+- **A Service Account token grants access to an operation, never to a credential.** The v0.16
+  `/api/agents` migration alias is gone; **Agent** is reserved for Flux's model + loop + bounded
   capabilities and becomes a Managed Agent when Exchange hosts it.
 - **Refuse; never repair.** A missing credential, a widened file mode, an unbound config value: each
   refuses and names the address, never the value. A store that falls back to memory, or a mode that

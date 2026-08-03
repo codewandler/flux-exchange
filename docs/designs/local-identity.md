@@ -17,7 +17,7 @@ operators.
 
 Not where it looks. A development identity **already exists** and works: `DevIdentity`
 (`crates/exchange-server/src/dev_identity.rs`) mints principals from a roster an operator writes at
-startup, `FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,agent:triage-bot@acme`. It is armed explicitly,
+startup, `FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,service_account:triage-bot@acme`. It is armed explicitly,
 refuses to start on a malformed roster rather than silently dropping an entry, and fixes each
 principal's tenant at startup so no request field can reach it. It is good work and it is not the
 problem.

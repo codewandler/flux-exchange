@@ -654,13 +654,14 @@ derive.
 ### What the gate rests on, unchanged from X-47
 
 A kind gate is only as good as what the identity port reports. `dev_identity.rs` mints
-`PrincipalKind::Agent` from a roster string, and a composition whose identity port mislabels an
-agent as a user bypasses every gate here. That is the port's contract rather than this surface's,
+`PrincipalKind::ServiceAccount` from a `service_account:` roster entry, and a composition whose
+identity port mislabels a Service Account as a user bypasses every gate here. That is the port's
+contract rather than this surface's,
 and it is why the roster is fixed at startup and forces a loopback bind.
 
 The second residual is X-47's, and this story does not clear it either: **the declared access is the
 only enforcement point.** The credential surface's own pattern is enforce-twice —
-`agents::MAY_MINT` is re-checked inside `AgentStore::mint` — and neither `create` nor `rotate` can
+`ServiceAccountStore::mint` re-checks its human-kind requirement — and neither `create` nor `rotate` can
 mirror it, because both write through `SecretStore::put` on a port that takes a `CredentialRef` and
 a `Secret` and has no principal to check. Widening that port is a change to a published crate this
 repository does not own. If a second handler ever reaches `SecretStore::put` without declaring an

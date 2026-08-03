@@ -47,12 +47,9 @@ import { SURFACES, type Surface } from './surfaces.mts'
  *
  * **The path carries nothing and must not learn how.** A route that can hold a value is a value in
  * the address bar, in every history entry after it, and in the referrer of every link the page then
- * offers. `test/agents.test.mjs` pins `parseRoute` to a bare `{ name: 'agents' }`.
+ * offers. `test/agents.test.mjs` pins `parseRoute` to a bare `{ name: 'service-accounts' }`.
  */
 export const SERVICE_ACCOUNTS_PATH = '/service-accounts'
-
-/** The retired fragment accepted only so old bookmarks can be replaced with the canonical one. */
-export const LEGACY_AGENTS_PATH = '/agents'
 
 /**
  * The onboarding step that *is* this screen.
@@ -67,11 +64,11 @@ export const MINT_STEP = 'create-service-account'
 /**
  * The kinds of principal that may mint, as this console understands X-40.
  *
- * **This is a courtesy, not the rule.** The rule is `routes::service_accounts::MAY_MINT`, enforced by the
- * route's `Access::PrincipalOfKind` guard and again inside `AgentStore::mint`. What this list buys
+ * **This is a courtesy, not the rule.** The rule is the service's operator guard, repeated by the
+ * human-kind check inside `ServiceAccountStore::mint`. What this list buys
  * is that an operator who cannot mint is told so instead of being offered a button and discovering
  * the `403` by pressing it — and when the two ever disagree, the service wins and its own sentence
- * is what the screen shows, which is why `Agents.mts` renders a refusal whole.
+ * is what the mint screen shows, which is why it renders a refusal whole.
  *
  * Spelled in the vocabulary `GET /api/session` publishes a principal's `kind` in, lowercase, which
  * is `PrincipalKind`'s own `Display`.
@@ -81,7 +78,7 @@ export const MAY_MINT: readonly string[] = ['user']
 /**
  * Whether this principal may create a principal.
  *
- * A `User`, and nothing else. An `Agent` may not, because a leaked token that mints successors
+ * A `User`, and nothing else. A `Service Account` may not, because a leaked token that mints successors
  * makes revocation an incomplete remedy in a way no operator can see; a `Service` may not, because
  * nothing in this repository mints, verifies, lists or revokes a service credential, so admitting
  * it would put the same defect one level further out of sight. The full argument is in

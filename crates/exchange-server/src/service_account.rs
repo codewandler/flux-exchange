@@ -3,7 +3,7 @@
 //! A Service Account is a non-human API principal, not a Flux Agent. The latter owns a model and an
 //! authored loop; this type owns only a bearer identity whose authority remains bounded by grants.
 //! The original X-36 through X-38 implementation called these records “agents”; the v0.16 migration
-//! keeps that word only where it names the legacy disk key, compatibility route or historical test.
+//! keeps that word only where it names the legacy disk key or a historical test.
 //!
 //! # This is not a session, and it must not share one's machinery
 //!
@@ -95,9 +95,6 @@ use crate::entropy;
 /// `exchange_host::CREDENTIAL_STORE_SETTING` does: a refusal and the reader that would have produced
 /// the value must not drift into two spellings.
 pub const SERVICE_ACCOUNT_STORE_SETTING: &str = "FLUX_EXCHANGE_SERVICE_ACCOUNTS";
-
-/// The v0.16 compatibility setting, removed with the legacy route in v0.17.
-pub const LEGACY_AGENT_STORE_SETTING: &str = "FLUX_EXCHANGE_AGENTS";
 
 /// A location that would have worked, quoted in a refusal. Written with `$HOME` rather than
 /// expanded: nothing here reads the environment.
@@ -657,14 +654,17 @@ fn read(
         });
     }
 
-    for agent in stored.service_accounts.values() {
-        Tenant::new(agent.tenant.clone()).map_err(|source| {
+    for service_account in stored.service_accounts.values() {
+        Tenant::new(service_account.tenant.clone()).map_err(|source| {
             ServiceAccountStoreError::Unreadable {
                 path: path.display().to_string(),
-                reason: format!("agent `{}` names an unusable tenant: {source}", agent.id),
+                reason: format!(
+                    "Service Account `{}` names an unusable tenant: {source}",
+                    service_account.id
+                ),
             }
         })?;
-        admit_id(&agent.id).map_err(|source| ServiceAccountStoreError::Unreadable {
+        admit_id(&service_account.id).map_err(|source| ServiceAccountStoreError::Unreadable {
             path: path.display().to_string(),
             reason: source.to_string(),
         })?;
@@ -922,13 +922,13 @@ impl fmt::Display for ServiceAccountStoreError {
             Self::Unreadable { path, reason } => write!(
                 f,
                 "the Service Account store at `{path}` cannot be read: {reason}. Refusing rather than \
-                 starting with an empty roster, which would silently revoke every agent",
+                 starting with an empty roster, which would silently revoke every Service Account",
             ),
             Self::Writable { path, what, mode } => write!(
                 f,
                 "refusing the Service Account store at `{path}`: the {what} is mode {mode:04o}, so somebody \
                  other than its owner can write it — and whoever can write it can plant a verifier \
-                 and authenticate as any agent in any tenant. `chmod 0600` on the file and `0700` \
+                 and authenticate as any Service Account in any tenant. `chmod 0600` on the file and `0700` \
                  on its directory",
             ),
         }
@@ -1285,7 +1285,7 @@ mod tests {
     /// The wire-level half — a body field, a header, a path segment — is
     /// `routes::service_accounts::tests`, which is where a caller's claim can actually be delivered.
     #[test]
-    fn the_minted_principal_is_an_agent_of_the_minting_principals_tenant() {
+    fn the_minted_principal_is_a_service_account_of_the_minting_principals_tenant() {
         let scratch = Scratch::new("tenant");
         let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
@@ -1384,11 +1384,11 @@ mod tests {
 
     /// **The store survives a restart**, which is the whole reason it is a file.
     ///
-    /// An in-memory store would pass every other test in this module and lose every agent's access
-    /// on the next deploy — and an operator whose agent stopped working would have nothing to
+    /// An in-memory store would pass every other test in this module and lose every Service
+    /// Account's access on the next deploy — and an operator whose automation stopped working would have nothing to
     /// attribute it to. This is that decision as an assertion.
     #[test]
-    fn an_agent_token_survives_a_restart() {
+    fn a_service_account_token_survives_a_restart() {
         let scratch = Scratch::new("restart");
         let path = scratch.store();
 
@@ -1753,7 +1753,7 @@ mod tests {
     /// The second half is what keeps expiry from becoming a way round the refusal: service_accounts nobody
     /// can use must not hold a place against the bound.
     #[test]
-    fn a_full_store_refuses_and_expired_agents_do_not_consume_the_bound() {
+    fn a_full_store_refuses_and_expired_service_accounts_do_not_consume_the_bound() {
         let scratch = Scratch::new("bound");
         let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 

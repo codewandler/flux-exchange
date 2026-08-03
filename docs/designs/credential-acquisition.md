@@ -1,6 +1,6 @@
 # Design: the host acquires a credential, and a weak way of acquiring one is labelled
 
-**Status:** proposed · **Epic:** `credential-acquisition` · **Stories:** X-72, X-73, X-74, X-75, X-76
+**Status:** accepted · **Epic:** `credential-acquisition` · **Stories:** X-72, X-73, X-74, X-75, X-76
 
 ## Why
 
@@ -216,7 +216,46 @@ fixture.
 - **A hazard is only as good as the declaration.** If upstream marks nothing, the filter admits
   everything and reads as safety. C-432's closing line is the standing warning: *a marking flux does
   not read is worse than none.* The guard is that this repository's filter refuses an **undeclared**
-  acquisition kind it does not recognise, rather than defaulting it to hazard-free.
+acquisition kind it does not recognise, rather than defaulting it to hazard-free.
+
+## Delivery seam while C-440 is unreleased (2026-08-03)
+
+The released catalogue still has no acquisition declaration to map. That does **not** permit this
+repository to infer one from the connector name: doing so would make X-74's property gate a name
+gate in disguise. The local delivery seam is therefore explicit and composition-owned:
+
+- `AppState` may be given an acquisition binding registry. Each entry fixes the connector,
+  declared hazard, target credential and performer before a request arrives. The HTTP body selects
+  neither endpoint nor hazard.
+- The production composition binds an empty registry until C-440 is released. Tests inject a
+  babelforce-shaped fixture entry and drive the real connection route. This is honest executable
+  coverage of the seam, not a claim that the released catalogue declares it.
+- The existing connection paths are reused. `?acquire=password` and `?acquire=refresh` select the
+  request form and make the value-free audit vocabulary distinguish vendor acquisition from a
+  human-supplied credential; the fixed registry entry still decides whether either form exists.
+- The access token remains at the connector's ordinary declared credential address. Returned
+  expiry and refresh token live at reserved companion addresses in the same credential scope and
+  move through one `SecretBatch`. A refresh that rotates its refresh token therefore cannot commit
+  half of the pair. Inventory projects only declared credentials, and removal/migration includes
+  companions so the internal state cannot be orphaned.
+- A successful acquisition is recorded as acquired/initiated-by, never as supplied-by. X-60's
+  question remains answerable without pretending the operator pasted a token the vendor minted.
+
+### The HTTP request shape, and where the quirks stop
+
+`exchange-host` owns `Redemption<'_>`, `Refresh<'_>`, the acquired token result and the async
+performer port. None has a requested lifetime, account id, URL, HTTP method or form vocabulary.
+
+`exchange-server` owns the concrete HTTP performer. Its ordinary form sends only the OAuth grant
+fields. A `BabelforceTokenEndpointQuirks` value, stored on that one performer instance, may add
+`expires_in` to password and refresh requests and `account_id` to refresh. Its documentation carries
+the complete measured table, including authorization-code ignoring `expires_in`; no caller field
+and no generic acquisition type can carry any of them. Applying the babelforce configuration to a
+second connector is the failing-first test.
+
+The vendor response's `expires_in` is different: it is observed state, not a requested policy. The
+performer turns it into an absolute expiry and the connection stores it. No default TTL is invented
+when the response omits it.
 
 ## Acceptance / done
 

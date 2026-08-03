@@ -1,11 +1,12 @@
 ---
 id: X-122
 title: "Bind a generated channel to one immutable connection instance"
-status: ready
+status: done
 priority: 1
 epic: generated-connector-channels
 areas: [exchange-host, exchange-server, console, docs]
-note: "X-14 makes invocation instance-aware; generated channels still store the connector id as their connection and need a rename-safe UUID binding"
+design: docs/designs/channel-connection-bindings.md
+note: "Generated channels now resolve operator labels to rename-safe host-minted instance UUIDs and refuse stale deletion."
 ---
 
 # Bind a generated channel to one immutable connection instance
@@ -27,25 +28,27 @@ looking healthy.
 
 ## Acceptance
 
-- [ ] Write a design first. Decide whether a channel record persists the immutable connection UUID
+- [x] Write a design first. Decide whether a channel record persists the immutable connection UUID
       directly or persists another stable Exchange-owned binding; a mutable label alone is not
       sufficient because renaming must not retarget or break a running channel.
-- [ ] A signed-in human chooses an operator label at channel create/update time; the host resolves it
+- [x] A signed-in human chooses an operator label at channel create/update time; the host resolves it
       inside the principal's tenant and persists no caller-supplied UUID, authority, host or
       credential address.
-- [ ] **Failing-first test** — with two connections for one connector, two channels resolve distinct
+- [x] **Failing-first test** — with two connections for one connector, two channels resolve distinct
       credential and configuration addresses and neither silently uses the first match.
-- [ ] **Failing-first test** — tenant A cannot bind a channel to tenant B's label or UUID.
-- [ ] Omitting a connection is valid only for a sole connection. Several held instances and no
+- [x] **Failing-first test** — tenant A cannot bind a channel to tenant B's label or UUID.
+- [x] Omitting a connection is valid only for a sole connection. Several held instances and no
       selector refuse as ambiguous; no default or primary instance exists.
-- [ ] Renaming a connection moves no credential and does not retarget, stop or orphan a channel
+- [x] Renaming a connection moves no credential and does not retarget, stop or orphan a channel
       already bound to its immutable instance.
-- [ ] Deleting an instance refuses while a durable channel still binds it, or atomically removes the
+- [x] Deleting an instance refuses while a durable channel still binds it, or atomically removes the
       channel binding under an explicitly designed cascade. No stale channel repeatedly retries an
       address that no longer exists.
-- [ ] Restored channels after restart resolve the same instance they used before restart.
-- [ ] The console and public management docs expose labels only and explain the rename/delete
-      consequences without rendering a credential value.
+- [x] Restored channels after restart resolve the same instance they used before restart.
+- [x] The console exposes labels only and explains the rename/delete consequences without rendering
+      a credential value.
+- [x] Public management docs expose labels only and explain the rename/delete consequences without
+      rendering a credential value.
 
 ## Notes
 
@@ -54,3 +57,18 @@ looking healthy.
 - Keep `ChannelRecord` value-free. A stable UUID is an address component, not credential material,
   but it remains tenant state and must not enter the anonymous catalogue or descriptor.
 - This story is a prerequisite for claiming generated channels support plural connector instances.
+
+## Progress
+
+- 2026-08-03: the accepted design persists the host-minted UUID directly and keeps labels as the
+  authenticated management projection. Rust host/server support is implemented: create and update
+  resolve labels through the tenant registry and credential inventory, omission is sole-only,
+  planner ports select the stored instance, legacy address elision remains compatible, and durable
+  bindings refuse connection deletion under the existing connection guard. Focused tests cover two
+  distinct credential/configuration selections, cross-tenant label and UUID attempts, ambiguity,
+  rename stability, deletion-before-mutation, and persistent restoration.
+- 2026-08-03: the console now derives channel choices from connection labels, sends only the selected
+  label on create and rebind, displays the current label, and explains that rename preserves the
+  binding while deletion refuses until channels are removed or rebound. Focused channel tests and
+  the production console build pass. The public subscribe capability now states the same label-only
+  contract and rename/delete consequences. The full Rust, console and public-site gates pass.

@@ -1,7 +1,7 @@
 ---
 id: X-72
 title: "Credential acquisition, and a labelled weak one (epic)"
-status: ready
+status: in-progress
 priority: 1
 epic: credential-acquisition
 design: docs/designs/credential-acquisition.md
@@ -67,6 +67,9 @@ epic reads what it publishes rather than keeping a local copy of the same fact.
 
 ## Progress
 - 2026-08-01 — filed with [`docs/designs/credential-acquisition.md`](../designs/credential-acquisition.md).
+- 2026-08-03 — X-73/X-74 are complete and the X-75/X-76 implementation lane is in progress. The
+  released connector catalogue still lacks C-440, so the server path is exercised through an
+  explicit injected acquisition binding and the epic remains open pending live babelforce proof.
 
 ## Notes
 - The design records why `produces_credential` is not the mechanism (C-432 measured it: `connector-flux`

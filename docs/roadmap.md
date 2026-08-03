@@ -5,8 +5,8 @@ the [board](stories/README.md); this document is the narrative around it.
 
 ## Status
 
-_As of 2026-08-03:_ **v0.16.2 — Wave #1: safer identity, fair traffic, attributable deploys and
-tested recovery.**
+_As of 2026-08-03:_ **v0.17.0 — Wave #2: canonical callers, complete public boundaries and
+instance-bound channels.**
 `cargo run -- --dev` is the loopback single-tenant shorthand; reachable binds still require a real
 identity provider. Complete OIDC sign-in, per-tenant connections and settings, metadata grants,
 ordinary connector invocation, immutable workflow publication, durable value-free workflow run
@@ -219,8 +219,8 @@ model + loop + bounded capabilities that Flux calls an Agent.
 
 A Service Account receives no authority merely by existing. Invocation and inbound subscriptions
 remain bounded by the tenant's grants, selected from declared metadata, and a token never yields a
-credential. `POST /api/agents` and `FLUX_EXCHANGE_AGENTS` are v0.16 compatibility spellings only;
-X-121 removes them in v0.17 without invalidating verifier-keyed tokens. See
+credential. The v0.16 Agent-named aliases are removed in v0.17 without invalidating verifier-keyed
+tokens. See
 [`docs/designs/service-accounts.md`](designs/service-accounts.md).
 
 ### Machine onboarding — X-41, X-42 · ✅ **LIVE**

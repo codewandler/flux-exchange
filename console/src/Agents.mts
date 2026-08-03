@@ -90,11 +90,11 @@ function instant(seconds: number): string {
 function failureSentence(reason: ServiceFailure): string {
   switch (reason.kind) {
     case 'unreachable':
-      return `${reason.endpoint} could not be reached. ${reason.detail} Nothing was sent, so no agent was created — and this is not the service saying no.`
+      return `${reason.endpoint} could not be reached. ${reason.detail} Nothing was sent, so no Service Account was created — and this is not the service saying no.`
     case 'refused':
       return `${reason.endpoint} answered ${reason.status}, with no sentence this console could read. ${reason.detail}`
     case 'unreadable':
-      return `${reason.endpoint} answered ${reason.status} with a body this console could not read. ${reason.detail} Whether an agent now exists is therefore unknown, and if one does, its token was in that body and is gone.`
+      return `${reason.endpoint} answered ${reason.status} with a body this console could not read. ${reason.detail} Whether a Service Account now exists is therefore unknown, and if one does, its token was in that body and is gone.`
   }
 }
 
@@ -245,7 +245,7 @@ function standingPanel(): VNode {
 }
 
 export default defineComponent({
-  name: 'Agents',
+  name: 'ServiceAccounts',
   props: {
     /**
      * What `/api/session` said. The only input this screen takes, and deliberately so: a minted

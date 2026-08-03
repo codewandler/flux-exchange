@@ -1,12 +1,12 @@
 ---
 id: X-82
 title: "A deployment a stranger can reach (epic)"
-status: ready
+status: blocked
 priority: 1
 epic: remote-deployment
 design: docs/designs/remote-deployment.md
 areas: [exchange-server, console, ci]
-note: "EPIC — owner-raised 2026-08-02: everything this platform does can only be seen on 127.0.0.1. Three blockers, and only one is packaging: OIDC is the sole path to a reachable bind, the console has no production host and cannot be given one on another origin, and nothing containerises this"
+note: "EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof"
 ---
 
 # A deployment a stranger can reach (epic)
@@ -23,16 +23,15 @@ on `localhost`, and that is the entire demonstrable surface. The public site ([[
 Owner-raised 2026-08-02, and owner-decided the same day: **stand up a real OIDC provider** rather than
 wait on local identity. That decision is what makes this epic two stories instead of three.
 
-## The three blockers, and which are ours
+## The three delivered foundations
 
-1. **A reachable bind needs a bound identity, and OIDC is the only one wired.** `main.rs:394` is the
-   sole route to `BoundIdentity::Real`. Everything else refuses at startup, which on fly is a
-   crash-loop. **Resolved by configuration, not code** — the path is already tested.
-2. **The console has no production host** and cannot be given one on another origin, because
-   `SameSite=Strict` means the browser never attaches the session cookie cross-origin. That is
-   [[X-83]], and it is a new capability.
-3. **Nothing containerises this**, and no flux-family repository has ever deployed. That is [[X-84]],
-   and it sets the precedent the siblings copy.
+1. **A reachable bind has a real identity.** Production uses OIDC; X-58 also delivered
+   verifier-backed local users for reachable self-hosted deployments. A reachable bind still refuses
+   when neither verifier is configured.
+2. **The console is same-origin** ([[X-83]]), because `SameSite=Strict` intentionally prevents a
+   separately hosted console from receiving the session cookie.
+3. **The service is containerised and deployed** ([[X-84]]) with one machine, one attached volume and
+   fail-closed startup checks. The remaining work is live journey and redeploy evidence, not packaging.
 
 ## Children
 - **X-83** — the console is served by the host it talks to. **Ordered first**: X-84 has nothing to
@@ -51,10 +50,14 @@ wait on local identity. That decision is what makes this epic two stories instea
 ## Progress
 - 2026-08-02 — filed with [`docs/designs/remote-deployment.md`](../designs/remote-deployment.md) after
   measuring the three blockers against the tree.
+- 2026-08-03 — the same-origin console and immutable Fly release are live without weakening the bind,
+  grant, kind, anonymous-surface or runtime gates. After the v0.16.2 scope correction, the owner
+  completed Google sign-in and reached an authenticated session. X-82 remains blocked with X-84 only
+  on connect → grant → invoke and post-redeploy persistence/session-invalidation proof.
 
 ## Notes
-- [[X-58]] stays worth landing **after** this, so a demonstration stops depending on a third party
-  being up. It is not on the critical path now that OIDC is the decided route.
+- [[X-58]] is delivered as the verifier-backed self-hosted alternative; production deliberately uses
+  OIDC for organization membership.
 - The design records why hosting the console on GitHub Pages beside the docs site cannot work. It is
   the obvious idea and it fails for a reason that looks like CORS and is not.
 - **It will boot and do nothing**, correctly: X-13's grant gate is fail-closed. If X-84 does not ship
