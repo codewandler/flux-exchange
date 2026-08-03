@@ -2,11 +2,11 @@
 //!
 //! # What signing in is, and what it is not
 //!
-//! Signing in establishes **who the human is**. It asks the provider only for `openid` — see
-//! [`SCOPES`](config::SCOPES) — and it mints nothing for any vendor. Connecting a
-//! provider so that operations can run against it is a different flow with a different consent
-//! screen, and conflating them is how a user who agreed to "sign in with Acme" ends up having
-//! granted a service standing access to their mail.
+//! Signing in establishes **who the human is**. It asks the provider for the minimal
+//! Google-compliant `openid email` pair — see [`SCOPES`](config::SCOPES) — while parsing no email
+//! claim and minting nothing for any vendor. Connecting a provider so that operations can run
+//! against it is a different flow with a different consent screen, and conflating them is how a
+//! user who agreed to "sign in with Acme" ends up granting unrelated vendor authority.
 //!
 //! # The three bindings
 //!
@@ -1419,6 +1419,7 @@ mod tests {
     fn configured_values_are_percent_encoded_into_the_url() {
         assert_eq!(urlencoded("flux-exchange"), "flux-exchange");
         assert_eq!(urlencoded("openid"), "openid");
+        assert_eq!(urlencoded("openid email"), "openid%20email");
         assert_eq!(
             urlencoded("https://a.example/cb?x=1&y=2"),
             "https%3A%2F%2Fa.example%2Fcb%3Fx%3D1%26y%3D2",
@@ -1438,7 +1439,7 @@ mod tests {
         .expect("the OS has randomness")
         .url;
 
-        assert!(url.contains("&scope=openid&"), "{url}");
+        assert!(url.contains("&scope=openid%20email&"), "{url}");
         assert!(url.ends_with("&hd=example.com%26prompt%3Dnone"), "{url}");
         assert_eq!(
             url.matches("prompt=").count(),

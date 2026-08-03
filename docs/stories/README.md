@@ -9,7 +9,7 @@ directory (`<ID>-<slug>.md`); this board indexes them by status. New work? Copy
 
 ## Status
 
-**v0.16.1 — Wave #1: safer identity, fair traffic, attributable deploys and tested recovery.** The
+**v0.16.2 — Wave #1: safer identity, fair traffic, attributable deploys and tested recovery.** The
 host serves OIDC, verifier-backed local users and loopback development identity, canonical Service Account
 lifecycle and bearer authentication, tenant connections/settings/grants, ordinary connector invoke,
 immutable workflow publication, durable value-free run activity and live WebSocket subscriptions.

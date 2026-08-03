@@ -118,8 +118,9 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
 - **Enforced when configured.** `FLUX_EXCHANGE_OIDC_HOSTED_DOMAIN` requires byte-for-byte equality
   with Google's signature-verified `hd` claim. The authorization request carries the same value
   only as an account-selection hint; a missing or mismatched signed claim refuses before a session
-  is opened. Membership is never inferred from email, and sign-in requests only `openid` because
-  identity is the immutable `sub`.
+  is opened. Membership is never inferred from email, and identity is the immutable `sub`.
+  Sign-in requests `openid email` only because live Google interoperability requires that minimal
+  pair; the email claim is not parsed, carried into `SignedClaims` or used for authorization.
 - **Known limitation.** Sessions have no durable inventory, per-principal revocation or global
   revocation endpoint. A process restart invalidates all sessions; normal logout invalidates only
   the session presented to it.

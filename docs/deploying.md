@@ -167,7 +167,9 @@ typo is a clear failure rather than a mysterious `401` an hour later. Every URL 
 scheme is checked for the back-channel *and* the browser-facing endpoints (X-19, X-23).
 The hosted-domain setting is optional for non-Google OIDC providers. When set, it is both a Google
 account-selection hint and a fail-closed check against the signed `hd` claim; only the latter grants
-admission.
+admission. The authorization request uses `openid email`: live Google evidence made `email` a
+provider-protocol requirement, not an authorization input. This host does not parse the email claim;
+identity remains the immutable `sub`, and organization admission remains the signed `hd` claim.
 
 ## It will start, and it will run nothing. That is correct.
 

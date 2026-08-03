@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-08-03
+
+### Fixed
+
+- **Google production sign-in requests the provider's minimal accepted OIDC scopes** (X-90).
+  Live evidence showed Google refusing the bare `openid` request, so authorization now requests
+  `openid email`. The email scope is a provider-protocol requirement only: the email claim remains
+  unparsed and unused, identity remains keyed by immutable `sub`, and Workspace admission still
+  requires exact equality with the signature-verified `hd` claim.
+
 ## [0.16.1] - 2026-08-03
 
 Wave #1 closes the first ten security, deployment and self-hosting stories selected from the ready
