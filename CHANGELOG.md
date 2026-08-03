@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **The documented development command is now an end-to-end release contract** (X-100). CI and the
+  tag-triggered publication gate start `cargo run --locked -- --dev` on an ephemeral loopback port,
+  verify its one-click browser form, exchange the implied `user:${USER}@dev` identity for an
+  HttpOnly cookie and resolve the authenticated session. Explicit-roster instructions also escape
+  their `<handle>` placeholder, so browsers no longer display an empty bearer value.
+
 ## [0.14.3] - 2026-08-03
 
 ### Fixed

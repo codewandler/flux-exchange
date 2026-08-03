@@ -89,6 +89,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Development command browser round trip
+        run: ./scripts/check-dev-signin.sh
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

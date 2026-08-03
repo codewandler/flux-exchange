@@ -458,7 +458,7 @@ fn development_page(automatic: bool) -> Response {
     } else {
         "This host has no federated identity provider, and does not need one: it was started with \
          a development roster, so it can sign you in itself. Present the handle of a rostered \
-         principal as a bearer token — `Authorization: Bearer <handle>` — and `POST /api/session` \
+         principal as a bearer token — `Authorization: Bearer &lt;handle&gt;` — and `POST /api/session` \
          exchanges it for a session cookie. The roster is the one the operator wrote at startup, \
          and this page does not name it. The development identity is deliberately unavailable on \
          any address but loopback, because a handle is a name rather than a secret."
@@ -2077,6 +2077,11 @@ mod tests {
             body.contains("/api/session"),
             "the page must say how sign-in is done here, or the affordance leads to prose that \
              changes nothing: {body}",
+        );
+        assert!(
+            body.contains("Authorization: Bearer &lt;handle&gt;"),
+            "the placeholder must be visible text rather than an HTML element the browser renders \
+             as an empty bearer value: {body}",
         );
         assert!(
             !body.contains("<form"),
