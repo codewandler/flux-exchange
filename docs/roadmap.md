@@ -5,26 +5,28 @@ the [board](stories/README.md); this document is the narrative around it.
 
 ## Status
 
-_As of 2026-08-03:_ **v0.14.3 — credentials, gated operations and versioned tenant workflows.**
+_As of 2026-08-03:_ **v0.15.0 — credentials, gated operations, versioned workflows and generated
+connector channels.**
 `cargo run -- --dev` is the loopback single-tenant shorthand; reachable binds still require a real
 identity provider. Complete OIDC sign-in, per-tenant connections and settings, metadata grants,
-ordinary connector invocation, immutable workflow publication and durable value-free workflow run
-records are built. `subscribe`, channels and leases-in-anger remain unbuilt.
+ordinary connector invocation, immutable workflow publication, durable value-free workflow run
+records, persistent generated WebSocket channels and authenticated live subscriptions are built.
+Webhook channels, durable event replay/inboxes and leases-in-anger remain unbuilt.
 
 `crates/exchange-host` carries the vocabulary and rules, the credential/settings/grant bindings,
 ordinary invocation and the tenant workflow runtime. A workflow is a stored Flux program rather
 than another interpreter: publication freezes operation contracts and execution repeats both its
 entry grant and every nested connector grant before credential resolution.
 
-`crates/exchange-server` composes the transport, identity and durable stores. `console/` guides an
-operator through Connect → Grant → Invoke and provides Workflows and Activity views backed by the
-upstream Flux editor schema.
+`crates/exchange-server` composes the transports, identity and durable stores. `console/` guides an
+operator through Connect → Grant → Invoke, provides Workflows and Activity views backed by the
+upstream Flux editor schema, and manages the declared event subsets of persistent Channels.
 
 **The credential never crosses the boundary; the authority does.**
 
 ## The engine line
 
-`connector-pack` 0.16 and the engine crates are aligned on Flux 0.52 for X-98. They remain one atomic
+`connector-pack` 0.17 and the engine crates are aligned on Flux 0.54 for X-101. They remain one atomic
 pin set: two engine versions are two incompatible `Tool` traits even when their names are identical.
 The manifest, resolved-lock and compile-time seam tests keep that rule executable.
 

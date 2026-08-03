@@ -1,5 +1,5 @@
 ---
-id: X-101
+id: X-103
 title: Grant declared inbound events
 status: in-progress
 epic: generated-connector-channels
@@ -19,5 +19,8 @@ existing grant document to no inbound access.
 
 ## Progress
 
+- 2026-08-03: grant writes and previews now resolve bindings from the catalogue, accept only
+  non-empty declared event subsets, and faithfully report inbound authority. The console refuses an
+  unreadable inbound response rather than dropping part of a whole-set grant on the next save.
 - 2026-08-02: old grants default to no inbound access and closed connector/binding/event subsets are
   enforced at the subscription gate; cross-tenant opaque ids share the not-found response.

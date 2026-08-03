@@ -75,6 +75,11 @@ pub(super) const MODULE: Module = Module {
             access: Access::Anonymous,
             method_router: credentials_route,
         },
+        Route {
+            path: "/api/catalogue/connectors/{id}/channels",
+            access: Access::Anonymous,
+            method_router: channels_route,
+        },
     ],
 };
 
@@ -88,6 +93,10 @@ fn operations_route() -> MethodRouter<AppState> {
 
 fn credentials_route() -> MethodRouter<AppState> {
     get(credentials)
+}
+
+fn channels_route() -> MethodRouter<AppState> {
+    get(channels)
 }
 
 /// Every connector this binary carries.
@@ -140,8 +149,22 @@ async fn credentials(Path(connector): Path<String>) -> Response {
     }
 }
 
+/// One connector's generated channel declarations, never its runtime connection material.
+async fn channels(Path(connector): Path<String>) -> Response {
+    match view::connector_channels(&connector) {
+        Some(channels) => Json(channels).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(view::UnknownConnector::new(&connector)),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     use axum::body::Body;
@@ -288,6 +311,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn generated_channel_choices_are_public_but_connection_material_is_not() {
+        let (status, body) = get_json("/api/catalogue/connectors/slack/channels").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["connector"], "slack");
+        assert!(!body["channels"].as_array().expect("an array").is_empty());
+        assert_eq!(body["channels"][0]["name"], "socket");
+        assert_eq!(body["channels"][0]["events"][0]["name"], "app_mention");
+
+        for channel in body["channels"].as_array().expect("an array") {
+            let keys = channel
+                .as_object()
+                .expect("a channel object")
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                keys,
+                BTreeSet::from(["description", "events", "name", "service", "transport",]),
+                "a channel declaration exposed more than its public selection metadata: {channel}",
+            );
+        }
+    }
+
     /// `404` naming the id, never an empty `200`.
     #[tokio::test]
     async fn an_unknown_connector_is_refused_and_named() {
@@ -315,6 +362,7 @@ mod tests {
         for (entry, provider) in listed.iter().zip(connector_catalog::providers()) {
             assert_eq!(entry["id"], provider.id);
             assert_eq!(entry["operation_count"], provider.operations.len());
+            assert_eq!(entry["channel_count"], provider.channels.len());
         }
     }
 }

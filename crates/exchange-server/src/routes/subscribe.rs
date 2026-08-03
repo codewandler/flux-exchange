@@ -196,3 +196,234 @@ async fn send(socket: &mut WebSocket, document: Value) -> Result<(), ()> {
         .await
         .map_err(|_| ())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use exchange_host::{
+        async_trait, ChannelRecord, Channels, CredentialRef, Deployment, Grant, Grants,
+        InboundGrant, MemoryChannels, MemoryConfig, Secret, SecretStore, Selector, StoreError,
+        Tenant,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::json;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::{header, HeaderValue};
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+    use super::*;
+    use crate::channel::{
+        ChannelDeclarations, ChannelEventSink, ChannelPlacement, ChannelPlacementResolver,
+        ChannelRunError, ChannelRunner, ChannelSupervisor,
+    };
+    use crate::dev_identity::DevIdentity;
+
+    struct Declarations;
+
+    impl ChannelDeclarations for Declarations {
+        fn events(&self, connector: &str, binding: &str) -> Option<BTreeSet<String>> {
+            (connector == "asterisk" && binding == "ari-events")
+                .then(|| ["channel-created".to_owned()].into_iter().collect())
+        }
+    }
+
+    struct LocalPlacement;
+
+    impl ChannelPlacementResolver for LocalPlacement {
+        fn resolve(&self, _: &ChannelRecord) -> Result<ChannelPlacement, ChannelRunError> {
+            Ok(ChannelPlacement::Local)
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingRunner {
+        sink: Mutex<Option<Arc<dyn ChannelEventSink>>>,
+    }
+
+    #[async_trait]
+    impl ChannelRunner for CapturingRunner {
+        async fn run(
+            &self,
+            _: ChannelRecord,
+            _: ChannelPlacement,
+            sink: Arc<dyn ChannelEventSink>,
+            cancel: CancellationToken,
+        ) -> Result<(), ChannelRunError> {
+            *self.sink.lock().expect("runner sink") = Some(sink);
+            cancel.cancelled().await;
+            Ok(())
+        }
+    }
+
+    struct NoCredentials;
+
+    #[async_trait]
+    impl SecretStore for NoCredentials {
+        async fn get(&self, _: &CredentialRef) -> Result<Secret, StoreError> {
+            unreachable!("subscribing reads no credential")
+        }
+
+        async fn put(&self, _: &CredentialRef, _: &Secret) -> Result<(), StoreError> {
+            unreachable!("subscribing writes no credential")
+        }
+
+        async fn delete(&self, _: &CredentialRef) -> Result<(), StoreError> {
+            unreachable!("subscribing deletes no credential")
+        }
+    }
+
+    struct HeldGrants(Vec<Grant>);
+
+    impl Grants for HeldGrants {
+        fn held(&self, _: &Tenant) -> Vec<Grant> {
+            self.0.clone()
+        }
+
+        fn set(&self, _: &Tenant, _: &[Grant]) -> Result<(), exchange_host::GrantRefusal> {
+            unreachable!("subscribing edits no grant")
+        }
+    }
+
+    async fn wait_for_sink(runner: &CapturingRunner) -> Arc<dyn ChannelEventSink> {
+        for _ in 0..250 {
+            if let Some(sink) = runner.sink.lock().expect("runner sink").clone() {
+                return sink;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("channel runner did not start")
+    }
+
+    async fn receive_json(
+        socket: &mut (impl StreamExt<Item = Result<ClientMessage, tokio_tungstenite::tungstenite::Error>>
+                  + Unpin),
+    ) -> Value {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("websocket response before timeout")
+            .expect("websocket remains open")
+            .expect("valid websocket message");
+        serde_json::from_str(message.to_text().expect("text response")).expect("JSON response")
+    }
+
+    #[tokio::test]
+    async fn authenticated_get_multiplexes_request_correlated_subscriptions_and_live_events() {
+        let tenant = Tenant::new("acme").expect("tenant");
+        let id = ChannelId::new("ch_live").expect("id");
+        let record = ChannelRecord::new(
+            id.clone(),
+            tenant,
+            "asterisk",
+            "asterisk",
+            "ari-events",
+            ["channel-created".to_owned()].into_iter().collect(),
+        )
+        .expect("record");
+        let store = Arc::new(MemoryChannels::default());
+        store.set(record.clone()).expect("stored channel");
+        let runner = Arc::new(CapturingRunner::default());
+        let supervisor = ChannelSupervisor::new(
+            store,
+            Arc::new(Declarations),
+            Arc::new(LocalPlacement),
+            runner.clone(),
+        );
+        supervisor.start(record);
+        let sink = wait_for_sink(&runner).await;
+
+        let mut grant = Grant::for_connector("asterisk", Selector::any());
+        grant.inbound.push(InboundGrant {
+            connector: "asterisk".into(),
+            binding: "ari-events".into(),
+            events: ["channel-created".to_owned()].into_iter().collect(),
+        });
+        let invoker = Arc::new(
+            crate::execution::invoker(
+                Deployment::SingleTenant,
+                Arc::new(NoCredentials),
+                Arc::new(MemoryConfig::new()),
+                Arc::new(HeldGrants(vec![grant])),
+            )
+            .expect("invoker"),
+        );
+        let state = AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster("agent:bot@acme").expect("development identity"),
+        ))
+        .with_invoker(invoker)
+        .with_channels(supervisor.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, super::super::app(state))
+                .await
+                .expect("test server")
+        });
+        let mut request = format!("ws://{address}/api/subscribe")
+            .into_client_request()
+            .expect("websocket request");
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer bot"),
+        );
+        let (mut socket, response) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("authenticated websocket upgrade");
+        assert_eq!(response.status(), 101);
+
+        socket
+            .send(ClientMessage::Text(
+                json!({"action":"subscribe", "request_id":"subscribe-1", "channel_id":"ch_live"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("subscribe command");
+        assert_eq!(
+            receive_json(&mut socket).await,
+            json!({"type":"ack", "request_id":"subscribe-1", "channel_id":"ch_live", "subscribed":true})
+        );
+
+        sink.deliver(ChannelEvent {
+            connector: "asterisk".into(),
+            binding: "ari-events".into(),
+            event: "channel-created".into(),
+            received_at_ms: 42,
+            payload: json!({"channel":{"id":"vendor-7"}}),
+        });
+        assert_eq!(
+            receive_json(&mut socket).await,
+            json!({
+                "type":"event",
+                "event": {
+                    "connector":"asterisk",
+                    "binding":"ari-events",
+                    "event":"channel-created",
+                    "received_at_ms":42,
+                    "payload":{"channel":{"id":"vendor-7"}}
+                }
+            })
+        );
+
+        socket
+            .send(ClientMessage::Text(
+                json!({"action":"unsubscribe", "request_id":"unsubscribe-1", "channel_id":"ch_live"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("unsubscribe command");
+        assert_eq!(
+            receive_json(&mut socket).await,
+            json!({"type":"ack", "request_id":"unsubscribe-1", "channel_id":"ch_live", "subscribed":false})
+        );
+
+        socket.close(None).await.expect("close websocket");
+        supervisor.stop(&id);
+        server.abort();
+    }
+}

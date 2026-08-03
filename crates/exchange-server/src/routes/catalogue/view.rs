@@ -56,6 +56,8 @@ pub struct ConnectorEntry {
     /// How many operations it publishes. A count, not the operations: the listing is a directory,
     /// and a client that wants the metadata asks for the connector it is interested in.
     pub operation_count: usize,
+    /// How many generated inbound bindings this connector declares.
+    pub channel_count: usize,
 }
 
 /// The body of `GET /api/catalogue/connectors/{id}/operations`.
@@ -66,6 +68,34 @@ pub struct ConnectorOperations {
     /// Every operation the connector publishes. **Never filtered** — see
     /// [`OperationView::admitted`].
     pub operations: Vec<OperationView>,
+}
+
+/// One connector's generated inbound bindings, with only public declaration metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConnectorChannels {
+    /// The connector these bindings belong to.
+    pub connector: String,
+    /// Every generated binding in declaration order.
+    pub channels: Vec<ChannelView>,
+}
+
+/// One generated binding as an operator may select it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChannelView {
+    pub name: String,
+    pub service: String,
+    pub description: String,
+    pub transport: String,
+    pub events: Vec<ChannelEventView>,
+}
+
+/// One event admitted by a generated binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ChannelEventView {
+    pub name: String,
+    pub description: String,
+    pub group: String,
+    pub default: bool,
 }
 
 /// One operation, with the metadata a `Selector` reads.
@@ -199,6 +229,7 @@ pub fn connectors() -> ConnectorList {
                 vendor: provider.vendor.to_string(),
                 description: provider.description.to_string(),
                 operation_count: provider.operations.len(),
+                channel_count: provider.channels.len(),
             })
             .collect(),
     }
@@ -258,6 +289,50 @@ pub fn connector_credentials(connector: &str) -> Option<ConnectorCredentials> {
             .map(|credential| CredentialView {
                 name: credential.name.to_string(),
                 leaf: credential.leaf.to_string(),
+            })
+            .collect(),
+    })
+}
+
+/// One connector's generated channel declarations, or `None` for an unknown connector.
+///
+/// This intentionally omits base URLs, handshakes, auth alternatives, selectors and payload
+/// mappings. The console needs the closed names and human descriptions to create a channel; the
+/// guarded runner is the only reader that needs connection material.
+pub fn connector_channels(connector: &str) -> Option<ConnectorChannels> {
+    let provider = catalog::provider(catalog::ProviderKey::id(connector))?;
+
+    Some(ConnectorChannels {
+        connector: provider.id.to_string(),
+        channels: provider
+            .channels
+            .iter()
+            .map(|channel| ChannelView {
+                name: channel.name.to_string(),
+                service: channel.service.to_string(),
+                description: channel.description.to_string(),
+                transport: match channel.transport {
+                    catalog::ChannelTransport::Webhook => "webhook",
+                    catalog::ChannelTransport::Socket => "socket",
+                    catalog::ChannelTransport::Poll => "poll",
+                }
+                .to_string(),
+                events: channel
+                    .events
+                    .iter()
+                    .filter_map(|name| {
+                        provider
+                            .events
+                            .iter()
+                            .find(|event| event.name == *name)
+                            .map(|event| ChannelEventView {
+                                name: event.name.to_string(),
+                                description: event.description.to_string(),
+                                group: event.group.to_string(),
+                                default: event.default,
+                            })
+                    })
+                    .collect(),
             })
             .collect(),
     })
@@ -388,6 +463,7 @@ mod tests {
                 vendor: provider.vendor.to_string(),
                 description: provider.description.to_string(),
                 operation_count: provider.operations.len(),
+                channel_count: provider.channels.len(),
             })
             .collect();
 
@@ -422,7 +498,13 @@ mod tests {
             let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
             assert_eq!(
                 keys,
-                BTreeSet::from(["description", "id", "operation_count", "vendor"]),
+                BTreeSet::from([
+                    "channel_count",
+                    "description",
+                    "id",
+                    "operation_count",
+                    "vendor"
+                ]),
                 "the anonymous connector directory gained state beyond static catalogue facts",
             );
         }
@@ -814,7 +896,16 @@ mod tests {
 
         let mut keys: Vec<&str> = zendesk.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["description", "id", "operation_count", "vendor"]);
+        assert_eq!(
+            keys,
+            [
+                "channel_count",
+                "description",
+                "id",
+                "operation_count",
+                "vendor"
+            ]
+        );
 
         let provider = catalog::providers()
             .iter()

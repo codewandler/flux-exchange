@@ -77,8 +77,8 @@ use axum::routing::{get, post, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
-    ConnectorSurface, Effect, Grant, Grants, Idempotency, OperationFacts, Principal, PrincipalKind,
-    Risk, Selector,
+    ConnectorSurface, Effect, Grant, Grants, Idempotency, InboundGrant, OperationFacts, Principal,
+    PrincipalKind, Risk, Selector,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -200,6 +200,17 @@ struct ProposedGrant {
     connector: String,
     /// Which of its operations.
     selector: ProposedSelector,
+    /// Which closed declared event subsets subscribers may receive.
+    #[serde(default)]
+    inbound: Vec<ProposedInboundGrant>,
+}
+
+/// One connector-declared inbound binding and a closed selected event subset.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposedInboundGrant {
+    binding: String,
+    events: BTreeSet<String>,
 }
 
 /// The three axes this surface expresses, and **only** those.
@@ -288,6 +299,21 @@ enum Refusal {
     UnknownConnector(String),
     /// One connector, twice, in one set.
     Twice(&'static str),
+    /// The connector does not declare this inbound binding.
+    UnknownBinding {
+        connector: &'static str,
+        binding: String,
+    },
+    /// The selected event set is empty or reaches outside the binding's declaration.
+    InvalidInboundEvents {
+        connector: &'static str,
+        binding: String,
+    },
+    /// One binding, twice, in one connector grant.
+    TwiceInbound {
+        connector: &'static str,
+        binding: String,
+    },
 }
 
 /// One proposed grant, resolved against the catalogue.
@@ -301,10 +327,43 @@ fn resolve(proposed: ProposedGrant) -> Result<(&'static Provider, Grant), Refusa
         return Err(Refusal::UnknownConnector(proposed.connector));
     };
 
-    Ok((
-        provider,
-        Grant::for_connector(provider.id, proposed.selector.resolve()),
-    ))
+    let mut grant = Grant::for_connector(provider.id, proposed.selector.resolve());
+    for inbound in proposed.inbound {
+        if grant
+            .inbound
+            .iter()
+            .any(|held| held.binding == inbound.binding)
+        {
+            return Err(Refusal::TwiceInbound {
+                connector: provider.id,
+                binding: inbound.binding,
+            });
+        }
+        let Some(channel) = provider.channel(&inbound.binding) else {
+            return Err(Refusal::UnknownBinding {
+                connector: provider.id,
+                binding: inbound.binding,
+            });
+        };
+        let declared: BTreeSet<String> = channel
+            .events
+            .iter()
+            .map(|event| (*event).to_owned())
+            .collect();
+        if inbound.events.is_empty() || !inbound.events.is_subset(&declared) {
+            return Err(Refusal::InvalidInboundEvents {
+                connector: provider.id,
+                binding: inbound.binding,
+            });
+        }
+        grant.inbound.push(InboundGrant {
+            connector: provider.id.to_owned(),
+            binding: inbound.binding,
+            events: inbound.events,
+        });
+    }
+
+    Ok((provider, grant))
 }
 
 /// Every proposed grant in a body.
@@ -375,13 +434,11 @@ async fn replace(
         Err(refusal) => return refused(refusal),
     };
 
-    // **Refuse; never repair.** This surface cannot express an id exception, so it must not replace
-    // a set that holds one: the write would silently drop a `deny` an operator meant, and the only
-    // evidence would be an operation running that used to be refused. The remedy is stated rather
-    // than guessed at — take the exception out of the file, or edit the file.
+    // **Refuse; never repair.** This surface must not replace state it cannot faithfully express:
+    // either an id exception or inbound authority that no longer matches this build's catalogue.
     let existing = store.held(principal.tenant());
-    if let Some(grant) = existing.iter().find(|grant| names_ids(&grant.selector)) {
-        return would_drop_an_exception(&grant.connector);
+    if let Some(grant) = existing.iter().find(|grant| !grant_is_expressible(grant)) {
+        return would_drop_unexpressed(&grant.connector);
     }
 
     if let Err(refusal) = store.set(principal.tenant(), &proposed) {
@@ -430,8 +487,9 @@ fn document(grants: &[Grant]) -> Value {
     json!({
         "grants": grants.iter().map(view).collect::<Vec<Value>>(),
         // Whether `PUT` on this path would be a faithful replacement of what is stored. False when
-        // anything held names an operation id, because this surface cannot write that back.
-        "editable": grants.iter().all(|grant| !names_ids(&grant.selector)),
+        // anything held names an operation id or carries inbound state this build no longer
+        // declares, because this surface cannot write either back faithfully.
+        "editable": grants.iter().all(grant_is_expressible),
     })
 }
 
@@ -454,6 +512,7 @@ fn view(grant: &Grant) -> Value {
         return json!({
             "connector": grant.connector,
             "selector": selector_view(&grant.selector),
+            "inbound": inbound_view(grant),
             "expressible": false,
             "reason": format!(
                 "this build's catalogue carries no connector `{}`, so nothing here can say what \
@@ -481,12 +540,14 @@ fn view(grant: &Grant) -> Value {
         .filter(|operation| admitted.contains(operation.id.as_str()))
         .collect();
 
+    let expressible = grant_is_expressible(grant);
     let mut view = json!({
         "connector": provider.id,
         "vendor": provider.vendor,
         "selector": selector_view(&grant.selector),
+        "inbound": inbound_view(grant),
         // Whether this surface could have written this grant, and could write it again.
-        "expressible": !names_ids(&grant.selector),
+        "expressible": expressible,
         "declares": provider.operations.len(),
         "admits": admits,
     });
@@ -502,9 +563,50 @@ fn view(grant: &Grant) -> Value {
             "always": grant.selector.allow_ids,
             "never": grant.selector.deny_ids,
         });
+    } else if !expressible {
+        view["reason"] = json!(
+            "this grant carries an inbound binding or event this build no longer declares, so this \
+             surface shows it as stored and refuses to replace the set rather than silently \
+             dropping or repairing that authority"
+        );
     }
 
     view
+}
+
+fn inbound_view(grant: &Grant) -> Value {
+    json!(grant
+        .inbound
+        .iter()
+        .map(|inbound| json!({
+            "binding": inbound.binding,
+            "events": inbound.events,
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn grant_is_expressible(grant: &Grant) -> bool {
+    if names_ids(&grant.selector) {
+        return false;
+    }
+    let Some(provider) = catalogued(&grant.connector) else {
+        return false;
+    };
+    let mut bindings = BTreeSet::new();
+    grant.inbound.iter().all(|inbound| {
+        if inbound.connector != provider.id || !bindings.insert(&inbound.binding) {
+            return false;
+        }
+        let Some(channel) = provider.channel(&inbound.binding) else {
+            return false;
+        };
+        let declared: BTreeSet<&str> = channel.events.iter().copied().collect();
+        !inbound.events.is_empty()
+            && inbound
+                .events
+                .iter()
+                .all(|event| declared.contains(event.as_str()))
+    })
 }
 
 /// The selector, in the vocabulary this surface takes back.
@@ -596,6 +698,30 @@ fn refused(refusal: Refusal) -> Response {
             ),
             json!({ "connector": connector }),
         ),
+        Refusal::UnknownBinding { connector, binding } => (
+            format!(
+                "connector `{connector}` declares no inbound binding `{binding}`. Read \
+                 `/api/catalogue/connectors/{connector}/channels` and choose one of its published \
+                 bindings"
+            ),
+            json!({ "connector": connector, "binding": binding }),
+        ),
+        Refusal::InvalidInboundEvents { connector, binding } => (
+            format!(
+                "the inbound grant for `{connector}` binding `{binding}` must select a non-empty \
+                 subset of that binding's declared events. Read \
+                 `/api/catalogue/connectors/{connector}/channels`; undeclared vendor values never \
+                 become subscriber event labels"
+            ),
+            json!({ "connector": connector, "binding": binding }),
+        ),
+        Refusal::TwiceInbound { connector, binding } => (
+            format!(
+                "the grant for connector `{connector}` names inbound binding `{binding}` twice. \
+                 Select one closed event set for the binding so its authority has one meaning"
+            ),
+            json!({ "connector": connector, "binding": binding }),
+        ),
     };
 
     refuse(StatusCode::UNPROCESSABLE_ENTITY, reason, extra)
@@ -611,14 +737,14 @@ fn refused(refusal: Refusal) -> Response {
 /// It names the connector, which is this tenant's own state told to a caller who already holds the
 /// tenant, and it does not name the operations — those are in the answer to `GET /api/grants`, which
 /// is where an operator goes to look.
-fn would_drop_an_exception(connector: &str) -> Response {
+fn would_drop_unexpressed(connector: &str) -> Response {
     refuse(
         StatusCode::CONFLICT,
         format!(
-            "this tenant's grant for `{connector}` names operations explicitly, and this surface \
-             does not express that: replacing the set here would drop the exception silently, and \
-             the only sign of it would be an operation running that used to be refused. Read \
-             `GET /api/grants` to see what is held, and remove the exception where it was written"
+            "this tenant's grant for `{connector}` carries authority this surface cannot write \
+             back faithfully: either explicit operation names or inbound declarations this build \
+             no longer carries. Replacing the set here would silently drop or repair it. Read \
+             `GET /api/grants` to see what is held, and correct it where it was written"
         ),
         json!({ "connector": connector }),
     )
@@ -1121,6 +1247,100 @@ mod tests {
         assert!(
             store.read("acme").is_empty(),
             "the preview wrote a grant, so an operator evaluating a policy has applied one",
+        );
+    }
+
+    /// Inbound authority is edited beside the connector's operation selector, and only from the
+    /// connector's own closed binding/event declarations.
+    #[tokio::test]
+    async fn an_inbound_grant_round_trips_only_a_declared_binding_and_event_subset() {
+        let store = Arc::new(StoredGrants::default());
+        let proposed = json!({
+            "grants": [{
+                "connector": "slack",
+                "selector": { "max_risk": "low" },
+                "inbound": [{ "binding": "socket", "events": ["app_mention"] }]
+            }]
+        });
+
+        let (status, body) = driven(
+            editing(store.clone()),
+            Method::PUT,
+            "/api/grants",
+            "alice",
+            Some(proposed),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["grants"][0]["inbound"],
+            json!([{"binding":"socket", "events":["app_mention"]}])
+        );
+        assert_eq!(store.read("acme")[0].inbound[0].connector, "slack");
+
+        let (status, body) = driven(
+            editing(store),
+            Method::PUT,
+            "/api/grants",
+            "alice",
+            Some(json!({
+                "grants": [{
+                    "connector": "slack",
+                    "selector": {},
+                    "inbound": [{ "binding": "socket", "events": ["vendor_invented"] }]
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(body["binding"], "socket");
+
+        for (inbound, expected_binding) in [
+            (
+                json!([{ "binding": "invented", "events": ["app_mention"] }]),
+                "invented",
+            ),
+            (json!([{ "binding": "socket", "events": [] }]), "socket"),
+            (
+                json!([
+                    { "binding": "socket", "events": ["app_mention"] },
+                    { "binding": "socket", "events": ["app_mention"] }
+                ]),
+                "socket",
+            ),
+        ] {
+            let (status, body) = driven(
+                signed_in(),
+                Method::POST,
+                "/api/grants/preview",
+                "alice",
+                Some(json!({
+                    "connector": "slack",
+                    "selector": {},
+                    "inbound": inbound,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["binding"], expected_binding);
+        }
+
+        let (status, body) = driven(
+            signed_in(),
+            Method::POST,
+            "/api/grants/preview",
+            "alice",
+            Some(json!({
+                "connector": "slack",
+                "selector": {},
+                "inbound": [{ "binding": "socket", "events": ["app_mention"] }],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["inbound"],
+            json!([{ "binding": "socket", "events": ["app_mention"] }])
         );
     }
 

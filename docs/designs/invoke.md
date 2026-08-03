@@ -186,7 +186,7 @@ What lock 1 does *not* cover: `flux-system` is reachable transitively (it is whe
 lives) and `flux-runtime`'s `ToolContext` is how the pack is called at all. The claim is therefore
 "no transport is a *direct* dependency", plus lock 2 for the reachable ones.
 
-**Lock 2 — one seam, counted.** A scanner over `crates/exchange-host/src/**/*.rs` enforces nine
+**Lock 2 — one seam, counted.** A scanner over `crates/exchange-host/src/**/*.rs` enforces ten
 rules. Each is one string: some no source in that crate may write, some only a named file may. They
 are listed below, under "What lock 2 is, and what it is not", with what each catches **and what it
 cannot** — a list rather than a summary at this point, because the summary that used to sit here
@@ -232,6 +232,7 @@ stripped first, so documenting a rule is not a violation of it.
 | `connector_pack::resolve` | exactly one file — and *exactly*, not *at most* | a second file resolving an operation, and equally the deletion of the only one, which would otherwise satisfy every other rule here | a second seam reaching the pack under an alias (`use connector_pack::resolve as go`) or through a re-export |
 | `connector_pack::pack` | nowhere | the pack's **model-facing** entry point, which installs a whole provider's tools into a registry. An execute route wants `resolve`; `pack` would be a second way in, and would silently withhold every `expose = false` operation from a caller entitled to run it | the same, aliased |
 | `connector_pack::Rehearsal` | `settings.rs` | the pack's **third** entry point turning up somewhere new. It takes no `Egress`, holds no transport and has no `execute`, so nothing reached through it can dispatch — this is a count, not a refusal, and the point of the count is that `resolve` and `pack` were once believed to be the whole list | a *fourth* entry point. The rule knows the three that exist; a new one is invisible until upstream ships it and somebody reads the changelog |
+| `connector_pack::channel_plan` | `channel.rs` | the pack's zero-transport channel planner appearing anywhere except the tenant-owned channel seam. It resolves configuration and credentials into redacting wire wrappers but owns no client, socket or `Egress`; execution stays in the composing binary's selected Flux system | the same call reached through an alias or re-export, and anything the composing binary does with the returned value |
 | `.tool()` | nowhere | unwrapping the transport out of its `Egress` — the second request path, in one line | the same unwrap through some other accessor, or a binding that never spells the call |
 | `.execute(` | the seam only | a tool dispatched from anywhere but the file that resolved it | call syntax only: the same dispatch spelled `Tool::execute(tool, …)` is a different string |
 | `Egress` | `invoke.rs`, `lib.rs` | the transport port travelling to a third file, from where it is one refactor away from `.tool()`. **Not** "exactly two occurrences", which is what this section claimed until X-56 and was never what the scanner counted — the rule bounds *which files* may name it, not how often | a transport that is neither an `Egress` nor named as one |

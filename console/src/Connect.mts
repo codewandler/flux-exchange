@@ -256,7 +256,7 @@ export default defineComponent({
       const names = declared()
       const picker = props.catalogConnectors.length
         ? props.catalogConnectors
-        : props.connectors.map((id) => ({ id, vendor: id, description: '', operationCount: 0, operations: [] }))
+        : props.connectors.map((id) => ({ id, vendor: id, description: '', operationCount: 0, channelCount: 0, operations: [] }))
 
       return h('section', { class: 'connect', 'data-connect': 'panel' }, [
         h('h2', { class: 'connect__title' }, 'Connect a connector'),

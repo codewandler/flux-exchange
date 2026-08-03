@@ -27,6 +27,7 @@ export interface Connector {
   vendor: string
   description: string
   operationCount: number
+  channelCount: number
   operations: Operation[]
 }
 

@@ -66,6 +66,18 @@ export function declarationEndpoint(connector: string): string {
   return `${CONNECTORS_ENDPOINT}/${encodeURIComponent(connector)}/credentials`
 }
 
+/** Public generated channel declarations for one connector. */
+export function channelDeclarationEndpoint(connector: string): string {
+  return `${CONNECTORS_ENDPOINT}/${encodeURIComponent(connector)}/channels`
+}
+
+/** Tenant-derived persistent connector channels. */
+export const CHANNELS_ENDPOINT = '/api/channels'
+
+export function channelEndpoint(channel: string): string {
+  return `${CHANNELS_ENDPOINT}/${encodeURIComponent(channel)}`
+}
+
 /**
  * Where one connector's connection is created, read and destroyed.
  *
@@ -128,6 +140,7 @@ export interface ServedConnector {
   vendor: string
   description: string
   operation_count: number
+  channel_count: number
 }
 
 /**
@@ -396,6 +409,7 @@ function readConnectors(body: unknown): ServedConnector[] | string {
       vendor: entry.vendor,
       description: entry.description,
       operation_count: typeof entry.operation_count === 'number' ? entry.operation_count : 0,
+      channel_count: typeof entry.channel_count === 'number' ? entry.channel_count : 0,
     })
   }
   return connectors
@@ -1069,6 +1083,13 @@ export interface ProposedGrant {
    * whatever the next connection added, without anyone deciding to. */
   connector: string
   selector: Selector
+  /** Closed declared event subsets admitted on the connector's inbound bindings. */
+  inbound?: InboundGrant[]
+}
+
+export interface InboundGrant {
+  binding: string
+  events: string[]
 }
 
 /**
@@ -1098,6 +1119,8 @@ export interface HeldGrant {
   connector: string
   vendor: string
   selector: Selector
+  /** Closed declared inbound authority, empty for every pre-channel grant document. */
+  inbound: InboundGrant[]
   /** Whether this surface could have written this grant, and could write it again. */
   expressible: boolean
   /** Why not, in the service's own words. Empty when it could. */
@@ -1127,6 +1150,182 @@ export type GrantsState =
       editable: boolean
     }
   | { status: 'failed'; failure: ServiceFailure }
+
+// ---------------------------------------------------------------------------------------------
+// Generated connector channels. Declarations are anonymous vendor facts; records are tenant data.
+// ---------------------------------------------------------------------------------------------
+
+export interface ChannelEventDeclaration {
+  name: string
+  description: string
+  group: string
+  default: boolean
+}
+
+export interface ChannelDeclaration {
+  connector: string
+  name: string
+  service: string
+  description: string
+  transport: 'socket' | 'webhook' | 'poll'
+  events: ChannelEventDeclaration[]
+}
+
+export interface HeldChannel {
+  id: string
+  connector: string
+  connection: string
+  binding: string
+  events: string[]
+  status: 'starting' | 'running' | 'retrying' | 'refused' | 'stopped'
+}
+
+export type ChannelDeclarationsState =
+  | { status: 'loading' }
+  | { status: 'ready'; declarations: ChannelDeclaration[] }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export type ChannelsState =
+  | { status: 'loading' }
+  | { status: 'ready'; channels: HeldChannel[] }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export type ChannelMutation =
+  | { status: 'saved'; channel: HeldChannel }
+  | { status: 'removed' }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+function readChannelDeclaration(connector: string, value: unknown): ChannelDeclaration[] | string {
+  if (!isObject(value) || !Array.isArray(value.channels)) return 'no `channels` array in the body'
+  const declarations: ChannelDeclaration[] = []
+  for (const entry of value.channels) {
+    if (!isObject(entry) || typeof entry.name !== 'string') return 'a channel declaration has no `name`'
+    if (!['socket', 'webhook', 'poll'].includes(String(entry.transport))) {
+      return `channel \`${entry.name}\` has an unknown transport`
+    }
+    if (!Array.isArray(entry.events)) return `channel \`${entry.name}\` has no events array`
+    const events: ChannelEventDeclaration[] = []
+    for (const event of entry.events) {
+      if (!isObject(event) || typeof event.name !== 'string') return `channel \`${entry.name}\` has an unnamed event`
+      events.push({
+        name: event.name,
+        description: typeof event.description === 'string' ? event.description : '',
+        group: typeof event.group === 'string' ? event.group : '',
+        default: event.default === true,
+      })
+    }
+    declarations.push({
+      connector,
+      name: entry.name,
+      service: typeof entry.service === 'string' ? entry.service : RESERVED_SERVICE,
+      description: typeof entry.description === 'string' ? entry.description : '',
+      transport: entry.transport as ChannelDeclaration['transport'],
+      events,
+    })
+  }
+  return declarations
+}
+
+function readHeldChannel(value: unknown): HeldChannel | string {
+  if (!isObject(value) || typeof value.id !== 'string' || typeof value.connector !== 'string') {
+    return 'a channel has no `id` or `connector`'
+  }
+  const statuses = ['starting', 'running', 'retrying', 'refused', 'stopped'] as const
+  if (!statuses.includes(value.status as typeof statuses[number])) return `channel \`${value.id}\` has an unknown status`
+  if (!Array.isArray(value.events) || value.events.some((event) => typeof event !== 'string')) {
+    return `channel \`${value.id}\` has no event list`
+  }
+  return {
+    id: value.id,
+    connector: value.connector,
+    connection: typeof value.connection === 'string' ? value.connection : value.connector,
+    binding: typeof value.binding === 'string' ? value.binding : '',
+    events: value.events as string[],
+    status: value.status as HeldChannel['status'],
+  }
+}
+
+export async function loadChannelDeclarations(catalog: Catalog, options: LoadOptions = {}): Promise<ChannelDeclarationsState> {
+  const connectors = catalog.connectors.filter((connector) => connector.channelCount > 0)
+  const answers = await Promise.all(connectors.map(async (connector) => {
+    const endpoint = channelDeclarationEndpoint(connector.id)
+    const answered = await read(endpoint, options)
+    if (!answered.ok) return answered.failure
+    const declarations = readChannelDeclaration(connector.id, answered.body)
+    return typeof declarations === 'string'
+      ? { kind: 'unreadable' as const, endpoint, status: 200, detail: declarations }
+      : declarations
+  }))
+  const declarations: ChannelDeclaration[] = []
+  for (const answer of answers) {
+    if (!Array.isArray(answer)) return { status: 'failed', failure: answer }
+    declarations.push(...answer)
+  }
+  return { status: 'ready', declarations }
+}
+
+export async function loadChannels(options: LoadOptions = {}): Promise<ChannelsState> {
+  const answered = await read(CHANNELS_ENDPOINT, options)
+  if (!answered.ok) return { status: 'failed', failure: answered.failure }
+  if (!Array.isArray(answered.body)) {
+    return { status: 'failed', failure: { kind: 'unreadable', endpoint: CHANNELS_ENDPOINT, status: 200, detail: 'body is not a channel array' } }
+  }
+  const channels: HeldChannel[] = []
+  for (const value of answered.body) {
+    const channel = readHeldChannel(value)
+    if (typeof channel === 'string') {
+      return { status: 'failed', failure: { kind: 'unreadable', endpoint: CHANNELS_ENDPOINT, status: 200, detail: channel } }
+    }
+    channels.push(channel)
+  }
+  return { status: 'ready', channels }
+}
+
+function channelFailure(answered: Exclude<Read, { ok: true }>, endpoint: string): ChannelMutation {
+  const error = serviceError(answered.body)
+  return answered.failure.kind === 'refused' && error
+    ? { status: 'refused', refusal: { endpoint, status: answered.failure.status ?? 0, error } }
+    : { status: 'failed', failure: answered.failure }
+}
+
+async function writeChannel(endpoint: string, method: string, body: unknown, options: LoadOptions): Promise<ChannelMutation> {
+  const answered = await read(endpoint, options, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!answered.ok) return channelFailure(answered, endpoint)
+  const channel = readHeldChannel(answered.body)
+  return typeof channel === 'string'
+    ? { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 200, detail: channel } }
+    : { status: 'saved', channel }
+}
+
+export async function createChannel(connector: string, binding: string, events: string[], options: LoadOptions = {}): Promise<ChannelMutation> {
+  return writeChannel(CHANNELS_ENDPOINT, 'POST', { connector, binding, events }, options)
+}
+
+export async function updateChannel(channel: HeldChannel, events: string[], options: LoadOptions = {}): Promise<ChannelMutation> {
+  return writeChannel(channelEndpoint(channel.id), 'PUT', { events }, options)
+}
+
+export async function removeChannel(channel: HeldChannel, options: LoadOptions = {}): Promise<ChannelMutation> {
+  const endpoint = channelEndpoint(channel.id)
+  const transport = options.fetch ?? globalThis.fetch
+  try {
+    const response = await transport(`${options.origin ?? ''}${endpoint}`, { method: 'DELETE' })
+    if (response.ok) return { status: 'removed' }
+    let body: unknown
+    try { body = await response.json() } catch { body = undefined }
+    const error = serviceError(body)
+    return error
+      ? { status: 'refused', refusal: { endpoint, status: response.status, error } }
+      : { status: 'failed', failure: { kind: 'refused', endpoint, status: response.status, detail: refusalDetail(body) } }
+  } catch (error) {
+    return { status: 'failed', failure: { kind: 'unreachable', endpoint, status: null, detail: describe(error) } }
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Workflows and activity. App.vue owns every read; the visual/editor views receive data as props.
@@ -1505,11 +1704,14 @@ function readGrant(entry: unknown): HeldGrant | string {
   }
   const admits = readAdmitted(entry.admits)
   if (typeof admits === 'string') return admits
+  const inbound = readInbound(entry.inbound)
+  if (typeof inbound === 'string') return inbound
 
   return {
     connector: entry.connector,
     vendor: typeof entry.vendor === 'string' ? entry.vendor : entry.connector,
     selector: readSelector(entry.selector),
+    inbound,
     // Absent reads as **not** expressible. The safe direction: a console that assumed it could write
     // a grant back would compose a set that silently dropped whatever it could not read.
     expressible: entry.expressible === true,
@@ -1518,6 +1720,25 @@ function readGrant(entry: unknown): HeldGrant | string {
     declares: typeof entry.declares === 'number' ? entry.declares : 0,
     admits,
   }
+}
+
+function readInbound(value: unknown): InboundGrant[] | string {
+  // Older hosts omitted this field, and omission means no inbound authority. Once a host sends it,
+  // though, every entry must be legible: dropping a malformed binding or event would let the next
+  // whole-set write silently revoke authority the operator was never shown.
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return 'a grant entry has no `inbound` array'
+  const inbound: InboundGrant[] = []
+  for (const entry of value) {
+    if (!isObject(entry) || typeof entry.binding !== 'string' || !Array.isArray(entry.events)) {
+      return 'an inbound grant has no `binding` or `events` array'
+    }
+    if (entry.events.some((event) => typeof event !== 'string')) {
+      return `inbound binding \`${entry.binding}\` has a non-string event`
+    }
+    inbound.push({ binding: entry.binding, events: entry.events as string[] })
+  }
+  return inbound
 }
 
 /** The grants in a `GET`/`PUT /api/grants` body, or the reason it is not one. */
@@ -1557,7 +1778,17 @@ function selectorBody(selector: Selector): Record<string, unknown> {
 
 /** One proposed grant as the service takes it. */
 function grantBody(proposed: ProposedGrant): Record<string, unknown> {
-  return { connector: proposed.connector, selector: selectorBody(proposed.selector) }
+  const body: Record<string, unknown> = {
+    connector: proposed.connector,
+    selector: selectorBody(proposed.selector),
+  }
+  if (proposed.inbound?.length) {
+    body.inbound = proposed.inbound.map((grant) => ({
+      binding: grant.binding,
+      events: grant.events,
+    }))
+  }
+  return body
 }
 
 /**
@@ -1858,6 +2089,7 @@ function adapt(pairs: ServedPair[]): Catalog {
         vendor: pair.connector.vendor,
         description: pair.connector.description,
         operationCount: pair.connector.operation_count,
+        channelCount: pair.connector.channel_count,
         operations: pair.operations.map(adaptOperation),
       })
     ),

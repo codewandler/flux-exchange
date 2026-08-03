@@ -704,23 +704,20 @@ test('the_derivation_is_live_and_takes_claims_off_the_page_rather_than_putting_t
 
   const stateOf = (surfaces, id) => tokenStanding(surfaces).find((entry) => entry.step.id === id)
 
-  // `subscribe` rather than `invoke` since X-42: `invoke` is served, so driving the hypothetical
-  // through it would be asserting a fact against itself and this test would move nothing.
-
   // As this build is.
-  assert.equal(stateOf(SURFACES, 'subscribe').can, false)
-  assert.ok(stateOf(SURFACES, 'subscribe').reason.length > 0)
+  assert.equal(stateOf(SURFACES, 'subscribe').can, true)
+  assert.equal(stateOf(SURFACES, 'subscribe').reason, '')
 
-  // As a build where the service serves it would be — no edit to this screen's copy, and none here.
+  // As a build where the service withdraws it would be — no edit to this screen's copy.
   assert.equal(
-    stateOf(asIf('subscribe', { served: true }), 'subscribe').can,
-    true,
-    'marking `subscribe` served does not change what this screen says a token can do, so the screen is not actually derived from `surfaces.mts`'
+    stateOf(asIf('subscribe', { served: false, absent: 'hypothetically withdrawn' }), 'subscribe').can,
+    false,
+    'marking `subscribe` unserved does not change what this screen says a token can do, so the screen is not actually derived from `surfaces.mts`'
   )
   assert.equal(
-    stateOf(asIf('subscribe', { served: true }), 'subscribe').reason,
-    '',
-    'the subscribe entry still carries a reason it cannot be done in a build where it can'
+    stateOf(asIf('subscribe', { served: false, absent: 'hypothetically withdrawn' }), 'subscribe').reason,
+    'hypothetically withdrawn',
+    'the subscribe entry does not carry the surface reason in a build where it is withdrawn'
   )
 
   // The direction that protects a reader: a surface regressing to unserved withdraws the claim

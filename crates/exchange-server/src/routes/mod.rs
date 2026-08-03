@@ -24,8 +24,8 @@ mod identity;
 mod invoke;
 mod onboarding;
 mod signin;
-mod workflows;
 mod subscribe;
+mod workflows;
 
 use std::path::Path;
 
@@ -865,6 +865,10 @@ mod tests {
             // capability fact out of an error body — `catalogue::view::ConnectorCredentials`
             // carries the long form.
             ("catalogue", "/api/catalogue/connectors/{id}/credentials"),
+            // Generated binding/event names and descriptions are immutable catalogue facts. The
+            // projection deliberately omits handshake, endpoint, auth and payload mapping data;
+            // tenant-owned channel records remain behind `/api/channels` and a user principal.
+            ("catalogue", "/api/catalogue/connectors/{id}/channels"),
             // Sign-in, and the callback it returns through. X-04's widening, and the argument the
             // identity design asked this story to make in its own words rather than inherit.
             //

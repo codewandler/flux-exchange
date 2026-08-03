@@ -6,19 +6,37 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **Generated connector WebSocket channels are a live, fail-closed Exchange surface** (X-101–X-105).
+  Operators persist tenant-derived channel declarations through `/api/channels`; the supervisor
+  restores and reconnects vendor sockets independently of subscribers, and connection or credential
+  rotation restarts affected channels. The reusable host plans through `connector-pack` without
+  constructing a request or opening a transport; the server binds Flux's guarded socket runtime.
+
+  Inbound grants name an explicit connector, binding and closed declared event set. Authenticated
+  `/api/subscribe` WebSockets multiplex opaque channel ids, request-correlated acknowledgements and
+  live typed events through bounded queues; a slow subscriber is isolated, and no replay or cursor
+  is implied. The console now manages Channels and publishes only declaration metadata anonymously,
+  never endpoints, auth headers, credentials or retained private payloads. Its Grants screen derives
+  inbound binding/event controls from those declarations, previews their consequences and preserves
+  held inbound authority when declarations cannot be read (X-110).
+
 ### Changed
 
-- **Flux Exchange adopts connector 0.16 and Flux 0.52 as one dependency graph** (X-104). The
-  engine-line seam, manifest and lockfile checks prove one Flux runtime line. Catalogue-expansion
-  guards now account for Asterisk's refused whole-authority host setting and Zendesk's default, Help
-  Center and Messaging settings.
+- **Flux Exchange advances connector-pack and the complete connector set to 0.17 with Flux 0.54 as
+  one dependency graph** (X-101). The engine-line seam, manifest and lockfile checks prove one Flux
+  runtime line; channel plans cross the same zero-I/O pack boundary as ordinary invocation.
 
-  The new canonical domain glossary reserves Agent for Flux's model + loop + bounded capabilities,
-  names the existing bearer principal Service Account, and defines Connection, Datasource, Event
-  Delivery, Trigger, App, Managed Agent, Model Profile, Run and Activity with honest live/target
-  status. The release audit records that Program declarations shipped through `flux-lang`, while
-  the `flux-app` and `flux-channels` host crates were omitted from the crates.io release; Exchange
-  does not replace either runtime locally.
+- **The flow editor protects work in progress and explains its state** (X-109). Switching drafts
+  with unsaved title, source or graph edits requires explicit discard; saved/modified state and
+  publication prerequisites stay visible; malformed node/run parameter objects report inline; and
+  an empty palette search is distinct from an unavailable catalogue.
+
+- **The family vocabulary now follows the released domain contracts** (X-106). Flux Programs,
+  Journeys, Apps, Managed Agents, Channels and Events are separated from Exchange-owned tenant
+  installations, connections, grants, service accounts and delivery policy, with live capability
+  claims kept distinct from the target architecture.
 
 ### Fixed
 

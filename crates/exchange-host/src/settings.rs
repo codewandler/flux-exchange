@@ -177,7 +177,7 @@ const _: () = assert!(MAX_TENANT_SETTINGS_BYTES < 32 * MAX_SETTING_VALUE_BYTES);
 
 /// **Which kind of non-secret value** a connector asks a tenant for.
 ///
-/// The two kinds `connector-pack`'s [`Field`] distinguishes, as an owned type this crate can put in
+/// The kinds `connector-pack`'s [`Field`] distinguishes, as an owned type this crate can put in
 /// a refusal, serialise into a store and hand back from [`declared_settings`]. `Field` borrows its
 /// name; a declared setting outlives the catalogue read that produced it.
 ///
@@ -195,6 +195,10 @@ pub enum SettingKind {
     /// is the connector's own declared data and is appended by the pack, so what a tenant supplies
     /// here is the plain account identifier and there is no join for it to get wrong.
     Username,
+    /// A non-secret value placed in one generated channel's WebSocket query string. `name` on the
+    /// surrounding [`DeclaredSetting`] is `<binding>.query.<parameter>`, preserving the pack's
+    /// declaration address without inventing a second channel configuration vocabulary.
+    ChannelQuery,
 }
 
 impl SettingKind {
@@ -206,6 +210,7 @@ impl SettingKind {
         match self {
             Self::Endpoint => "endpoint",
             Self::Username => "username",
+            Self::ChannelQuery => "channel",
         }
     }
 }
@@ -247,6 +252,10 @@ impl DeclaredSetting {
         match self.kind {
             SettingKind::Endpoint => Field::Endpoint(&self.name),
             SettingKind::Username => Field::Username(&self.name),
+            SettingKind::ChannelQuery => {
+                let (channel, parameter) = self.name.split_once(".query.").unwrap_or(("", ""));
+                Field::ChannelQuery { channel, parameter }
+            }
         }
     }
 
@@ -264,6 +273,15 @@ impl DeclaredSetting {
         let kind = match kind {
             "endpoint" => SettingKind::Endpoint,
             "username" => SettingKind::Username,
+            "channel"
+                if name
+                    .split_once(".query.")
+                    .is_some_and(|(channel, parameter)| {
+                        !channel.is_empty() && !parameter.is_empty()
+                    }) =>
+            {
+                SettingKind::ChannelQuery
+            }
             _ => return None,
         };
 
@@ -282,11 +300,12 @@ impl DeclaredSetting {
 /// that projection will require, rather than a second guess that could disagree with it. See this
 /// module's documentation for the measured reason a `base_url` scan is not an alternative.
 ///
-/// Two kinds are collected, under the service of the operation that asks for them:
+/// Three kinds are collected, under the service that asks for them:
 ///
 /// - every endpoint variable the operation's Flux carries;
 /// - the non-secret user half of every `basic` credential the **connector** declares, which the
 ///   pack requires under each service that authenticates with it.
+/// - non-secret generated-channel query values published by the connector catalogue.
 ///
 /// The answer is deduplicated and sorted, so a connector's surface is stable across calls: an
 /// enumeration that reordered between two requests would make a UI flicker and a diff meaningless.
@@ -334,6 +353,12 @@ pub fn declared_settings(
                     name: credential.name.to_owned(),
                 });
             }
+        }
+    }
+
+    for field in provider.config.iter().filter(|field| !field.secret) {
+        if let Some(declared) = DeclaredSetting::parse(field.service, field.binds) {
+            found.insert(declared);
         }
     }
 
@@ -479,8 +504,8 @@ impl HostPinning {
 /// templating intact, which is what makes this decidable without a new dependency and without
 /// reaching into `connector-pack` (whose `Slot` is `pub(crate)` and not available).
 ///
-/// Only [`SettingKind::Endpoint`] can reach an authority. A [`SettingKind::Username`] is the
-/// non-secret half of a Basic credential and is placed in a header, never in a URL, so it is always
+/// Only [`SettingKind::Endpoint`] can reach an authority. Username and channel-query settings are
+/// placed in a header or query string, never in the authority, so both are always
 /// [`OutsideTheAuthority`](HostPinning::OutsideTheAuthority).
 ///
 /// # A declared closed set is asked about first
@@ -1334,6 +1359,9 @@ mod file {
         match field {
             Field::Endpoint(name) => format!("endpoint.{name}"),
             Field::Username(name) => format!("username.{name}"),
+            Field::ChannelQuery { channel, parameter } => {
+                format!("channel.{channel}.query.{parameter}")
+            }
         }
     }
 

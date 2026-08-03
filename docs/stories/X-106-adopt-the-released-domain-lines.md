@@ -1,5 +1,5 @@
 ---
-id: X-104
+id: X-106
 title: "Adopt the released Flux and connector domain lines"
 status: done
 epic: apps
@@ -25,7 +25,7 @@ actually shipped. That evidence is the implementation boundary for Exchange-host
 - [x] The canonical glossary is aligned across the three family repositories and clearly separates
       live capabilities from target architecture.
 - [x] The Rust workspace gate, console tests/build, and public-site build/tests pass without
-      overwriting the in-progress X-99 through X-103 channel work.
+      overwriting the in-progress X-101 through X-105 channel work.
 - [x] The changelog records the dependency move and the clarified domain vocabulary; this story and
       the generated board are current.
 
@@ -33,7 +33,7 @@ actually shipped. That evidence is the implementation boundary for Exchange-host
 - 2026-08-03: crates.io reports connector-address, connector-catalog, connector-pack and
   connector-secrets 0.16.0. Published connector-pack metadata requires Flux core/lang/runtime 0.52,
   and Flux 0.52.1 is published.
-- 2026-08-03: the existing worktree contains user-owned X-99 through X-103 channel implementation;
+- 2026-08-03: the existing worktree contains user-owned X-101 through X-105 channel implementation;
   dependency adoption will preserve and compile that work rather than reset it.
 - 2026-08-03: the engine-line test failed first against the old 0.49 pins, then the complete graph
   resolved to connector 0.16.0 and Flux 0.52.1. The released Zendesk and Asterisk catalogue changes

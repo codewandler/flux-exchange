@@ -86,18 +86,12 @@ test('the_page_cannot_claim_a_capability_this_service_does_not_serve', async () 
   const html = await page()
 
   assert.ok(STEPS.length > 0, 'the onboarding model declares no steps; everything below is vacuous')
-  assert.ok(
-    SURFACES.some((surface) => !surface.served),
-    'nothing is declared unserved, so this test could not catch the thing it exists for'
-  )
 
   // Both halves are non-empty. A model where everything is withheld would pass the honesty
   // assertions while telling an agent author nothing, and one where everything is claimed would
   // pass them while claiming a platform that does not exist.
   const claimed = STEPS.filter((entry) => available(entry))
-  const withheldSteps = STEPS.filter((entry) => !available(entry))
   assert.ok(claimed.length > 0, 'the page claims nothing works; there is at least one thing that does')
-  assert.ok(withheldSteps.length > 0, 'the page withholds nothing, and this build cannot do everything')
 
   for (const entry of STEPS) {
     const surface = backing(entry)
@@ -157,25 +151,23 @@ test('the_page_cannot_claim_a_capability_this_service_does_not_serve', async () 
 })
 
 test('the_derivation_is_live_and_not_a_coincidence', () => {
-  // `subscribe` and not `invoke`, since X-42: `invoke` is now served, so using it here would be
-  // asserting a hypothetical against a fact and the test would stop moving anything.
   const subscribe = STEPS.find((entry) => entry.surface === 'subscribe')
   assert.ok(subscribe, 'no step is backed by the `subscribe` surface, so this test proves nothing')
 
   // As this build is.
-  assert.equal(available(subscribe, SURFACES), false)
-  assert.ok(withheld(subscribe, SURFACES).length > 0)
+  assert.equal(available(subscribe, SURFACES), true)
+  assert.equal(withheld(subscribe, SURFACES), '')
 
-  // As a build where the service serves it would be — no edit to the copy, and none to this file.
+  const withdrawn = asIf('subscribe', { served: false, absent: 'hypothetically withdrawn' })
   assert.equal(
-    available(subscribe, asIf('subscribe', { served: true })),
-    true,
-    'marking `subscribe` served does not make the subscribe step available, so the page is not actually derived from `surfaces.mts`'
+    available(subscribe, withdrawn),
+    false,
+    'marking `subscribe` unserved does not withdraw the step, so the page is not actually derived from `surfaces.mts`'
   )
   assert.equal(
-    withheld(subscribe, asIf('subscribe', { served: true })),
-    '',
-    'the subscribe step still carries a reason it cannot be done in a build where it can'
+    withheld(subscribe, withdrawn),
+    'hypothetically withdrawn',
+    'the withdrawn subscribe step does not carry the surface reason'
   )
 
   // And the other direction, which is the one that protects a reader: a surface that regresses to

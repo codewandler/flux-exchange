@@ -1,5 +1,5 @@
 ---
-id: X-99
+id: X-101
 title: Serve generated connector channels
 status: in-progress
 epic: generated-connector-channels
@@ -14,7 +14,7 @@ Make inbound connector bindings the tenant-safe mirror of operation invocation: 
 vendor channel and agents receive only explicitly granted declared events.
 
 ## Acceptance
-- [ ] X-100 through X-103 are done and their combined Rust, console and documentation gates pass.
+- [ ] X-102 through X-105 are done and their combined Rust, console and documentation gates pass.
 - [ ] Flux and connector dependencies move together only after compatible releases are published.
 
 ## Progress

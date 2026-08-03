@@ -41,8 +41,12 @@ use tracing_subscriber::EnvFilter;
 
 use crate::agent::{AgentStore, AGENT_STORE_SETTING};
 use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
+use crate::channel::{
+    CatalogueChannelDeclarations, ChannelSupervisor, DeploymentChannelPlacement,
+    GeneratedChannelRunner,
+};
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
-use crate::execution::invoker;
+use crate::execution::{channel_execution_system, invoker};
 use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
 use crate::oidc::Oidc;
@@ -239,12 +243,17 @@ fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
     if let Some(store) = settings.clone() {
         state = state.with_settings(store);
     }
+    let configuration = settings.map_or_else(
+        || Arc::new(exchange_host::MemoryConfig::new()) as Arc<dyn exchange_host::ConfigStore>,
+        |store| store as Arc<dyn exchange_host::ConfigStore>,
+    );
 
     // Bound before the invoker, because the invoker requires it. **No grant store, no invoker** —
     // see `grant_store`: an invoker built without one could only be built by choosing what to do in
     // its absence, and the only available choice is to admit everything.
     let grants = grant_store()?;
 
+    let channels = channel_store()?;
     if let Some(store) = credential_store()? {
         // The invoker is built from the same store the connections surface writes to, and only
         // when there is one. A composition with no store could still resolve a principal and look
@@ -257,18 +266,37 @@ fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
             // settings store is what the *templated* connectors need, and a host without one is
             // still a working host for the rest of the catalogue. What it must not do is pretend —
             // the seventeen that need a value refuse by name, quoting the field and the service.
-            let configuration = settings.map_or_else(
-                || {
-                    Arc::new(exchange_host::MemoryConfig::new())
-                        as Arc<dyn exchange_host::ConfigStore>
-                },
-                |store| store as Arc<dyn exchange_host::ConfigStore>,
-            );
-
             state = state.with_invoker(Arc::new(
-                invoker(startup.deployment(), store.clone(), configuration, grants)
-                    .map_err(|reason| StartupRefusal::Invoker { reason })?,
+                invoker(
+                    startup.deployment(),
+                    store.clone(),
+                    Arc::clone(&configuration),
+                    grants,
+                )
+                .map_err(|reason| StartupRefusal::Invoker { reason })?,
             ));
+        }
+
+        if let Some(channels) = channels {
+            let planner = Arc::new(exchange_host::ConnectorChannelPlanner::new(
+                store.clone(),
+                Arc::clone(&configuration),
+            ));
+            let execution_system = channel_execution_system()
+                .map_err(|reason| StartupRefusal::ChannelRuntime { reason })?;
+            let runner = Arc::new(GeneratedChannelRunner::new(
+                planner,
+                execution_system,
+                flux_system::net::PrivateNetAllow::None,
+            ));
+            let supervisor = ChannelSupervisor::new(
+                channels,
+                Arc::new(CatalogueChannelDeclarations),
+                Arc::new(DeploymentChannelPlacement::new(startup.deployment())),
+                runner,
+            );
+            supervisor.restore();
+            state = state.with_channels(supervisor);
         }
 
         // Bound whether or not an invoker was, and that combination is a real composition rather
@@ -276,6 +304,11 @@ fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
         // vendor to and nobody can run anything on, which is the honest state to be in on the way
         // to granting something.
         state = state.with_credentials(store);
+    } else if channels.is_some() {
+        warn!(
+            "a channel store is bound but no credential store is available, so channel management \
+             refuses instead of supervising unauthenticated vendor connections"
+        );
     }
     if let Some(store) = agent_store()? {
         state = state.with_agents(store);
@@ -285,6 +318,32 @@ fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
     }
 
     Ok(state)
+}
+
+/// Bind persistent channel declarations, or bind none. Unset is an unavailable capability rather
+/// than an in-memory fallback; configured and unreadable refuses startup.
+#[cfg(unix)]
+fn channel_store() -> Result<Option<Arc<dyn exchange_host::Channels>>, StartupRefusal> {
+    let Ok(configured) = std::env::var(exchange_host::CHANNEL_STORE_SETTING) else {
+        warn!(
+            "no channel store is bound ({} is unset), so persistent connector channels refuse",
+            exchange_host::CHANNEL_STORE_SETTING
+        );
+        return Ok(None);
+    };
+    let store =
+        exchange_host::ChannelStore::bind_configured(Some(&configured)).map_err(|error| {
+            StartupRefusal::ChannelStore {
+                reason: error.to_string(),
+            }
+        })?;
+    info!(path = %store.path().display(), "connector channels: owner-only atomic file store");
+    Ok(Some(Arc::new(store)))
+}
+
+#[cfg(not(unix))]
+fn channel_store() -> Result<Option<Arc<dyn exchange_host::Channels>>, StartupRefusal> {
+    Ok(None)
 }
 
 /// Bind workflow definitions and the audited pure cognition pack, or bind neither.

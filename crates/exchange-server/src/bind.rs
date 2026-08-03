@@ -180,6 +180,18 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A persistent connector-channel store was named and could not be bound.
+    ChannelStore {
+        /// The store's redaction-safe refusal.
+        reason: String,
+    },
+
+    /// The composition could not construct the guarded execution substrate for stored channels.
+    ChannelRuntime {
+        /// The redaction-safe composition failure.
+        reason: String,
+    },
+
     /// The composition could not build the thing that runs operations.
     ///
     /// A separate variant for the reason the two stores are separate: an operator fixes this
@@ -234,13 +246,19 @@ impl fmt::Display for StartupRefusal {
             | Self::AgentStore { reason }
             | Self::SettingsStore { reason }
             | Self::GrantStore { reason }
-            | Self::WorkflowStore { reason } => {
+            | Self::WorkflowStore { reason }
+            | Self::ChannelStore { reason } => {
                 write!(f, "{reason}")
             }
             Self::Invoker { reason } => write!(
                 f,
                 "refusing to start: a credential store is bound but nothing could be composed to \
                  run operations with — {reason}",
+            ),
+            Self::ChannelRuntime { reason } => write!(
+                f,
+                "refusing to start: persistent channels are configured but their guarded runtime \
+                 could not be composed — {reason}",
             ),
         }
     }
@@ -257,6 +275,8 @@ impl std::error::Error for StartupRefusal {
             | Self::SettingsStore { .. }
             | Self::GrantStore { .. }
             | Self::WorkflowStore { .. }
+            | Self::ChannelStore { .. }
+            | Self::ChannelRuntime { .. }
             | Self::Invoker { .. } => None,
             Self::DevIdentity { source } => Some(source),
             Self::UnreadableBind { source, .. } => Some(source),

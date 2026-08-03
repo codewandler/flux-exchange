@@ -26,6 +26,8 @@ channel id. Responses correlate by request id. Events expose only connector, bin
 event, receive time and raw typed payload. Operator-only `/api/channels` routes manage stored channel
 records, deriving tenant and connection authority from existing authenticated state.
 
-The descriptor and public surfaces remain `live = false` until the route and end-to-end tests ship.
-Dependency pins move atomically only after a published Flux line and connector-pack line expose the
-required guarded channel APIs; sibling path dependencies are forbidden.
+The descriptor and public surfaces report the route live because the route, real WebSocket
+end-to-end test and built-in single-tenant runner now ship together. A configured channel still
+refuses honestly when its stores, inbound grant or admissible placement are missing. The dependency
+pins moved atomically only after Flux 0.54 and connector-pack 0.17 published the required guarded
+channel APIs; sibling path dependencies remain forbidden.

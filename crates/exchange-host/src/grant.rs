@@ -105,7 +105,7 @@ impl OperationFacts {
     /// # `effects` is **derived**, and that is a measured gap rather than a detail
     ///
     /// `connector_catalog::Operation` publishes `risk`, `idempotency`, `credentials`, `hosts` and
-    /// the operation's Flux — and **no effects field** (re-checked against 0.16.0 in X-104), even
+    /// the operation's Flux — and **no effects field** (re-checked against 0.16.0 in X-106), even
     /// though the operation's own Flux source carries an `effects` declaration. So the rule here is
     /// the most
     /// the *readable* data supports and not one step further: **an operation the catalogue gives a
@@ -114,7 +114,7 @@ impl OperationFacts {
     ///
     /// The consequence for a grant, stated plainly because it is the direction that costs: a
     /// selector written `with_effects_within([Effect::Network])` is exact for every connector this
-    /// build carries — all declare `http`, re-measured on catalogue 0.16 in X-104 rather than
+    /// build carries — all declare `http`, re-measured on catalogue 0.16 in X-106 rather than
     /// carried over from an older catalogue — and would silently admit an operation with an
     /// *unreported* effect the day one ships. What keeps that from being live today is the same fact
     /// that makes

@@ -89,18 +89,6 @@ pub fn invoker(
         ..WebOptions::default()
     };
 
-    // A workspace nothing in this path reads. The registry an invocation resolves holds exactly one
-    // operation and its egress, and neither touches the filesystem. It exists because
-    // `ToolContext::new` takes a `System` and there is no constructor that does not.
-    let root = std::env::current_dir()
-        .map_err(|error| format!("the working directory is unreadable: {error}"))?;
-    let workspace = Workspace::new(&root).map_err(|error| {
-        format!(
-            "`{}` is not a usable workspace root: {error}",
-            root.display()
-        )
-    })?;
-
     Ok(Invoker::new(
         // Chosen once at startup, never by a request. Ordinary startup remains multi-tenant — the
         // class that refuses more — while X-59's `--dev` shorthand declares the one `dev` tenant
@@ -120,9 +108,27 @@ pub fn invoker(
         // process's memory for it.
         grants,
         Arc::new(GuardedSystem {
-            system: Arc::new(guarded_system(workspace)),
+            system: channel_execution_system()?,
         }),
     ))
+}
+
+/// Build the native guarded substrate selected once by this composition for persistent channels.
+/// The caller erases it behind Flux's `ExecutionSystem` port; request and channel records cannot
+/// replace it or weaken its sandbox posture.
+pub fn channel_execution_system() -> Result<Arc<System>, String> {
+    // A workspace nothing in invocation or generated WebSocket execution reads. `System` requires
+    // one because the same handle can serve workspace operations; the channel receives only the
+    // erased guarded port and uses its network family.
+    let root = std::env::current_dir()
+        .map_err(|error| format!("the working directory is unreadable: {error}"))?;
+    let workspace = Workspace::new(&root).map_err(|error| {
+        format!(
+            "`{}` is not a usable workspace root: {error}",
+            root.display()
+        )
+    })?;
+    Ok(Arc::new(guarded_system(workspace)))
 }
 
 /// The guarded IO handle every [`ToolContext`] is built over, **with its sandbox posture stated**.

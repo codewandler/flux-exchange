@@ -56,8 +56,9 @@ caller's tenant. It is the outbound verb of a connector binding.
 
 ### `subscribe` and channels
 
-The inbound verb of the same binding. A vendor's signed payload is verified at the boundary and the
-subscriber receives a typed, declared event, scoped to bindings that tenant already has.
+The inbound verb of the same binding. The host authenticates a generated vendor WebSocket from
+tenant-held configuration and the subscriber receives a typed, declared event, scoped to the closed
+binding/event set that tenant's grant admits.
 [Its own page](/capabilities/subscribe) carries the derived status.
 
 **A webhook is a Channel** — not a trigger, and not a session artifact. It belongs to the deployment
@@ -94,5 +95,4 @@ The [repository](https://github.com/codewandler/flux-exchange) carries the itemi
 is not built, and it is expected to stay accurate — a page or a type that implies a working service
 costs more than an honest gap. This site is a *third* rendering of overlapping facts, so treat the
 descriptor as the source and this page as the vocabulary.
-
 

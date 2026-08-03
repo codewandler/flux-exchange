@@ -61,17 +61,17 @@ struct ChannelView {
     connection: String,
     binding: String,
     events: BTreeSet<String>,
+    status: crate::channel::ChannelStatus,
 }
 
-impl From<ChannelRecord> for ChannelView {
-    fn from(record: ChannelRecord) -> Self {
-        Self {
-            id: record.id().to_string(),
-            connector: record.connector().to_owned(),
-            connection: record.connection().to_owned(),
-            binding: record.binding().to_owned(),
-            events: record.events().clone(),
-        }
+fn view(supervisor: &crate::channel::ChannelSupervisor, record: ChannelRecord) -> ChannelView {
+    ChannelView {
+        id: record.id().to_string(),
+        connector: record.connector().to_owned(),
+        connection: record.connection().to_owned(),
+        binding: record.binding().to_owned(),
+        events: record.events().clone(),
+        status: supervisor.status(record.id()),
     }
 }
 
@@ -87,7 +87,7 @@ async fn list(
             .store()
             .held(principal.tenant())
             .into_iter()
-            .map(ChannelView::from)
+            .map(|record| view(supervisor, record))
             .collect::<Vec<_>>(),
     )
     .into_response()
@@ -124,7 +124,7 @@ async fn create(
         return unavailable();
     }
     supervisor.start(record.clone());
-    (StatusCode::CREATED, Json(ChannelView::from(record))).into_response()
+    (StatusCode::CREATED, Json(view(supervisor, record))).into_response()
 }
 
 async fn update(
@@ -158,7 +158,7 @@ async fn update(
         return unavailable();
     }
     supervisor.start(record.clone());
-    Json(ChannelView::from(record)).into_response()
+    Json(view(supervisor, record)).into_response()
 }
 
 async fn remove(
@@ -175,6 +175,7 @@ async fn remove(
     match supervisor.store().delete(principal.tenant(), &id) {
         Ok(true) => {
             supervisor.stop(&id);
+            supervisor.forget(&id);
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => not_found(),

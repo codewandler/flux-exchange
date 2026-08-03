@@ -1,5 +1,5 @@
 ---
-id: X-103
+id: X-105
 title: Publish the live subscribe surface
 status: in-progress
 epic: generated-connector-channels
@@ -20,6 +20,9 @@ behavior exist.
 
 ## Progress
 
+- 2026-08-03: the released connector/Flux runner is bound, channel CRUD and subscribe are live, the
+  descriptor and public documentation agree, and the console manages tenant channels without ever
+  receiving endpoint or authentication material.
 - 2026-08-02: operator CRUD and authenticated subscribe routes exist and are tested, but the built-in
   composition intentionally binds no runner until compatible Flux/connector releases arrive.
   Descriptor, console and public docs therefore remain non-live as this story requires.

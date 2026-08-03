@@ -183,6 +183,14 @@ mod rules {
     /// surface from its operations' own Flux.
     pub const MAY_NAME_REHEARSAL: &[&str] = &["settings.rs"];
 
+    /// The zero-transport channel entry point. It may compose one generated handshake plan but has
+    /// no client, socket or `Egress`; the composing binary executes that plan through Flux's
+    /// selected guarded system.
+    pub const CHANNEL_PLAN: &str = "connector_pack::channel_plan";
+
+    /// The tenant-owned channel planner is the only file that may enter this zero-I/O seam.
+    pub const MAY_NAME_CHANNEL_PLAN: &[&str] = &["channel.rs"];
+
     /// Dispatching a tool. Only the seam may, and only on the operation the pack resolved.
     pub const DISPATCH: &str = ".execute(";
 
@@ -669,6 +677,24 @@ fn the_scanner_catches_what_it_claims_to() {
         !violations(&[seam(), rehearsing("elsewhere.rs")]).is_empty(),
         "the scanner accepted the pack's third entry point in a file that may not name it",
     );
+
+    let planning = |name: &str| {
+        (
+            name.to_owned(),
+            format!(
+                "let plan = {}(provider, binding, credentials, settings).await?;",
+                rules::CHANNEL_PLAN
+            ),
+        )
+    };
+    assert!(
+        violations(&[seam(), planning("channel.rs")]).is_empty(),
+        "the scanner rejects the one file that may compose a zero-transport channel plan",
+    );
+    assert!(
+        !violations(&[seam(), planning("elsewhere.rs")]).is_empty(),
+        "the scanner accepted channel planning outside its bounded file",
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1077,6 +1103,7 @@ fn lock_2_markers() -> Vec<&'static str> {
         rules::SEAM,
         rules::MODEL_FACING_SEAM,
         rules::REHEARSAL,
+        rules::CHANNEL_PLAN,
         rules::UNWRAPS_THE_TRANSPORT,
         rules::DISPATCH,
         rules::TRANSPORT_PORT,
@@ -1281,6 +1308,19 @@ fn violations(sources: &[(String, String)]) -> Vec<String> {
                  ways into `connector-pack` from this crate is bounded on purpose, and a new one \
                  belongs in `MAY_NAME_REHEARSAL` with a reason.",
                 rules::REHEARSAL,
+            ));
+        }
+    }
+
+    for path in naming(rules::CHANNEL_PLAN) {
+        if !rules::MAY_NAME_CHANNEL_PLAN
+            .iter()
+            .any(|allowed| path.ends_with(allowed))
+        {
+            found.push(format!(
+                "`{path}` names `{}`, the pack's zero-transport channel planner outside the one \
+                 file allowed to bind tenant stores to generated channel declarations.",
+                rules::CHANNEL_PLAN,
             ));
         }
     }

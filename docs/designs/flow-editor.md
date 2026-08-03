@@ -20,9 +20,10 @@ storage, routes, execution and console. The exchange deliberately carries no loc
 projection logic and no sibling `path`/`git` override: either would make the shipped service depend
 on code outside its reviewed dependency graph.
 
-That sequence completed on Flux 0.52: L-126 shipped in the engine line, flux-connectors 0.16.0
-published the compatible pack, and the exchange moved both pin sets atomically. The registry-only
-dependency graph is retained deliberately; no sibling checkout is part of the shipped build.
+That sequence first completed on Flux 0.52: L-126 shipped in the engine line and flux-connectors
+0.16.0 published the compatible pack. Exchange now moves forward atomically on connector-pack 0.17
+and Flux 0.54, retaining the registry-only dependency graph; no sibling checkout is part of the
+shipped build.
 
 ## Catalogue and authority
 
@@ -54,7 +55,9 @@ a deterministic local tree layout. Graph projections and source edits go to the 
 and validation; TypeScript never implements Flux semantics. Published runs are polled, cancellable
 and painted onto nodes by the upstream node map. Freeform dragging changes local arrangement only;
 persisted execution order remains the Flux source, which the console states rather than implying a
-second interpreter.
+Switching drafts while title, source or graph edits are unsaved requires an explicit discard;
+saved/modified state and publication prerequisites stay visible, and malformed node or run
+parameter objects are reported inline at the field that needs correction.
 
 ## Authoring and publication sequence
 

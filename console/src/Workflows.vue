@@ -48,6 +48,7 @@ const workingGraph = ref<EditorGraph | null>(null)
 const editMode = ref<'source' | 'graph'>('source')
 const selectedNodeId = ref('')
 const nodeParams = ref('{}')
+const switchBlockedId = ref('')
 let nextNode = 1
 
 const workflows = computed(() => props.state.status === 'ready' ? props.state.workflows : [])
@@ -170,7 +171,18 @@ function layoutGraph() {
 }
 
 function choose(workflow: WorkflowDraft) {
+  if (workflow.id === selectedId.value) return
+  if (dirty.value) {
+    switchBlockedId.value = workflow.id
+    return
+  }
   selectedId.value = workflow.id
+}
+
+function discardAndOpen() {
+  if (!switchBlockedId.value) return
+  selectedId.value = switchBlockedId.value
+  switchBlockedId.value = ''
 }
 
 function remember(value: string) {
@@ -326,6 +338,14 @@ async function showSource() {
           <span v-if="workflow.published_version">Published v{{ workflow.published_version }}</span>
           <span v-else>Not published</span>
         </button>
+        <div v-if="switchBlockedId" class="workflow-switch-warning" role="alert">
+          <strong>Unsaved changes</strong>
+          <p>Save this draft before opening another, or discard the local edits.</p>
+          <div>
+            <button type="button" @click="switchBlockedId = ''">Keep editing</button>
+            <button type="button" class="button-danger" @click="discardAndOpen">Discard and open</button>
+          </div>
+        </div>
         <p v-if="!workflows.length" class="workflow-empty">No draft exists for this tenant yet.</p>
 
         <details class="workflow-create" :open="!workflows.length">
@@ -341,7 +361,10 @@ async function showSource() {
         <div class="workflow-editor__bar">
           <div>
             <input v-model="title" class="workflow-title" aria-label="Workflow title" maxlength="160" />
-            <code>{{ selected.id }}</code>
+            <div class="workflow-editor__identity">
+              <code>{{ selected.id }}</code>
+              <span class="draft-state" :data-dirty="dirty">{{ dirty ? 'Draft modified' : 'Draft saved' }}</span>
+            </div>
           </div>
           <div class="mode-switch" aria-label="Editor mode">
             <button v-for="choice in (['tree', 'freeform', 'source'] as Mode[])" :key="choice" type="button" :aria-pressed="mode === choice" @click="mode = choice">
@@ -388,7 +411,8 @@ async function showSource() {
           </div>
           <label v-if="selectedNode.kind === 'call'">
             Parameter object
-            <textarea v-model="nodeParams" rows="5" spellcheck="false"></textarea>
+            <textarea v-model="nodeParams" rows="5" spellcheck="false" :aria-invalid="!nodeParamsValid"></textarea>
+            <span v-if="!nodeParamsValid" class="input-error" role="alert">Parameter JSON must be an object.</span>
           </label>
           <div class="node-inspector__actions">
             <button type="button" @click="moveSelected(-1)">Move earlier</button>
@@ -421,6 +445,9 @@ async function showSource() {
         </div>
 
         <div class="workflow-actions">
+          <span class="workflow-action-note" aria-live="polite">
+            {{ dirty ? 'Save this draft before publishing.' : 'Ready to publish this saved revision.' }}
+          </span>
           <button type="button" :disabled="busy" @click="validateCurrent">Validate</button>
           <button type="button" :disabled="busy || !dirty || !title.trim()" @click="save">Save draft</button>
           <button type="button" class="button-primary" :disabled="busy || dirty" @click="emit('publish', selected)">Publish r{{ selected.revision }}</button>
@@ -433,7 +460,11 @@ async function showSource() {
             <p v-else>Publish this draft before it can run.</p>
             <p>Requires a grant for <code>workflow.{{ selected.id }}</code> and a separate grant for every connector it calls.</p>
           </div>
-          <label>Parameters <textarea v-model="params" rows="4" spellcheck="false"></textarea></label>
+          <label>
+            Parameters
+            <textarea v-model="params" rows="4" spellcheck="false" :aria-invalid="parsedParams === null"></textarea>
+            <span v-if="parsedParams === null" class="input-error" role="alert">Parameter JSON must be an object.</span>
+          </label>
           <button type="button" :disabled="busy || !selected.published_version || parsedParams === null" @click="emit('run', selected, parsedParams)">Start run</button>
         </section>
 
@@ -453,6 +484,9 @@ async function showSource() {
         <p v-if="catalog.status === 'loading'">Reading executable operations…</p>
         <p v-else-if="catalog.status === 'failed'" role="alert">{{ catalog.failure.detail }}</p>
         <template v-else>
+          <p v-if="!operations.length" class="palette-empty" role="status">
+            No operations match{{ query.trim() ? ` “${query.trim()}”` : '' }}.
+          </p>
           <details v-for="kind in ['connector', 'cognition']" :key="kind" open>
             <summary>{{ kind === 'connector' ? 'Connectors' : 'Pure cognition' }}</summary>
             <article v-for="operation in operations.filter((item) => item.kind === kind)" :key="operation.id" class="palette-operation">

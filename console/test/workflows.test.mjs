@@ -86,6 +86,18 @@ test('workflow and activity views receive data and never fetch it', () => {
   assert.match(source('Activity.vue'), /entry\.event\.node_id/)
 })
 
+test('the editor protects unsaved work and explains invalid local input', () => {
+  const view = source('Workflows.vue')
+
+  assert.match(view, /switchBlockedId/)
+  assert.match(view, /Unsaved changes/)
+  assert.match(view, /Discard and open/)
+  assert.match(view, /Draft modified/)
+  assert.match(view, /Save this draft before publishing/)
+  assert.match(view, /Parameter JSON must be an object/)
+  assert.match(view, /No operations match/)
+})
+
 test('workflow styles name no literal colour and every custom property exists', () => {
   const styles = source('workflows.css')
   const tokens = source('tokens.css')

@@ -50,6 +50,7 @@ import {
 import { GRANTS_ENDPOINT, SIGNIN_ENDPOINT } from './service.mts'
 import type {
   AdmittedOperation,
+  ChannelDeclarationsState,
   GrantOutcome,
   GrantsState,
   HeldGrant,
@@ -161,6 +162,20 @@ function admittedPanel(grant: HeldGrant): VNode {
   ])
 }
 
+function inboundPanel(grant: HeldGrant): VNode | null {
+  const inbound = grant.inbound ?? []
+  if (!inbound.length) return null
+  return h('div', { class: 'grants__inbound', 'data-grants': 'inbound' }, [
+    h('p', { class: 'grants__count' }, 'Inbound channel events'),
+    h('ul', { class: 'grants__inbound-list' }, inbound.map((entry) =>
+      h('li', { key: entry.binding }, [
+        h('code', null, entry.binding),
+        h('span', null, entry.events.join(', ')),
+      ])
+    )),
+  ])
+}
+
 /**
  * A grant this surface could not have written, shown as stored.
  *
@@ -211,6 +226,7 @@ function grantCard(grant: HeldGrant, revoke: (() => void) | null): VNode {
       ].filter((node): node is VNode => node !== null)),
       selectorLine(grant),
       grant.expressible ? null : inexpressibleNotice(grant),
+      inboundPanel(grant),
       admittedPanel(grant),
     ].filter((node): node is VNode => node !== null)
   )
@@ -228,6 +244,10 @@ export default defineComponent({
     catalogConnectors: { type: Array as PropType<Connector[]>, default: () => [] },
     connected: { type: Array as PropType<string[]>, default: () => [] },
     catalog: { type: Object as PropType<Catalog>, default: null },
+    channelDeclarations: {
+      type: Object as PropType<ChannelDeclarationsState>,
+      default: () => ({ status: 'ready', declarations: [] }),
+    },
     initialConnector: { type: String, default: '' },
     /** Every risk level the catalogue publishes, so a level this console cannot offer is visible. */
     catalogueRisks: { type: Array as PropType<string[]>, default: () => [] },
@@ -254,6 +274,36 @@ export default defineComponent({
     /** Whether the effects axis bounds anything at all. `false` sends no `effects_within`. */
     const boundEffects = ref(false)
     const effects = ref<string[]>([])
+    const inbound = ref<Record<string, string[]>>({})
+
+    const declaredInbound = computed(() =>
+      props.channelDeclarations.status === 'ready'
+        ? props.channelDeclarations.declarations.filter((entry) =>
+            entry.connector === connector.value && entry.transport === 'socket')
+        : []
+    )
+
+    function loadInbound(id: string): void {
+      const existing = held.value.find((grant) => grant.connector === id)
+      inbound.value = Object.fromEntries(
+        (existing?.inbound ?? []).map((entry) => [entry.binding, [...entry.events]])
+      )
+    }
+
+    function chooseConnector(id: string): void {
+      connector.value = id
+      loadInbound(id)
+      if (id) applyPreset(preset.value)
+      else changed()
+    }
+
+    function toggleInbound(binding: string, event: string, checked: boolean): void {
+      const selected = new Set(inbound.value[binding] ?? [])
+      if (checked) selected.add(event)
+      else selected.delete(event)
+      inbound.value = { ...inbound.value, [binding]: [...selected] }
+      changed()
+    }
 
     function applyPreset(next: GrantPreset): void {
       preset.value = next
@@ -264,10 +314,6 @@ export default defineComponent({
       effects.value = selector.effectsWithin ?? []
       changed()
     }
-
-    watch(() => props.initialConnector, (next) => {
-      if (next) { connector.value = next; applyPreset('read-only') }
-    }, { immediate: true })
 
     /** What the operator has stated, or `null` before they have chosen a connector. */
     const draft = (): ProposedGrant | null =>
@@ -280,6 +326,17 @@ export default defineComponent({
               effectsWithin: boundEffects.value ? [...effects.value] : null,
               idempotency: idempotency.value === '' ? null : idempotency.value,
             },
+            ...(() => {
+              const selected = props.channelDeclarations.status === 'ready'
+                ? declaredInbound.value.flatMap((entry) => {
+                    const events = inbound.value[entry.name] ?? []
+                    return events.length ? [{ binding: entry.name, events: [...events] }] : []
+                  })
+                : held.value
+                    .find((grant) => grant.connector === connector.value)
+                    ?.inbound?.map((entry) => ({ binding: entry.binding, events: [...entry.events] })) ?? []
+              return selected.length ? { inbound: selected } : {}
+            })(),
           }
 
     /**
@@ -298,6 +355,17 @@ export default defineComponent({
       props.grants.status === 'ready' ? props.grants.grants : []
     )
     const blocked = computed<HeldGrant[]>(() => blocking(held.value))
+
+    watch(() => props.initialConnector, (next) => {
+      if (next) { connector.value = next; loadInbound(next); applyPreset('read-only') }
+    }, { immediate: true })
+
+    watch(() => props.grants, () => {
+      if (connector.value) {
+        loadInbound(connector.value)
+        changed()
+      }
+    }, { deep: true })
 
     /**
      * Whether the preview on screen is an answer about the draft on screen.
@@ -558,6 +626,39 @@ export default defineComponent({
       const unknownEffect = unknownEffects(props.catalogueEffects)
       const stopped = props.grants.status === 'ready' && !props.grants.editable
 
+      const inboundFields = (): VNode => {
+        if (!connector.value) {
+          return h('p', { class: 'grants__hint' }, 'Choose a connector to see its inbound channel bindings.')
+        }
+        if (props.channelDeclarations.status === 'loading') {
+          return h('p', { class: 'grants__hint', 'aria-live': 'polite' }, 'Reading inbound channel declarations…')
+        }
+        if (props.channelDeclarations.status === 'failed') {
+          return h('p', { class: 'grants__stale', role: 'alert' },
+            `Inbound declarations could not be read from ${props.channelDeclarations.failure.endpoint}. Existing inbound authority is preserved, but cannot be edited safely.`)
+        }
+        if (!declaredInbound.value.length) {
+          return h('p', { class: 'grants__hint' }, 'This connector declares no generated WebSocket channel.')
+        }
+        return h('div', { class: 'grants__inbound-editor' }, declaredInbound.value.map((binding) =>
+          h('fieldset', { key: binding.name }, [
+            h('legend', null, [h('code', null, binding.name), ` — ${binding.description}`]),
+            ...binding.events.map((event) => h('label', { key: event.name }, [
+              h('input', {
+                type: 'checkbox',
+                checked: (inbound.value[binding.name] ?? []).includes(event.name),
+                onChange: (changed: Event) => toggleInbound(
+                  binding.name,
+                  event.name,
+                  (changed.target as HTMLInputElement).checked
+                ),
+              }),
+              h('span', null, [h('strong', null, event.name), h('small', null, event.description)]),
+            ])),
+          ])
+        ))
+      }
+
       return h('form', { class: 'grants__form', 'data-grants': 'form', onSubmit: save }, [
         h('h2', null, 'Grant a connector'),
 
@@ -572,11 +673,11 @@ export default defineComponent({
         h(ConnectorPicker, {
           connectors: props.catalogConnectors.length
             ? props.catalogConnectors
-            : props.connectors.map((id) => ({ id, vendor: id, description: '', operationCount: 0, operations: [] })),
+            : props.connectors.map((id) => ({ id, vendor: id, description: '', operationCount: 0, channelCount: 0, operations: [] })),
           connected: props.connected,
           value: connector.value,
           label: 'Connector',
-          'onChoose': (id: string) => { connector.value = id; if (id) applyPreset(preset.value); else changed() },
+          'onChoose': chooseConnector,
         }),
 
         h('label', { class: 'sr-only', 'aria-hidden': 'true' }, [
@@ -588,8 +689,7 @@ export default defineComponent({
               'data-grants': 'connector',
               value: connector.value,
               onChange: (event: Event) => {
-                connector.value = (event.target as HTMLSelectElement).value
-                if (connector.value) applyPreset(preset.value)
+                chooseConnector((event.target as HTMLSelectElement).value)
               },
             },
             [
@@ -641,6 +741,13 @@ export default defineComponent({
           'any',
           ['idempotent', 'conditional', 'not_idempotent']
         ),
+        ]),
+
+        h('section', { class: 'grants__inbound-editor-section', 'aria-labelledby': 'inbound-grant-title' }, [
+          h('h3', { id: 'inbound-grant-title' }, 'Inbound channel events'),
+          h('p', { class: 'grants__hint' },
+            'Optional and closed: a subscriber receives only the declared events selected here. This does not start or stop the vendor channel.'),
+          inboundFields(),
         ]),
 
         unknown.length > 0

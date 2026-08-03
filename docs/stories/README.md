@@ -9,12 +9,13 @@ directory (`<ID>-<slug>.md`); this board indexes them by status. New work? Copy
 
 ## Status
 
-**v0.14.3 — credentials, gated operations and versioned tenant workflows.** The host serves OIDC
-and loopback development identity, tenant connections/settings/grants, ordinary connector invoke,
-immutable workflow publication and durable value-free run activity. `subscribe`, channels and
+**v0.14.3 + current main — credentials, gated operations, versioned tenant workflows and generated
+connector channels.** The host serves OIDC and loopback development identity, tenant
+connections/settings/grants, ordinary connector invoke, immutable workflow publication, durable
+value-free run activity and live WebSocket subscriptions. Webhooks, durable event replay/inboxes and
 leases-in-anger remain unbuilt. See [README](../../README.md) § Status.
 
-The engine seam is aligned: connector-pack 0.16 and Flux 0.52 move as one pin set, held by manifest,
+The engine seam is aligned: connector-pack 0.17 and Flux 0.54 move as one pin set, held by manifest,
 lockfile and compile-time tests.
 
 <!-- BEGIN track:board -->
@@ -24,12 +25,13 @@ lockfile and compile-time tests.
 - [X-59 — A deployment can hold one tenant and stop asking which](X-59-single-tenant-deployment.md) · the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · the first deployment any flux-family repository has made, so it sets the precedent the siblings copy. One machine deliberately — the credential store fsyncs the whole file under one mutex and a fly volume is per-machine, so two machines is two divergent stores with no reconciliation
 - [X-100 — The development command keeps a real browser session](X-100-dev-command-keeps-a-browser-session.md) · a route fixture covered --dev, but no repeatable test spawned cargo run; meanwhile the explicit-roster page rendered <handle> as an empty HTML element
-- [X-98 — A versioned visual and source flow editor](X-98-a-versioned-flow-editor.md) · connector operations plus the pure cognition group; immutable publication, dual grants and node-addressed run records
-- [X-99 — Serve generated connector channels](X-99-generated-connector-channels-epic.md) · persistent tenant-owned channels, explicit inbound grants, one multiplexed agent WebSocket
-- [X-100 — Persist and supervise connector channels](X-100-persist-and-supervise-connector-channels.md)
-- [X-101 — Grant declared inbound events](X-101-grant-declared-inbound-events.md)
-- [X-102 — Multiplex agent channel subscriptions](X-102-multiplex-agent-channel-subscriptions.md)
-- [X-103 — Publish the live subscribe surface](X-103-publish-live-subscribe-surface.md)
+- [X-101 — Serve generated connector channels](X-101-generated-connector-channels-epic.md) · persistent tenant-owned channels, explicit inbound grants, one multiplexed agent WebSocket
+- [X-102 — Persist and supervise connector channels](X-102-persist-and-supervise-connector-channels.md)
+- [X-103 — Grant declared inbound events](X-103-grant-declared-inbound-events.md)
+- [X-104 — Multiplex agent channel subscriptions](X-104-multiplex-agent-channel-subscriptions.md)
+- [X-105 — Publish the live subscribe surface](X-105-publish-live-subscribe-surface.md)
+- [X-109 — Refine flow editor feedback and navigation](X-109-refine-flow-editor-feedback-and-navigation.md)
+- [X-110 — Edit inbound channel grants in the console](X-110-edit-inbound-grants-in-the-console.md) · channel creation without an inbound grant editor leaves the operator unable to complete create → grant → subscribe
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-92 — Private reporting and protected main](X-92-private-reporting-and-protected-main.md) · Observed 2026-08-02: private vulnerability reporting, secret scanning, Dependabot security updates and main protection are all disabled.
@@ -41,7 +43,8 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 - [X-35 — Agent access (epic)](X-35-agent-access-epic.md) · EPIC — the vision's primary caller cannot authenticate. PrincipalKind::Agent exists as a type and appears in the loopback dev roster; nothing mints or verifies an agent's token. Not blocked by X-11, unlike everything else downstream
 
 ### Apps
-- [X-105 — Service Accounts are not Flux Agents](X-105-service-accounts-are-not-flux-agents.md) · migrate the legacy agent-token API without invalidating existing callers; reserve Agent for the managed Flux runtime
+- [X-107 — Service Accounts are not Flux Agents](X-107-service-accounts-are-not-flux-agents.md) · migrate the legacy agent-token API without invalidating existing callers; reserve Agent for the managed Flux runtime
+- [X-108 — Host installed Flux Apps and Managed Agents](X-108-host-installed-flux-apps.md) · Flux App/channel contracts are published on the connector-compatible line; design Exchange-owned package installation and tenant bindings before implementation
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first
@@ -73,9 +76,6 @@ _Everything this platform does can only be seen on `127.0.0.1`. The getting-star
 - [X-94 — Persistent state has a tested recovery path](X-94-persistent-state-has-a-tested-recovery-path.md) · The one production volume was encrypted but listed no snapshots on 2026-08-02; no recovery point or restore time has been demonstrated.
 - [X-96 — Traffic controls are fair as well as bounded](X-96-traffic-controls-are-fair-as-well-as-bounded.md) · The process-wide X-87 limiter bounds memory and concurrency but lets one caller spend the shared invocation budget and supplies no saturation metric.
 - [X-97 — Public credentials leave the file store](X-97-public-credentials-leave-the-file-store.md) · The file store is honest and mode-safe but application-plaintext; the existing SecretStore port is the seam for a managed Vault-class backend.
-
-## Blocked
-- [X-106 — Host installed Flux Apps and Managed Agents](X-106-host-installed-flux-apps.md) · blocked until the Flux App/channel host is published on the connector-compatible engine line; package and tenant bindings stay Exchange-owned
 
 ## Backlog
 - [X-51 — A broken doc link fails the build instead of hiding among twenty others](X-51-a-broken-doc-link-is-visible.md) · found by X-48, 2026-08-01: `cargo doc --workspace --no-deps` emits ~20 unresolved intra-doc link warnings and is not in the gate, so a genuinely broken link in new code is invisible
@@ -159,7 +159,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-89 — The security posture is discoverable and its gaps are tracked](X-89-document-and-extend-the-security-posture.md) · Document the controls X-87 hardened, label deployment assumptions and limitations honestly, and turn the remaining security work into ranked stories.
 - [X-98 — A versioned visual and source flow editor](X-98-a-versioned-flow-editor.md) · connector operations plus the pure cognition group; immutable publication, dual grants and node-addressed run records
 - [X-99 — The development build keeps the declared MSRV](X-99-dev-build-keeps-the-declared-msrv.md) · cargo run -- --dev regressed when bundled SQLite moved beyond Rust 1.88; align Exchange and Flux on the compatible registry line and prove the real browser round trip
-- [X-104 — Adopt the released Flux and connector domain lines](X-104-adopt-the-released-domain-lines.md) · Release gate opened 2026-08-03: connector-pack 0.16 requires Flux 0.52; audit the shipped contracts before Exchange builds on them
+- [X-106 — Adopt the released Flux and connector domain lines](X-106-adopt-the-released-domain-lines.md) · Release gate opened 2026-08-03: connector-pack 0.16 requires Flux 0.52; audit the shipped contracts before Exchange builds on them
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

@@ -1352,6 +1352,25 @@ fn the_declared_surface_is_read_from_the_connector_rather_than_from_its_base_url
     assert_eq!(declared, vec!["endpoint.workspace".to_owned()]);
 }
 
+/// The socket planner asks for its query value through the same tenant-scoped configuration port
+/// as ordinary operations. If the surface omitted this declaration, an operator could connect
+/// Asterisk's REST API but its generated event channel would always refuse as unconfigured.
+#[test]
+fn a_generated_channel_query_is_part_of_the_connection_settings_surface() {
+    let asterisk = connector_catalog::provider(connector_catalog::ProviderKey::id("asterisk"))
+        .expect("the catalogue carries asterisk");
+    let declared = declared_settings(asterisk).expect("asterisk declarations are readable");
+
+    assert!(
+        declared.iter().any(|setting| {
+            setting.service == "default"
+                && setting.kind == SettingKind::ChannelQuery
+                && setting.binds() == "channel.ari-events.query.app"
+        }),
+        "the generated ARI socket's required application query is not configurable: {declared:?}",
+    );
+}
+
 /// A connector with a literal base URL and no Basic credential declares nothing to configure, and
 /// that is an answer rather than an omission.
 #[test]

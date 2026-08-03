@@ -149,6 +149,71 @@
   line-height: 1.6;
 }
 
+.grants__inbound {
+  margin: 14px 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--vp-c-bg-soft);
+}
+
+.grants__inbound-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.grants__inbound-list li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.grants__inbound-list span {
+  color: var(--vp-c-text-2);
+  font-size: 13px;
+}
+
+.grants__inbound-editor-section {
+  margin: 24px 0;
+  padding-top: 20px;
+  border-top: 1px solid var(--vp-c-divider);
+}
+
+.grants__inbound-editor-section h3 {
+  margin: 0 0 6px;
+}
+
+.grants__inbound-editor {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.grants__inbound-editor fieldset {
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.grants__inbound-editor label {
+  display: flex;
+  gap: 10px;
+  align-items: start;
+}
+
+.grants__inbound-editor label span {
+  display: grid;
+  gap: 2px;
+}
+
+.grants__inbound-editor small {
+  color: var(--vp-c-text-2);
+}
+
 .grants__admitted-list {
   list-style: none;
   margin: 0;

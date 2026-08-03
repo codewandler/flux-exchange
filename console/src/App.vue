@@ -26,9 +26,12 @@ import {
   CONNECTORS_ENDPOINT,
   SIGNIN_ENDPOINT,
   connect,
+  createChannel,
   cancelWorkflowRun,
   createWorkflow,
   loadCatalogue,
+  loadChannelDeclarations,
+  loadChannels,
   loadConnections,
   loadActivity,
   loadEditorCatalog,
@@ -39,6 +42,7 @@ import {
   publishWorkflow,
   previewGrant,
   replaceGrants,
+  removeChannel,
   rotateCredential,
   saveWorkflow,
   saveWorkflowGraph,
@@ -46,8 +50,12 @@ import {
   startWorkflowRun,
   validateWorkflowEdit,
   validateWorkflowGraph,
+  updateChannel,
   type ActivityState,
   type CatalogueState,
+  type ChannelDeclarationsState,
+  type ChannelMutation,
+  type ChannelsState,
   type ConnectionsState,
   type ConnectOutcome,
   type DeclarationState,
@@ -75,6 +83,7 @@ import CatalogueFinder from './CatalogueFinder.mts'
 import CatalogueFailure from './CatalogueFailure.mts'
 import CatalogueOperation from './CatalogueOperation.mts'
 import Connect from './Connect.mts'
+import Channels from './Channels.vue'
 import Connections from './Connections.mts'
 import ConsoleShell from './ConsoleShell.mts'
 import Grants from './Grants.mts'
@@ -90,6 +99,10 @@ const connections = shallowRef<ConnectionsState>({ status: 'loading' })
 const workflows = shallowRef<WorkflowsState>({ status: 'loading' })
 const editorCatalog = shallowRef<EditorCatalogState>({ status: 'loading' })
 const activity = shallowRef<ActivityState>({ status: 'loading' })
+const channels = shallowRef<ChannelsState>({ status: 'loading' })
+const channelDeclarations = shallowRef<ChannelDeclarationsState>({ status: 'loading' })
+const channelOutcome = shallowRef<ChannelMutation | null>(null)
+const channelBusy = shallowRef(false)
 const workflowOutcome = shallowRef<WorkflowMutation | null>(null)
 const workflowBusy = shallowRef(false)
 
@@ -129,6 +142,17 @@ async function reloadActivity() {
   activity.value = await loadActivity()
 }
 
+async function reloadChannels() {
+  channels.value = { status: 'loading' }
+  channels.value = await loadChannels()
+}
+
+async function reloadChannelDeclarations() {
+  if (catalogue.value.status !== 'ready') return
+  channelDeclarations.value = { status: 'loading' }
+  channelDeclarations.value = await loadChannelDeclarations(catalogue.value.catalog)
+}
+
 async function reloadWorkflowSurface() {
   workflowOutcome.value = null
   await Promise.all([reloadWorkflows(), reloadEditorCatalog(), reloadActivity()])
@@ -147,9 +171,37 @@ onMounted(async () => {
 watch(signedIn, async (resolved) => {
   if (resolved) {
     await reloadConnections()
-    if (principal.value?.kind === 'user') await reloadWorkflowSurface()
+    if (principal.value?.kind === 'user') await Promise.all([reloadWorkflowSurface(), reloadChannels()])
   }
 })
+
+watch(() => catalogue.value.status, async (status) => {
+  if (status === 'ready') await reloadChannelDeclarations()
+})
+
+async function createHeldChannel(connector: string, binding: string, events: string[]) {
+  if (channelBusy.value) return
+  channelBusy.value = true
+  channelOutcome.value = await createChannel(connector, binding, events)
+  channelBusy.value = false
+  if (channelOutcome.value.status === 'saved') await reloadChannels()
+}
+
+async function updateHeldChannel(channel: Parameters<typeof updateChannel>[0], events: string[]) {
+  if (channelBusy.value) return
+  channelBusy.value = true
+  channelOutcome.value = await updateChannel(channel, events)
+  channelBusy.value = false
+  if (channelOutcome.value.status === 'saved') await reloadChannels()
+}
+
+async function removeHeldChannel(channel: Parameters<typeof removeChannel>[0]) {
+  if (channelBusy.value) return
+  channelBusy.value = true
+  channelOutcome.value = await removeChannel(channel)
+  channelBusy.value = false
+  if (channelOutcome.value.status === 'removed') await reloadChannels()
+}
 
 async function createWorkflowDraft(id: string, title: string, source: string) {
   if (workflowBusy.value) return
@@ -397,7 +449,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
 </script>
 
 <template>
-  <div class="console" :class="{ 'console--wide': route.name === 'workflows' || route.name === 'activity' }">
+  <div class="console" :class="{ 'console--wide': route.name === 'workflows' || route.name === 'activity' || route.name === 'channels' }">
     <ConsoleShell :session="session" :active="active" @sign-out="endSession" @retry-session="reloadSession">
       <template #theme>
         <button type="button" :aria-pressed="isDark" @click="toggleTheme()">
@@ -519,6 +571,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
           :catalog-connectors="catalogConnectors"
           :connected="connected"
           :catalog="ready?.catalog"
+          :channel-declarations="channelDeclarations"
           :initial-connector="route.connector"
           :catalogue-risks="catalogueRisks"
           :catalogue-effects="catalogueEffects"
@@ -584,6 +637,25 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         <section v-else class="gate">
           <h1>Sign in as a user to inspect workflow activity</h1>
           <p>Run records are tenant data and are never selected by a tenant field on this page.</p>
+          <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
+        </section>
+      </template>
+
+      <template v-else-if="route.name === 'channels'">
+        <Channels
+          v-if="principal?.kind === 'user'"
+          :state="channels"
+          :declarations="channelDeclarations"
+          :busy="channelBusy"
+          :outcome="channelOutcome"
+          @retry="reloadChannels"
+          @create="createHeldChannel"
+          @update="updateHeldChannel"
+          @remove="removeHeldChannel"
+        />
+        <section v-else class="gate">
+          <h1>Sign in as a user to manage channels</h1>
+          <p>Persistent channels belong to the tenant on the resolved user principal.</p>
           <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
         </section>
       </template>

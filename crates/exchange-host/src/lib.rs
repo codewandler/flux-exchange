@@ -111,7 +111,7 @@ pub use connector_secrets::{CredentialRef, Secret, SecretStore, StoreError, TENA
 /// prevent. `tests/connection_settings.rs` exercises it through this doorway. A re-export that is
 /// the return type of a public method is load-bearing whether or not anything in this tree happens
 /// to call it.
-pub use connector_pack::{ConfigStore, Egress, Field, MemoryConfig};
+pub use connector_pack::{ConfigStore, Egress, Field, MemoryConfig, PreparedChannelPlan};
 
 pub use flux_lang::editor::{EditorTraceEvent, EditorTraceObserver};
 /// The context an invocation runs in, re-exported for the same reason [`Egress`] is.
@@ -124,7 +124,10 @@ pub use flux_lang::editor::{EditorTraceEvent, EditorTraceObserver};
 pub use flux_runtime::{ToolContext, ToolRegistry};
 
 pub use acquisition::AuthHazard;
-pub use channel::{ChannelId, ChannelRecord, ChannelRefusal, Channels, MemoryChannels};
+pub use channel::{
+    ChannelId, ChannelPlanRefusal, ChannelRecord, ChannelRefusal, Channels,
+    ConnectorChannelPlanner, MemoryChannels,
+};
 #[cfg(unix)]
 pub use channel::{ChannelStore, ChannelStoreError, CHANNEL_STORE_SETTING};
 pub use connections::{

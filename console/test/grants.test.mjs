@@ -106,6 +106,7 @@ const grant = (over = {}) => ({
   connector: 'github',
   vendor: 'GitHub',
   selector: { maxRisk: 'low', effectsWithin: null, idempotency: null },
+  inbound: [],
   expressible: true,
   reason: '',
   exempt: null,
@@ -220,6 +221,26 @@ test('the_console_can_ask_what_a_grant_would_admit_without_saving_it', async () 
     [`POST ${service.GRANTS_PREVIEW_ENDPOINT}`],
     `asking what a grant would admit must read the preview route and nothing else; it asked: ${JSON.stringify(stub.asked)}`
   )
+})
+
+test('the_console_refuses_to_read_malformed_inbound_authority', async () => {
+  const state = await service.loadGrants({
+    fetch: granting({
+      held: [{
+        connector: 'slack',
+        vendor: 'Slack',
+        selector: {},
+        inbound: [{ binding: 'socket', events: ['app_mention', { invented: true }] }],
+        expressible: true,
+        declares: 0,
+        admits: [],
+      }],
+    }).fetch,
+  })
+
+  assert.equal(state.status, 'failed', 'a malformed inbound event was silently discarded')
+  assert.equal(state.failure.kind, 'unreadable')
+  assert.match(state.failure.detail, /non-string event/)
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -360,6 +381,7 @@ function screen(over = {}) {
     connectors: ['github', 'slack'],
     catalogueRisks: ['low', 'high'],
     catalogueEffects: ['network'],
+    channelDeclarations: { status: 'ready', declarations: [] },
     preview: null,
     outcome: null,
     busy: false,
@@ -377,6 +399,7 @@ function screen(over = {}) {
         connectors: state.connectors,
         catalogueRisks: state.catalogueRisks,
         catalogueEffects: state.catalogueEffects,
+        channelDeclarations: state.channelDeclarations,
         preview: state.preview,
         outcome: state.outcome,
         busy: state.busy,
@@ -459,6 +482,78 @@ test('the_save_is_refused_until_the_preview_has_answered', async () => {
     [[{ connector: 'github', selector: { maxRisk: 'low', effectsWithin: null, idempotency: null } }]],
     'saving did not send the whole set the service replaces'
   )
+})
+
+test('inbound channel grants come from declarations and survive preview and whole-set writes', async () => {
+  const stub = granting({
+    preview: {
+      body: {
+        connector: 'slack',
+        vendor: 'Slack',
+        selector: { max_risk: 'low' },
+        inbound: [{ binding: 'socket', events: ['app_mention'] }],
+        expressible: true,
+        declares: 1,
+        admits: [admits('slack-message-send')],
+      },
+    },
+  })
+  const proposal = {
+    connector: 'slack',
+    selector: { maxRisk: 'low', effectsWithin: null, idempotency: null },
+    inbound: [{ binding: 'socket', events: ['app_mention'] }],
+  }
+  const preview = await service.previewGrant(proposal, { fetch: stub.fetch })
+  assert.equal(preview.status, 'ready')
+  assert.deepEqual(preview.grant.inbound, proposal.inbound)
+  assert.deepEqual(stub.asked[0].body.inbound, proposal.inbound)
+
+  const view = screen({
+    channelDeclarations: {
+      status: 'ready',
+      declarations: [{
+        connector: 'slack',
+        name: 'socket',
+        service: 'default',
+        description: 'Events API socket',
+        transport: 'socket',
+        events: [{ name: 'app_mention', description: 'An app mention', group: 'messages', default: false }],
+      }],
+    },
+  })
+  await choose(view, 'slack')
+  const inboundChoice = find(view.root, 'type', 'checkbox').at(-1)
+  assert.ok(inboundChoice, 'the declared inbound event has no checkbox')
+  await view.fire(inboundChoice, 'onChange', { target: { checked: true } })
+  assert.deepEqual(view.emitted.preview.at(-1), proposal)
+
+  view.state.preview = { status: 'ready', grant: grant({ ...proposal, vendor: 'Slack' }) }
+  await nextTick()
+  assert.match(rendered(view.root), /Inbound channel events[\s\S]*app_mention/)
+  await view.fire(at(view.root, 'form'), 'onSubmit')
+  assert.deepEqual(view.emitted.save, [[proposal]])
+})
+
+test('an unavailable declaration read preserves held inbound authority', async () => {
+  const held = grant({
+    connector: 'slack',
+    vendor: 'Slack',
+    inbound: [{ binding: 'socket', events: ['app_mention'] }],
+  })
+  const view = screen({
+    grants: { status: 'ready', editable: true, grants: [held] },
+    channelDeclarations: {
+      status: 'failed',
+      failure: { kind: 'unreachable', endpoint: '/api/catalogue/connectors/slack/channels', status: null, detail: 'offline' },
+    },
+  })
+  await choose(view, 'slack')
+  assert.deepEqual(
+    view.emitted.preview.at(-1).inbound,
+    [{ binding: 'socket', events: ['app_mention'] }],
+    'an unavailable declaration read silently dropped existing inbound authority from the draft'
+  )
+  assert.match(rendered(view.root), /cannot be edited safely/)
 })
 
 /**

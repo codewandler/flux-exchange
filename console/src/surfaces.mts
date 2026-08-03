@@ -7,9 +7,9 @@
 // that holds credentials and executes on a tenant's behalf. So the shape of the platform is stated
 // here, once, as data: the shell renders it, and `test/shell.test.mjs` walks it.
 //
-// **Half of it does not exist yet, and that is the harder half to get right.** `invoke`, `subscribe`
-// and execution records are not built. Leaving them out would hide the platform's own shape; giving
-// them a screen would be worse. Principle 7 of the vision, restated in `AGENTS.md`:
+// **Some of it did not exist when this model landed, and that was the harder half to get right.**
+// Leaving future surfaces out would hide the platform's own shape; giving them a screen would be
+// worse. Principle 7 of the vision, restated in `AGENTS.md`:
 //
 //   > Say what is not built. A page or a type that implies a working service costs more than an
 //   > honest gap.
@@ -50,8 +50,8 @@ export interface Surface {
    *
    * `null` means there is nowhere to go, and it means that for two different reasons which
    * [`built`](Surface#built) tells apart: `identity` is built and is a *control* in the header
-   * rather than a page, while `invoke`, `subscribe` and `activity` have no path because there is
-   * nothing behind them. **A surface that is not built must carry `null` here** — that is the
+   * rather than a page, while any unavailable future surface has no path because there is nothing
+   * behind it. **A surface that is not built must carry `null` here** — that is the
    * honesty invariant in its smallest form, and it is asserted.
    */
   path: string | null
@@ -108,8 +108,8 @@ export interface Surface {
  * Every surface, in the order the shell presents them.
  *
  * **The order is the argument.** Connections first because wiring things up is the first of the
- * console's two jobs and the one that works today; Activity second because seeing what happened is
- * the other one, even though it is not built; then the two execution verbs; and the catalogue
+ * console's two jobs; Activity second because seeing what happened is the other one; then the two
+ * execution verbs; and the catalogue
  * **last**, because it is reference material and this story exists to stop it being the front door.
  *
  * `identity` is not in that sequence — it is the header's own affordance rather than a place — but
@@ -168,14 +168,12 @@ export const SURFACES: readonly Surface[] = [
   },
   {
     id: 'subscribe',
-    label: 'Subscribe',
+    label: 'Channels',
     summary: "Terminate a vendor's channel and receive typed, declared events.",
-    path: null,
-    built: false,
-    served: false,
-    absent:
-      '`subscribe`, the websocket and channels are not built. Nothing here terminates a channel, ' +
-      'so there is no subscription to show and no route to call.',
+    path: '/channels',
+    built: true,
+    served: true,
+    absent: '',
   },
   {
     id: 'catalogue',
@@ -223,6 +221,8 @@ export function surfaceOfRoute(name: string): string | null {
       return 'workflows'
     case 'activity':
       return 'activity'
+    case 'channels':
+      return 'subscribe'
     case 'explorer':
     case 'operation':
     case 'core':

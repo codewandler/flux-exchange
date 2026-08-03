@@ -4,8 +4,10 @@
 //! service binds a runner after catalogue, grant, connection and placement checks have passed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
+use connector_pack::{ConfigStore, Configuration, Credentials, PreparedChannelPlan};
+use connector_secrets::SecretStore;
 use serde::{Deserialize, Serialize};
 
 use crate::Tenant;
@@ -146,6 +148,51 @@ fn declared_name(value: String) -> Result<String, ChannelRefusal> {
     }
     Ok(value)
 }
+
+/// The one zero-transport seam from a tenant-owned channel record to connector-pack's generated
+/// handshake plan. The composing binary receives the plan only after its placement gate has passed;
+/// it never receives either store or a credential value as an independently addressable object.
+pub struct ConnectorChannelPlanner {
+    credentials: Arc<dyn SecretStore>,
+    settings: Arc<dyn ConfigStore>,
+}
+
+impl ConnectorChannelPlanner {
+    /// Bind the same tenant-scoped stores used by ordinary connector invocation.
+    pub fn new(credentials: Arc<dyn SecretStore>, settings: Arc<dyn ConfigStore>) -> Self {
+        Self {
+            credentials,
+            settings,
+        }
+    }
+
+    /// Resolve the record's generated connector binding into a guarded-runtime plan.
+    ///
+    /// The tenant comes only from the persistent record, whose tenant was derived from the
+    /// authenticated operator. Connector-pack performs every configuration and credential lookup
+    /// and returns its redacting wire-value wrappers; this host neither constructs nor logs them.
+    pub async fn prepare(
+        &self,
+        record: &ChannelRecord,
+    ) -> Result<PreparedChannelPlan, ChannelPlanRefusal> {
+        let tenant = record.tenant().as_str();
+        let credentials = Credentials::new(Arc::clone(&self.credentials), tenant)
+            .map_err(|_| ChannelPlanRefusal)?;
+        let settings = Configuration::new(Arc::clone(&self.settings), tenant)
+            .map_err(|_| ChannelPlanRefusal)?;
+
+        connector_pack::channel_plan(record.connector(), record.binding(), credentials, settings)
+            .await
+            .map_err(|_| ChannelPlanRefusal)
+    }
+}
+
+/// A generated channel plan could not be prepared. It deliberately carries no upstream message:
+/// connector refusals name declarations, but this public boundary must never accidentally preserve
+/// a credential-bearing URL or header added to a future diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("connector channel plan was refused")]
+pub struct ChannelPlanRefusal;
 
 /// Persistent channel storage. Every lookup is tenant-scoped; `all` exists only for startup
 /// restoration by the host, never for a request route.

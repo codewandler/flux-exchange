@@ -1,5 +1,5 @@
 ---
-id: X-102
+id: X-104
 title: Multiplex agent channel subscriptions
 status: in-progress
 epic: generated-connector-channels
@@ -20,5 +20,8 @@ at-most-once events without coupling vendor-channel lifetime to subscribers.
 
 ## Progress
 
+- 2026-08-03: an assembled-server test now starts a real TCP listener, authenticates with a
+  development agent principal, upgrades `/api/subscribe`, and proves correlated subscribe/event/
+  unsubscribe frames over the actual WebSocket route.
 - 2026-08-02: authenticated request-correlated subscribe/unsubscribe, live at-most-once fan-out and
   isolated 32-event subscriber queues are implemented behind the optional channel supervisor.

@@ -23,8 +23,8 @@ may exist in the domain model before its Exchange API exists; the final column m
 | **Connector** | A compiled declaration of what one vendor can do in both directions and what an operator must supply. It is not a running connection. | flux-connectors | Live; the published Rust catalogue type is still named `Provider` |
 | **Service** | One connector API surface with its own endpoint/version and a partition of that connector's operations. | flux-connectors | Live as operation metadata; there is no standalone published `Service` value |
 | **Connection** | A tenant-owned installation of a connector, including a stable instance identity, settings and credential addresses. | Exchange | One connection per connector is live; multiple instances are X-14 |
-| **Channel Binding** | A connector declaration composing inbound event types with an optional outbound reply operation and transport requirements. It declares; it does not install. | flux-connectors | Declarations are published; X-99–X-103 host them |
-| **Channel** | A deployment-scoped, long-running installed input/output surface. It outlives callers and pushes events. | Flux runtime + Exchange binding | In progress in X-99–X-103 |
+| **Channel Binding** | A connector declaration composing inbound event types with an optional outbound reply operation and transport requirements. It declares; it does not install. | flux-connectors | Generated socket declarations are published and hosted; webhook bindings remain target architecture |
+| **Channel** | A deployment-scoped, long-running installed input/output surface. It outlives callers and pushes events. | Flux runtime + Exchange binding | Generated WebSocket channels are live; durable delivery is target architecture |
 
 “Provider” is always qualified in prose:
 
@@ -40,7 +40,7 @@ may exist in the domain model before its Exchange API exists; the final column m
 | **Datasource Definition** | A declaration of a readable record/retrieval surface. It contains no tenant value or credential. | Flux or connector package | Flux contracts are published; connectors do not yet publish vendor-data definitions |
 | **Datasource** | A tenant-bound readable surface available to an app or managed agent. V1 reads live systems through governed operations; indexing is a separate later binding. | Exchange | Target architecture |
 | **Event Type** | A connector- or program-declared event schema/name. It is a type, not an occurrence. | flux-connectors / Flux-Lang | Connector declarations are published |
-| **Event Delivery** | One occurrence of an event, with identity, source, payload lifecycle and delivery outcome. | Exchange | X-99 has the live path; durable inbox is target architecture |
+| **Event Delivery** | One occurrence of an event, with identity, source, payload lifecycle and delivery outcome. | Exchange | Live at-most-once delivery exists for generated channels; durable inbox is target architecture |
 | **Webhook Endpoint** | An HTTP transport endpoint that verifies and admits vendor callbacks into a Channel. It is neither an Event Type nor a Trigger, and its URL is deployment configuration rather than app authority. | Exchange channel host | Target architecture; generated WebSocket channels are the current inbound slice |
 | **Trigger Declaration** | A Program member naming an event label and a journey or agent target. | Flux-Lang | Published in `codewandler-flux-lang` |
 | **Trigger** | A tenant-installed binding of exactly one trigger declaration to an installed event source and target. | Exchange | Target architecture |

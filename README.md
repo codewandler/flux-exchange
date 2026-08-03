@@ -14,7 +14,7 @@ Managed Agent and Service Account one meaning across the Flux family and labels 
 live versus target architecture.
 
 > [!WARNING]
-> **Status: v0.14.3 — credentials, gated operations, and versioned tenant workflows.**
+> **Status: v0.15.0 — credentials, gated operations, versioned workflows, and generated channels.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
 > connector catalogue and a session without OIDC setup. The ordinary composition supports a
@@ -36,9 +36,15 @@ live versus target architecture.
 > guides a person through Connect → Grant → Invoke. A signed-in human can also author and validate
 > a Flux workflow, publish immutable versions, and inspect or cancel durable runs. The workflow
 > entry operation and every nested connector call are independently grant-gated before credentials
-> are resolved; `FLUX_EXCHANGE_WORKFLOWS` names the durable definitions-and-runs directory. See
-> [What exists today](#what-exists-today) for the honest inventory before planning around any of
-> this.
+> are resolved; `FLUX_EXCHANGE_WORKFLOWS` names the durable definitions-and-runs directory. The same
+> boundary now works inbound: an operator can persist a connector's generated WebSocket
+> binding and a principal can subscribe only to the closed declared event set an inbound grant
+> admits. `FLUX_EXCHANGE_CHANNELS` names the durable channel declarations; the built-in binary runs
+> sockets locally only under the single-tenant `--dev` composition and refuses to invent a local
+> placement for a multi-tenant deployment.
+>
+> See [What exists today](#what-exists-today) for the honest inventory before planning around any
+> of this.
 
 ## Why it exists
 
@@ -97,22 +103,41 @@ against one tenant's connections, not a vendor secret.
 
 | | |
 |---|---|
-| `crates/exchange-host` | Principal-derived tenancy, grants, runtime admission, credential/settings stores, ordinary invocation, and tenant-scoped workflow drafts plus immutable published versions. Workflow execution still dispatches through Flux and `connector_pack`; this crate holds no transport of its own. |
-| `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant connections and grants, agent minting, ordinary invocation, workflow authoring/publication and durable SQLite run records. It is the **only crate here that holds an HTTP client**, and deliberately never names `connector_pack` — a test asserts both halves. |
-| `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows and Activity. The workflow editor uses the upstream Flux graph contract, retains exact source, and paints durable value-free run events back onto nodes. `subscribe` stays honestly inert. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
+| `crates/exchange-host` | Principal-derived tenancy, grants, runtime admission, credential/settings/channel stores, ordinary invocation, zero-I/O generated channel planning, and tenant-scoped workflow drafts plus immutable published versions. Workflow and channel execution still end in Flux and `connector_pack`; this crate holds no transport of its own. |
+| `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant connections and grants, agent minting, ordinary invocation, workflow authoring/publication, durable SQLite run records, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
+| `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows, Activity and Channels. The workflow editor uses the upstream Flux graph contract, protects unsaved drafts, retains exact source, and paints durable value-free run events back onto nodes. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
 **Not built, despite being described in the design:** a second connection to one
-connector (the address has no instance dimension until upstream publishes one),
-`subscribe`, the websocket, channels, leases-in-anger, and the catalogue loader. Stored workflows
-and workflow execution records moved off this list in X-98. The credential store has moved off this
+connector (the address has no instance dimension until upstream publishes one), webhook channels,
+durable event replay/inboxes, leases-in-anger, and the catalogue loader. Stored workflows,
+workflow execution records and generated WebSocket channels moved off this list in X-98 and X-101.
+The credential store has moved off this
 list and is described below, and X-47 moved
 per-connection configuration off it too — but the honest replacement claim is narrower than "done":
 a tenant can now **supply**, over HTTP, every admitted catalogue-declared connection value — and
 **four are refused on purpose**: `asterisk`, `okta`, `docusign` and `freshdesk` template their whole
 destination authority, so a tenant-supplied value would *be* the origin this host sends their
-credential to. Those four stay uninvocable and say so. Connection settings still have
-no human screen. The design is ahead of the code
+credential to. Those four stay uninvocable and say so. The design is ahead of the code
 on purpose; the gap is stated here so nobody has to discover it.
+
+### Generated WebSocket channels are live and fail closed
+
+`FLUX_EXCHANGE_CHANNELS` names the owner-only persistent channel file. With that store, the
+credential store and the grant store bound, a signed-in human can create, edit and remove a channel
+from the console. The mutation names only a catalogue connector, one of its generated socket
+bindings and a closed event subset. Tenant, connection, endpoint, credential and placement are all
+derived or operator-owned; none is accepted from the request body.
+
+The vendor socket is supervised independently of subscribers and restored after restart. An
+authenticated `GET /api/subscribe` WebSocket multiplexes opaque channel ids and returns
+request-correlated acknowledgements or non-enumerating refusals. Events are live and at-most-once:
+each subscriber has a bounded queue, a slow subscriber is disconnected without stopping the vendor
+channel, and there is deliberately no cursor, replay or retained payload inbox.
+
+The built-in composition admits local socket execution only when `--dev` selected
+`Deployment::SingleTenant`. With OIDC or an explicit development roster it is multi-tenant and
+channel placement refuses before credentials are read; a product embedding `exchange-host` must
+bind its own operator-selected remote placement to run those channels safely.
 
 ### An agent token is minted, and nothing yet verifies one
 

@@ -266,7 +266,7 @@ impl WorkflowRunStore {
     }
 
     /// Observer that persists only upstream's value-free node identity/status event.
-    pub fn observer(self: &Arc<Self>, run_id: &str) -> Arc<RunObserver> {
+    pub(crate) fn observer(self: &Arc<Self>, run_id: &str) -> Arc<RunObserver> {
         Arc::new(RunObserver {
             store: self.clone(),
             run_id: run_id.into(),

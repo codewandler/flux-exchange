@@ -315,7 +315,19 @@ export const STEPS: readonly Step[] = [
       'Have this host terminate a vendor’s channel, verify what arrives against the connector’s ' +
       'declaration, and hand you a typed event.',
     surface: 'subscribe',
-    call: null,
+    call: {
+      method: 'GET',
+      endpoint: '/api/subscribe',
+      caller: 'A resolved principal presenting its session cookie or bearer token.',
+      note:
+        'Upgrade to WebSocket, then send {action:"subscribe",request_id,channel_id}. The channel ' +
+        'id must belong to the principal’s tenant and its connector, binding and complete selected ' +
+        'event set must be admitted by an inbound grant. Acknowledgements and refusals echo ' +
+        'request_id; live event messages carry only the declared event envelope.',
+      warn:
+        'Delivery is live and at-most-once: there is no replay or cursor. A subscriber that cannot ' +
+        'keep up with its bounded queue is disconnected without stopping the vendor channel.',
+    },
     pending: '',
   },
   {

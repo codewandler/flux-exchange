@@ -168,9 +168,7 @@ test('the_page_and_the_descriptor_agree', async () => {
   assert.ok(document.capabilities.length > 0, 'the descriptor publishes no capabilities; everything below is vacuous')
 
   const claimed = document.capabilities.filter((capability) => capability.live)
-  const withheld = document.capabilities.filter((capability) => !capability.live)
   assert.ok(claimed.length > 0, 'the descriptor says nothing works; there is at least one thing that does')
-  assert.ok(withheld.length > 0, 'the descriptor withholds nothing, and this build cannot do everything')
 
   for (const capability of document.capabilities) {
     const rendered = block(html, capability.id)
@@ -234,23 +232,23 @@ test('the_descriptor_is_derived_and_not_a_coincidence', () => {
   const today = JSON.parse(descriptorJson(SURFACES))
   const live = (document, id) => document.capabilities.find((entry) => entry.id === id)
 
-  // `subscribe` and not `invoke`, since X-42: `invoke` is served, so it can no longer stand in for
-  // a capability this build does not have.
-  assert.equal(live(today, 'subscribe').live, false)
-  assert.ok(live(today, 'subscribe').withheld.length > 0)
+  assert.equal(live(today, 'subscribe').live, true)
+  assert.equal(live(today, 'subscribe').withheld, '')
 
-  // As a build where the service serves it would be — with no edit to `descriptor.mts`, none to
-  // `onboarding.mts`, and none here.
-  const hypothetical = JSON.parse(descriptorJson(asIf('subscribe', { served: true })))
+  // A regression in the surface withdraws the capability without editing the descriptor code.
+  const hypothetical = JSON.parse(descriptorJson(asIf('subscribe', {
+    served: false,
+    absent: 'hypothetically withdrawn',
+  })))
   assert.equal(
     live(hypothetical, 'subscribe').live,
-    true,
-    'marking `subscribe` served does not make the subscribe capability live, so the descriptor is not actually derived from `surfaces.mts`'
+    false,
+    'marking `subscribe` unserved does not withdraw the capability, so the descriptor is not actually derived from `surfaces.mts`'
   )
   assert.equal(
     live(hypothetical, 'subscribe').withheld,
-    '',
-    'the subscribe capability still carries a reason it cannot be done in a build where it can'
+    'hypothetically withdrawn',
+    'the withdrawn subscribe capability does not carry the surface reason'
   )
 
   // And the direction that protects a reader: a surface regressing to unserved withdraws the

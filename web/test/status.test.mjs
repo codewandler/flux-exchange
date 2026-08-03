@@ -148,21 +148,6 @@ test('the status is in the page chrome, above the prose', () => {
   }
 })
 
-test('the site publishes a page for both answers the badge can give', () => {
-  // Without this, a suite could be green on a site whose every capability page happens to be live,
-  // and "the badge renders `Not built`" would never once have been executed. One of each is the
-  // smallest sample that exercises the component's two branches.
-  const document = descriptor()
-  const named = new Map(document.capabilities.map((capability) => [capability.id, capability]))
-  const live = capabilityPages().map(({ id }) => named.get(id)?.live)
-
-  assert.ok(live.includes(true), 'no capability page is for a live capability')
-  assert.ok(
-    live.includes(false),
-    'no capability page is for a capability this build does not have, so nothing on this site has ever rendered the `Not built` badge'
-  )
-})
-
 // ---------------------------------------------------------------------------------------------
 // The committed artifact is current, and the *site* build is what says so.
 // ---------------------------------------------------------------------------------------------
@@ -256,46 +241,48 @@ test("flipping a capability's served flag flips the rendered badge", { timeout: 
   // and watches the rendered HTML move: `served` in `console/src/surfaces.mts` → `available()` in
   // `onboarding.mts` → `live` in the descriptor → the badge in the page chrome.
   //
-  // `subscribe` and not `invoke`, for `descriptor.test.mjs`'s reason: `invoke` is served, so it
-  // cannot stand in for a capability this build does not have.
+  // `subscribe` is the newest live route and therefore catches the exact transition that removed
+  // the site's last real `Not built` page. The demonstration flips in either direction; it must not
+  // depend on the production tree permanently retaining an absent capability just to test a badge.
   const { descriptorJson } = await import(path.join(repoRoot, 'console', 'src', 'descriptor.mts'))
   const { SURFACES } = await import(path.join(repoRoot, 'console', 'src', 'surfaces.mts'))
 
   const SUBJECT = 'subscribe'
   const page = `${SUBJECT}.html`
 
-  // Where it stands today, read off the site that is already built. If this is not `false` the
-  // mutation below proves nothing, so it is asserted rather than assumed.
+  // Where it stands today, read off the site that is already built. The mutation below is the
+  // opposite, derived from this value rather than hard-coding yesterday's status.
   const before = capabilityPages().find(({ id }) => id === SUBJECT)
   assert.ok(before, `the site publishes no capability page for \`${SUBJECT}\` (X-64)`)
-  assert.equal(
-    attribute(badge(before.name, before.html).element, 'data-live'),
-    'false',
-    `\`${SUBJECT}\` is live in this build, so flipping its surface to served cannot demonstrate anything`
-  )
+  const beforeLive = attribute(badge(before.name, before.html).element, 'data-live') === 'true'
 
-  // The same site, as a build whose service serves it — with no edit to any page, none to the
-  // component, and none here.
+  // The same site with the surface's served fact inverted — with no edit to any page or component.
   const hypothetical = JSON.parse(
     descriptorJson(
-      SURFACES.map((surface) => (surface.id === SUBJECT ? { ...surface, served: true } : surface))
+      SURFACES.map((surface) => (surface.id === SUBJECT ? { ...surface, served: !beforeLive } : surface))
     )
   )
   assert.equal(
     hypothetical.capabilities.find((capability) => capability.id === SUBJECT).live,
-    true,
-    'flipping `served` did not make the capability live in the derived document; the chain is broken before it reaches the site'
+    !beforeLive,
+    'flipping `served` did not flip the capability in the derived document; the chain is broken before it reaches the site'
   )
 
   await scratch(async (dir) => {
     const built = await buildWith(hypothetical, dir)
-    assert.ok(built.ok, `the site did not build against a descriptor where \`${SUBJECT}\` is live:\n${built.output}`)
+    assert.ok(built.ok, `the site did not build against the flipped \`${SUBJECT}\` descriptor:\n${built.output}`)
 
     const html = readFileSync(path.join(built.out, 'capabilities', page), 'utf-8')
     assert.equal(
       attribute(badge(page, html).element, 'data-live'),
-      'true',
-      `marking \`${SUBJECT}\` served did not change the badge on its page. The status is not derived from the descriptor — it is written somewhere, and this site is one stale edit from the sixth rendering of a false claim.`
+      String(!beforeLive),
+      `flipping \`${SUBJECT}\` did not change the badge on its page. The status is not derived from the descriptor — it is written somewhere, and this site is one stale edit from the sixth rendering of a false claim.`
+    )
+
+    assert.match(
+      html,
+      beforeLive ? /Not built/ : /Live/,
+      'the flipped build did not exercise the badge label for the opposite state'
     )
   })
 })

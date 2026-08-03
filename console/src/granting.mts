@@ -88,7 +88,14 @@ export function anySelector(): Selector {
  * [`without`] refuse a set containing one rather than calling this on it. See their note.
  */
 export function proposedOf(grant: HeldGrant): ProposedGrant {
-  return { connector: grant.connector, selector: grant.selector }
+  const inbound = grant.inbound ?? []
+  return {
+    connector: grant.connector,
+    selector: grant.selector,
+    ...(inbound.length
+      ? { inbound: inbound.map((entry) => ({ binding: entry.binding, events: [...entry.events] })) }
+      : {}),
+  }
 }
 
 /**

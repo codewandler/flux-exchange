@@ -1,5 +1,5 @@
 ---
-id: X-105
+id: X-107
 title: "Service Accounts are not Flux Agents"
 status: ready
 priority: 3
@@ -33,7 +33,7 @@ compatibility path for tokens and clients created through the legacy `/api/agent
 
 ## Progress
 
-- 2026-08-03: Raised by X-104 after the family glossary reserved Agent for model + loop + bounded
+- 2026-08-03: Raised by X-106 after the family glossary reserved Agent for model + loop + bounded
   capabilities. The current `/api/agents` principal is explicitly recorded as migration debt.
 
 ## Notes

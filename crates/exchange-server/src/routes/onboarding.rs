@@ -547,10 +547,7 @@ mod tests {
         // `binding_an_agent_store_does_not_admit_a_reachable_bind` is the other half.
         ("authenticate", None),
         ("invoke", Some("/api/operations/{operation}/invoke")),
-        // Nothing terminates a channel. There is no websocket, no channel and no subscription
-        // route on this surface, and `every_published_route_is_a_capability_or_is_argued_not_to_be`
-        // is what notices on the day one lands.
-        ("subscribe", None),
+        ("subscribe", Some("/api/subscribe")),
         // Workflow runs are durable and tenant-scoped; the collection is the capability's entry.
         ("read-what-happened", Some("/api/workflow-runs")),
     ];
@@ -576,6 +573,12 @@ mod tests {
             "/api/catalogue/connectors/{id}/credentials",
             "what a connector declares it needs. An operator supplies those; an agent never sees a \
              credential at all, which is the vision's fourth principle.",
+        ),
+        (
+            "/api/catalogue/connectors/{id}/channels",
+            "the public generated binding and event choices an operator uses to configure a channel; \
+             it publishes no handshake, auth, endpoint, payload mapping or tenant state and is the \
+             declaration half of the catalogue rather than a separate agent capability.",
         ),
         (
             "/api/session",
@@ -659,19 +662,12 @@ mod tests {
         ),
         (
             "/api/channels",
-            "operator-owned lifecycle for persistent vendor channels. It is staged until a released \
-             connector catalogue and guarded runtime can be bound; agents consume selected events \
-             through subscribe and never create or widen the underlying connection.",
+            "operator-owned lifecycle for persistent vendor channels. Agents consume selected \
+             events through subscribe and never create or widen the underlying connection.",
         ),
         (
             "/api/channels/{id}",
             "the item half of the same operator-owned channel lifecycle, not an agent capability.",
-        ),
-        (
-            "/api/subscribe",
-            "the authenticated transport is staged but no released compatible connector-channel \
-              runner is bound by this build. The subscribe capability remains unavailable until \
-              that end-to-end composition ships.",
         ),
         (
             "/api/onboarding",

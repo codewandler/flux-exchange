@@ -1,11 +1,12 @@
 ---
-id: X-106
+id: X-108
 title: "Host installed Flux Apps and Managed Agents"
-status: blocked
+status: ready
+priority: 4
 epic: apps
 areas: [exchange-host, exchange-server, console, docs]
 design: docs/designs/released-domain-audit.md
-note: "blocked until the Flux App/channel host is published on the connector-compatible engine line; package and tenant bindings stay Exchange-owned"
+note: "Flux App/channel contracts are published on the connector-compatible line; design Exchange-owned package installation and tenant bindings before implementation"
 ---
 
 # Host installed Flux Apps and Managed Agents
@@ -35,16 +36,13 @@ profile and triggers. Exchange then supervises its Managed Agents for chat and e
 
 ## Progress
 
-- 2026-08-03: X-104 found the declarations and supporting interfaces in published Flux 0.52.1,
+- 2026-08-03: Flux 0.54 publishes `flux-app` and `flux-channels`, connector-pack 0.17 publishes the
+  channel planner on that engine line, and X-101 binds the runnable channel seam. The upstream
+  publication blocker is gone; the next work is an Exchange design for immutable packages,
+  installation authority and tenant-owned durable bindings.
+- 2026-08-03: X-106 found the declarations and supporting interfaces in published Flux 0.52.1,
   but `flux-app` and `flux-channels` were omitted from both crates.io and the tagged release script.
   `connector-pack` 0.16 also publishes no channel runner.
-
-## Blocker
-
-The reusable Flux App/channel host must be published on an engine line compatible with a published
-connector pack. Exchange will not copy the runtime or add a path/git dependency to a sibling
-checkout. Re-audit the published closure when that release lands; package metadata and tenant
-binding children may proceed separately only after their own designs and stories are accepted.
 
 ## Notes
 

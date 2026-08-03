@@ -1,5 +1,5 @@
 ---
-id: X-100
+id: X-102
 title: Persist and supervise connector channels
 status: in-progress
 epic: generated-connector-channels
@@ -21,6 +21,10 @@ Exchange restart.
 
 ## Progress
 
+- 2026-08-03: Exchange now binds `connector_pack::channel_plan` to the released 0.17 pack and runs
+  its plan through Flux 0.54's guarded channel runtime. Restoration, reconnect, rotation restart and
+  operator-owned placement tests pass; multi-tenant composition still refuses without remote
+  placement before any credential is read.
 - 2026-08-02: persistent tenant-scoped store, independent supervisor restoration/reconnect, rotation
   restart hooks and placement-before-runner ordering are implemented. The released typed-placement
   and connector runner bindings remain dependency-ordered follow-up work.
