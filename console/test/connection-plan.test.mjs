@@ -41,6 +41,20 @@ function answer(status, body) {
   }
 }
 
+function completeContract() {
+  const complete = structuredClone(contract)
+  complete.state = 'complete'
+  for (const field of complete.fields) {
+    if (!field.required) continue
+    field.routable = true
+    field.set = true
+    if (field.target === null) field.target = { id: `fixture.${field.identity}` }
+    delete field.reason
+    if (field.authority !== undefined) field.authority.state = 'approved'
+  }
+  return complete
+}
+
 test('the_shared_v1_contract_is_read_whole_and_a_malformed_declared_row_fails_the_read', async () => {
   const served = answer(200, contract)
   const state = await loadConnectionPlan(contract.connector, contract.selection, { fetch: served.fetch })
@@ -260,6 +274,30 @@ test('unsupported_plan_versions_are_refused_before_render_or_submit', async () =
   assert.equal(state.plan, undefined)
 })
 
+test('top_level_completion_must_match_every_required_routable_set_field', async () => {
+  const lying = structuredClone(contract)
+  const proposal = lying.fields.find(({ authority }) => authority?.state === 'proposed')
+  assert.equal(proposal.required, true)
+  assert.equal(proposal.routable, true)
+  assert.equal(proposal.set, false)
+  lying.state = 'complete'
+
+  const state = await loadConnectionPlan(contract.connector, contract.selection, {
+    fetch: answer(200, lying).fetch,
+  })
+  assert.equal(state.status, 'failed')
+  assert.match(state.failure.detail, /complete|required|field/i)
+  assert.equal(state.plan, undefined)
+
+  const understated = completeContract()
+  understated.state = 'incomplete'
+  const inverse = await loadConnectionPlan(contract.connector, contract.selection, {
+    fetch: answer(200, understated).fetch,
+  })
+  assert.equal(inverse.status, 'failed')
+  assert.match(inverse.failure.detail, /incomplete|required|field/i)
+})
+
 test('the_form_renders_labels_rename_choices_secrets_optional_status_and_unroutable_rows', async () => {
   const optional = structuredClone(contract)
   optional.fields[2].required = false
@@ -311,7 +349,7 @@ test('one_control_and_one_submission_key_represent_rows_that_share_a_target', as
 
 test('secrets_exist_only_in_the_post_body_and_never_in_url_or_returned_outcome', async () => {
   const sentinel = 'sentinel-secret-never-retained'
-  const completed = { outcome: 'complete', steps: [], plan: { ...contract, state: 'complete' } }
+  const completed = { outcome: 'complete', steps: [], plan: completeContract() }
   const served = answer(200, completed)
   const outcome = await applyConnectionPlan(contract.connector, {
     version: CONNECTION_PLAN_VERSION,
@@ -332,7 +370,7 @@ test('secrets_exist_only_in_the_post_body_and_never_in_url_or_returned_outcome',
 
 test('complete_incomplete_refused_and_partial_apply_outcomes_are_distinct', async () => {
   for (const value of ['complete', 'incomplete', 'refused', 'partial']) {
-    const body = { outcome: value, steps: [], plan: { ...contract, state: value === 'complete' ? 'complete' : 'incomplete' } }
+    const body = { outcome: value, steps: [], plan: value === 'complete' ? completeContract() : contract }
     const status = value === 'partial' ? 207 : value === 'refused' ? 422 : 200
     const outcome = await applyConnectionPlan(contract.connector, {
       version: CONNECTION_PLAN_VERSION,
@@ -355,7 +393,7 @@ test('complete_incomplete_refused_and_partial_apply_outcomes_are_distinct', asyn
 
   const completeAt500 = await applyConnectionPlan(contract.connector, {
     version: CONNECTION_PLAN_VERSION, name: 'production', values: {},
-  }, { fetch: answer(500, { outcome: 'complete', steps: [], plan: { ...contract, state: 'complete' } }).fetch })
+  }, { fetch: answer(500, { outcome: 'complete', steps: [], plan: completeContract() }).fetch })
   assert.equal(completeAt500.status, 'failed')
   assert.equal(completeAt500.failure.status, 500)
 })

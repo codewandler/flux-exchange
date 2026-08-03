@@ -1079,6 +1079,12 @@ function readConnectionPlan(body: unknown, expectedConnector: string): Connectio
     identities.add(field.identity)
     fields.push(field)
   }
+  const derivedState = fields.every((field) => !field.required || (field.routable && field.set))
+    ? 'complete'
+    : 'incomplete'
+  if (body.state !== derivedState) {
+    return `the plan claims \`${body.state}\` but its required fields derive \`${derivedState}\``
+  }
   if (body.selection === null && fields.some((field) => field.authority?.state !== undefined && field.authority.state !== 'unset')) {
     return 'a proposed authority state has no selected label'
   }
