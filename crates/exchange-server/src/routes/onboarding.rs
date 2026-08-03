@@ -278,7 +278,8 @@ mod tests {
     use axum::http::{header, Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        address_path, async_trait, CredentialRef, Secret, SecretStore, StoreError,
+        address_path, async_trait, CredentialRef, CredentialScope, Layout, Secret, SecretStore,
+        StoreError, TenantLayout,
     };
     use serde_json::json;
     use tower::Service;
@@ -326,6 +327,23 @@ mod tests {
                 .expect("no test poisons this")
                 .remove(&address_path(reference));
             Ok(())
+        }
+
+        async fn references(
+            &self,
+            scope: &CredentialScope,
+        ) -> Result<Vec<CredentialRef>, StoreError> {
+            let mut references = Vec::new();
+            for path in self.0.lock().expect("no test poisons this").keys() {
+                let reference = TenantLayout
+                    .parse(path)
+                    .map_err(|reason| StoreError::Layout { reason })?;
+                if scope.contains(&reference) {
+                    references.push(reference);
+                }
+            }
+            references.sort();
+            Ok(references)
         }
     }
 
@@ -607,6 +625,26 @@ mod tests {
              only the canonical resource and this alias is removed in v0.17.",
         ),
         ("/api/connections/{connector}", "as above."),
+        (
+            "/api/connections/{connector}/label",
+            "as above; naming the sole connection is operator metadata.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}",
+            "as above; creating, inspecting, renaming or removing a named connection remains an operator action.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}/settings",
+            "as above; it exposes only declared setting names and set state, never values.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
+            "as above; selecting which endpoint receives this connection's credential is an operator action.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}/credentials/{credential}",
+            "as above, and it accepts a credential value which the agent descriptor must never invite an agent to supply.",
+        ),
         (
             "/api/connections/{connector}/credentials/{credential}",
             "as above, and it takes a credential value — the one thing this document must never \

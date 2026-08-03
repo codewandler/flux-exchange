@@ -1,11 +1,11 @@
 ---
 id: X-14
 title: "Two instances of one connector, told apart by a name the operator chose"
-status: in-progress
+status: done
 priority: 2
 epic: connections
 design: docs/designs/connection-instances.md
-note: "flux-connectors v0.18 is published; implementing the registry, atomic first-to-second migration, label-scoped management, and invocation selection against registry crates only"
+note: "delivered in v0.16: durable tenant-scoped labels, host-minted UUIDs, atomic first-to-second migration, per-instance settings/rotation and explicit invocation selection"
 ---
 
 # Two instances of one connector, told apart by a name the operator chose
@@ -17,12 +17,12 @@ naming a host or a credential.
 
 ## Why this is not a detail
 
-The derived address has no instance dimension. `connector_spec`'s `credential_ref_for`
-(`ir.rs:1268`) composes `tenants/<tenant>/<authority>/<service>/<credential>` from the tenant, the
-connector's declared `authority`, the service and the credential's leaf name. **Nothing in it varies
-per connection.** So a tenant that connects `acme.zendesk.com` and then `acme-eu.zendesk.com`
-resolves both to one address: the second write overwrites the first, and every subsequent call goes
-to whichever credential survived — with a `200` from the wrong instance rather than a refusal.
+The legacy derived address had no instance dimension. Without X-14, a tenant connecting
+`acme.zendesk.com` and then `acme-eu.zendesk.com` resolved both to one address: the second write
+would overwrite the first, and every subsequent call would go to whichever credential survived —
+with a `200` from the wrong instance rather than a refusal. C-406 added the optional address level;
+C-494 and connector v0.18 added the inventory, batch and instance-aware host ports needed to use it
+without a partial migration.
 
 That is the same failure flux-connectors' C-226 records from the other side (one credential that
 cannot be shared by two connectors); this is one connector that cannot hold two credentials.
@@ -53,33 +53,42 @@ inside the tenant the principal was resolved for. The caller names *which of my 
 refusal, not a fallback to a default.
 
 ## Acceptance
-- [ ] A tenant can hold two connections to the same connector, and both work.
-- [ ] **Failing-first test** — creating a second connection to a connector the tenant already has
+- [x] A tenant can hold two connections to the same connector, and both work.
+- [x] **Failing-first test** — creating a second connection to a connector the tenant already has
       **does not overwrite the first**. This is the bug that motivates the story; assert it at the
       store, not only at the API.
-- [ ] The credential address includes the instance, and two instances of one connector for one
+- [x] The credential address includes the instance, and two instances of one connector for one
       tenant provably render **different** addresses.
-- [ ] An invocation names an instance by its label and nothing else. **Failing-first test** — a
+- [x] An invocation names an instance by its label and nothing else. **Failing-first test** — a
       caller that supplies a host, an authority or a credential address is refused, and the refusal
       names the address rather than the value.
-- [ ] **Failing-first test** — tenant A cannot reach tenant B's instance by naming B's label. The
+- [x] **Failing-first test** — tenant A cannot reach tenant B's instance by naming B's label. The
       label is resolved *within* the principal's tenant, never globally.
-- [ ] An invocation selects a connection with `?connection={label}` while its JSON body remains the
+- [x] An invocation selects a connection with `?connection={label}` while its JSON body remains the
       operation's raw parameter object. Omitting the label works only for a sole connection; two
       instances and no label is an **ambiguous** refusal rather than a default or first match.
-- [ ] Management uses `/api/connections/{connector}/instances/{label}`. A human can label the sole
+- [x] Management uses `/api/connections/{connector}/instances/{label}`. A human can label the sole
       legacy connection before creating a second, and renaming a label moves no credential.
-- [ ] Existence is derived from `SecretStore::references` under the tenant/authority scope. Deleting
+- [x] Existence is derived from `SecretStore::references` under the tenant/authority scope. Deleting
       the label record cannot invent or hide a connection; every held UUID remains listed, unnamed.
-- [ ] The second create holds the tenant/connector lock and uses one checked `SecretBatch` to migrate
+- [x] The second create holds the tenant/connector lock and uses one checked `SecretBatch` to migrate
       the first connection and write the second. An unsupported or failed batch leaves the first
       byte-identical and refuses the create.
-- [ ] Deleting one instance leaves the other's credential intact.
-- [ ] The label's spelling is validated where it is constructed, the way `Tenant::new` already does
+- [x] Deleting one instance leaves the other's credential intact.
+- [x] The label's spelling is validated where it is constructed, the way `Tenant::new` already does
       — 1–64 ASCII alphanumeric, `-`, or `_` bytes. It is not the UUID address segment, and the host
       never accepts a caller-supplied UUID, authority, host or credential address.
 
 ## Progress
+
+- **Delivered for v0.16, 2026-08-03.** Exchange consumes registry-only connector v0.18 and Flux
+  v0.54.4. `ConnectionRegistryStore` persists tenant/connector-scoped label→UUID rows outside the
+  worktree; credential inventory remains authoritative for existence. Label-scoped create,
+  read/rename/delete, settings and rotation are live. The first-to-second and two-to-one transitions
+  are checked atomic `SecretBatch` operations, and a failed transition is retryable with its inert
+  pre-written UUID. Invocation resolves `?connection=` inside the principal tenant and rejects every
+  caller-supplied address axis. Point-only stores retain the sole legacy surface and explicitly
+  refuse plural management.
 - **Blocked on upstream, 2026-08-01.** The instance dimension belongs in `connector_spec`'s
   `CredentialRef`, filed as flux-connectors **C-406** (an optional uuid, required when a tenant holds
   more than one integration of the same kind — owner-directed). It cannot be added here: this story's

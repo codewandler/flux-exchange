@@ -61,6 +61,7 @@ mod connections;
 #[cfg(unix)]
 mod credentials;
 mod grant;
+mod instances;
 mod invoke;
 mod lease;
 // Where a file store may sit, asked before one is created. Shared by the two file stores this crate
@@ -90,7 +91,10 @@ pub use async_trait::async_trait;
 /// different one is a different type with an identical name — an error about mismatched types where
 /// the actual problem is a dependency line. There is one credential addressing scheme in this
 /// ecosystem and this is a doorway to it, not a second copy.
-pub use connector_secrets::{CredentialRef, Secret, SecretStore, StoreError, TENANTS_ROOT};
+pub use connector_secrets::{
+    CredentialRef, CredentialScope, InstanceId, Layout, Secret, SecretBatch, SecretStore,
+    StoreError, TenantInstances, TenantLayout, TENANTS_ROOT,
+};
 
 /// The pack's transport and configuration ports, re-exported for the same reason
 /// [`SecretStore`] is: a composition binds them, and it must not have to name `connector-pack` to
@@ -142,6 +146,13 @@ pub use grant::{
 };
 #[cfg(unix)]
 pub use grant::{GrantStore, GrantStoreError, GRANT_STORE_SETTING};
+pub use instances::{
+    ConnectionLabel, ConnectionRegistry, MemoryConnectionRegistry, NamedConnection, RegistryRefusal,
+};
+#[cfg(unix)]
+pub use instances::{
+    ConnectionRegistryStore, ConnectionRegistryStoreError, CONNECTION_REGISTRY_SETTING,
+};
 pub use invoke::{
     admit_runtime, operation_input_schema, Contexts, InputSchemaError, Invocation, InvokeRefusal,
     Invoker, Sent, WorkflowInvocation, WorkflowInvokeRefusal,

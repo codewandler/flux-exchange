@@ -47,10 +47,17 @@ integration. The historical Rust catalogue type is still named `Provider`; in pr
 “provider” is qualified as **Model Provider** or **Identity Provider** and vendor integrations are
 Connectors.
 
-A **connection** is one tenant's configured relationship with one connector: the credential it needs,
-plus any non-secret per-connection values a templated connector requires. The two are stored
-separately on purpose — a subdomain is not a credential, and one store holding both would make
-"held" mean two different things.
+A **connection** is one tenant's configured relationship with one connector: a host-minted stable
+instance identity, an operator-chosen mutable label, the credential it needs, plus any non-secret
+per-connection values a templated connector requires. One tenant may hold several connections to
+the same Connector. The label selects one inside that tenant; it is never the credential-address
+component, and changing it moves no credential.
+
+Credentials and non-secret settings are stored separately on purpose — a subdomain is not a
+credential, and one store holding both would make "held" mean two different things. When a tenant
+has several connections, an operation invocation names the label in `?connection=` while preserving
+the operation's declared JSON body. Omitting it is valid only when the Connector has a sole
+connection; ambiguity is refused rather than defaulted.
 
 A credential is addressed, never handed out. Nothing that reads a connection returns a secret value.
 

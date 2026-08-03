@@ -492,3 +492,16 @@ The reasoning for the order:
 - **The store is single-process**, like `ConnectionGuard`: the read-decide-write around the tenant
   allowance is claimed within this process and not across a cluster. The same limit `connections.md`
   already records, in the same words.
+
+## Addendum, 2026-08-03 — X-14 has inserted the instance seam
+
+Section 6 described the sequencing contract; connector v0.18 supplied the instance-aware
+`ConfigStore` port and X-14 has now completed it. `SettingsStore` keys plural connections by the
+same host-minted UUID used in credential addressing. Creating the second connection moves the sole
+legacy settings namespace under the first UUID before the atomic credential batch; a refused batch
+restores the legacy namespace. Deleting one of two discards the selected settings and moves the
+survivor back to the legacy namespace. Label-scoped settings routes expose set state and accept
+values exactly like the original routes; values still never come back out.
+
+The historical “No per-instance settings” bullet above is therefore superseded. Every other
+boundary in §7 remains unchanged.

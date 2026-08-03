@@ -22,7 +22,7 @@ may exist in the domain model before its Exchange API exists; the final column m
 |---|---|---|---|
 | **Connector** | A compiled declaration of what one vendor can do in both directions and what an operator must supply. It is not a running connection. | flux-connectors | Live; the published Rust catalogue type is still named `Provider` |
 | **Service** | One connector API surface with its own endpoint/version and a partition of that connector's operations. | flux-connectors | Live as operation metadata; there is no standalone published `Service` value |
-| **Connection** | A tenant-owned installation of a connector, including a stable instance identity, settings and credential addresses. | Exchange | One connection per connector is live; multiple instances are X-14 |
+| **Connection** | A tenant-owned installation of a connector, including a stable instance identity, mutable operator label, settings and credential addresses. The label selects; the host-minted UUID addresses. | Exchange | Multiple instances per tenant and connector are live; omission is allowed only for a sole connection |
 | **Channel Binding** | A connector declaration composing inbound event types with an optional outbound reply operation and transport requirements. It declares; it does not install. | flux-connectors | Generated socket declarations are published and hosted; webhook bindings remain target architecture |
 | **Channel** | A deployment-scoped, long-running installed input/output surface. It outlives callers and pushes events. | Flux runtime + Exchange binding | Generated WebSocket channels are live; durable delivery is target architecture |
 

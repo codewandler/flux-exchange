@@ -14,6 +14,16 @@
 //!                                       supply one non-secret per-connection value
 //! DELETE /api/connections/{connector}/settings/{service}/{field}
 //!                                       unset one
+//! PUT    /api/connections/{connector}/label
+//!                                       label the sole legacy connection
+//! POST   /api/connections/{connector}/instances/{label}
+//!                                       create another named connection
+//! GET/PUT/DELETE /api/connections/{connector}/instances/{label}
+//!                                       inspect, rename or destroy one named connection
+//! GET/PUT/DELETE .../instances/{label}/settings/...
+//!                                       manage one instance's non-secret settings
+//! PUT    .../instances/{label}/credentials/{credential}
+//!                                       rotate one instance's credential
 //! ```
 //!
 //! # The settings half, and why it is a second store rather than more credentials (X-47)
@@ -58,7 +68,8 @@
 //!
 //! # Who may touch a connection, decided per route (X-47, X-54)
 //!
-//! Every route here requires a principal, and three of them require one of a particular **kind**.
+//! Every route here requires a principal, and every write that supplies a credential, changes a
+//! label, or steers an endpoint requires one particular **kind**.
 //! The division is *writing a credential or the value that steers where it goes* against
 //! *everything else*, and it is declared as data on each [`Route`] rather than checked inside a
 //! handler, so `super::tests::the_kind_gated_surface_is_only_what_was_declared` can walk it:
@@ -72,6 +83,9 @@
 //! | `PUT .../credentials/{credential}` | a `User` | the same substitution as `POST`, and invisible — it replaces in place |
 //! | `GET .../settings` | any kind | `binds` targets and a `set` boolean, never a value |
 //! | `PUT`/`DELETE .../settings/{service}/{field}` | a `User` | the value is substituted into the operation's own request |
+//! | `PUT .../label`; `POST`/`PUT .../instances/{label}` | a `User` | naming or creating an external account is operator work |
+//! | `GET`/`DELETE .../instances/{label}` | any kind | safe metadata read or visible destructive undo |
+//! | instance settings and credential routes | the same as their sole-connection counterparts | selecting an instance does not reduce the authority |
 //!
 //! [`MAY_SUPPLY_A_CREDENTIAL`] and [`MAY_CONFIGURE`] carry the arguments, including why `Service` is
 //! refused alongside `Agent` and the within-tenant gap **neither** of them closes — there is no
@@ -96,15 +110,16 @@
 //! sentinel stored, and asserts it appears in no response body. `AGENTS.md` § Invariants: name the
 //! address, never the value.
 //!
-//! # The second connection to one connector is refused
+//! # Plural connections are explicit and atomic (X-14)
 //!
-//! `tenants/<tenant>/<authority>/<credential>` has nowhere to say *which* Zendesk, so a tenant with
-//! a sandbox and a production account renders one address for both and the second write would
-//! silently replace the first. That is refused with `409` rather than accepted, and the refusal
-//! quotes the `@instances/<uuid>` level that has landed upstream (flux-connectors C-406) and is not
-//! published yet. **This refusal is the placeholder for that level** — see [`already_connected`],
-//! `exchange_host::ConnectorDeclaration::address_of_declared` for the seam it is inserted at, and
-//! `docs/designs/connections.md` for the argument.
+//! The legacy `POST /api/connections/{connector}` remains create-only and refuses an occupied
+//! connector; it never became an upsert. The label-scoped resource is the explicit plural path.
+//! The host mints the UUID, resolves labels within the principal's tenant, and derives existence
+//! from scoped credential references rather than from the naming overlay. Creating the second
+//! connection atomically moves every legacy credential under the first UUID and writes the second;
+//! deleting one of two atomically moves the survivor back to its legacy address. A store without
+//! scoped inventory and checked atomic batches keeps the sole legacy surface but refuses plural
+//! management—point writes are never used as a migration fallback.
 //!
 //! # What one tenant may occupy, refused before anything is written
 //!
@@ -202,9 +217,10 @@ use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
     address_path, admit_tenant_occupancy, declared_settings, host_pinning, stored_bytes,
-    ConnectionRefusal, ConnectorDeclaration, CredentialRef, DeclaredCredential, DeclaredSetting,
-    HostPinning, Principal, PrincipalKind, Secret, SecretStore, SettingsRefusal, StoreError,
-    Tenant,
+    ConnectionLabel, ConnectionRefusal, ConnectorDeclaration, CredentialRef, CredentialScope,
+    DeclaredCredential, DeclaredSetting, HostPinning, InstanceId, Principal, PrincipalKind,
+    RegistryRefusal, Secret, SecretBatch, SecretStore, SettingsRefusal, StoreError, Tenant,
+    TenantInstances,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -472,6 +488,36 @@ pub(super) const MODULE: Module = Module {
             access: Access::PrincipalOfKind(MAY_CONFIGURE),
             method_router: setting_route,
         },
+        Route {
+            path: "/api/connections/{connector}/label",
+            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            method_router: legacy_label_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}",
+            access: Access::Principal,
+            method_router: instance_read_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}",
+            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            method_router: instance_write_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}/settings",
+            access: Access::Principal,
+            method_router: instance_settings_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
+            access: Access::PrincipalOfKind(MAY_CONFIGURE),
+            method_router: instance_setting_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}/credentials/{credential}",
+            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            method_router: instance_credential_route,
+        },
     ],
 };
 
@@ -505,6 +551,30 @@ fn setting_route() -> MethodRouter<AppState> {
     put(set_setting).delete(clear_setting)
 }
 
+fn legacy_label_route() -> MethodRouter<AppState> {
+    put(label_legacy)
+}
+
+fn instance_read_route() -> MethodRouter<AppState> {
+    get(show_instance).delete(remove_instance)
+}
+
+fn instance_write_route() -> MethodRouter<AppState> {
+    post(create_instance).put(rename_instance)
+}
+
+fn instance_settings_route() -> MethodRouter<AppState> {
+    get(list_instance_settings)
+}
+
+fn instance_setting_route() -> MethodRouter<AppState> {
+    put(set_instance_setting).delete(clear_instance_setting)
+}
+
+fn instance_credential_route() -> MethodRouter<AppState> {
+    put(rotate_instance)
+}
+
 /// The values a caller supplies when it connects a connector.
 ///
 /// Keyed by the flat-namespace name the catalogue publishes (`zendesk.api_token`), because that is
@@ -522,6 +592,11 @@ fn setting_route() -> MethodRouter<AppState> {
 struct NewConnection {
     /// Declared credential name to value. At least one, and every name declared by the connector.
     credentials: BTreeMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct LabelBody {
+    label: String,
 }
 
 /// The one value a caller supplies when it rotates a credential.
@@ -563,18 +638,12 @@ async fn list(
         let declared = declared_credentials(provider);
         let declaration = declaration(provider, &declared);
 
-        // A connector with no authority or no declared credential has no address, so this tenant
-        // cannot hold a connection to it and there is nothing to report. The refusal for *asking*
-        // about one is `show`'s and `create`'s; a listing that refused because some unrelated
-        // connector is unaddressable would be useless.
-        let Ok(addresses) = declaration.addresses(principal.tenant()) else {
+        if declaration.authority.is_none() || declaration.credentials.is_empty() {
             continue;
-        };
-
-        match held(store, &addresses).await {
-            Ok(held) if held.is_empty() => {}
-            Ok(held) => connections.push(view(provider, &addresses, &held)),
-            Err(error) => return store_failed(&error),
+        }
+        match connection_views(&state, store, principal.tenant(), provider, &declaration).await {
+            Ok(views) => connections.extend(views),
+            Err(response) => return response,
         }
     }
 
@@ -596,17 +665,27 @@ async fn show(
 
     let declared = declared_credentials(provider);
     let declaration = declaration(provider, &declared);
-    let addresses = match declaration.addresses(principal.tenant()) {
-        Ok(addresses) => addresses,
-        Err(refusal) => return connection_refused(&refusal),
-    };
-
-    match held(store, &addresses).await {
-        Err(error) => store_failed(&error),
-        // Nothing here, and the refusal names **this tenant's** address — the one this host looked
-        // at. Never another tenant's, and never the fact that another tenant holds one.
-        Ok(held) if held.is_empty() => not_connected(provider, &addresses),
-        Ok(held) => Json(view(provider, &addresses, &held)).into_response(),
+    let views =
+        match connection_views(&state, store, principal.tenant(), provider, &declaration).await {
+            Ok(views) => views,
+            Err(response) => return response,
+        };
+    match views.as_slice() {
+        [] => {
+            let addresses = match declaration.addresses(principal.tenant()) {
+                Ok(addresses) => addresses,
+                Err(refusal) => return connection_refused(&refusal),
+            };
+            not_connected(provider, &addresses)
+        }
+        [sole] => Json(sole.clone()).into_response(),
+        _ => Json(json!({
+            "connector": provider.id,
+            "vendor": provider.vendor,
+            "authority": provider.authority,
+            "instances": views,
+        }))
+        .into_response(),
     }
 }
 
@@ -748,6 +827,781 @@ async fn rollback(
     }
 }
 
+#[derive(Default)]
+struct ConnectionInventory {
+    legacy: Vec<CredentialRef>,
+    instances: BTreeMap<InstanceId, Vec<CredentialRef>>,
+}
+
+impl ConnectionInventory {
+    fn count(&self) -> usize {
+        usize::from(!self.legacy.is_empty()) + self.instances.len()
+    }
+
+    fn ids(&self) -> Vec<InstanceId> {
+        self.instances.keys().cloned().collect()
+    }
+
+    fn holds(&self, instance: &InstanceId) -> bool {
+        self.instances.contains_key(instance)
+    }
+}
+
+/// Enumerate connection existence from credential addresses, never from the naming overlay.
+async fn inventory(
+    store: &Arc<dyn SecretStore>,
+    tenant: &Tenant,
+    declaration: &ConnectorDeclaration<'_>,
+) -> Result<ConnectionInventory, Response> {
+    let Some(authority) = declaration.authority else {
+        return Err(connection_refused(
+            &ConnectionRefusal::UndeclaredAuthority {
+                connector: declaration.connector.to_owned(),
+            },
+        ));
+    };
+    let scope = CredentialScope::new(tenant.as_str(), authority).map_err(|reason| {
+        refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connector `{}` has no usable credential inventory scope: {reason}",
+                declaration.connector
+            ),
+            json!({ "connector": declaration.connector }),
+        )
+    })?;
+    let references = store
+        .references(&scope)
+        .await
+        .map_err(|error| store_failed(&error))?;
+    let mut answer = ConnectionInventory::default();
+    for reference in references {
+        let declared = declaration.credentials.iter().any(|credential| {
+            credential.leaf == reference.credential() && reference.is_default_service()
+        });
+        if !declared {
+            continue;
+        }
+        match reference.instance() {
+            Some(instance) => answer
+                .instances
+                .entry(instance.clone())
+                .or_default()
+                .push(reference),
+            None => answer.legacy.push(reference),
+        }
+    }
+    if !answer.legacy.is_empty() && !answer.instances.is_empty() {
+        return Err(refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connector `{}` has both legacy and instance-qualified credential addresses for this tenant; refusing rather than guessing which layout is current",
+                declaration.connector
+            ),
+            json!({ "connector": declaration.connector }),
+        ));
+    }
+    Ok(answer)
+}
+
+fn held_names(declaration: &ConnectorDeclaration<'_>, references: &[CredentialRef]) -> Vec<String> {
+    declaration
+        .credentials
+        .iter()
+        .filter(|declared| {
+            references
+                .iter()
+                .any(|reference| reference.credential() == declared.leaf)
+        })
+        .map(|declared| declared.name.to_owned())
+        .collect()
+}
+
+fn named_view(
+    provider: &'static Provider,
+    addresses: &[(DeclaredCredential<'_>, CredentialRef)],
+    held: &[String],
+    label: Option<&ConnectionLabel>,
+    instance: Option<&InstanceId>,
+) -> Value {
+    let mut answer = view(provider, addresses, held);
+    let object = answer
+        .as_object_mut()
+        .expect("the connection view is always an object");
+    object.insert(
+        "label".to_owned(),
+        json!(label.map(ConnectionLabel::as_str)),
+    );
+    object.insert(
+        "instance".to_owned(),
+        json!(instance.map(InstanceId::as_str)),
+    );
+    answer
+}
+
+async fn connection_views(
+    state: &AppState,
+    store: &Arc<dyn SecretStore>,
+    tenant: &Tenant,
+    provider: &'static Provider,
+    declaration: &ConnectorDeclaration<'_>,
+) -> Result<Vec<Value>, Response> {
+    // A composition without the naming overlay is deliberately the pre-X-14 compatibility mode.
+    // It may bind a store such as Vault that can do point operations but cannot prove a safe
+    // listing policy. Keep sole legacy connections working there; instance management below is
+    // the surface that requires address inventory and refuses when the store cannot provide it.
+    if state.connection_registry().is_none() {
+        let addresses = declaration
+            .addresses(tenant)
+            .map_err(|refusal| connection_refused(&refusal))?;
+        let held = held(store, &addresses)
+            .await
+            .map_err(|error| store_failed(&error))?;
+        return Ok((!held.is_empty())
+            .then(|| named_view(provider, &addresses, &held, None, None))
+            .into_iter()
+            .collect());
+    }
+    let inventory = inventory(store, tenant, declaration).await?;
+    let labels = match state.connection_registry() {
+        Some(registry) => registry
+            .entries(tenant, provider.id)
+            .map_err(|refusal| registry_refused(&refusal))?,
+        None => Vec::new(),
+    };
+    let mut views = Vec::new();
+    if !inventory.legacy.is_empty() {
+        let addresses = declaration
+            .addresses(tenant)
+            .map_err(|refusal| connection_refused(&refusal))?;
+        let label = (labels.len() == 1).then(|| &labels[0]);
+        views.push(named_view(
+            provider,
+            &addresses,
+            &held_names(declaration, &inventory.legacy),
+            label.map(|entry| &entry.label),
+            label.map(|entry| &entry.instance),
+        ));
+    }
+    let ids = inventory.ids();
+    for (instance, references) in &inventory.instances {
+        let addresses = if ids.len() > 1 {
+            declaration
+                .addresses_for(tenant, TenantInstances::held(&ids, Some(instance)))
+                .map_err(|refusal| connection_refused(&refusal))?
+        } else {
+            // A lone qualified address is an interrupted or externally edited migration. List the
+            // addresses the store actually holds rather than hiding the connection or pretending
+            // its credentials live at the elided legacy path.
+            declaration
+                .credentials
+                .iter()
+                .filter_map(|declared| {
+                    references
+                        .iter()
+                        .find(|reference| reference.credential() == declared.leaf)
+                        .cloned()
+                        .map(|reference| (*declared, reference))
+                })
+                .collect()
+        };
+        let label = labels.iter().find(|entry| entry.instance == *instance);
+        views.push(named_view(
+            provider,
+            &addresses,
+            &held_names(declaration, references),
+            label.map(|entry| &entry.label),
+            Some(instance),
+        ));
+    }
+    Ok(views)
+}
+
+/// Resolve `?connection=` inside the principal's tenant for the invocation adapter.
+pub(super) async fn invocation_instance(
+    state: &AppState,
+    principal: &Principal,
+    provider: &'static Provider,
+    supplied: Option<&str>,
+) -> Result<Option<InstanceId>, Response> {
+    let Some(registry) = state.connection_registry() else {
+        return match supplied {
+            Some(_) => Err(no_registry()),
+            None => Ok(None),
+        };
+    };
+    let Some(store) = state.credentials() else {
+        return Err(no_store());
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = inventory(store, principal.tenant(), &declaration).await?;
+    let Some(supplied) = supplied else {
+        return if inventory.count() > 1 {
+            Err(refuse(
+                StatusCode::CONFLICT,
+                format!(
+                    "this tenant holds {} connections to `{}`; pass `?connection=<label>` rather than letting this host choose an account",
+                    inventory.count(), provider.id
+                ),
+                json!({ "connector": provider.id, "code": "ambiguous_connection" }),
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    let label =
+        ConnectionLabel::new(supplied.to_owned()).map_err(|refusal| registry_refused(&refusal))?;
+    let instance = registry
+        .resolve(principal.tenant(), provider.id, &label)
+        .map_err(|refusal| registry_refused(&refusal))?
+        .ok_or_else(|| unknown_label(provider, &label))?;
+    if inventory.holds(&instance) {
+        return Ok(Some(instance));
+    }
+    if inventory.count() == 1 && !inventory.legacy.is_empty() {
+        // The UUID already names the sole connection in the overlay, while its address correctly
+        // elides the instance level until a second connection is created. Require it to be the
+        // overlay's only row: a stale row after an interrupted management write must not become an
+        // alias that silently selects the surviving account.
+        return if names_only_legacy(registry, principal.tenant(), provider.id, &instance)
+            .map_err(|response| *response)?
+        {
+            Ok(None)
+        } else {
+            Err(unknown_label(provider, &label))
+        };
+    }
+    Err(unknown_label(provider, &label))
+}
+
+fn names_only_legacy(
+    registry: &Arc<dyn exchange_host::ConnectionRegistry>,
+    tenant: &Tenant,
+    connector: &str,
+    instance: &InstanceId,
+) -> Result<bool, Box<Response>> {
+    let entries = registry
+        .entries(tenant, connector)
+        .map_err(|refusal| Box::new(registry_refused(&refusal)))?;
+    Ok(matches!(entries.as_slice(), [entry] if entry.instance == *instance))
+}
+
+fn mint_instance() -> Result<InstanceId, Box<Response>> {
+    let mut bytes = crate::entropy::bytes::<16>().map_err(|error| {
+        error!(%error, source = crate::entropy::SOURCE, "connection UUID entropy unavailable");
+        Box::new(refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this host could not mint a connection identifier; nothing was written. Retrying may work",
+            json!({}),
+        ))
+    })?;
+    // RFC 4122 version 4 and variant bits. The remaining 122 bits come directly from the one OS
+    // entropy source this binary uses for every unguessable value.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let text = format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    );
+    InstanceId::parse(&text).map_err(|reason| {
+        error!(%reason, "the host minted a UUID the address vocabulary refused");
+        Box::new(refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "this host minted an unusable connection identifier; nothing was written",
+            json!({}),
+        ))
+    })
+}
+
+fn instance_reference(
+    reference: &CredentialRef,
+    instance: &InstanceId,
+) -> Result<CredentialRef, Box<Response>> {
+    CredentialRef::for_instance(
+        reference.tenant(),
+        reference.authority(),
+        instance.as_str(),
+        reference.service(),
+        reference.credential(),
+    )
+    .map_err(|reason| {
+        Box::new(refuse(
+            StatusCode::CONFLICT,
+            format!("the derived connection address is unusable: {reason}"),
+            json!({}),
+        ))
+    })
+}
+
+fn legacy_reference(reference: &CredentialRef) -> Result<CredentialRef, Box<Response>> {
+    CredentialRef::new(
+        reference.tenant(),
+        reference.authority(),
+        reference.service(),
+        reference.credential(),
+    )
+    .map_err(|reason| {
+        Box::new(refuse(
+            StatusCode::CONFLICT,
+            format!("the derived legacy connection address is unusable: {reason}"),
+            json!({}),
+        ))
+    })
+}
+
+async fn label_legacy(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(connector): Path<String>,
+    Json(body): Json<LabelBody>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let label = match ConnectionLabel::new(body.label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    if inventory.count() != 1 || inventory.legacy.is_empty() {
+        return refuse(
+            StatusCode::CONFLICT,
+            "only one unlabelled legacy connection can be labelled through this route",
+            json!({ "connector": provider.id }),
+        );
+    }
+    let existing = match registry.entries(principal.tenant(), provider.id) {
+        Ok(existing) => existing,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    if !existing.is_empty() {
+        return refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connector `{}`'s sole connection already has a label",
+                provider.id
+            ),
+            json!({ "connector": provider.id }),
+        );
+    }
+    let instance = match mint_instance() {
+        Ok(instance) => instance,
+        Err(response) => return *response,
+    };
+    if let Err(refusal) = registry.assign(principal.tenant(), provider.id, &label, &instance) {
+        return registry_refused(&refusal);
+    }
+    Json(json!({ "connector": provider.id, "label": label.as_str() })).into_response()
+}
+
+async fn create_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label)): Path<(String, String)>,
+    Json(body): Json<NewConnection>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let label = match ConnectionLabel::new(label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    if body.credentials.is_empty() {
+        return refuse(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "a connection to `{}` carries at least one credential value",
+                provider.id
+            ),
+            json!({ "connector": provider.id }),
+        );
+    }
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    let entries = match registry.entries(principal.tenant(), provider.id) {
+        Ok(entries) => entries,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+
+    let existing_requested = entries
+        .iter()
+        .find(|entry| entry.label == label)
+        .map(|entry| entry.instance.clone());
+    let requested_names_sole_legacy = existing_requested.is_some()
+        && !inventory.legacy.is_empty()
+        && entries.iter().all(|entry| entry.label == label);
+    if existing_requested
+        .as_ref()
+        .is_some_and(|instance| inventory.holds(instance))
+        || requested_names_sole_legacy
+    {
+        return registry_refused(&RegistryRefusal::LabelAlreadyExists {
+            connector: provider.id.to_owned(),
+            label: label.to_string(),
+        });
+    }
+    let instance = match existing_requested {
+        Some(stale) => stale,
+        None => {
+            let instance = match mint_instance() {
+                Ok(instance) => instance,
+                Err(response) => return *response,
+            };
+            if let Err(refusal) =
+                registry.assign(principal.tenant(), provider.id, &label, &instance)
+            {
+                return registry_refused(&refusal);
+            }
+            instance
+        }
+    };
+
+    let mut held_ids = inventory.ids();
+    if !inventory.legacy.is_empty() {
+        let mut legacy_ids = entries
+            .iter()
+            .filter(|entry| entry.label != label)
+            .map(|entry| entry.instance.clone());
+        let Some(first) = legacy_ids.next() else {
+            return refuse(
+                StatusCode::CONFLICT,
+                format!(
+                    "label the sole `{}` connection with PUT /api/connections/{}/label before creating a second",
+                    provider.id, provider.id
+                ),
+                json!({ "connector": provider.id }),
+            );
+        };
+        if legacy_ids.next().is_some() {
+            return refuse(
+                StatusCode::CONFLICT,
+                "the sole legacy connection has more than one naming record; refusing migration",
+                json!({ "connector": provider.id }),
+            );
+        }
+        held_ids.push(first);
+    }
+    held_ids.push(instance.clone());
+    held_ids.sort();
+
+    let writes = match declaration.writes_for(
+        principal.tenant(),
+        TenantInstances::held(&held_ids, Some(&instance)),
+        &body.credentials,
+    ) {
+        Ok(writes) => writes,
+        Err(refusal) => return connection_refused(&refusal),
+    };
+    let adding: usize = writes.iter().map(|(_, secret)| stored_bytes(secret)).sum();
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) = admit_tenant_occupancy(held_bytes, adding) {
+        return connection_refused(&refusal);
+    }
+
+    let Some(authority) = declaration.authority else {
+        return connection_refused(&ConnectionRefusal::UndeclaredAuthority {
+            connector: provider.id.to_owned(),
+        });
+    };
+    let scope = match CredentialScope::new(principal.tenant().as_str(), authority) {
+        Ok(scope) => scope,
+        Err(reason) => {
+            return refuse(
+                StatusCode::CONFLICT,
+                reason,
+                json!({ "connector": provider.id }),
+            )
+        }
+    };
+    let mut batch = SecretBatch::new(scope);
+    if !inventory.legacy.is_empty() {
+        let first = held_ids
+            .iter()
+            .find(|candidate| **candidate != instance)
+            .expect("a labelled legacy id was required above");
+        for source in &inventory.legacy {
+            let destination = match instance_reference(source, first) {
+                Ok(destination) => destination,
+                Err(response) => return *response,
+            };
+            if let Err(reason) = batch.move_secret(source.clone(), destination) {
+                return refuse(StatusCode::CONFLICT, reason, json!({}));
+            }
+        }
+    }
+    for (reference, secret) in &writes {
+        if let Err(reason) = batch.put(reference.clone(), secret.clone()) {
+            return refuse(StatusCode::CONFLICT, reason, json!({}));
+        }
+    }
+    let migrating_first = (!inventory.legacy.is_empty()).then(|| {
+        held_ids
+            .iter()
+            .find(|candidate| **candidate != instance)
+            .expect("a labelled legacy id was required above")
+            .clone()
+    });
+    if let (Some(settings), Some(first)) = (state.settings(), migrating_first.as_ref()) {
+        if let Err(refusal) = settings.qualify_instance(principal.tenant(), provider.id, first) {
+            return settings_refused(&refusal);
+        }
+    }
+    if let Err(error) = store.apply(&batch).await {
+        if let (Some(settings), Some(first)) = (state.settings(), migrating_first.as_ref()) {
+            if let Err(refusal) =
+                settings.collapse_instances(principal.tenant(), provider.id, &instance, first)
+            {
+                error!(%refusal, "connection-settings migration rollback failed after credential batch refusal");
+            }
+        }
+        return store_failed(&error);
+    }
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "connector": provider.id,
+            "label": label.as_str(),
+            "credentials": writes.iter().map(|(reference, _)| address_path(reference)).collect::<Vec<_>>(),
+        })),
+    )
+        .into_response()
+}
+
+async fn show_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label)): Path<(String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let label = match ConnectionLabel::new(label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let instance = match registry.resolve(principal.tenant(), provider.id, &label) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return unknown_label(provider, &label),
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    let references = if inventory.holds(&instance) {
+        inventory
+            .instances
+            .get(&instance)
+            .cloned()
+            .unwrap_or_default()
+    } else if inventory.count() == 1
+        && !inventory.legacy.is_empty()
+        && match names_only_legacy(registry, principal.tenant(), provider.id, &instance) {
+            Ok(sole) => sole,
+            Err(response) => return *response,
+        }
+    {
+        inventory.legacy
+    } else {
+        return unknown_label(provider, &label);
+    };
+    Json(json!({
+        "connector": provider.id,
+        "label": label.as_str(),
+        "credentials": references.iter().map(address_path).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+async fn rename_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, from)): Path<(String, String)>,
+    Json(body): Json<LabelBody>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let from = match ConnectionLabel::new(from) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let to = match ConnectionLabel::new(body.label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    if let Err(response) =
+        invocation_instance(&state, &principal, provider, Some(from.as_str())).await
+    {
+        return response;
+    }
+    match registry.rename(principal.tenant(), provider.id, &from, &to) {
+        Ok(_) => Json(json!({ "connector": provider.id, "label": to.as_str() })).into_response(),
+        Err(refusal) => registry_refused(&refusal),
+    }
+}
+
+async fn remove_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label)): Path<(String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let label = match ConnectionLabel::new(label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let instance = match registry.resolve(principal.tenant(), provider.id, &label) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return unknown_label(provider, &label),
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    let selected = if inventory.holds(&instance) {
+        inventory
+            .instances
+            .get(&instance)
+            .cloned()
+            .unwrap_or_default()
+    } else if inventory.count() == 1
+        && !inventory.legacy.is_empty()
+        && match names_only_legacy(registry, principal.tenant(), provider.id, &instance) {
+            Ok(sole) => sole,
+            Err(response) => return *response,
+        }
+    {
+        inventory.legacy.clone()
+    } else {
+        return unknown_label(provider, &label);
+    };
+    let Some(authority) = declaration.authority else {
+        return connection_refused(&ConnectionRefusal::UndeclaredAuthority {
+            connector: provider.id.to_owned(),
+        });
+    };
+    let scope = match CredentialScope::new(principal.tenant().as_str(), authority) {
+        Ok(scope) => scope,
+        Err(reason) => return refuse(StatusCode::CONFLICT, reason, json!({})),
+    };
+    let mut batch = SecretBatch::new(scope);
+    for reference in selected {
+        if let Err(reason) = batch.delete(reference) {
+            return refuse(StatusCode::CONFLICT, reason, json!({}));
+        }
+    }
+    if inventory.instances.len() == 2 && inventory.legacy.is_empty() {
+        let remaining = inventory
+            .instances
+            .iter()
+            .find(|(candidate, _)| **candidate != instance)
+            .map(|(_, references)| references)
+            .expect("two instances include one remaining");
+        for source in remaining {
+            let destination = match legacy_reference(source) {
+                Ok(destination) => destination,
+                Err(response) => return *response,
+            };
+            if let Err(reason) = batch.move_secret(source.clone(), destination) {
+                return refuse(StatusCode::CONFLICT, reason, json!({}));
+            }
+        }
+    }
+    if let Err(error) = store.apply(&batch).await {
+        return store_failed(&error);
+    }
+    if let Some(settings) = state.settings() {
+        let transition = if inventory.instances.len() == 2 && inventory.legacy.is_empty() {
+            let remaining = inventory
+                .instances
+                .keys()
+                .find(|candidate| **candidate != instance)
+                .expect("two instances include one remaining");
+            settings.collapse_instances(principal.tenant(), provider.id, &instance, remaining)
+        } else if inventory.holds(&instance) {
+            settings.discard_instance(principal.tenant(), provider.id, &instance)
+        } else {
+            Ok(())
+        };
+        if let Err(refusal) = transition {
+            // The credential batch is already durable. Refusing before removing the selected label
+            // would leave it able to alias the survivor's now-legacy address. Finish the deletion
+            // and leave the survivor's settings absent (a fail-closed invocation refusal), while
+            // making the operator-visible repair failure loud.
+            error!(%refusal, "connection settings could not follow a completed credential migration");
+        }
+    }
+    if let Err(refusal) = registry.remove(principal.tenant(), provider.id, &label) {
+        return registry_refused(&refusal);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// Replace one credential's value, at the address the connection already uses.
 ///
 /// The operation an operator reaches for when a secret has leaked, and the reason it exists is
@@ -868,6 +1722,75 @@ async fn rotate(
     // credentials are held — and the set of held credentials is unchanged, because a rotation
     // replaces one that was already among them.
     Json(view(provider, &addresses, &held_now)).into_response()
+}
+
+async fn rotate_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label, credential)): Path<(String, String, String)>,
+    Json(body): Json<RotatedCredential>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    let selected = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(selected) => selected,
+        Err(response) => return response,
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    let ids = inventory.ids();
+    let instances = match selected.as_ref() {
+        Some(instance) => TenantInstances::held(&ids, Some(instance)),
+        None => TenantInstances::sole(),
+    };
+    let (reference, secret) =
+        match declaration.write_of_for(principal.tenant(), &credential, &body.value, instances) {
+            Ok(write) => write,
+            Err(refusal) => return connection_refused(&refusal),
+        };
+    let replacing = match store.get(&reference).await {
+        Ok(current) => stored_bytes(&current),
+        Err(error) if error.is_not_found() => {
+            return nothing_to_rotate(provider, &credential, &reference)
+        }
+        Err(error) => return store_failed(&error),
+    };
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) =
+        admit_tenant_occupancy(held_bytes.saturating_sub(replacing), stored_bytes(&secret))
+    {
+        return connection_refused(&refusal);
+    }
+    if let Err(error) = store.put(&reference, &secret).await {
+        return rotation_failed(provider, &credential, &reference, &error);
+    }
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
+    Json(json!({
+        "connector": provider.id,
+        "label": label,
+        "credential": credential,
+        "address": address_path(&reference),
+    }))
+    .into_response()
 }
 
 /// Disconnect, destroying every credential the connection holds.
@@ -1136,6 +2059,115 @@ async fn clear_setting(
     }
 }
 
+async fn list_instance_settings(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label)): Path<(String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+    let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(instance) => instance,
+        Err(response) => return response,
+    };
+    let declared = match declared_settings(provider) {
+        Ok(declared) => declared,
+        Err(refusal) => return settings_refused(&refusal),
+    };
+    let settings: Vec<Value> = declared
+        .iter()
+        .map(|setting| {
+            let pinning = host_pinning(provider, setting);
+            json!({
+                "service": setting.service,
+                "field": setting.binds(),
+                "set": store.is_set_for_instance(
+                    principal.tenant(),
+                    provider.id,
+                    instance.as_ref(),
+                    setting,
+                ),
+                "suppliable": pinning.tenant_may_supply(),
+            })
+        })
+        .collect();
+    Json(json!({
+        "connector": provider.id,
+        "label": label,
+        "configurable": declared.iter().all(|setting| host_pinning(provider, setting).tenant_may_supply()),
+        "settings": settings,
+    }))
+    .into_response()
+}
+
+async fn set_instance_setting(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label, service, field)): Path<(String, String, String, String)>,
+    Json(body): Json<SuppliedSetting>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+    let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(instance) => instance,
+        Err(response) => return response,
+    };
+    let Some(setting) = DeclaredSetting::parse(&service, &field) else {
+        return unreadable_field(provider, &service, &field);
+    };
+    if let Err(refusal) = store.set_for_instance(
+        principal.tenant(),
+        provider.id,
+        instance.as_ref(),
+        &setting,
+        &body.value,
+    ) {
+        return settings_refused(&refusal);
+    }
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
+    Json(setting_view(provider, &setting, true)).into_response()
+}
+
+async fn clear_instance_setting(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label, service, field)): Path<(String, String, String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+    let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(instance) => instance,
+        Err(response) => return response,
+    };
+    let Some(setting) = DeclaredSetting::parse(&service, &field) else {
+        return unreadable_field(provider, &service, &field);
+    };
+    match store.clear_for_instance(principal.tenant(), provider.id, instance.as_ref(), &setting) {
+        Err(refusal) => settings_refused(&refusal),
+        Ok(false) => nothing_to_clear(provider, &setting),
+        Ok(true) => {
+            if let Some(channels) = state.channels() {
+                channels.restart(principal.tenant(), provider.id);
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+    }
+}
+
 /// One setting as a caller sees it: where it belongs and whether it is supplied. Never its value.
 fn setting_view(provider: &'static Provider, setting: &DeclaredSetting, set: bool) -> Value {
     json!({
@@ -1219,6 +2251,16 @@ fn nothing_to_clear(provider: &'static Provider, setting: &DeclaredSetting) -> R
 /// value.
 fn settings_refused(refusal: &SettingsRefusal) -> Response {
     let (status, extra) = match refusal {
+        SettingsRefusal::InstanceUnsupported {
+            connector,
+            instance,
+        } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "connector": connector, "instance": instance }),
+        ),
+        SettingsRefusal::InstanceTransition { connector, .. } => {
+            (StatusCode::CONFLICT, json!({ "connector": connector }))
+        }
         SettingsRefusal::NothingDeclared { connector } => (
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({ "connector": connector }),
@@ -1416,20 +2458,24 @@ async fn held(
 /// closed. That claim is single-process, exactly as the per-connection one is.
 async fn occupied(store: &Arc<dyn SecretStore>, tenant: &Tenant) -> Result<usize, StoreError> {
     let mut total = 0usize;
+    let mut seen = std::collections::BTreeSet::new();
 
     for provider in connector_catalog::providers() {
-        let declared = declared_credentials(provider);
-        let declaration = declaration(provider, &declared);
-
-        // A connector with no address cannot hold anything for this tenant, so it contributes
-        // nothing. Refusing the whole create because some unrelated connector is unaddressable
-        // would be the listing bug in another place.
-        let Ok(addresses) = declaration.addresses(tenant) else {
+        let Some(authority) = provider.authority else {
             continue;
         };
-
-        for (_, reference) in &addresses {
-            match store.get(reference).await {
+        let scope = CredentialScope::new(tenant.as_str(), authority)
+            .map_err(|reason| StoreError::Layout { reason })?;
+        let references = match store.references(&scope).await {
+            Ok(references) => references,
+            Err(StoreError::Unsupported { .. }) => return occupied_legacy(store, tenant).await,
+            Err(error) => return Err(error),
+        };
+        for reference in references {
+            if !seen.insert(reference.clone()) {
+                continue;
+            }
+            match store.get(&reference).await {
                 Ok(secret) => total = total.saturating_add(stored_bytes(&secret)),
                 Err(error) if error.is_not_found() => {}
                 Err(error) => return Err(error),
@@ -1437,6 +2483,38 @@ async fn occupied(store: &Arc<dyn SecretStore>, tenant: &Tenant) -> Result<usize
         }
     }
 
+    Ok(total)
+}
+
+/// The pre-v0.18 occupancy walk for stores that support point operations but not scoped inventory.
+///
+/// Such a store cannot admit multiple instances, so every address it can hold through this host is
+/// still one of the catalogue-derived legacy addresses. Falling back here preserves that supported
+/// sole-connection surface without treating an unsupported inventory as an empty inventory.
+async fn occupied_legacy(
+    store: &Arc<dyn SecretStore>,
+    tenant: &Tenant,
+) -> Result<usize, StoreError> {
+    let mut total = 0usize;
+    for provider in connector_catalog::providers() {
+        let declared = declared_credentials(provider);
+        let declaration = declaration(provider, &declared);
+        if declaration.authority.is_none() || declaration.credentials.is_empty() {
+            continue;
+        }
+        let addresses = declaration
+            .addresses(tenant)
+            .map_err(|refusal| StoreError::Layout {
+                reason: refusal.to_string(),
+            })?;
+        for (_, reference) in addresses {
+            match store.get(&reference).await {
+                Ok(secret) => total = total.saturating_add(stored_bytes(&secret)),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
     Ok(total)
 }
 
@@ -1613,16 +2691,11 @@ fn connection_refused(refusal: &ConnectionRefusal) -> Response {
     refuse(status, refusal.to_string(), extra)
 }
 
-/// **The X-14 placeholder.** A second connection to a connector this tenant already has.
+/// A create through the source-compatible sole-connection resource found an existing connection.
 ///
-/// The address this host *derives* has no level at which two instances of one connector differ, so
-/// accepting this would overwrite the first connection, answer `201`, and send every later call to
-/// the wrong account while looking healthy. The refusal names the level that will replace it:
-/// `@instances/<uuid>`, which landed in flux-connectors (C-406) and is published and pinned here
-/// since X-11 — `connector_address::CredentialRef::for_instance` spells it. What is still missing
-/// is this host's half: resolving a name the operator chooses to that uuid, and moving the
-/// already-stored credential to the address it gains. That is X-14, and until it lands this refuses
-/// rather than deriving an address the store was never written at.
+/// This route deliberately remains create-only; accepting it as an upsert would still silently
+/// replace the sole connection. X-14 added the explicit label-scoped plural resource instead, so
+/// the refusal points a human at the two deliberate management steps.
 fn already_connected(
     provider: &'static Provider,
     addresses: &[(DeclaredCredential<'_>, CredentialRef)],
@@ -1630,20 +2703,19 @@ fn already_connected(
     refuse(
         StatusCode::CONFLICT,
         format!(
-            "this tenant already has a connection to connector `{}`, and the credential address \
-             has no instance dimension to tell two of them apart — a second one would overwrite \
-             the first rather than sit beside it",
+            "this tenant already has a connection to connector `{}`; this legacy resource is \
+             create-only and will not replace it",
             provider.id,
         ),
         json!({
             "connector": provider.id,
             "addresses": addresses_of(addresses),
-            "would_have_worked":
-                "an instance level on the address — \
-                 `tenants/<tenant>/<authority>/@instances/<uuid>/<credential>` — which landed in \
-                 flux-connectors (C-406) and is published; this host does not yet resolve a name \
-                 you choose to that uuid, which is X-14. Until then, delete the existing \
-                 connection before creating another",
+            "create_another_at": format!(
+                "/api/connections/{}/instances/<label>", provider.id
+            ),
+            "label_existing_at": format!(
+                "/api/connections/{}/label", provider.id
+            ),
         }),
     )
 }
@@ -1753,6 +2825,50 @@ fn no_store() -> Response {
     )
 }
 
+fn no_registry() -> Response {
+    #[cfg(unix)]
+    let setting = exchange_host::CONNECTION_REGISTRY_SETTING;
+    #[cfg(not(unix))]
+    let setting = "FLUX_EXCHANGE_CONNECTIONS";
+    refuse(
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!(
+            "no connection registry is configured. Set `{setting}` to a durable path before using labels or multiple connector instances"
+        ),
+        json!({}),
+    )
+}
+
+fn unknown_label(provider: &'static Provider, label: &ConnectionLabel) -> Response {
+    refuse(
+        StatusCode::NOT_FOUND,
+        format!(
+            "connector `{}` has no held connection named `{}` for this tenant",
+            provider.id, label
+        ),
+        json!({ "connector": provider.id, "label": label.as_str() }),
+    )
+}
+
+fn registry_refused(refusal: &RegistryRefusal) -> Response {
+    let status = match refusal {
+        RegistryRefusal::InvalidLabel { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        RegistryRefusal::LabelAlreadyExists { .. }
+        | RegistryRefusal::InstanceAlreadyNamed { .. } => StatusCode::CONFLICT,
+        RegistryRefusal::UnknownLabel { .. } => StatusCode::NOT_FOUND,
+        RegistryRefusal::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    if matches!(refusal, RegistryRefusal::Unavailable { .. }) {
+        error!(%refusal, "the connection registry failed");
+        return refuse(
+            status,
+            "the connection registry could not be read or written; nothing was repaired. Retrying may work",
+            json!({}),
+        );
+    }
+    refuse(status, refusal.to_string(), json!({}))
+}
+
 /// The store failed, and *how* it failed survives out to the caller.
 ///
 /// Never a `404`, whatever the variant: "we cannot say" reported as "you have not connected that
@@ -1822,6 +2938,16 @@ fn store_failure(error: &StoreError) -> (StatusCode, &'static str, &'static str)
             "the credential store answered with something this host cannot interpret",
             "Retrying will not help; this is a defect in the store or in how it is configured",
         ),
+        StoreError::Conflict { .. } => (
+            StatusCode::CONFLICT,
+            "the credential store refused an atomic mutation because its checked state changed",
+            "Nothing was partially applied; refresh the connection inventory before retrying",
+        ),
+        StoreError::Unsupported { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the configured credential store cannot provide the operation this connection change requires",
+            "Retrying will not help; an operator must bind a store that supports scoped inventory and atomic batches",
+        ),
     }
 }
 
@@ -1859,7 +2985,10 @@ fn escalation(error: &StoreError) -> Escalation {
         // and warns about it. Ranked lowest so it can never win a comparison and hide a real one.
         StoreError::NotFound { .. } | StoreError::Unreachable { .. } => Escalation::Transient,
         StoreError::Denied { .. } => Escalation::RestoreAccess,
-        StoreError::Backend { .. } | StoreError::Layout { .. } => Escalation::RepairTheStore,
+        StoreError::Backend { .. }
+        | StoreError::Layout { .. }
+        | StoreError::Conflict { .. }
+        | StoreError::Unsupported { .. } => Escalation::RepairTheStore,
     }
 }
 
@@ -2032,8 +3161,8 @@ mod tests {
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        async_trait, ConnectionSettings as _, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES,
-        TENANTS_ROOT,
+        async_trait, ConnectionSettings as _, Layout as _, TenantLayout,
+        MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES, TENANTS_ROOT,
     };
     use tower::Service;
 
@@ -2335,6 +3464,30 @@ mod tests {
                 .expect("no test poisons this")
                 .remove(&address_path(reference));
             Ok(())
+        }
+
+        async fn references(
+            &self,
+            scope: &CredentialScope,
+        ) -> Result<Vec<CredentialRef>, StoreError> {
+            if let Some(failure) = *self.fails.lock().expect("no test poisons this") {
+                return Err(failure.at(format!(
+                    "tenants/{}/{}",
+                    scope.tenant(),
+                    scope.authority()
+                )));
+            }
+            let mut references = Vec::new();
+            for path in self.held.lock().expect("no test poisons this").keys() {
+                let reference = TenantLayout
+                    .parse(path)
+                    .map_err(|reason| StoreError::Layout { reason })?;
+                if scope.contains(&reference) {
+                    references.push(reference);
+                }
+            }
+            references.sort();
+            Ok(references)
         }
     }
 
@@ -2715,10 +3868,7 @@ mod tests {
         );
     }
 
-    /// **The X-14 placeholder, asserted.** A second connection to one connector is refused rather
-    /// than silently overwriting the first, and the refusal names the level that would have worked.
-    ///
-    /// Delete this test in the change that lands the `@instances/<uuid>` level.
+    /// The legacy resource remains create-only after X-14; plurality must be explicit and labelled.
     #[tokio::test]
     async fn a_second_connection_to_one_connector_is_refused_rather_than_overwriting() {
         let (app, store) = connected_app();
@@ -2738,16 +3888,14 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::CONFLICT,
-            "a second connection to one connector collides on one address, so it must refuse \
-             rather than overwrite: {body}",
+            "a second legacy create must refuse rather than become an upsert: {body}",
         );
 
         let rendered = body.to_string();
         assert!(
-            rendered.contains("@instances/<uuid>"),
-            "the refusal must name the level that would have worked: {rendered}",
+            rendered.contains("/api/connections/zendesk/instances/<label>"),
+            "the refusal must name the explicit plural resource: {rendered}",
         );
-        assert!(rendered.contains("X-14"), "{rendered}");
         assert!(
             rendered.contains("tenants/acme/com.zendesk.api/api_token"),
             "the refusal must name the address it collides at: {rendered}",
@@ -3022,7 +4170,7 @@ mod tests {
             );
         }
 
-        // And the create refusal is the one X-10 wrote, unchanged — asserted here as well as in
+        // And the legacy create refusal remains create-only — asserted here as well as in
         // `a_second_connection_to_one_connector_is_refused_rather_than_overwriting`, because this
         // is the test that would notice rotation having been wired into `POST`.
         let (status, refusal) = call(
@@ -3035,7 +4183,9 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
         assert!(
-            refusal.to_string().contains("@instances/<uuid>"),
+            refusal
+                .to_string()
+                .contains("/api/connections/zendesk/instances/<label>"),
             "{refusal}"
         );
     }
@@ -5985,8 +7135,9 @@ mod tests {
     /// which drives address-shaped and traversing values straight at the route.
     #[test]
     fn no_route_here_accepts_an_address() {
-        /// What a path here may name, each because the catalogue is what resolves it.
-        const KEYS: &[&str] = &["connector", "credential", "service", "field"];
+        /// What a path here may name. `label` is resolved only through the principal tenant's
+        /// naming overlay; every other entry is resolved through the catalogue.
+        const KEYS: &[&str] = &["connector", "credential", "service", "field", "label"];
 
         for route in MODULE.routes {
             for parameter in route
@@ -6153,6 +7304,22 @@ mod tests {
                     "/api/connections/{connector}/settings/{service}/{field}",
                     MAY_CONFIGURE,
                 ),
+                (
+                    "/api/connections/{connector}/label",
+                    MAY_SUPPLY_A_CREDENTIAL,
+                ),
+                (
+                    "/api/connections/{connector}/instances/{label}",
+                    MAY_SUPPLY_A_CREDENTIAL,
+                ),
+                (
+                    "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
+                    MAY_CONFIGURE,
+                ),
+                (
+                    "/api/connections/{connector}/instances/{label}/credentials/{credential}",
+                    MAY_SUPPLY_A_CREDENTIAL,
+                ),
             ],
             "who may reach a tenant's connections changed; every entry is a decision that belongs \
              beside the constant it names rather than only in a route table, and these are what \
@@ -6230,7 +7397,7 @@ mod tests {
         use super::*;
 
         use std::path::PathBuf;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         use exchange_host::CredentialStore;
 
@@ -6271,6 +7438,504 @@ mod tests {
                 ))
                 .with_credentials(store.secrets()),
             )
+        }
+
+        fn instance_app(
+            store: &CredentialStore,
+            registry: Arc<exchange_host::MemoryConnectionRegistry>,
+        ) -> Router {
+            super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(store.secrets())
+                .with_connection_registry(registry),
+            )
+        }
+
+        fn configurable_instance_app(
+            credentials: &CredentialStore,
+            registry: Arc<exchange_host::MemoryConnectionRegistry>,
+            settings: Arc<exchange_host::SettingsStore>,
+        ) -> Router {
+            super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(credentials.secrets())
+                .with_connection_registry(registry)
+                .with_settings(settings),
+            )
+        }
+
+        struct NoAtomicBatch(Arc<dyn SecretStore>);
+
+        #[async_trait]
+        impl SecretStore for NoAtomicBatch {
+            async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+                self.0.get(reference).await
+            }
+
+            async fn put(
+                &self,
+                reference: &CredentialRef,
+                secret: &Secret,
+            ) -> Result<(), StoreError> {
+                self.0.put(reference, secret).await
+            }
+
+            async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+                self.0.delete(reference).await
+            }
+
+            async fn references(
+                &self,
+                scope: &CredentialScope,
+            ) -> Result<Vec<CredentialRef>, StoreError> {
+                self.0.references(scope).await
+            }
+
+            async fn apply(&self, _: &SecretBatch) -> Result<(), StoreError> {
+                Err(StoreError::Unsupported {
+                    operation: "atomic batch".to_owned(),
+                    reason: "this test binding deliberately cannot guarantee one".to_owned(),
+                })
+            }
+        }
+
+        /// A Vault-shaped port for compatibility: point operations work, while the default
+        /// `references` and `apply` methods refuse because the backend cannot prove those policies.
+        struct PointOnly(Arc<dyn SecretStore>);
+
+        #[async_trait]
+        impl SecretStore for PointOnly {
+            async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+                self.0.get(reference).await
+            }
+
+            async fn put(
+                &self,
+                reference: &CredentialRef,
+                secret: &Secret,
+            ) -> Result<(), StoreError> {
+                self.0.put(reference, secret).await
+            }
+
+            async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+                self.0.delete(reference).await
+            }
+        }
+
+        struct FailFirstBatch {
+            inner: Arc<dyn SecretStore>,
+            failed: AtomicBool,
+        }
+
+        #[async_trait]
+        impl SecretStore for FailFirstBatch {
+            async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+                self.inner.get(reference).await
+            }
+
+            async fn put(
+                &self,
+                reference: &CredentialRef,
+                secret: &Secret,
+            ) -> Result<(), StoreError> {
+                self.inner.put(reference, secret).await
+            }
+
+            async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+                self.inner.delete(reference).await
+            }
+
+            async fn references(
+                &self,
+                scope: &CredentialScope,
+            ) -> Result<Vec<CredentialRef>, StoreError> {
+                self.inner.references(scope).await
+            }
+
+            async fn apply(&self, batch: &SecretBatch) -> Result<(), StoreError> {
+                if !self.failed.swap(true, Ordering::Relaxed) {
+                    return Err(StoreError::Unreachable {
+                        path: "test atomic batch".to_owned(),
+                        reason: "the first attempt fails deliberately".to_owned(),
+                    });
+                }
+                self.inner.apply(batch).await
+            }
+        }
+
+        /// **X-14's motivating failing-first test at the real store boundary.** The second create
+        /// migrates the first value and writes the second in one checked batch; neither overwrites
+        /// the other. Deleting one atomically unqualifies the survivor without changing its bytes.
+        #[tokio::test]
+        async fn a_second_instance_does_not_overwrite_the_first_in_the_store() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = instance_app(&store, registry);
+
+            let (status, first) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/prod",
+                Some(json!({ "credentials": { "zendesk.api_token": SENTINEL } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{first}");
+            assert_eq!(
+                first["credentials"][0],
+                "tenants/acme/com.zendesk.api/api_token"
+            );
+
+            let second_value = "SECOND-SENTINEL-NOT-A-REAL-SECRET";
+            let (status, second) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": second_value } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{second}");
+
+            let (status, prod) = call(
+                &app,
+                "alice",
+                Method::GET,
+                "/api/connections/zendesk/instances/prod",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{prod}");
+            let prod_path = prod["credentials"][0].as_str().expect("prod address");
+            let sandbox_path = second["credentials"][0].as_str().expect("sandbox address");
+            assert_ne!(prod_path, sandbox_path);
+
+            let prod_id = prod_path.split('/').nth(4).expect("instance segment");
+            let sandbox_id = sandbox_path.split('/').nth(4).expect("instance segment");
+            let prod_ref = CredentialRef::for_instance(
+                "acme",
+                "com.zendesk.api",
+                prod_id,
+                "default",
+                "api_token",
+            )
+            .expect("prod reference");
+            let sandbox_ref = CredentialRef::for_instance(
+                "acme",
+                "com.zendesk.api",
+                sandbox_id,
+                "default",
+                "api_token",
+            )
+            .expect("sandbox reference");
+            assert_eq!(
+                store
+                    .secrets()
+                    .get(&prod_ref)
+                    .await
+                    .expect("first survives")
+                    .expose_secret(),
+                SENTINEL,
+            );
+            assert_eq!(
+                store
+                    .secrets()
+                    .get(&sandbox_ref)
+                    .await
+                    .expect("second lands separately")
+                    .expose_secret(),
+                second_value,
+            );
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::DELETE,
+                "/api/connections/zendesk/instances/sandbox",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            let legacy = CredentialRef::new("acme", "com.zendesk.api", "default", "api_token")
+                .expect("legacy reference");
+            assert_eq!(
+                store
+                    .secrets()
+                    .get(&legacy)
+                    .await
+                    .expect("survivor is unqualified")
+                    .expose_secret(),
+                SENTINEL,
+            );
+            assert!(store
+                .secrets()
+                .get(&sandbox_ref)
+                .await
+                .unwrap_err()
+                .is_not_found());
+        }
+
+        /// X-14 widens the file-store surface; it does not revoke the sole-connection contract of a
+        /// point-only backend. Without a registry, create and listing use the legacy address walk.
+        #[tokio::test]
+        async fn a_point_only_store_keeps_sole_legacy_connections_working() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(Arc::new(PointOnly(store.secrets()))),
+            );
+
+            let (status, body) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let (status, body) = call(&app, "alice", Method::GET, "/api/connections", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["connections"].as_array().map(Vec::len), Some(1));
+            assert_eq!(body["connections"][0]["label"], Value::Null);
+            assert_eq!(body["connections"][0]["instance"], Value::Null);
+        }
+
+        /// An unsupported batch refuses the migration and leaves the first credential byte-for-byte
+        /// at its legacy address. Point writes are not a fallback.
+        #[tokio::test]
+        async fn a_failed_or_unsupported_batch_leaves_the_first_connection_untouched() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(Arc::new(NoAtomicBatch(store.secrets())))
+                .with_connection_registry(registry),
+            );
+            let (status, body) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/zendesk/label",
+                Some(json!({ "label": "prod" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            let legacy = CredentialRef::new("acme", "com.zendesk.api", "default", "api_token")
+                .expect("legacy reference");
+            assert_eq!(
+                store
+                    .secrets()
+                    .get(&legacy)
+                    .await
+                    .expect("the first stayed put")
+                    .expose_secret(),
+                SENTINEL,
+            );
+            let scope = CredentialScope::new("acme", "com.zendesk.api").expect("scope");
+            let references = store.secrets().references(&scope).await.expect("inventory");
+            assert_eq!(references, vec![legacy]);
+        }
+
+        /// A registry row is durable before the credential batch starts. A transient failure must
+        /// reuse that inert UUID rather than turning every retry into a duplicate-label conflict.
+        #[tokio::test]
+        async fn a_failed_atomic_migration_can_be_retried_with_the_same_label() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(Arc::new(FailFirstBatch {
+                    inner: store.secrets(),
+                    failed: AtomicBool::new(false),
+                }))
+                .with_connection_registry(registry.clone()),
+            );
+            let (status, body) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/zendesk/label",
+                Some(json!({ "label": "prod" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            for expected in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::CREATED] {
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::POST,
+                    "/api/connections/zendesk/instances/sandbox",
+                    Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+                )
+                .await;
+                assert_eq!(status, expected, "{body}");
+            }
+
+            let tenant = Tenant::new("acme").expect("plain tenant");
+            let entries =
+                exchange_host::ConnectionRegistry::entries(registry.as_ref(), &tenant, "zendesk")
+                    .expect("registry rows");
+            assert_eq!(entries.len(), 2, "the retry must not mint a third UUID");
+        }
+
+        /// Deleting the naming overlay cannot hide connections: existence and UUIDs come back from
+        /// the credential inventory, while labels render `null`.
+        #[tokio::test]
+        async fn deleting_every_label_still_lists_every_held_uuid_unnamed() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = instance_app(&store, registry.clone());
+            for (label, value) in [("prod", SENTINEL), ("sandbox", "SECOND-SENTINEL")] {
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::POST,
+                    &format!("/api/connections/zendesk/instances/{label}"),
+                    Some(json!({ "credentials": { "zendesk.api_token": value } })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "{body}");
+            }
+
+            let tenant = Tenant::new("acme").expect("plain tenant");
+            for label in ["prod", "sandbox"] {
+                let label = ConnectionLabel::new(label).expect("valid label");
+                exchange_host::ConnectionRegistry::remove(
+                    registry.as_ref(),
+                    &tenant,
+                    "zendesk",
+                    &label,
+                )
+                .expect("delete naming row only");
+            }
+
+            let (status, body) = call(&app, "alice", Method::GET, "/api/connections", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let listed = body["connections"].as_array().expect("connections array");
+            assert_eq!(listed.len(), 2, "{body}");
+            for connection in listed {
+                assert!(connection["label"].is_null(), "{connection}");
+                assert!(connection["instance"].as_str().is_some(), "{connection}");
+            }
+        }
+
+        /// A label lookup is scoped by the principal tenant before the held UUID is checked.
+        #[tokio::test]
+        async fn tenant_a_cannot_reach_tenant_bs_instance_by_its_label() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = instance_app(&store, registry);
+            let (status, body) = call(
+                &app,
+                "bob",
+                Method::POST,
+                "/api/connections/zendesk/instances/foreign",
+                Some(json!({ "credentials": { "zendesk.api_token": SENTINEL } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::GET,
+                "/api/connections/zendesk/instances/foreign",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert!(!body.to_string().contains("globex"), "{body}");
+        }
+
+        /// The non-secret connection settings move with the first UUID and remain isolated from
+        /// the second; otherwise two Zendesk credentials would still target one subdomain.
+        #[tokio::test]
+        async fn two_instances_keep_distinct_connection_settings() {
+            let scratch = Scratch::new();
+            let credentials = scratch.store();
+            let settings = Arc::new(
+                exchange_host::SettingsStore::bind(scratch.0.join("state").join("settings"))
+                    .expect("settings store"),
+            );
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = configurable_instance_app(&credentials, registry, settings.clone());
+
+            for label in ["prod", "sandbox"] {
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::POST,
+                    &format!("/api/connections/zendesk/instances/{label}"),
+                    Some(
+                        json!({ "credentials": { "zendesk.api_token": format!("{label}-token") } }),
+                    ),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "{body}");
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::PUT,
+                    &format!(
+                        "/api/connections/zendesk/instances/{label}/settings/default/endpoint.subdomain"
+                    ),
+                    Some(json!({ "value": label })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+            }
+
+            for label in ["prod", "sandbox"] {
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::GET,
+                    &format!("/api/connections/zendesk/instances/{label}"),
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                let path = body["credentials"][0].as_str().expect("address");
+                let id = InstanceId::parse(path.split('/').nth(4).expect("instance"))
+                    .expect("instance id");
+                assert_eq!(
+                    exchange_host::ConfigStore::get_for_instance(
+                        settings.as_ref(),
+                        "acme",
+                        "zendesk",
+                        Some(&id),
+                        "default",
+                        exchange_host::Field::Endpoint("subdomain"),
+                    )
+                    .as_deref(),
+                    Some(label),
+                );
+            }
         }
 
         /// Create, list, read and delete, all the way down to a file on disk — and the credential

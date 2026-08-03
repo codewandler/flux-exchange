@@ -131,6 +131,7 @@
 
 use std::collections::BTreeSet;
 
+use connector_address::InstanceId;
 use connector_pack::{ConfigStore, Field};
 
 use crate::Tenant;
@@ -681,6 +682,95 @@ pub trait ConnectionSettings: ConfigStore {
     /// The input to [`MAX_TENANT_SETTINGS_BYTES`], measured as lengths and never as values — there
     /// is nothing in the answer a later `debug!` could turn into a disclosure.
     fn held_bytes(&self, tenant: &Tenant) -> usize;
+
+    /// Put one value for a selected connection UUID.
+    fn set_for_instance(
+        &self,
+        tenant: &Tenant,
+        connector: &str,
+        instance: Option<&InstanceId>,
+        declared: &DeclaredSetting,
+        value: &str,
+    ) -> Result<(), SettingsRefusal> {
+        match instance {
+            None => self.set(tenant, connector, declared, value),
+            Some(instance) => Err(SettingsRefusal::InstanceUnsupported {
+                connector: connector.to_owned(),
+                instance: instance.to_string(),
+            }),
+        }
+    }
+
+    /// Clear one value for a selected connection UUID.
+    fn clear_for_instance(
+        &self,
+        tenant: &Tenant,
+        connector: &str,
+        instance: Option<&InstanceId>,
+        declared: &DeclaredSetting,
+    ) -> Result<bool, SettingsRefusal> {
+        match instance {
+            None => self.clear(tenant, connector, declared),
+            Some(instance) => Err(SettingsRefusal::InstanceUnsupported {
+                connector: connector.to_owned(),
+                instance: instance.to_string(),
+            }),
+        }
+    }
+
+    /// Whether one selected connection has this value.
+    fn is_set_for_instance(
+        &self,
+        tenant: &Tenant,
+        connector: &str,
+        instance: Option<&InstanceId>,
+        declared: &DeclaredSetting,
+    ) -> bool {
+        match instance {
+            None => self.is_set(tenant, connector, declared),
+            Some(_) => false,
+        }
+    }
+
+    /// Move the sole legacy settings namespace under its newly minted UUID.
+    fn qualify_instance(
+        &self,
+        _tenant: &Tenant,
+        connector: &str,
+        instance: &InstanceId,
+    ) -> Result<(), SettingsRefusal> {
+        Err(SettingsRefusal::InstanceUnsupported {
+            connector: connector.to_owned(),
+            instance: instance.to_string(),
+        })
+    }
+
+    /// Delete one instance's settings and move the survivor back to the legacy namespace.
+    fn collapse_instances(
+        &self,
+        _tenant: &Tenant,
+        connector: &str,
+        _removed: &InstanceId,
+        remaining: &InstanceId,
+    ) -> Result<(), SettingsRefusal> {
+        Err(SettingsRefusal::InstanceUnsupported {
+            connector: connector.to_owned(),
+            instance: remaining.to_string(),
+        })
+    }
+
+    /// Delete one instance's settings while several others remain qualified.
+    fn discard_instance(
+        &self,
+        _tenant: &Tenant,
+        connector: &str,
+        instance: &InstanceId,
+    ) -> Result<(), SettingsRefusal> {
+        Err(SettingsRefusal::InstanceUnsupported {
+            connector: connector.to_owned(),
+            instance: instance.to_string(),
+        })
+    }
 }
 
 /// Why a connection setting was refused. Every variant refuses; none repairs, and none repeats a
@@ -693,6 +783,24 @@ pub trait ConnectionSettings: ConfigStore {
 /// third kind, and are about this host rather than about the request.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettingsRefusal {
+    /// The bound settings port has not implemented instance-aware addressing.
+    #[error(
+        "connector `{connector}` instance `{instance}` needs instance-aware connection settings, but the bound settings store does not provide them"
+    )]
+    InstanceUnsupported {
+        /// The connector being configured.
+        connector: String,
+        /// The host-minted UUID.
+        instance: String,
+    },
+    /// The settings namespaces could not make the same instance transition as the credentials.
+    #[error("connector `{connector}` settings cannot change instance layout: {reason}")]
+    InstanceTransition {
+        /// The connector being migrated.
+        connector: String,
+        /// The conflicting or unwritable state, containing no value.
+        reason: String,
+    },
     /// The connector asks for nothing per connection, so there is nothing to supply.
     #[error(
         "connector `{connector}` asks for no per-connection value, so there is nothing to \
@@ -939,7 +1047,7 @@ mod file {
     use connector_pack::{ConfigStore, Field};
 
     use super::{
-        admit_tenant_settings, ConnectionSettings, DeclaredSetting, SettingsRefusal,
+        admit_tenant_settings, ConnectionSettings, DeclaredSetting, InstanceId, SettingsRefusal,
         MAX_SETTING_VALUE_BYTES,
     };
     use crate::paths::{enclosing_working_tree, resolve};
@@ -1108,10 +1216,20 @@ mod file {
         /// **The one place a settings address is composed**, and therefore the seam X-14 extends:
         /// an instance level lands between the connector and the service, exactly where it lands in
         /// the credential address, and no other call site re-spells the key.
-        fn at(tenant: &str, connector: &str, service: &str, binds: &str) -> [String; 4] {
+        fn at(
+            tenant: &str,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            service: &str,
+            binds: &str,
+        ) -> [String; 4] {
+            let connector = match instance {
+                Some(instance) => format!("{connector}@{}", instance.as_str()),
+                None => connector.to_owned(),
+            };
             [
                 tenant.to_owned(),
-                connector.to_owned(),
+                connector,
                 service.to_owned(),
                 binds.to_owned(),
             ]
@@ -1321,7 +1439,22 @@ mod file {
             service: &str,
             field: Field<'_>,
         ) -> Option<String> {
+            self.get_for_instance(tenant, provider, None, service, field)
+        }
+
+        fn get_for_instance(
+            &self,
+            tenant: &str,
+            provider: &str,
+            instance: Option<&InstanceId>,
+            service: &str,
+            field: Field<'_>,
+        ) -> Option<String> {
             let binds = binds_of(field);
+            let connector_key = match instance {
+                Some(instance) => format!("{provider}@{}", instance.as_str()),
+                None => provider.to_owned(),
+            };
 
             let catalogued =
                 connector_catalog::provider(connector_catalog::ProviderKey::id(provider))
@@ -1332,7 +1465,7 @@ mod file {
                 .read()
                 .ok()?
                 .get(tenant)?
-                .get(provider)?
+                .get(&connector_key)?
                 .get(service)?
                 .get(&binds)
                 .cloned()?;
@@ -1373,6 +1506,17 @@ mod file {
             declared: &DeclaredSetting,
             value: &str,
         ) -> Result<(), SettingsRefusal> {
+            self.set_for_instance(tenant, connector, None, declared, value)
+        }
+
+        fn set_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            value: &str,
+        ) -> Result<(), SettingsRefusal> {
             SettingsStore::admit(connector, declared, value)?;
 
             let mut values = self
@@ -1390,6 +1534,7 @@ mod file {
             let [t, c, s, b] = SettingsStore::at(
                 tenant.as_str(),
                 connector,
+                instance,
                 &declared.service,
                 &declared.binds(),
             );
@@ -1405,7 +1550,7 @@ mod file {
             let previous = values
                 .entry(t)
                 .or_default()
-                .entry(c)
+                .entry(c.clone())
                 .or_default()
                 .entry(s)
                 .or_default()
@@ -1418,7 +1563,7 @@ mod file {
             if let Err(refusal) = self.persist(&values) {
                 let settings = values
                     .get_mut(tenant.as_str())
-                    .and_then(|connectors| connectors.get_mut(connector))
+                    .and_then(|connectors| connectors.get_mut(&c))
                     .and_then(|services| services.get_mut(&declared.service));
                 if let Some(settings) = settings {
                     match previous {
@@ -1438,6 +1583,16 @@ mod file {
             connector: &str,
             declared: &DeclaredSetting,
         ) -> Result<bool, SettingsRefusal> {
+            self.clear_for_instance(tenant, connector, None, declared)
+        }
+
+        fn clear_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+        ) -> Result<bool, SettingsRefusal> {
             let mut values = self
                 .values
                 .write()
@@ -1449,6 +1604,7 @@ mod file {
             let [t, c, s, b] = SettingsStore::at(
                 tenant.as_str(),
                 connector,
+                instance,
                 &declared.service,
                 &declared.binds(),
             );
@@ -1484,6 +1640,133 @@ mod file {
                 declared.field(),
             )
             .is_some()
+        }
+
+        fn is_set_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+        ) -> bool {
+            self.get_for_instance(
+                tenant.as_str(),
+                connector,
+                instance,
+                &declared.service,
+                declared.field(),
+            )
+            .is_some()
+        }
+
+        fn qualify_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: &InstanceId,
+        ) -> Result<(), SettingsRefusal> {
+            let mut values = self
+                .values
+                .write()
+                .map_err(|_| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            let Some(connectors) = values.get(tenant.as_str()) else {
+                return Ok(());
+            };
+            let qualified = format!("{connector}@{}", instance.as_str());
+            if connectors.contains_key(&qualified) {
+                return Err(SettingsRefusal::InstanceTransition {
+                    connector: connector.to_owned(),
+                    reason: format!("destination namespace `{qualified}` already exists"),
+                });
+            }
+            if !connectors.contains_key(connector) {
+                return Ok(());
+            }
+            let previous = values.clone();
+            let connectors = values
+                .get_mut(tenant.as_str())
+                .expect("the tenant existed above");
+            let legacy = connectors
+                .remove(connector)
+                .expect("the legacy namespace existed above");
+            connectors.insert(qualified, legacy);
+            if let Err(refusal) = self.persist(&values) {
+                *values = previous;
+                return Err(refusal);
+            }
+            Ok(())
+        }
+
+        fn collapse_instances(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            removed: &InstanceId,
+            remaining: &InstanceId,
+        ) -> Result<(), SettingsRefusal> {
+            let mut values = self
+                .values
+                .write()
+                .map_err(|_| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            let Some(connectors) = values.get_mut(tenant.as_str()) else {
+                return Ok(());
+            };
+            if connectors.contains_key(connector) {
+                return Err(SettingsRefusal::InstanceTransition {
+                    connector: connector.to_owned(),
+                    reason: "the legacy destination namespace is already occupied".to_owned(),
+                });
+            }
+            let previous = values.clone();
+            let connectors = values
+                .get_mut(tenant.as_str())
+                .expect("the tenant existed above");
+            connectors.remove(&format!("{connector}@{}", removed.as_str()));
+            if let Some(survivor) =
+                connectors.remove(&format!("{connector}@{}", remaining.as_str()))
+            {
+                connectors.insert(connector.to_owned(), survivor);
+            }
+            if let Err(refusal) = self.persist(&values) {
+                *values = previous;
+                return Err(refusal);
+            }
+            Ok(())
+        }
+
+        fn discard_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: &InstanceId,
+        ) -> Result<(), SettingsRefusal> {
+            let mut values = self
+                .values
+                .write()
+                .map_err(|_| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            let previous = values.clone();
+            let removed = values
+                .get_mut(tenant.as_str())
+                .and_then(|connectors| {
+                    connectors.remove(&format!("{connector}@{}", instance.as_str()))
+                })
+                .is_some();
+            if removed {
+                if let Err(refusal) = self.persist(&values) {
+                    *values = previous;
+                    return Err(refusal);
+                }
+            }
+            Ok(())
         }
 
         fn held_bytes(&self, tenant: &Tenant) -> usize {

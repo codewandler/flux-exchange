@@ -617,6 +617,34 @@ fn audited_action(
                 connector: (*connector).to_owned(),
             },
         )),
+        (&Method::PUT, [connector, "label"]) if !connector.is_empty() => Some((
+            AuditAction::ConnectionLabeled,
+            AuditTarget::Connection {
+                connector: (*connector).to_owned(),
+            },
+        )),
+        (&Method::POST | &Method::PUT, [connector, "instances", label])
+            if !connector.is_empty() && !label.is_empty() =>
+        {
+            Some((
+                AuditAction::ConnectionCreated,
+                AuditTarget::ConnectionInstance {
+                    connector: (*connector).to_owned(),
+                    label: (*label).to_owned(),
+                },
+            ))
+        }
+        (&Method::DELETE, [connector, "instances", label])
+            if !connector.is_empty() && !label.is_empty() =>
+        {
+            Some((
+                AuditAction::ConnectionRemoved,
+                AuditTarget::ConnectionInstance {
+                    connector: (*connector).to_owned(),
+                    label: (*label).to_owned(),
+                },
+            ))
+        }
         (&Method::PUT, [connector, "credentials", credential]) => Some((
             AuditAction::CredentialRotated,
             AuditTarget::Credential {
@@ -636,6 +664,32 @@ fn audited_action(
             AuditAction::SettingCleared,
             AuditTarget::Setting {
                 connector: (*connector).to_owned(),
+                service: (*service).to_owned(),
+                field: (*field).to_owned(),
+            },
+        )),
+        (&Method::PUT, [connector, "instances", label, "credentials", credential]) => Some((
+            AuditAction::CredentialRotated,
+            AuditTarget::InstanceCredential {
+                connector: (*connector).to_owned(),
+                label: (*label).to_owned(),
+                credential: (*credential).to_owned(),
+            },
+        )),
+        (&Method::PUT, [connector, "instances", label, "settings", service, field]) => Some((
+            AuditAction::SettingSet,
+            AuditTarget::InstanceSetting {
+                connector: (*connector).to_owned(),
+                label: (*label).to_owned(),
+                service: (*service).to_owned(),
+                field: (*field).to_owned(),
+            },
+        )),
+        (&Method::DELETE, [connector, "instances", label, "settings", service, field]) => Some((
+            AuditAction::SettingCleared,
+            AuditTarget::InstanceSetting {
+                connector: (*connector).to_owned(),
+                label: (*label).to_owned(),
                 service: (*service).to_owned(),
                 field: (*field).to_owned(),
             },
@@ -1239,6 +1293,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_instance_write_has_a_precise_value_free_audit_target() {
+        let principal = Principal::new(
+            PrincipalKind::User,
+            "alice",
+            Tenant::new("acme").expect("a usable tenant"),
+        );
+        let cases = [
+            (
+                Method::PUT,
+                "/api/connections/github/label",
+                AuditAction::ConnectionLabeled,
+                AuditTarget::Connection {
+                    connector: "github".to_owned(),
+                },
+            ),
+            (
+                Method::POST,
+                "/api/connections/github/instances/work",
+                AuditAction::ConnectionCreated,
+                AuditTarget::ConnectionInstance {
+                    connector: "github".to_owned(),
+                    label: "work".to_owned(),
+                },
+            ),
+            (
+                Method::DELETE,
+                "/api/connections/github/instances/work",
+                AuditAction::ConnectionRemoved,
+                AuditTarget::ConnectionInstance {
+                    connector: "github".to_owned(),
+                    label: "work".to_owned(),
+                },
+            ),
+            (
+                Method::PUT,
+                "/api/connections/github/instances/work/credentials/token",
+                AuditAction::CredentialRotated,
+                AuditTarget::InstanceCredential {
+                    connector: "github".to_owned(),
+                    label: "work".to_owned(),
+                    credential: "token".to_owned(),
+                },
+            ),
+            (
+                Method::PUT,
+                "/api/connections/github/instances/work/settings/default/endpoint.url",
+                AuditAction::SettingSet,
+                AuditTarget::InstanceSetting {
+                    connector: "github".to_owned(),
+                    label: "work".to_owned(),
+                    service: "default".to_owned(),
+                    field: "endpoint.url".to_owned(),
+                },
+            ),
+            (
+                Method::DELETE,
+                "/api/connections/github/instances/work/settings/default/endpoint.url",
+                AuditAction::SettingCleared,
+                AuditTarget::InstanceSetting {
+                    connector: "github".to_owned(),
+                    label: "work".to_owned(),
+                    service: "default".to_owned(),
+                    field: "endpoint.url".to_owned(),
+                },
+            ),
+        ];
+
+        for (method, uri, action, target) in cases {
+            let request = HttpRequest::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .expect("a request");
+            assert_eq!(audited_action(&request, &principal), Some((action, target)));
+        }
+
+        let read = HttpRequest::builder()
+            .uri("/api/connections/github/instances/work")
+            .body(Body::empty())
+            .expect("a request");
+        assert_eq!(audited_action(&read, &principal), None);
+    }
+
     /// The tenant comes from the resolved principal and from **nothing a caller controls** — so no
     /// published route may take a tenant in its path. Stated over the whole surface rather than
     /// over the routes that exist today, so a module added by a later story is covered on the day
@@ -1463,6 +1601,31 @@ mod tests {
                 "connections",
                 "/api/connections/{connector}/settings/{service}/{field}",
                 connections::MAY_CONFIGURE,
+            ),
+            // Naming, creating and removing connection instances changes which external account a
+            // tenant reaches. The item path also has open GET and DELETE declarations; only its
+            // POST/PUT management declaration appears here.
+            (
+                "connections",
+                "/api/connections/{connector}/label",
+                connections::MAY_CONFIGURE,
+            ),
+            (
+                "connections",
+                "/api/connections/{connector}/instances/{label}",
+                connections::MAY_CONFIGURE,
+            ),
+            // Instance-specific settings and rotation carry exactly the same authority as their
+            // sole-connection counterparts above. The settings collection is read-only and open.
+            (
+                "connections",
+                "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
+                connections::MAY_CONFIGURE,
+            ),
+            (
+                "connections",
+                "/api/connections/{connector}/instances/{label}/credentials/{credential}",
+                connections::MAY_SUPPLY_A_CREDENTIAL,
             ),
             // Managing Service Accounts. Only a signed-in human, because a principal that can
             // create principals makes revocation (X-38) an incomplete remedy that an operator

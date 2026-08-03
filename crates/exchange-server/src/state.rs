@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use exchange_host::{
-    ConnectionSettings, Identity, Invoker, PureEditorTools, SecretStore, WorkflowStore,
+    ConnectionRegistry, ConnectionSettings, Identity, Invoker, PureEditorTools, SecretStore,
+    WorkflowStore,
 };
 
 use crate::audit::AuditJournal;
@@ -54,6 +55,12 @@ pub struct AppState {
     /// not an `Option` — a guard with no store behind it costs nothing and guards nothing, and
     /// making it absent would give the routes a second thing to branch on.
     connections: Arc<ConnectionGuard>,
+    /// The durable tenant-scoped label-to-UUID overlay, when this composition bound one.
+    ///
+    /// Credentials remain authoritative for existence; routes intersect these rows with
+    /// `SecretStore::references` before displaying or resolving them. `None` therefore preserves
+    /// sole legacy connections and refuses every operation that requires a label.
+    connection_registry: Option<Arc<dyn ConnectionRegistry>>,
     /// The Service Accounts this host has minted tokens for, if this composition bound a store.
     ///
     /// A separate binding from [`credentials`](Self::credentials) and deliberately so: an agent
@@ -207,6 +214,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
             workflows: None,
@@ -234,6 +242,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
             workflows: None,
@@ -258,6 +267,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
             workflows: None,
@@ -292,6 +302,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
             workflows: None,
@@ -316,6 +327,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
             workflows: None,
@@ -478,6 +490,17 @@ impl AppState {
     /// closes and the single-process limit it closes it within.
     pub fn connections(&self) -> &Arc<ConnectionGuard> {
         &self.connections
+    }
+
+    /// Bind the durable connection-label overlay.
+    pub fn with_connection_registry(mut self, registry: Arc<dyn ConnectionRegistry>) -> Self {
+        self.connection_registry = Some(registry);
+        self
+    }
+
+    /// The connection-label overlay, if this composition bound one.
+    pub fn connection_registry(&self) -> Option<&Arc<dyn ConnectionRegistry>> {
+        self.connection_registry.as_ref()
     }
 
     /// Whether a request could become a principal, and whether that is safe to expose.

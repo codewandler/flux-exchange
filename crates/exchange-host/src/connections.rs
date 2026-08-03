@@ -5,9 +5,10 @@
 //! the address*, and the answer is a function of three facts, none of which a caller supplies.
 //!
 //! ```text
-//! tenants/<tenant>/<authority>/<credential>
-//!         ^^^^^^^^ ^^^^^^^^^^^ ^^^^^^^^^^^^
-//!         |        |           the connector's declared credential leaf
+//! tenants/<tenant>/<authority>[/@instances/<uuid>]/<credential>
+//!         ^^^^^^^^ ^^^^^^^^^^^              ^^^^^^  ^^^^^^^^^^^^
+//!         |        |                        |       the connector's declared credential leaf
+//!         |        |                        the host-minted connection instance, when plural
 //!         |        the connector's declared authority
 //!         the resolved principal's tenant
 //! ```
@@ -27,35 +28,21 @@
 //! is a lost credential presented to the operator as a success. `AGENTS.md` § Invariants, last
 //! entry: refuse; never repair, and name the address rather than the value.
 //!
-//! # The address has an instance dimension upstream, and this does not yet spell it
+//! # One address vocabulary covers sole and plural connections (X-14)
 //!
-//! Nothing above varies per *connection*, so a tenant with two accounts on one connector — a
-//! sandbox Zendesk and a production one — renders one address for both. That gap is **X-14** here
-//! and **C-406** upstream, where the dimension has landed and, since X-11, is **published and
-//! pinned here**:
+//! A tenant with one account keeps the byte-identical legacy address. A tenant with several gets a
+//! host-minted UUID dimension, published by C-406 and consumed here by X-14:
 //!
 //! ```text
 //! tenants/<tenant>/<authority>[/@instances/<uuid>][/<service>]/<credential>
 //! ```
 //!
-//! `connector_address::CredentialRef::for_instance` is the constructor that spells it, and
-//! `TenantInstances` is the rule for when it may be spelled. **This module still calls
-//! [`CredentialRef::new`]**, which renders the un-instanced form byte for byte — that is the whole
-//! point of upstream having made the level opt-in, since a qualified address would strand every
-//! credential already stored. Closing the gap means resolving an operator's label to a uuid, which
-//! upstream states is the *host's* job and is therefore X-14's, not a consequence of moving a pin.
-//! `tests/engine_line.rs` asserts the rendered address literally, so the day that changes it is a
-//! failing test rather than a credential written where nothing looks for it.
-//!
-//! What this module does meanwhile is make the collision *visible* and leave the level one
-//! insertion away. [`ConnectorDeclaration::addresses`] is total and deterministic, so a caller can ask whether
-//! an address is already occupied before it writes; and
-//! [`address_of_declared`](ConnectorDeclaration::address_of_declared) is the single place any
-//! address is composed, which is where the `@instances/<uuid>` level goes.
-//! Upstream's note is that mapping an operator's label to that uuid is the *host's* job — this
-//! repository's, i.e. X-14 — so that function is the seam X-14 extends rather than replaces. The
-//! refusal that stands in for it meanwhile belongs to the surface that writes; see
-//! `docs/designs/connections.md`.
+//! [`TenantInstances`] decides whether the level is elided, selected, or ambiguous;
+//! [`ConnectorDeclaration::address_of_for`] is the one composition seam that hands that decision
+//! to `CredentialRef::for_instance`. The mutable operator label never reaches this module: Exchange
+//! resolves it inside the principal's tenant and passes only the immutable UUID the host minted.
+//! The original methods delegate to [`TenantInstances::sole`], preserving source compatibility for
+//! compositions that deliberately support only one connection.
 //!
 //! # What a tenant may occupy, and why the bound is here and not on the port
 //!
@@ -101,7 +88,7 @@ use std::collections::BTreeMap;
 // its `credential` module. Reaching for the vocabulary crate for that one constant is better than
 // restating `"default"`: the elision rule and the constant have to be the same fact.
 use connector_address::DEFAULT_SERVICE;
-use connector_secrets::{CredentialRef, Layout, Secret, TenantLayout};
+use connector_secrets::{CredentialRef, Layout, Secret, TenantInstances, TenantLayout};
 
 use crate::Tenant;
 
@@ -230,6 +217,26 @@ impl<'a> ConnectorDeclaration<'a> {
         tenant: &Tenant,
         name: &str,
     ) -> Result<CredentialRef, ConnectionRefusal> {
+        self.address_of_for(tenant, name, TenantInstances::sole())
+    }
+
+    /// The address of one declared credential for the selected connection instance.
+    ///
+    /// The caller supplies the host-resolved instance set, never a label or an address component.
+    /// [`TenantInstances`] preserves the legacy address for a sole connection and refuses an
+    /// ambiguous selection when several are held.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`address_of`](Self::address_of), including an
+    /// [`ConnectionRefusal::Unaddressable`] refusal when the instance selection is ambiguous or
+    /// not among the tenant's held connections.
+    pub fn address_of_for(
+        &self,
+        tenant: &Tenant,
+        name: &str,
+        instances: TenantInstances<'_>,
+    ) -> Result<CredentialRef, ConnectionRefusal> {
         if self.credentials.is_empty() {
             return Err(ConnectionRefusal::NoCredentialDeclared {
                 connector: self.connector.to_string(),
@@ -244,7 +251,7 @@ impl<'a> ConnectorDeclaration<'a> {
             });
         };
 
-        self.address_of_declared(tenant, declared)
+        self.address_of_declared(tenant, declared, instances)
     }
 
     /// Every declared credential's address, for one tenant, in declaration order.
@@ -262,6 +269,20 @@ impl<'a> ConnectorDeclaration<'a> {
         &self,
         tenant: &Tenant,
     ) -> Result<Vec<(DeclaredCredential<'a>, CredentialRef)>, ConnectionRefusal> {
+        self.addresses_for(tenant, TenantInstances::sole())
+    }
+
+    /// Every declared credential address for the selected connection instance.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`addresses`](Self::addresses), plus an ambiguous or unknown instance
+    /// selection mapped to [`ConnectionRefusal::Unaddressable`].
+    pub fn addresses_for(
+        &self,
+        tenant: &Tenant,
+        instances: TenantInstances<'_>,
+    ) -> Result<Vec<(DeclaredCredential<'a>, CredentialRef)>, ConnectionRefusal> {
         if self.credentials.is_empty() {
             return Err(ConnectionRefusal::NoCredentialDeclared {
                 connector: self.connector.to_string(),
@@ -272,7 +293,7 @@ impl<'a> ConnectorDeclaration<'a> {
             .iter()
             .copied()
             .map(|declared| {
-                self.address_of_declared(tenant, declared)
+                self.address_of_declared(tenant, declared, instances)
                     .map(|reference| (declared, reference))
             })
             .collect()
@@ -303,10 +324,25 @@ impl<'a> ConnectorDeclaration<'a> {
         tenant: &Tenant,
         supplied: &BTreeMap<String, String>,
     ) -> Result<Vec<(CredentialRef, Secret)>, ConnectionRefusal> {
+        self.writes_for(tenant, TenantInstances::sole(), supplied)
+    }
+
+    /// Every supplied value admitted and addressed for the selected connection instance.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`writes`](Self::writes), plus an ambiguous or unknown instance
+    /// selection mapped to [`ConnectionRefusal::Unaddressable`].
+    pub fn writes_for(
+        &self,
+        tenant: &Tenant,
+        instances: TenantInstances<'_>,
+        supplied: &BTreeMap<String, String>,
+    ) -> Result<Vec<(CredentialRef, Secret)>, ConnectionRefusal> {
         let mut writes = Vec::with_capacity(supplied.len());
 
         for (name, value) in supplied {
-            writes.push(self.write_of(tenant, name, value)?);
+            writes.push(self.write_of_for(tenant, name, value, instances)?);
         }
 
         Ok(writes)
@@ -333,7 +369,23 @@ impl<'a> ConnectorDeclaration<'a> {
         name: &str,
         value: &str,
     ) -> Result<(CredentialRef, Secret), ConnectionRefusal> {
-        let reference = self.address_of(tenant, name)?;
+        self.write_of_for(tenant, name, value, TenantInstances::sole())
+    }
+
+    /// One supplied value admitted and addressed for the selected connection instance.
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`write_of`](Self::write_of), plus an ambiguous or unknown instance
+    /// selection mapped to [`ConnectionRefusal::Unaddressable`].
+    pub fn write_of_for(
+        &self,
+        tenant: &Tenant,
+        name: &str,
+        value: &str,
+        instances: TenantInstances<'_>,
+    ) -> Result<(CredentialRef, Secret), ConnectionRefusal> {
+        let reference = self.address_of_for(tenant, name, instances)?;
 
         if value.len() > MAX_CREDENTIAL_VALUE_BYTES {
             return Err(ConnectionRefusal::CredentialTooLarge {
@@ -349,17 +401,15 @@ impl<'a> ConnectorDeclaration<'a> {
 
     /// The address of a credential this declaration is already known to carry.
     ///
-    /// **The one place an address is composed**, and therefore the seam X-14 extends. The instance
-    /// level is published and pinned since X-11, so the `@instances/<uuid>` segment is inserted
-    /// *here* — the function grows the tenant's chosen instance as an argument and passes it to
-    /// `CredentialRef::for_instance` instead of [`CredentialRef::new`] — and no other call site
-    /// re-spells the address. Upstream states that
-    /// resolving an operator's label to that uuid is the host's job, which makes it this function's
-    /// job rather than a new one beside it.
+    /// **The one place an address is composed**, and therefore the seam X-14 extended. The optional
+    /// `@instances/<uuid>` level is selected here through [`TenantInstances`] and no other call site
+    /// re-spells the address. Resolving an operator's label to that UUID remains the host surface's
+    /// job; this declaration accepts only the already-resolved address vocabulary.
     fn address_of_declared(
         &self,
         tenant: &Tenant,
         declared: DeclaredCredential<'a>,
+        instances: TenantInstances<'_>,
     ) -> Result<CredentialRef, ConnectionRefusal> {
         let Some(authority) = self.authority else {
             return Err(ConnectionRefusal::UndeclaredAuthority {
@@ -372,13 +422,28 @@ impl<'a> ConnectorDeclaration<'a> {
         // services, exactly as upstream's `connector_spec::Connector::credential_ref_for` composes
         // it. This is a view of that composition, not a second one — both spell the address through
         // `connector-address`, which is why they cannot drift.
-        CredentialRef::new(tenant.as_str(), authority, DEFAULT_SERVICE, declared.leaf).map_err(
-            |reason| ConnectionRefusal::Unaddressable {
+        let selected = instances
+            .resolve()
+            .map_err(|reason| ConnectionRefusal::Unaddressable {
                 connector: self.connector.to_string(),
                 credential: declared.name.to_string(),
                 reason,
-            },
-        )
+            })?;
+        let reference = match selected {
+            Some(instance) => CredentialRef::for_instance(
+                tenant.as_str(),
+                authority,
+                instance.as_str(),
+                DEFAULT_SERVICE,
+                declared.leaf,
+            ),
+            None => CredentialRef::new(tenant.as_str(), authority, DEFAULT_SERVICE, declared.leaf),
+        };
+        reference.map_err(|reason| ConnectionRefusal::Unaddressable {
+            connector: self.connector.to_string(),
+            credential: declared.name.to_string(),
+            reason,
+        })
     }
 
     /// The names this connector declares, for a refusal that says what would have worked.
@@ -679,6 +744,55 @@ mod tests {
             address_path(&globex_reference),
             "tenants/globex/com.zendesk.api/api_token",
         );
+    }
+
+    /// **X-14's address acceptance, failing first.** Two held instances of one connector render
+    /// different addresses, and omitting the selected instance is refused rather than choosing a
+    /// default. The mutable operator label is resolved before this seam; only the host-minted UUID
+    /// reaches the address vocabulary.
+    #[test]
+    fn two_instances_of_one_connector_render_different_addresses() {
+        let first = connector_secrets::InstanceId::parse("0d3f79ae-b6df-4f77-8f77-438436c3b2ef")
+            .expect("canonical instance id");
+        let second = connector_secrets::InstanceId::parse("3a4bbf6d-5a20-4cdf-bfd7-18f1831fe2fd")
+            .expect("canonical instance id");
+        let held = [first.clone(), second.clone()];
+
+        let first_reference = zendesk()
+            .address_of_for(
+                &acme(),
+                "zendesk.api_token",
+                connector_secrets::TenantInstances::held(&held, Some(&first)),
+            )
+            .expect("first instance address");
+        let second_reference = zendesk()
+            .address_of_for(
+                &acme(),
+                "zendesk.api_token",
+                connector_secrets::TenantInstances::held(&held, Some(&second)),
+            )
+            .expect("second instance address");
+
+        assert_ne!(first_reference, second_reference);
+        assert_eq!(
+            address_path(&first_reference),
+            "tenants/acme/com.zendesk.api/@instances/0d3f79ae-b6df-4f77-8f77-438436c3b2ef/api_token",
+        );
+        assert_eq!(
+            address_path(&second_reference),
+            "tenants/acme/com.zendesk.api/@instances/3a4bbf6d-5a20-4cdf-bfd7-18f1831fe2fd/api_token",
+        );
+
+        let refusal = zendesk()
+            .address_of_for(
+                &acme(),
+                "zendesk.api_token",
+                connector_secrets::TenantInstances::held(&held, None),
+            )
+            .expect_err("two held connections and no selection is ambiguous");
+        assert!(refusal
+            .to_string()
+            .contains("there is no address to render"));
     }
 
     /// A value larger than a credential is refused, and the refusal names the credential and the

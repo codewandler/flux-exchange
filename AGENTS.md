@@ -43,7 +43,9 @@ tenant, per-connection settings gated to signed-in humans (X-47), and — since 
 do. Since X-98 it also stores tenant workflow drafts, publishes immutable versions, runs them
 through Flux with dual grant gates, and records value-free node activity. Since X-101 it persists
 and supervises generated connector WebSocket channels, gates closed declared event sets, and fans
-them out through authenticated `/api/subscribe`.** `cargo run` binds loopback and refuses to start
+them out through authenticated `/api/subscribe`. Since X-14 a tenant may hold several labelled
+connections to one connector; invocation selects one explicitly and the first-to-second credential
+migration is atomic.** `cargo run` binds loopback and refuses to start
 on a reachable address with no identity provider configured.
 
 **Signing in without an identity provider works on loopback** (X-57, v0.9.0+). Arm

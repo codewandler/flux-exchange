@@ -310,6 +310,34 @@ impl Invoker {
         operation: &str,
         params: Value,
     ) -> Result<Invocation, InvokeRefusal> {
+        self.invoke_selected(principal, operation, None, params)
+            .await
+    }
+
+    /// Run one catalogue operation against a connection UUID the host already resolved.
+    ///
+    /// The mutable operator label never reaches this boundary. A composition resolves it inside
+    /// the principal's tenant and passes the validated immutable UUID, so no caller can name a
+    /// host, authority, credential, or raw address component here.
+    pub async fn invoke_for_instance(
+        &self,
+        principal: &Principal,
+        operation: &str,
+        instance: &crate::InstanceId,
+        params: Value,
+    ) -> Result<Invocation, InvokeRefusal> {
+        self.invoke_selected(principal, operation, Some(instance), params)
+            .await
+    }
+
+    /// The single execution path both sole and explicitly selected invocations pass through.
+    async fn invoke_selected(
+        &self,
+        principal: &Principal,
+        operation: &str,
+        instance: Option<&crate::InstanceId>,
+        params: Value,
+    ) -> Result<Invocation, InvokeRefusal> {
         // 1. The catalogue. A global lookup by the id the catalogue itself spells, so the connector
         //    is derived rather than named — a redundant name is a name that can disagree.
         let entry = connector_catalog::operation(connector_catalog::OperationKey::id(operation))
@@ -353,10 +381,16 @@ impl Invoker {
         // 4. One tenant, one expression, two ports. The tenant is read off the resolved principal
         //    and from nothing a caller controls.
         let tenant = principal.tenant().as_str();
-        let (credentials, settings) = (
-            Credentials::new(self.credentials.clone(), tenant),
-            Configuration::new(self.settings.clone(), tenant),
-        );
+        let (credentials, settings) = match instance {
+            Some(instance) => (
+                Credentials::for_instance(self.credentials.clone(), tenant, instance.as_str()),
+                Configuration::for_instance(self.settings.clone(), tenant, instance.as_str()),
+            ),
+            None => (
+                Credentials::new(self.credentials.clone(), tenant),
+                Configuration::new(self.settings.clone(), tenant),
+            ),
+        };
         let credentials = credentials.map_err(|error| InvokeRefusal::refused(entry.id, &error))?;
         let settings = settings.map_err(|error| InvokeRefusal::refused(entry.id, &error))?;
 

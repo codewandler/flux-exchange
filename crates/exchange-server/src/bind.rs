@@ -175,6 +175,12 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A connection-label registry was named and could not be bound.
+    ConnectionRegistry {
+        /// The registry's own refusal.
+        reason: String,
+    },
+
     /// A grant store was named and could not be bound.
     ///
     /// A separate variant from the three above for their reason, and this one's is the sharpest: an
@@ -272,6 +278,7 @@ impl fmt::Display for StartupRefusal {
             Self::CredentialStore { reason }
             | Self::ServiceAccountStore { reason }
             | Self::SettingsStore { reason }
+            | Self::ConnectionRegistry { reason }
             | Self::GrantStore { reason }
             | Self::WorkflowStore { reason }
             | Self::ChannelStore { reason }
@@ -302,6 +309,7 @@ impl std::error::Error for StartupRefusal {
             | Self::CredentialStore { .. }
             | Self::ServiceAccountStore { .. }
             | Self::SettingsStore { .. }
+            | Self::ConnectionRegistry { .. }
             | Self::GrantStore { .. }
             | Self::WorkflowStore { .. }
             | Self::ChannelStore { .. }
