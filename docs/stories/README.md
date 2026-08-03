@@ -9,7 +9,7 @@ directory (`<ID>-<slug>.md`); this board indexes them by status. New work? Copy
 
 ## Status
 
-**v0.14.3 + current main — credentials, gated operations, versioned tenant workflows and generated
+**v0.15.0 — credentials, gated operations, versioned tenant workflows and generated
 connector channels.** The host serves OIDC and loopback development identity, tenant
 connections/settings/grants, ordinary connector invoke, immutable workflow publication, durable
 value-free run activity and live WebSocket subscriptions. Webhooks, durable event replay/inboxes and

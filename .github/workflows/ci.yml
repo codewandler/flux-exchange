@@ -283,3 +283,5 @@ jobs:
         run: |
           ./scripts/check-crate-versions.sh --self-test
           ./scripts/check-crate-versions.sh
+          ./scripts/check-current-version.sh --self-test
+          ./scripts/check-current-version.sh

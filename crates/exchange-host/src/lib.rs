@@ -31,7 +31,7 @@
 //!
 //! # Status
 //!
-//! **v0.13.0, and the service around these types runs operations.** Since X-12,
+//! **v0.15.0, and the service around these types runs operations and generated channels.** Since X-12,
 //! `POST /api/operations/{operation}/invoke` executes one catalogue operation for the caller's
 //! tenant through [`Invoker`], over a credential store, a connection-settings store and an OIDC
 //! sign-in. What is *not* built is itemized in the repository README, and keeping that page

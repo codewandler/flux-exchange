@@ -1,7 +1,7 @@
 ---
 id: X-81
 title: "Four places state this project's version and three of them are wrong"
-status: ready
+status: in-progress
 priority: 1
 areas: [ci, exchange-host]
 note: "found by X-73's implementor, 2026-08-02: lib.rs says v0.7.0, AGENTS.md and README.md say v0.9.0, the manifest says 0.11.0. lib.rs's is the published crate's front-page doc comment, so docs.rs is serving the wrong one — and nothing in the gate compares any of them to the manifest"
@@ -56,3 +56,10 @@ holding this number, and the script knows about two.
   during this session's wave.
 - Ordered before the next release deliberately: the release commit will correct the three numbers, but
   correcting them is a repair and this story is the thing that stops the fourth.
+
+## Progress
+
+- 2026-08-03: The failing-first checker reports all current drift in the release worktree: AGENTS,
+  README and roadmap pre-state v0.15.0 while the manifest is still 0.14.3; the generated board says
+  0.14.3 plus main rather than one release; and the published host crate doc remains at v0.13.0.
+  Historical changelog headings and milestone citations are deliberately outside the scanned set.

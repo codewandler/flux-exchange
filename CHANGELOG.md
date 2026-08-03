@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-03
+
 ### Added
 
 - **Generated connector WebSocket channels are a live, fail-closed Exchange surface** (X-101–X-105).
@@ -45,6 +47,11 @@ All notable changes to this project are documented in this file. The format is b
   verify its one-click browser form, exchange the implied `user:${USER}@dev` identity for an
   HttpOnly cookie and resolve the authenticated session. Explicit-roster instructions also escape
   their `<handle>` placeholder, so browsers no longer display an empty bearer value.
+
+- **Every prose claim about the current Exchange version is checked against the manifest** (X-81).
+  The contributor guide, README, roadmap, generated board and published host-crate front page move
+  with the release version or fail both ordinary CI and the tag gate. Historical changelog headings
+  and milestone citations remain outside that deliberately exact scan.
 
 ## [0.14.3] - 2026-08-03
 

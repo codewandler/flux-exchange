@@ -81,6 +81,11 @@ jobs:
             exit 1
           fi
 
+      - name: Verify current prose matches the workspace version
+        run: |
+          ./scripts/check-current-version.sh --self-test
+          ./scripts/check-current-version.sh
+
       # The project's gate, exactly as AGENTS.md § Build / test / run states it. A red gate must
       # stop the publish, because the upload cannot be taken back afterwards.
       - name: Build
