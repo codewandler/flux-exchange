@@ -64,12 +64,20 @@ refusal, not a fallback to a default.
       names the address rather than the value.
 - [ ] **Failing-first test** — tenant A cannot reach tenant B's instance by naming B's label. The
       label is resolved *within* the principal's tenant, never globally.
-- [ ] Exactly one connection, or a named default, is used when a caller names no instance — and
-      whichever rule is chosen, an **ambiguous** case is refused rather than guessed. A tenant with
-      two instances and a call that names neither must not silently pick one.
+- [ ] An invocation selects a connection with `?connection={label}` while its JSON body remains the
+      operation's raw parameter object. Omitting the label works only for a sole connection; two
+      instances and no label is an **ambiguous** refusal rather than a default or first match.
+- [ ] Management uses `/api/connections/{connector}/instances/{label}`. A human can label the sole
+      legacy connection before creating a second, and renaming a label moves no credential.
+- [ ] Existence is derived from `SecretStore::references` under the tenant/authority scope. Deleting
+      the label record cannot invent or hide a connection; every held UUID remains listed, unnamed.
+- [ ] The second create holds the tenant/connector lock and uses one checked `SecretBatch` to migrate
+      the first connection and write the second. An unsupported or failed batch leaves the first
+      byte-identical and refuses the create.
 - [ ] Deleting one instance leaves the other's credential intact.
 - [ ] The label's spelling is validated where it is constructed, the way `Tenant::new` already does
-      — it becomes an address segment, so a traversing spelling is refused at construction.
+      — 1–64 ASCII alphanumeric, `-`, or `_` bytes. It is not the UUID address segment, and the host
+      never accepts a caller-supplied UUID, authority, host or credential address.
 
 ## Progress
 - **Blocked on upstream, 2026-08-01.** The instance dimension belongs in `connector_spec`'s
@@ -128,6 +136,10 @@ secret batches and instance-aware credential/configuration host ports on its v0.
 This story deliberately does not consume that working tree through a path or Git dependency. Start
 the Exchange registry and migration only after the four connector crates are published together at
 v0.18 and this repository can move both connector and Flux engine pin sets in one commit.
+
+The public contract is now pinned before implementation: management resources are label-scoped,
+invoke uses `?connection=` without wrapping the operation body, omission is sole-only, the host mints
+the UUID, and the first-to-second transition is one C-494 `SecretBatch` under the connection lock.
 
 ## Unblocked, 2026-08-01
 

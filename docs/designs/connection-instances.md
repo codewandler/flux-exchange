@@ -28,7 +28,7 @@ may be spelled:
 
 | held | named | address |
 |---|---|---|
-| one (or the first) | anything consistent | **no instance segment** — byte-identical to today |
+| one | omitted | **no instance segment** — byte-identical to today |
 | several | one of them | that uuid |
 | several | none | **refused**, naming the uuids that would have worked |
 | any | one the tenant does not hold | **refused** |
@@ -111,7 +111,26 @@ a label is not a credential, it is not stored as one, and its bounds are never s
 credential allowance. It is not secret, and unlike a setting value it **is** read back out: an
 operator that cannot see what it named its connections cannot name one.
 
-### 3. The migration is loud, and it is the risky part
+### 3. The public API names labels and preserves the operation body
+
+The management resource is
+`/api/connections/{connector}/instances/{label}`. An invocation selects it with
+`POST /api/operations/{operation}/invoke?connection={label}`; the request body remains the
+operation's raw parameter object, so connection metadata never enters a vendor schema.
+
+Omitting `connection` is valid only while the tenant holds exactly one connection for that
+connector. Once several exist it is an ambiguous refusal, with no default or primary escape hatch.
+
+An already-connected tenant has one unlabelled legacy connection. Before a second can be created, a
+human operator labels that sole connection with `PUT /api/connections/{connector}/label`. A labelled
+connection is renamed through its label-scoped management resource; a rename updates only the
+label→uuid record and never moves credentials.
+
+The label grammar is deliberately smaller than a general path segment: 1–64 ASCII alphanumeric,
+`-`, or `_` bytes. The host validates it at construction and mints the canonical UUID. No request
+accepts a UUID, authority, host, or credential address.
+
+### 4. The migration is loud, atomic, and the risky part
 
 The address is a function of how many connections the tenant holds, so **the day a second connection
 appears, the first credential's address gains a segment** and the stored value has to move.
@@ -119,16 +138,18 @@ appears, the first credential's address gains a segment** and the stored value h
 This is the only part of this story that writes credentials it did not create, so it gets the
 tightest treatment:
 
-- It happens **inside the same lock** the create decides and writes under — the same read-decide-write
+- It happens **inside the same tenant/connector lock** the create decides and writes under — the same read-decide-write
   discipline `SettingsStore::set` uses. A migration that raced a rotation would move a stale value
   over a fresh one.
-- It **fails closed**. If the move cannot be completed, the create fails and the first connection is
-  left exactly where it was. A half-migrated tenant is worse than a refused create.
-- The old address is deleted only after the new one reads back. The intermediate state — value at
-  both addresses — is safe (the un-instanced address is what `resolve` elides to only when the tenant
-  holds one, and by then it holds two, so nothing reads the old one); the reverse order is not.
+- It uses flux-connectors C-494's checked `SecretBatch`, scoped by `CredentialScope`, to move every
+  credential of the sole connection and write the new connection as one atomic store mutation.
+  Point-by-point copy/delete is not an implementation option.
+- It **fails closed**. A backend that cannot guarantee the batch refuses the second connection; the
+  first remains exactly where it was. A half-migrated tenant is worse than a refused create.
+- The label mapping may be written before any credential exists because it is inert: enumeration
+  remains the source of connection existence, so a map row cannot invent a connection.
 
-### 4. What is deliberately not built
+### 5. What is deliberately not built
 
 - **No default instance, and no "primary".** Upstream refuses the ambiguous case and this repository
   should not soften that. An operator with two connections that wants one of them to be the implicit
@@ -168,7 +189,7 @@ tightest treatment:
 
 ## Acceptance / done
 
-X-14's Acceptance, unchanged. The shape it defers to this document: the caller names an
+X-14's Acceptance is the executable contract. The shape it defers to this document: the caller names an
 **operator-chosen label scoped to its own tenant**, the uuid is minted by the host and never named by
 a caller, existence stays derived from the credential store, and the ambiguous case is refused rather
 than defaulted.
