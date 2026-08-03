@@ -57,7 +57,7 @@ ambiguous side effect becomes dead-lettered or indeterminate rather than silentl
 | **App Package** | An immutable, versioned Program plus metadata and integrity/provenance from a curated signed registry. | Exchange packaging over Flux Program | Target architecture |
 | **App** | A tenant-installed App Package revision with frozen reviewed bindings: connections, operations, datasources, triggers, model profile, scopes, risk ceiling and quotas. | Exchange | Target architecture; the Flux host crate is not yet published |
 | **Managed Agent** | An Agent declaration inside an installed App, hosted and supervised by Exchange. | Exchange binding over Flux Agent | Target architecture |
-| **Service Account** | A non-human Exchange principal holding a one-time bearer token and receiving grants. It calls APIs but is not a Flux Agent. | Exchange | Currently exposed under the legacy “agent” name; migration is required before managed agents ship |
+| **Service Account** | A non-human Exchange principal holding a one-time bearer token and receiving grants. It calls APIs but is not a Flux Agent. | Exchange | Live: canonical create/list/revoke and bearer authentication; the legacy create spelling is removed in v0.17 |
 | **Model Profile** | A tenant-owned selection of Model Provider, model and credential/configuration used by managed agents. | Exchange | Target architecture |
 | **Grant** | Tenant authority over metadata selectors and bound resources. Deny wins; a grant conveys operation/datasource access, never a credential value. | Exchange | Tenant-wide operation grants are live; connection/app scopes are target architecture |
 

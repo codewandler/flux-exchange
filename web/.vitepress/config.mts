@@ -126,6 +126,7 @@ export default defineConfig({
       {
         text: 'Capabilities',
         items: [
+          { text: 'Service Accounts', link: '/capabilities/create-service-account' },
           { text: 'invoke', link: '/capabilities/invoke' },
           { text: 'subscribe', link: '/capabilities/subscribe' },
         ],

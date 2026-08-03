@@ -415,7 +415,7 @@ pub(super) const MODULE: Module = Module {
             // tenant the caller already belongs to, an operator can see it and undo it by
             // reconnecting, and nothing about it outlives revocation of the token that did it.
             // Whether an agent should reach a destructive route is the grant-shaped question,
-            // which is X-13's. See `crate::routes::agents`.
+            // which is X-13's. See `crate::routes::service_accounts`.
             path: "/api/connections/{connector}",
             access: Access::Principal,
             method_router: connection_route,
@@ -5791,7 +5791,7 @@ mod tests {
     /// Without this, `an_agent_may_not_create_a_connection_or_rotate_a_credential_and_the_refusal_is_logged`
     /// is satisfied just as happily by gating `/api/connections/{connector}` whole — which would
     /// take `GET` and `DELETE` with it, silently reversing a decision X-40 wrote down and argued
-    /// (`crate::routes::agents`, § *How far the argument reaches, and where it stops*).
+    /// (`crate::routes::service_accounts`, § *How far the argument reaches, and where it stops*).
     ///
     /// - **The two reads** answer addresses and a `held` boolean and no value at all, and an agent
     ///   that can see *"this tenant has no zendesk connection"* is one that can say so instead of

@@ -200,7 +200,7 @@ async fn zendesk_store(value: &str) -> Arc<dyn SecretStore> {
 /// The caller. An agent, because agents are what call operations all day.
 fn caller() -> Principal {
     Principal::new(
-        PrincipalKind::Agent,
+        PrincipalKind::ServiceAccount,
         "triage-bot",
         Tenant::new(TENANT).expect("`acme` is a usable tenant"),
     )

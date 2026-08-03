@@ -5,12 +5,13 @@ the [board](stories/README.md); this document is the narrative around it.
 
 ## Status
 
-_As of 2026-08-03:_ **v0.15.0 — credentials, gated operations, versioned workflows and generated
-connector channels.**
+_As of 2026-08-03:_ **v0.16.0 — Service Accounts, gated operations, versioned workflows and
+generated connector channels.**
 `cargo run -- --dev` is the loopback single-tenant shorthand; reachable binds still require a real
 identity provider. Complete OIDC sign-in, per-tenant connections and settings, metadata grants,
 ordinary connector invocation, immutable workflow publication, durable value-free workflow run
-records, persistent generated WebSocket channels and authenticated live subscriptions are built.
+records, canonical Service Account lifecycle and bearer identity, persistent generated WebSocket
+channels and authenticated live subscriptions are built.
 Webhook channels, durable event replay/inboxes and leases-in-anger remain unbuilt.
 
 `crates/exchange-host` carries the vocabulary and rules, the credential/settings/grant bindings,
@@ -31,6 +32,23 @@ pin set: two engine versions are two incompatible `Tool` traits even when their 
 The manifest, resolved-lock and compile-time seam tests keep that rule executable.
 
 ## Epics
+
+### Rich connector runtimes through Exchange
+
+HTTP invocation and generated connector WebSocket channels are delivered slices, not the hosted
+boundary. The accepted family direction moves Docker, Kubernetes, SQL, observability, secret stores,
+collaboration tools, and every other official integration into flux-connectors. Exchange executes
+the same declared connector address under tenant-derived authority; it does not invent its own
+vendor request or adapter path.
+
+[[X-111]] tracks the program. [[X-113]] completes the remote invoke/subscribe/stream/lease protocol;
+[[X-114]] dispatches the pack's declared runtime plans; [[X-115]] binds all guarded runtimes in
+single-tenant mode; [[X-116]] adds fail-closed per-tenant isolation for shared deployments; [[X-117]]
+and [[X-118]] own streams, cancellation and leases; [[X-119]] installs only digest-pinned attested
+artifacts; and [[X-120]] proves local/hosted parity through Docker, Kubernetes, SQL and a streamed
+operation. Delivered [[X-107]] Service Account authentication and X-101–X-105 channel work are
+prerequisites, not duplicate stories. Design:
+[`docs/designs/rich-connector-runtimes.md`](designs/rich-connector-runtimes.md).
 
 ### A public documentation site
 
@@ -186,39 +204,28 @@ fallback to memory. The last one matters most — a host that fell back would st
 serve every route correctly, look exactly like a working one, and lose everything on the next
 restart.
 
-### Agent access — X-35 · 🔄 **X-36, X-40 done; X-37, X-38, X-45 open**
+### Service Account access — X-35, X-107 · ✅ **LIVE** (legacy spelling removal X-121)
 
-The charter's second sentence calls the agent the **primary caller**, and for most of this project's
-life `PrincipalKind::Agent` existed as a type that nothing could produce: the only ways to become a
-principal were federated sign-in (a human) and the loopback development roster.
+The old Agent-access stories delivered the durable non-human principal in slices: one-time token
+minting, human-only lifecycle control, bearer authentication, listing and revocation. X-107 gives
+that resource its canonical name: **Service Account**. It authenticates an API caller; it is not the
+model + loop + bounded capabilities that Flux calls an Agent.
 
-X-36 made minting real — a token shown once, with the store keeping only a digest — and then found
-the hole in itself: nothing gated *who* may mint, so a leaked agent token would mint successors and
-revocation would stop being a remedy invisibly. X-40 closed that before X-37 could make it
-reachable, and refused `Service` as well as `Agent`, because the property holds only if every minter
-is itself revocable by this operator.
+A Service Account receives no authority merely by existing. Invocation and inbound subscriptions
+remain bounded by the tenant's grants, selected from declared metadata, and a token never yields a
+credential. `POST /api/agents` and `FLUX_EXCHANGE_AGENTS` are v0.16 compatibility spellings only;
+X-121 removes them in v0.17 without invalidating verifier-keyed tokens. See
+[`docs/designs/service-accounts.md`](designs/service-accounts.md).
 
-**Still open, and stated plainly rather than implied:** an agent token **authenticates nothing yet**
-(X-37), and it authorises nothing beyond any principal until grants land (X-13). See
-[`docs/designs/agent-access.md`](designs/agent-access.md).
+### Machine onboarding — X-41, X-42 · ✅ **LIVE**
 
-### Agent onboarding — X-41, X-42 · 🔄 **READY**
+The anonymous onboarding descriptor and public capability pages tell an App, Agent or automation
+what this deployment can do without exposing deployment-specific or credential-shaped data. The
+descriptor derives capability status from the same declared surface the server exposes, including
+canonical Service Account creation and bearer authentication.
 
-The charter's second sentence calls the agent the **primary caller**, and everything built so far
-serves the other one. A human can sign in, wire up a connection and read a catalogue; **an agent
-arriving at this service is told nothing** — no page, no descriptor, no route answers "what is this
-and how do I connect to it". X-36 made it possible to mint an agent principal and hand it a token,
-and nothing tells anyone so.
-
-Two renderings of one truth: a public page reachable from the console's footer (X-41), and a
-fetchable descriptor for the caller that does not read pages (X-42). Both derive what they claim from
-the same surface declaration the navigation uses, so neither can advertise a capability the console
-marks unbuilt — which matters more than usual here, because the honest answer today is *an agent can
-be issued an identity and cannot yet use it*.
-
-**Done** looks like: an agent author who has never seen this deployment can reach the page without an
-account, learn what it can and cannot do today, and fetch the same facts in a parseable form. See
-[`docs/designs/agent-onboarding.md`](designs/agent-onboarding.md).
+This is discovery, not authority: learning that a capability exists does not grant it. An installed
+App and hosted Agent remain target architecture, defined in [`docs/concepts.md`](concepts.md).
 
 ### Invoke — X-11…X-13 · 🔄 **UNBLOCKED, X-12 in progress**
 
@@ -247,30 +254,13 @@ flux needs no new concept to consume this: `flux-channels` already has a generic
 kind, and a `mode = "remote"` setting opens a stream instead of binding a listener. The event names
 come from the same manifest either way, so `trigger { on = … }` is unchanged.
 
-## Not yet filed
+## The formerly unfiled platform work is now owned
 
-Deliberately, because filing a story that cannot be started manufactures work rather than scoping it:
-
-- **`subscribe`** — inbound events, and the other verb of the same remote connector binding as
-  `invoke`. **Its stated blocker is gone**: the inbound confused-deputy argument is now written down
-  (flux's ecosystem design, and restated in [`vision.md`](vision.md#north-star) — *a subscriber
-  cannot name a binding it has not been granted; a subscription is a projection of the connections
-  that tenant already has*), and it needed an authenticated principal, which shipped in v0.1.0.
-  What it still waits on is a **grant model to scope a subscription with**, i.e. X-13 — which is
-  blocked upstream. Filing it now would produce a story nobody can start.
-- **Leases** — the type is tested and nothing holds one. It needs a runtime that keeps state open,
-  which means the runtime axis beyond `http`.
-- **Workflows** — stored, versioned, per-tenant `flux-app` Programs, never a second execution model
-  and never an interpreter here (see [`vision.md`](vision.md) principle 8). Furthest out, and
-  dependent on the composition path in flux-connectors.
-
-  **Check the pin, not flux's HEAD.** The prerequisite was `http.request` returning a record rather
-  than a flat string, so a composite operation can read a field out of a previous step's response.
-  That landed in flux **v0.43.0** — but flux-connectors pins `codewandler-flux-web` **0.41.0**, where
-  it is still flat, so its `Graph` lowering still refuses composites *correctly for the version in
-  its lockfile*. The unblock is real, it is upstream, and it reaches the connector compiler on a
-  flux-web bump and not before.
-- **Execution records** — after X-12, since there is nothing to record until something executes.
+Generated `subscribe` shipped in X-101–X-105 and workflows plus execution records shipped in X-98.
+The remaining general work is no longer an unscoped direction: streams and cancellation are X-117,
+leases are X-118, isolated rich runtimes are X-114–X-116, artifact trust is X-119, and X-120 holds
+the end-to-end migration proof. Webhook/poll hosting and durable replay remain outside this runtime
+epic and still require their own designs before implementation.
 
 **Unblocked 2026-08-01.** flux-connectors published 0.9.0: `connector-pack` requires
 `flux-runtime ^0.46` where it required `^0.41` against a flux line at 0.45. X-11 landed the upgrade

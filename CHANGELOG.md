@@ -6,6 +6,34 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- **The roadmap now makes Exchange the hosted runtime for every connector kind** (X-111, X-112).
+  HTTP invocation and generated socket channels are delivered slices; filed follow-ups cover the
+  stable remote protocol, declared runtime-plan dispatch, single-tenant execution, per-tenant
+  isolation, streams, leases, attested artifacts, and local/hosted conformance. Vendor-specific
+  adapters remain owned by flux-connectors rather than becoming a second Exchange catalogue.
+
+### Added
+
+- **Service Accounts are now a complete non-human identity resource** (X-107). Signed-in humans can
+  create, list and revoke them at `/api/service-accounts`; creation returns a new `fxsa_…` token
+  once, the durable store retains only its verifier, and bearer presentation resolves the canonical
+  `service_account` principal in its original tenant until expiry or revocation. Authentication
+  grants no authority by itself: operation and inbound-channel grants remain metadata selectors,
+  and Service Accounts cannot manage credentials, connections, settings, grants or successors.
+
+  Descriptor vocabulary version 2 publishes canonical creation and bearer authentication as live.
+  The console uses `#/service-accounts`, replaces the retired fragment, and explains the difference
+  between a Service Account and a hosted Flux Agent.
+
+### Deprecated
+
+- `POST /api/agents` and `FLUX_EXCHANGE_AGENTS` are accepted for v0.16 compatibility and are removed
+  in v0.17 (X-121). Alias responses carry deprecation, successor and removal headers; two environment
+  spellings that name different paths refuse startup. Existing unprefixed tokens continue to resolve
+  from the unchanged verifier-keyed file format.
+
 ## [0.15.0] - 2026-08-03
 
 ### Added

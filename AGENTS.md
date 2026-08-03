@@ -35,7 +35,8 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.15.0. The service serves health, the catalogue, a session, a complete OIDC sign-in,
+**v0.16.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
+authentication, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
 `GET /api/onboarding`, an anonymous machine-readable descriptor of what this build can and cannot
@@ -207,6 +208,10 @@ Each is stated in `docs/vision.md` and several are already enforced by tests in
   scan needs is the drift the locks exist to prevent.
 - **The runtime is declared by the connector, never chosen by the caller.** There is deliberately no
   constructor on `Runtime` that takes caller input; keep it that way.
+- **Every official integration is a connector, including rich protocols.** HTTP is the delivered
+  outbound slice, not a permanent boundary. Docker, Kubernetes, SQL, sockets, processes, containers,
+  and plugin-backed adapters reach this host through connector-declared runtime plans; do not add an
+  Exchange-owned vendor adapter or request builder. X-111 owns that migration.
 - **A multi-tenant deployment refuses every locally-executing runtime.** `Deployment::admits` decides
   this from the manifest. Do not add an override.
 - **Grants select by declared metadata, not by name**, and an explicit `deny` beats an explicit

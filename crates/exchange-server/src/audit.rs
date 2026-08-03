@@ -16,8 +16,8 @@ pub(crate) fn signed_out(principal: &Principal) {
     info!(audit = true, action = "signed_out", actor = %principal, "authority exercised");
 }
 
-pub(crate) fn agent_minted(actor: &Principal, agent: &Principal) {
-    info!(audit = true, action = "agent_minted", actor = %actor, target = %agent, "authority exercised");
+pub(crate) fn service_account_minted(actor: &Principal, account: &Principal) {
+    info!(audit = true, action = "service_account_minted", actor = %actor, target = %account, "authority exercised");
 }
 
 pub(crate) fn connection_created(actor: &Principal, connector: &str) {
@@ -89,7 +89,7 @@ mod tests {
             Tenant::new("acme").expect("a literal tenant"),
         );
         let agent = Principal::new(
-            PrincipalKind::Agent,
+            PrincipalKind::ServiceAccount,
             "triage",
             Tenant::new("acme").expect("a literal tenant"),
         );
@@ -99,7 +99,7 @@ mod tests {
 
         signed_in(&actor);
         signed_out(&actor);
-        agent_minted(&actor, &agent);
+        service_account_minted(&actor, &agent);
         connection_created(&actor, "github");
         credential_rotated(&actor, "github", "token");
         connection_removed(&actor, "github");
@@ -112,7 +112,7 @@ mod tests {
         for action in [
             "signed_in",
             "signed_out",
-            "agent_minted",
+            "service_account_minted",
             "connection_created",
             "credential_rotated",
             "connection_removed",

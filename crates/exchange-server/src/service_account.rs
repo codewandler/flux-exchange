@@ -1,10 +1,9 @@
-//! The agent tokens this host has minted, and the verifiers it keeps **instead of** them.
+//! The Service Account tokens this host has minted, and the verifiers it keeps **instead of** them.
 //!
-//! `docs/vision.md`'s second sentence says the primary caller is an agent, not a human. Until this
-//! module existed nothing in this binary could create one: an agent became a principal only through
-//! the development identity, a roster of secretless handles whose port forces a loopback bind
-//! precisely because it is unsafe to expose. This is the half of `docs/designs/agent-access.md`
-//! that mints; X-37 is the half that verifies, and X-38 the half that revokes.
+//! A Service Account is a non-human API principal, not a Flux Agent. The latter owns a model and an
+//! authored loop; this type owns only a bearer identity whose authority remains bounded by grants.
+//! The original X-36 through X-38 implementation called these records “agents”; the v0.16 migration
+//! keeps that word only where it names the legacy disk key, compatibility route or historical test.
 //!
 //! # This is not a session, and it must not share one's machinery
 //!
@@ -13,11 +12,11 @@
 //! | | Scope | Dies when |
 //! |---|---|---|
 //! | a session | a conversation | closed, or the human's identity expires |
-//! | an agent token | a principal | revoked, or its stated expiry passes |
+//! | a Service Account token | a principal | revoked, or its stated expiry passes |
 //!
-//! A session dies when the human's identity does. An agent token outlives every session and is
+//! A session dies when the human's identity does. A Service Account token outlives every session and is
 //! killed by an operator. So: a different type, a different store, and a different clock — see
-//! [`Agent::expires_at`].
+//! [`ServiceAccount::expires_at`].
 //!
 //! # Where this store lives, and why it is not the two stores already here
 //!
@@ -25,15 +24,15 @@
 //!
 //! - **Not [`SessionStore`](crate::session::SessionStore).** That one is in memory because a session
 //!   is short and minted for one browser, so losing it on restart costs a human one sign-in. An
-//!   agent token is long-lived and an operator pastes it into a config; losing every one of them on
-//!   restart would take out every agent at once, silently, with no failure anybody could attribute
+//!   Service Account token is long-lived and an operator pastes it into a config; losing all of them
+//!   on restart would take out every automation at once, silently, with no attributable failure
 //!   to the restart. That is the "looks like it worked" failure this repository refuses elsewhere.
 //! - **Not the credential store.** Two reasons, and the first is structural: [`SecretStore`] cannot
 //!   enumerate. It is a `get`/`put`/`delete` port over an address, and `routes::connections` gets
 //!   away with that only because the set of addresses is the compiled-in catalogue. The set of
-//!   agents is not a fixed set, so *"which agents exist"* — X-38's whole story, and the thing that
+//!   Service Accounts are not a fixed set, so *"which Service Accounts exist"* — X-38's whole story, and the thing that
 //!   makes minting something other than a one-way door — would be unanswerable. The second is that
-//!   an agent verifier is **this host's own record**, not a tenant's vendor credential: putting it
+//!   a Service Account verifier is **this host's own record**, not a tenant's vendor credential: putting it
 //!   in the credential file would enter it into that file's vocabulary, its addressing and its
 //!   per-tenant occupancy accounting, for a value that is none of those things.
 //!
@@ -41,12 +40,12 @@
 //!
 //! # What an attacker who reads this store obtains
 //!
-//! **The roster, and nothing they can present.** For each agent: its id, its tenant, and when its
+//! **The roster, and nothing they can present.** For each Service Account: its id, its tenant, and when its
 //! token expires. What it does *not* contain, anywhere, is a value that authenticates as anybody —
 //! only `SHA-256(token)`, and a digest is not a token. Reading this file end to end and replaying
 //! every byte of it resolves to nothing;
 //! [`an_attacker_who_reads_the_store_obtains_no_usable_token`](tests::an_attacker_who_reads_the_store_obtains_no_usable_token)
-//! is that sentence as a test, and it presents every value in the file to [`AgentStore::resolve`]
+//! is that sentence as a test, and it presents every value in the file to [`ServiceAccountStore::resolve`]
 //! rather than merely checking that the token is absent from it.
 //!
 //! ## Why a bare digest, and no password hash
@@ -68,8 +67,8 @@
 //!
 //! These are not the same exposure and this module does not treat them as one. Anyone who can
 //! *write* this file can insert a verifier of their own choosing and then present the matching token
-//! as any agent in any tenant. That is a full bypass, and the file mode is the only thing standing
-//! in front of it — so [`AgentStore::open`] **refuses** a store anyone but its owner can write.
+//! as any Service Account in any tenant. That is a full bypass, and the file mode is the only thing standing
+//! in front of it — so [`ServiceAccountStore::open`] **refuses** a store anyone but its owner can write.
 //! A merely group- or world-*readable* store discloses the roster and yields no access, so that
 //! warns instead: refusing to start over it would take the whole host down for a disclosure nobody
 //! can spend. `exchange_host::CredentialStore` refuses both, and correctly — every byte of *that*
@@ -95,16 +94,19 @@ use crate::entropy;
 /// The name lives here, beside the refusal that quotes it, for the reason
 /// `exchange_host::CREDENTIAL_STORE_SETTING` does: a refusal and the reader that would have produced
 /// the value must not drift into two spellings.
-pub const AGENT_STORE_SETTING: &str = "FLUX_EXCHANGE_AGENTS";
+pub const SERVICE_ACCOUNT_STORE_SETTING: &str = "FLUX_EXCHANGE_SERVICE_ACCOUNTS";
+
+/// The v0.16 compatibility setting, removed with the legacy route in v0.17.
+pub const LEGACY_AGENT_STORE_SETTING: &str = "FLUX_EXCHANGE_AGENTS";
 
 /// A location that would have worked, quoted in a refusal. Written with `$HOME` rather than
 /// expanded: nothing here reads the environment.
-const EXAMPLE_PATH: &str = "$HOME/.local/share/flux-exchange/agents.json";
+const EXAMPLE_PATH: &str = "$HOME/.local/share/flux-exchange/service_accounts.json";
 
-/// How many bytes of entropy an agent token carries. 256 bits, from the OS.
+/// How many bytes of entropy a Service Account token carries. 256 bits, from the OS.
 const TOKEN_BYTES: usize = 32;
 
-/// The longest life this host will mint an agent token for. One year.
+/// The longest life this host will mint a Service Account token for. One year.
 ///
 /// **Refuse; never repair**, in both directions — X-16 set that precedent for sessions and the
 /// argument is identical, so this is that argument and not a new one. Clamping a request for ten
@@ -112,45 +114,45 @@ const TOKEN_BYTES: usize = 32;
 /// operator would go on believing the ten years. Refusing names it at the moment it can still be
 /// typed differently.
 ///
-/// A year rather than a month, because this is not a session: an operator pastes an agent token into
+/// A year rather than a month, because this is not a session: an operator pastes a Service Account token into
 /// a config and a token that expired every thirty days would be a monthly outage. A year rather than
 /// forever, because a token nobody is ever forced to rotate is a token that outlives the laptop it
 /// leaked from — X-39 is the rotation story, and this bound is what makes it a chore rather than an
 /// afterthought.
-const MAX_AGENT_TOKEN_SECONDS: i64 = 365 * 24 * 60 * 60;
+const MAX_SERVICE_ACCOUNT_TOKEN_SECONDS: i64 = 365 * 24 * 60 * 60;
 
-/// The most agents one store will hold at once.
+/// The most service_accounts one store will hold at once.
 ///
 /// A bound and a refusal, following [`SessionStore`](crate::session::SessionStore) rather than
 /// `oidc::flow`: eviction here would silently kill a live agent — a config somewhere stops working
-/// for a reason nobody can attribute — and reaching this many agents means something is minting in a
-/// loop. Expired agents are swept before it is tested, so it is only ever reached by agents somebody
+/// for a reason nobody can attribute — and reaching this many service_accounts means something is minting in a
+/// loop. Expired service_accounts are swept before it is tested, so it is only ever reached by service_accounts somebody
 /// could still use.
-const MAX_LIVE_AGENTS: usize = 4096;
+const MAX_LIVE_SERVICE_ACCOUNTS: usize = 4096;
 
-/// The longest an agent id may be, matching `Tenant`'s bound for the reason that one has: an
+/// The longest a Service Account id may be, matching `Tenant`'s bound for the reason that one has: an
 /// identifier that ends up in a log line, a metric label and a principal should be short enough that
 /// it can never be the interesting part of any of them.
-const MAX_AGENT_ID: usize = 64;
+const MAX_SERVICE_ACCOUNT_ID: usize = 64;
 
-/// An opaque agent token: this host mints it once and never holds it again.
+/// An opaque Service Account token: this host mints it once and never holds it again.
 ///
 /// A bearer credential, so it gets a bearer credential's protections and gets them the way
 /// [`SessionToken`](crate::session::SessionToken) and
 /// [`Binder`](crate::oidc::flow::Binder) already do rather than in a third shape: drawn from
 /// [`entropy`], no `Display`, and a `Debug` that redacts. The value leaves this type only through
-/// [`AgentToken::as_str`], which is called in exactly one place — the response that shows it once.
+/// [`ServiceAccountToken::as_str`], which is called in exactly one place — the response that shows it once.
 #[derive(Clone, PartialEq, Eq)]
-pub struct AgentToken(String);
+pub struct ServiceAccountToken(String);
 
-impl AgentToken {
+impl ServiceAccountToken {
     /// Draw one, with 256 bits of entropy from the operating system.
     ///
     /// Through [`entropy`], which is where the session token, the OIDC `state`, `nonce` and the PKCE
     /// verifier also come from. One source read one way: a second entropy path is how one of them
     /// quietly becomes weaker than the others.
     fn draw() -> Result<Self, io::Error> {
-        entropy::hex::<TOKEN_BYTES>().map(Self)
+        entropy::hex::<TOKEN_BYTES>().map(|material| Self(format!("fxsa_{material}")))
     }
 
     /// The token as it goes on the wire, once. The only disclosure, and a deliberate one.
@@ -159,10 +161,10 @@ impl AgentToken {
     }
 }
 
-impl fmt::Debug for AgentToken {
-    /// Redacts. An agent token in a log line is an agent anyone reading the log can be.
+impl fmt::Debug for ServiceAccountToken {
+    /// Redacts. A Service Account token in a log line is a Service Account anyone reading the log can be.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AgentToken(redacted)")
+        f.write_str("ServiceAccountToken(redacted)")
     }
 }
 
@@ -201,7 +203,7 @@ fn hex(bytes: &[u8]) -> String {
     encoded
 }
 
-/// When an agent token stops resolving.
+/// When a Service Account token stops resolving.
 ///
 /// Two fields and no default, following `session::Expiry::Credential`: `as_of` is the caller's
 /// reading of the wall clock rather than one taken here, so whether the request is admissible and
@@ -209,7 +211,7 @@ fn hex(bytes: &[u8]) -> String {
 /// they are two readings.
 ///
 /// Unlike a session there is no `WhileTheProcessLives` arm, and the absence is the Acceptance's
-/// sixth item: an agent token **always** states an expiry. A session may legitimately have none —
+/// sixth item: a Service Account token **always** states an expiry. A session may legitimately have none —
 /// the development identity's roster handles carry no `exp` to inherit, and that port is already
 /// loopback-only — but nothing here is bounded by the process, so a token with no expiry would be a
 /// token that is only ever killed by hand.
@@ -224,14 +226,14 @@ pub struct Expiry {
 /// One agent this host has minted a token for.
 ///
 /// Keyed in the store by its [`Verifier`], the way `SessionStore` is keyed by its token: it makes
-/// [`AgentStore::resolve`] a lookup rather than a scan over every agent on the host.
+/// [`ServiceAccountStore::resolve`] a lookup rather than a scan over every agent on the host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Agent {
-    /// The tenant this agent belongs to, as the validated string it was minted from.
+struct ServiceAccount {
+    /// The tenant this Service Account belongs to, as the validated string it was minted from.
     ///
     /// A `String` on disk and a [`Tenant`] in every decision: `Tenant` validates at construction and
     /// has no `Deserialize`, deliberately, so a hand-edited file cannot introduce a tenant nothing
-    /// checked. [`AgentStore::open`] re-validates every one it reads.
+    /// checked. [`ServiceAccountStore::open`] re-validates every one it reads.
     tenant: String,
 
     /// Its identifier within that tenant, and the `id` of the [`Principal`] it resolves to.
@@ -243,15 +245,15 @@ struct Agent {
     /// from `SessionStore`, which holds a monotonic deadline precisely so that a backward clock step
     /// cannot extend a session. A deadline that has to survive a process restart cannot be
     /// monotonic: an `Instant` means nothing in the next process. So this store inherits the
-    /// weakness `session` writes against — an NTP step backwards extends every agent token by the
+    /// weakness `session` writes against — an NTP step backwards extends every Service Account token by the
     /// size of the step — and it is the cost of the durability the module documentation argues for
     /// rather than an oversight. The remedy for a token that must die now is revocation (X-38), not
     /// the clock.
     expires_at: i64,
 }
 
-impl Agent {
-    /// Whether this agent's token is over, at the caller's reading of the clock.
+impl ServiceAccount {
+    /// Whether this Service Account's token is over, at the caller's reading of the clock.
     ///
     /// At the deadline and not after it: a token that ends at `t` does not resolve at `t`.
     fn has_expired(&self, as_of: i64) -> bool {
@@ -263,10 +265,22 @@ impl Agent {
 #[derive(Debug)]
 pub struct Minted {
     /// The token. Returned to exactly one caller, exactly once, and never held here.
-    pub token: AgentToken,
-    /// The agent principal the token resolves to.
+    pub token: ServiceAccountToken,
+    /// The Service Account principal the token resolves to.
     pub principal: Principal,
     /// When it stops resolving, as seconds since the Unix epoch.
+    pub expires_at: i64,
+}
+
+/// A Service Account as the management API may list it.
+///
+/// No token and no verifier field can be serialized from this type; the route receives only the
+/// stable name and expiry needed to choose a revocation target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServiceAccountSummary {
+    /// Stable identifier within the tenant.
+    pub id: String,
+    /// When its bearer token stops resolving.
     pub expires_at: i64,
 }
 
@@ -276,24 +290,25 @@ struct StoredFile {
     /// The format version. `1` is the only one this build writes or reads.
     version: u32,
     /// Verifier to agent.
-    agents: BTreeMap<Verifier, Agent>,
+    #[serde(rename = "agents")]
+    service_accounts: BTreeMap<Verifier, ServiceAccount>,
 }
 
-/// The agents this host has minted tokens for.
+/// The service_accounts this host has minted tokens for.
 ///
-/// Durable, because an agent token is. See the module documentation for why this is neither the
+/// Durable, because a Service Account token is. See the module documentation for why this is neither the
 /// session store nor the credential store, and for what a reader of the file behind it obtains.
 #[derive(Debug)]
-pub struct AgentStore {
+pub struct ServiceAccountStore {
     /// The file this store is kept in, resolved.
     path: PathBuf,
     /// Verifier to agent. Written through to [`path`](Self::path) inside this lock, so no two mints
     /// can serialise two different views of the same map.
-    live: Mutex<BTreeMap<Verifier, Agent>>,
+    live: Mutex<BTreeMap<Verifier, ServiceAccount>>,
 }
 
-impl AgentStore {
-    /// Open — or create — the agent store at `path`, or refuse.
+impl ServiceAccountStore {
+    /// Open — or create — the Service Account store at `path`, or refuse.
     ///
     /// **Refuse; never repair.** A file that cannot be parsed is not an empty store: reading it as
     /// one would start the host having silently revoked every agent, which is indistinguishable
@@ -302,19 +317,19 @@ impl AgentStore {
     ///
     /// # Errors
     ///
-    /// [`AgentStoreError::Unconfigured`] for an empty path; [`AgentStoreError::Unusable`] when the
-    /// file or its directory cannot be created or read; [`AgentStoreError::Unreadable`] when the
-    /// file exists and is not this format; [`AgentStoreError::Writable`] when its mode would let
+    /// [`ServiceAccountStoreError::Unconfigured`] for an empty path; [`ServiceAccountStoreError::Unusable`] when the
+    /// file or its directory cannot be created or read; [`ServiceAccountStoreError::Unreadable`] when the
+    /// file exists and is not this format; [`ServiceAccountStoreError::Writable`] when its mode would let
     /// somebody else plant a verifier.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, AgentStoreError> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ServiceAccountStoreError> {
         let path = path.as_ref();
         if path.as_os_str().is_empty() {
-            return Err(AgentStoreError::Unconfigured {
-                setting: AGENT_STORE_SETTING,
+            return Err(ServiceAccountStoreError::Unconfigured {
+                setting: SERVICE_ACCOUNT_STORE_SETTING,
             });
         }
 
-        let path = absolute(path).map_err(|source| AgentStoreError::Unusable {
+        let path = absolute(path).map_err(|source| ServiceAccountStoreError::Unusable {
             path: path.display().to_string(),
             source,
         })?;
@@ -322,7 +337,7 @@ impl AgentStore {
         // The directory first, at `0700` set in the `mkdir(2)` rather than `chmod`-ed afterwards —
         // a window in which the directory exists at a wider mode is a window, however short.
         if let Some(parent) = path.parent() {
-            create_directory(parent).map_err(|source| AgentStoreError::Unusable {
+            create_directory(parent).map_err(|source| ServiceAccountStoreError::Unusable {
                 path: parent.display().to_string(),
                 source,
             })?;
@@ -338,7 +353,7 @@ impl AgentStore {
             // here — an empty store has nothing to protect and nothing to lose.
             Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
             Err(source) => {
-                return Err(AgentStoreError::Unusable {
+                return Err(ServiceAccountStoreError::Unusable {
                     path: path.display().to_string(),
                     source,
                 })
@@ -360,30 +375,30 @@ impl AgentStore {
     ///
     /// The path is this store's own rather than the value that was configured, so it cannot name a
     /// file this process did not open — `exchange_host::CredentialStore::banner`'s rule. What the
-    /// file holds is named in the same line, because an operator who reads only `agents: /var/lib/…`
+    /// file holds is named in the same line, because an operator who reads only `service_accounts: /var/lib/…`
     /// will assume it holds tokens.
     pub fn banner(&self) -> String {
         format!(
-            "agents: {} (file store, mode 0600, verifiers only — no token is recoverable from it)",
+            "service_accounts: {} (file store, mode 0600, verifiers only — no token is recoverable from it)",
             self.path().display(),
         )
     }
 
-    /// Mint an agent principal for `minted_by`'s tenant, and return its token **once**.
+    /// Mint a Service Account principal for `minted_by`'s tenant, and return its token **once**.
     ///
     /// # Where the tenant comes from
     ///
     /// [`minted_by`](Principal) and nowhere else. There is deliberately no tenant parameter on this
     /// function, so there is no argument a path segment, a body field or a header could reach —
     /// the same shape `routes::identity` states for sessions, expressed as a signature rather than
-    /// as a check somebody has to remember. `routes::agents`' vector tests are what keep it true
+    /// as a check somebody has to remember. `routes::service_accounts`' vector tests are what keep it true
     /// from the wire inwards.
     ///
     /// # Who may mint (X-40)
     ///
     /// Only a [`PrincipalKind::User`]. The argument — that a principal which can create principals
     /// makes revocation an incomplete remedy, and why `Service` is refused too — lives on
-    /// `routes::agents::MAY_MINT`, where a reader meets the rule.
+    /// `routes::service_accounts::MAY_MINT`, where a reader meets the rule.
     ///
     /// It is enforced **here as well as at the route**, and the two are not the same claim: the
     /// route's declaration is what a caller meets and what the surface enumeration can see, while
@@ -393,19 +408,19 @@ impl AgentStore {
     ///
     /// # Errors
     ///
-    /// Every variant of [`AgentError`], and none of them carries the token — which is structural
+    /// Every variant of [`ServiceAccountError`], and none of them carries the token — which is structural
     /// rather than disciplinary, since on any path that returns one nothing has been drawn yet.
     pub fn mint(
         &self,
         minted_by: &Principal,
         id: &str,
         expiry: Expiry,
-    ) -> Result<Minted, AgentError> {
+    ) -> Result<Minted, ServiceAccountError> {
         // First, and before the identifier is even looked at: a principal that may not create one
         // learns nothing from this call — not whether the name it chose was admissible, not whether
         // it was taken, not how full this store is.
         if minted_by.kind() != PrincipalKind::User {
-            return Err(AgentError::MayNotMint {
+            return Err(ServiceAccountError::MayNotMint {
                 kind: minted_by.kind(),
             });
         }
@@ -418,33 +433,34 @@ impl AgentStore {
 
         let mut live = self.live();
 
-        // Swept first, so the bound below is tested against agents somebody can still use and an
+        // Swept first, so the bound below is tested against service_accounts somebody can still use and an
         // expired one does not hold a place against it.
         live.retain(|_, agent| !agent.has_expired(expiry.as_of));
 
         // Refuse; never repair. Expiry bounds how long an entry lives, never how many there are.
-        if live.len() >= MAX_LIVE_AGENTS {
-            return Err(AgentError::TooManyLive {
-                max: MAX_LIVE_AGENTS,
+        if live.len() >= MAX_LIVE_SERVICE_ACCOUNTS {
+            return Err(ServiceAccountError::TooManyLive {
+                max: MAX_LIVE_SERVICE_ACCOUNTS,
             });
         }
 
-        // Scoped to the minting principal's tenant, so this refusal can only ever be about an agent
+        // Scoped to the minting principal's tenant, so this refusal can only ever be about a Service Account
         // the caller's own tenant holds. A check across the whole store would answer a caller with
         // the fact that some other tenant uses that name.
         if live
             .values()
             .any(|agent| agent.id == id && agent.tenant == tenant.as_str())
         {
-            return Err(AgentError::AlreadyMinted { id });
+            return Err(ServiceAccountError::AlreadyMinted { id });
         }
 
-        let token = AgentToken::draw().map_err(|source| AgentError::NoEntropy { source })?;
+        let token = ServiceAccountToken::draw()
+            .map_err(|source| ServiceAccountError::NoEntropy { source })?;
         let verifier = Verifier::of(token.as_str());
 
         live.insert(
             verifier.clone(),
-            Agent {
+            ServiceAccount {
                 tenant: tenant.as_str().to_string(),
                 id: id.clone(),
                 expires_at,
@@ -456,7 +472,7 @@ impl AgentStore {
         // the one-way door X-38 exists to close, held open by a failed write.
         if let Err(source) = self.write(&live) {
             live.remove(&verifier);
-            return Err(AgentError::Unwritable {
+            return Err(ServiceAccountError::Unwritable {
                 path: self.path.display().to_string(),
                 source,
             });
@@ -464,16 +480,16 @@ impl AgentStore {
 
         Ok(Minted {
             token,
-            principal: Principal::new(PrincipalKind::Agent, id, tenant),
+            principal: Principal::new(PrincipalKind::ServiceAccount, id, tenant),
             expires_at,
         })
     }
 
-    /// The agent principal a presented token names, if it names one at `as_of`.
+    /// The Service Account principal a presented token names, if it names one at `as_of`.
     ///
-    /// **X-37 is the story that binds this to `exchange_host::Identity`**, which is what makes an
-    /// agent token authenticate a request; nothing on the surface calls it yet. It lives here and
-    /// now because it is the only thing that can state what the stored verifier is worth:
+    /// The request identity boundary calls this for bearer credentials, which is what makes a
+    /// Service Account token authenticate. This is also the only function that can state what the
+    /// stored verifier is worth:
     /// [`tests::an_attacker_who_reads_the_store_obtains_no_usable_token`] presents every value in
     /// the file to it and gets `None` from each, and a property nothing can check is a property
     /// nobody is held to.
@@ -487,14 +503,10 @@ impl AgentStore {
     /// bits from the OS, and what is compared is a digest of what they sent, so a partial match
     /// leaks a prefix of a hash they can already compute for themselves.
     ///
-    /// Expired agents are filtered rather than removed, which is where this parts company with
+    /// Expired Service Accounts are filtered rather than removed, which is where this parts company with
     /// `SessionStore` — that one sweeps on resolve, because its map is free to mutate. Sweeping
     /// here would rewrite a file on every authenticated request. The bound is swept at
     /// [`mint`](Self::mint) instead, which is the only place it is enforced.
-    #[allow(
-        dead_code,
-        reason = "bound to the Identity port by X-37; see the doc comment"
-    )]
     pub fn resolve(&self, presented: &str, as_of: i64) -> Option<Principal> {
         // An empty presented value must never match, and could not: `Verifier::of("")` is the
         // digest of the empty string, which is not a value this store ever inserted. Stated anyway,
@@ -514,8 +526,55 @@ impl AgentStore {
                 // and refusing is the direction to be unreachable in.
                 Tenant::new(agent.tenant.clone())
                     .ok()
-                    .map(|tenant| Principal::new(PrincipalKind::Agent, &agent.id, tenant))
+                    .map(|tenant| Principal::new(PrincipalKind::ServiceAccount, &agent.id, tenant))
             })
+    }
+
+    /// List the caller's unexpired Service Accounts without exposing tokens or verifiers.
+    pub fn list(
+        &self,
+        actor: &Principal,
+        as_of: i64,
+    ) -> Result<Vec<ServiceAccountSummary>, ServiceAccountError> {
+        admit_manager(actor)?;
+        let mut accounts: Vec<_> = self
+            .live()
+            .values()
+            .filter(|account| {
+                account.tenant == actor.tenant().as_str() && !account.has_expired(as_of)
+            })
+            .map(|account| ServiceAccountSummary {
+                id: account.id.clone(),
+                expires_at: account.expires_at,
+            })
+            .collect();
+        accounts.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(accounts)
+    }
+
+    /// Revoke one Service Account in the actor's tenant.
+    ///
+    /// Another tenant's matching id is indistinguishable from an absent one. The map is changed
+    /// only after the complete replacement file has been written; a failed write leaves the token
+    /// resolvable and reports that revocation did not happen.
+    pub fn revoke(&self, actor: &Principal, id: &str) -> Result<(), ServiceAccountError> {
+        admit_manager(actor)?;
+        let id = admit_id(id)?;
+        let mut live = self.live();
+        let mut candidate = live.clone();
+        let before = candidate.len();
+        candidate
+            .retain(|_, account| account.tenant != actor.tenant().as_str() || account.id != id);
+        if candidate.len() == before {
+            return Err(ServiceAccountError::NotFound { id });
+        }
+        self.write(&candidate)
+            .map_err(|source| ServiceAccountError::Unwritable {
+                path: self.path.display().to_string(),
+                source,
+            })?;
+        *live = candidate;
+        Ok(())
     }
 
     /// Write the whole store, atomically.
@@ -523,16 +582,16 @@ impl AgentStore {
     /// A sibling temporary at `0600`, `fsync`, then `rename(2)` — the shape `connector_secrets`'
     /// file store uses, for its reason: a crash part way through leaves either the old file or the
     /// new one, never half of either. A truncate-and-write in place would leave a store that parses
-    /// as fewer agents than exist, which reads exactly like a revocation nobody performed.
+    /// as fewer service_accounts than exist, which reads exactly like a revocation nobody performed.
     ///
     /// Called with the map's guard held, so the bytes on disk are always some state this map was
     /// actually in.
-    fn write(&self, live: &BTreeMap<Verifier, Agent>) -> io::Result<()> {
+    fn write(&self, live: &BTreeMap<Verifier, ServiceAccount>) -> io::Result<()> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
 
         let encoded = serde_json::to_vec_pretty(&StoredFile {
             version: FORMAT_VERSION,
-            agents: live.clone(),
+            service_accounts: live.clone(),
         })
         .map_err(io::Error::other)?;
 
@@ -541,7 +600,7 @@ impl AgentStore {
             self.path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "agents".to_string()),
+                .unwrap_or_else(|| "service_accounts".to_string()),
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed),
         ));
@@ -557,13 +616,13 @@ impl AgentStore {
         outcome
     }
 
-    /// The live agents.
+    /// The live service_accounts.
     ///
     /// Recovers from a poisoned lock rather than propagating it, for `SessionStore::live`'s reason:
     /// the guarded value has no cross-key invariant a panic could have left half-updated, and
     /// refusing every subsequent request because an unrelated handler panicked would turn one
     /// failure into an outage.
-    fn live(&self) -> std::sync::MutexGuard<'_, BTreeMap<Verifier, Agent>> {
+    fn live(&self) -> std::sync::MutexGuard<'_, BTreeMap<Verifier, ServiceAccount>> {
         self.live
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -578,15 +637,18 @@ const FORMAT_VERSION: u32 = 1;
 /// `Tenant` and the id are checked here rather than trusted, because the file is a thing an operator
 /// can open in an editor and because `Tenant` deliberately has no `Deserialize` — validating at
 /// construction is worth nothing if a deserializer can walk around it.
-fn read(bytes: &[u8], path: &Path) -> Result<BTreeMap<Verifier, Agent>, AgentStoreError> {
+fn read(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<BTreeMap<Verifier, ServiceAccount>, ServiceAccountStoreError> {
     let stored: StoredFile =
-        serde_json::from_slice(bytes).map_err(|source| AgentStoreError::Unreadable {
+        serde_json::from_slice(bytes).map_err(|source| ServiceAccountStoreError::Unreadable {
             path: path.display().to_string(),
             reason: source.to_string(),
         })?;
 
     if stored.version != FORMAT_VERSION {
-        return Err(AgentStoreError::Unreadable {
+        return Err(ServiceAccountStoreError::Unreadable {
             path: path.display().to_string(),
             reason: format!(
                 "it is format version {}, and this build reads version {FORMAT_VERSION}",
@@ -595,42 +657,45 @@ fn read(bytes: &[u8], path: &Path) -> Result<BTreeMap<Verifier, Agent>, AgentSto
         });
     }
 
-    for agent in stored.agents.values() {
-        Tenant::new(agent.tenant.clone()).map_err(|source| AgentStoreError::Unreadable {
-            path: path.display().to_string(),
-            reason: format!("agent `{}` names an unusable tenant: {source}", agent.id),
+    for agent in stored.service_accounts.values() {
+        Tenant::new(agent.tenant.clone()).map_err(|source| {
+            ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: format!("agent `{}` names an unusable tenant: {source}", agent.id),
+            }
         })?;
-        admit_id(&agent.id).map_err(|source| AgentStoreError::Unreadable {
+        admit_id(&agent.id).map_err(|source| ServiceAccountStoreError::Unreadable {
             path: path.display().to_string(),
             reason: source.to_string(),
         })?;
     }
 
-    Ok(stored.agents)
+    Ok(stored.service_accounts)
 }
 
-/// Validate an agent identifier.
+/// Validate a Service Account identifier.
 ///
 /// The same alphabet `Tenant` accepts — ASCII alphanumerics, `-` and `_` — and for the same reason,
 /// stated once there: it refuses `.` and `/`, so an id can never be the interesting part of a path,
 /// a log line or a metric label it is interpolated into.
-fn admit_id(id: &str) -> Result<String, AgentError> {
+fn admit_id(id: &str) -> Result<String, ServiceAccountError> {
     if id.is_empty() {
-        return Err(AgentError::UnusableId {
-            reason: "an agent identifier may not be empty",
+        return Err(ServiceAccountError::UnusableId {
+            reason: "a Service Account identifier may not be empty",
         });
     }
-    if id.len() > MAX_AGENT_ID {
-        return Err(AgentError::UnusableId {
-            reason: "an agent identifier is at most 64 bytes",
+    if id.len() > MAX_SERVICE_ACCOUNT_ID {
+        return Err(ServiceAccountError::UnusableId {
+            reason: "a Service Account identifier is at most 64 bytes",
         });
     }
     if !id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(AgentError::UnusableId {
-            reason: "an agent identifier may contain only ASCII alphanumerics, `-` and `_`",
+        return Err(ServiceAccountError::UnusableId {
+            reason:
+                "a Service Account identifier may contain only ASCII alphanumerics, `-` and `_`",
         });
     }
 
@@ -646,26 +711,34 @@ fn admit_id(id: &str) -> Result<String, AgentError> {
 /// - **An expiry that has already passed** mints nothing. Minting a token that is dead the moment it
 ///   exists would report success while handing an operator a value that never works, and they would
 ///   go looking for the fault everywhere except at the expiry they typed.
-/// - **An expiry further out than [`MAX_AGENT_TOKEN_SECONDS`]** mints nothing either. See that
+/// - **An expiry further out than [`MAX_SERVICE_ACCOUNT_TOKEN_SECONDS`]** mints nothing either. See that
 ///   constant.
-fn admit_expiry(expiry: Expiry) -> Result<i64, AgentError> {
+fn admit_expiry(expiry: Expiry) -> Result<i64, ServiceAccountError> {
     // Saturating, because `expires_at` is a number a caller sent and `i64::MIN` must arrive here as
     // a very expired token rather than as an overflow.
     let remaining = expiry.expires_at.saturating_sub(expiry.as_of);
 
     if remaining <= 0 {
-        return Err(AgentError::AlreadyExpired {
+        return Err(ServiceAccountError::AlreadyExpired {
             expires_at: expiry.expires_at,
         });
     }
-    if remaining > MAX_AGENT_TOKEN_SECONDS {
-        return Err(AgentError::ImplausibleLifetime {
+    if remaining > MAX_SERVICE_ACCOUNT_TOKEN_SECONDS {
+        return Err(ServiceAccountError::ImplausibleLifetime {
             seconds: remaining,
-            max: MAX_AGENT_TOKEN_SECONDS,
+            max: MAX_SERVICE_ACCOUNT_TOKEN_SECONDS,
         });
     }
 
     Ok(expiry.expires_at)
+}
+
+fn admit_manager(actor: &Principal) -> Result<(), ServiceAccountError> {
+    if actor.kind() == PrincipalKind::User {
+        Ok(())
+    } else {
+        Err(ServiceAccountError::MayNotManage { kind: actor.kind() })
+    }
 }
 
 /// Make `path` absolute without touching the filesystem.
@@ -674,7 +747,7 @@ fn admit_expiry(expiry: Expiry) -> Result<i64, AgentError> {
 /// decide whether a store of live vendor credentials would land inside a working tree, where one
 /// `git add -A` commits it. This file holds no value anybody can present, so the same accident
 /// commits a roster rather than a secret — and paying for the walk here would imply a protection the
-/// contents do not need. What is wanted is only that [`AgentStore::banner`] and every refusal name
+/// contents do not need. What is wanted is only that [`ServiceAccountStore::banner`] and every refusal name
 /// one stable spelling rather than whatever the process's current directory was.
 fn absolute(path: &Path) -> io::Result<PathBuf> {
     if path.is_absolute() {
@@ -748,7 +821,7 @@ fn write_tight(path: &Path, bytes: &[u8]) -> io::Result<()> {
 ///   That warns. Refusing to start would take `/health`, the catalogue and sign-in down over a file
 ///   whose entire contents an attacker can do nothing with.
 #[cfg(unix)]
-fn admit_mode(path: &Path, what: &str) -> Result<(), AgentStoreError> {
+fn admit_mode(path: &Path, what: &str) -> Result<(), ServiceAccountStoreError> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let Ok(metadata) = fs::metadata(path) else {
@@ -760,7 +833,7 @@ fn admit_mode(path: &Path, what: &str) -> Result<(), AgentStoreError> {
     let mode = metadata.permissions().mode() & 0o777;
 
     if mode & 0o022 != 0 {
-        return Err(AgentStoreError::Writable {
+        return Err(ServiceAccountStoreError::Writable {
             path: path.display().to_string(),
             what: what.to_string(),
             mode,
@@ -771,7 +844,7 @@ fn admit_mode(path: &Path, what: &str) -> Result<(), AgentStoreError> {
         warn!(
             path = %path.display(),
             mode = format!("{mode:04o}"),
-            "the agent store {what} is readable by others. That discloses which agents exist, in \
+            "the Service Account store {what} is readable by others. That discloses which service_accounts exist, in \
              which tenants, and when their tokens expire — it discloses no token and yields no \
              access, which is why this is a warning and not a refusal. `chmod 0600` on the file and \
              `0700` on its directory",
@@ -788,18 +861,18 @@ fn admit_mode(path: &Path, what: &str) -> Result<(), AgentStoreError> {
 /// the refusal above: on such a platform nothing here stops somebody who can write the file from
 /// planting a verifier. A composition on one should bind a store of its own.
 #[cfg(not(unix))]
-fn admit_mode(_path: &Path, _what: &str) -> Result<(), AgentStoreError> {
+fn admit_mode(_path: &Path, _what: &str) -> Result<(), ServiceAccountStoreError> {
     Ok(())
 }
 
-/// Why an agent store could not be opened. Every variant refuses; none falls back.
+/// Why a Service Account store could not be opened. Every variant refuses; none falls back.
 ///
 /// Hand-written `Display`, not derived: `thiserror` is the library's convention and this binary
 /// does not carry the dependency — `bind::StartupRefusal` and `session::SessionError` say the same
 /// and are written the same way. The obligation the convention encodes is met below: name the path,
 /// never a value, and distinguish failures an operator answers differently.
 #[derive(Debug)]
-pub enum AgentStoreError {
+pub enum ServiceAccountStoreError {
     /// No store was named, and there is no default worth choosing on an operator's behalf.
     Unconfigured {
         /// The setting that would have named one.
@@ -833,27 +906,27 @@ pub enum AgentStoreError {
     },
 }
 
-impl fmt::Display for AgentStoreError {
+impl fmt::Display for ServiceAccountStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unconfigured { setting } => write!(
                 f,
-                "no agent store is configured: set `{setting}` to a path, for example \
+                "no Service Account store is configured: set `{setting}` to a path, for example \
                  `{EXAMPLE_PATH}`. This host does not fall back to an in-memory store — one would \
                  mint tokens that work until the next restart and then stop, with nothing to \
                  attribute the failure to",
             ),
             Self::Unusable { path, source } => {
-                write!(f, "the agent store at `{path}` cannot be opened: {source}")
+                write!(f, "the Service Account store at `{path}` cannot be opened: {source}")
             }
             Self::Unreadable { path, reason } => write!(
                 f,
-                "the agent store at `{path}` cannot be read: {reason}. Refusing rather than \
+                "the Service Account store at `{path}` cannot be read: {reason}. Refusing rather than \
                  starting with an empty roster, which would silently revoke every agent",
             ),
             Self::Writable { path, what, mode } => write!(
                 f,
-                "refusing the agent store at `{path}`: the {what} is mode {mode:04o}, so somebody \
+                "refusing the Service Account store at `{path}`: the {what} is mode {mode:04o}, so somebody \
                  other than its owner can write it — and whoever can write it can plant a verifier \
                  and authenticate as any agent in any tenant. `chmod 0600` on the file and `0700` \
                  on its directory",
@@ -862,7 +935,7 @@ impl fmt::Display for AgentStoreError {
     }
 }
 
-impl std::error::Error for AgentStoreError {
+impl std::error::Error for ServiceAccountStoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Unusable { source, .. } => Some(source),
@@ -871,15 +944,15 @@ impl std::error::Error for AgentStoreError {
     }
 }
 
-/// Why an agent token could not be minted.
+/// Why a Service Account token could not be minted.
 ///
 /// **No variant carries the token**, which is structural rather than a rule anybody has to keep: on
 /// every path that returns one of these, either nothing has been drawn yet or the draw itself is
-/// what failed. Hand-written `Display` for [`AgentStoreError`]'s reason.
+/// what failed. Hand-written `Display` for [`ServiceAccountStoreError`]'s reason.
 #[derive(Debug)]
-pub enum AgentError {
+pub enum ServiceAccountError {
     /// The minting principal is not of a kind that may create a principal. See
-    /// [`AgentStore::mint`], and `routes::agents::MAY_MINT` for why.
+    /// [`ServiceAccountStore::mint`], and `routes::service_accounts::MAY_MINT` for why.
     MayNotMint {
         /// The kind that asked. **Currently write-only**, and this doc used to claim otherwise:
         /// nothing emits it, because the published route is gated by its declaration and the guard
@@ -889,16 +962,28 @@ pub enum AgentError {
         kind: PrincipalKind,
     },
 
-    /// The identifier the caller supplied cannot name an agent.
+    /// A non-human principal attempted to list or revoke Service Accounts.
+    MayNotManage {
+        /// The refused principal kind, for the audit-side diagnostic only.
+        kind: PrincipalKind,
+    },
+
+    /// The identifier the caller supplied cannot name a Service Account.
     UnusableId {
         /// Which rule it broke. The rule and not the value: a refusal that echoed the identifier
         /// would put whatever a caller sent into this host's own log lines and answers.
         reason: &'static str,
     },
 
-    /// This tenant already has an agent by that name.
+    /// This tenant already has a Service Account by that name.
     AlreadyMinted {
         /// The identifier that is taken, which is the caller's own tenant's and never another's.
+        id: String,
+    },
+
+    /// No Service Account by this id exists in the actor's tenant.
+    NotFound {
+        /// The actor's own requested id.
         id: String,
     },
 
@@ -908,7 +993,7 @@ pub enum AgentError {
         expires_at: i64,
     },
 
-    /// The expiry is further out than this host will mint for. See [`MAX_AGENT_TOKEN_SECONDS`].
+    /// The expiry is further out than this host will mint for. See [`MAX_SERVICE_ACCOUNT_TOKEN_SECONDS`].
     ImplausibleLifetime {
         /// The life that was asked for, in seconds.
         seconds: i64,
@@ -916,7 +1001,7 @@ pub enum AgentError {
         max: i64,
     },
 
-    /// This store already holds as many agents as it will.
+    /// This store already holds as many service_accounts as it will.
     TooManyLive {
         /// The limit that was reached.
         max: usize,
@@ -937,47 +1022,54 @@ pub enum AgentError {
     },
 }
 
-impl fmt::Display for AgentError {
+impl fmt::Display for ServiceAccountError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MayNotMint { kind } => write!(
                 f,
-                "a principal of kind `{kind}` may not mint an agent: minting creates a principal, \
+                "a principal of kind `{kind}` may not mint a Service Account: minting creates a principal, \
                  and a principal that can create principals is one whose revocation does not end \
                  the access it gave",
+            ),
+            Self::MayNotManage { kind } => write!(
+                f,
+                "a principal of kind `{kind}` may not manage Service Accounts"
             ),
             Self::UnusableId { reason } => f.write_str(reason),
             Self::AlreadyMinted { id } => write!(
                 f,
-                "this tenant already holds an agent called `{id}`. Refusing rather than replacing \
+                "this tenant already holds a Service Account called `{id}`. Refusing rather than replacing \
                  it — a replacement would revoke the live token of whatever is using that name, \
-                 and the first anybody would know of it is an agent that stopped working",
+                 and the first anybody would know of it is a Service Account that stopped working",
             ),
+            Self::NotFound { id } => {
+                write!(f, "this tenant has no Service Account called `{id}`")
+            }
             Self::AlreadyExpired { expires_at } => write!(
                 f,
-                "cannot mint an agent token: the expiry {expires_at} (seconds since the Unix \
+                "cannot mint a Service Account token: the expiry {expires_at} (seconds since the Unix \
                  epoch) is in the past. Refusing rather than minting a token that never resolves",
             ),
             Self::ImplausibleLifetime { seconds, max } => write!(
                 f,
-                "cannot mint an agent token: {seconds} seconds was asked for and this host mints \
+                "cannot mint a Service Account token: {seconds} seconds was asked for and this host mints \
                  at most {max}. Refusing rather than quietly shortening it — a token whose life is \
                  not the life that was asked for is one nobody will rotate at the right moment",
             ),
             Self::TooManyLive { max } => write!(
                 f,
-                "cannot mint an agent token: this store already holds its maximum of {max}. \
-                 Expired agents are swept before this is decided, so these are all live",
+                "cannot mint a Service Account token: this store already holds its maximum of {max}. \
+                 Expired service_accounts are swept before this is decided, so these are all live",
             ),
             Self::NoEntropy { source } => write!(
                 f,
-                "cannot mint an agent token: {} is unreadable ({source}). Refusing rather than \
+                "cannot mint a Service Account token: {} is unreadable ({source}). Refusing rather than \
                  falling back to a predictable token",
                 entropy::SOURCE,
             ),
             Self::Unwritable { path, source } => write!(
                 f,
-                "cannot mint an agent token: the store at `{path}` could not be written \
+                "cannot mint a Service Account token: the store at `{path}` could not be written \
                  ({source}). Refusing rather than returning a token this host has no record of, \
                  which nobody could revoke and nobody could see",
             ),
@@ -985,13 +1077,15 @@ impl fmt::Display for AgentError {
     }
 }
 
-impl std::error::Error for AgentError {
+impl std::error::Error for ServiceAccountError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::NoEntropy { source } | Self::Unwritable { source, .. } => Some(source),
             Self::MayNotMint { .. }
+            | Self::MayNotManage { .. }
             | Self::UnusableId { .. }
             | Self::AlreadyMinted { .. }
+            | Self::NotFound { .. }
             | Self::AlreadyExpired { .. }
             | Self::ImplausibleLifetime { .. }
             | Self::TooManyLive { .. } => None,
@@ -1015,7 +1109,7 @@ mod tests {
         fn new(label: &str) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().join(format!(
-                "flux-exchange-agents-{label}-{}-{}",
+                "flux-exchange-service_accounts-{label}-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed),
             ));
@@ -1026,7 +1120,7 @@ mod tests {
         /// The store path a test opens. Under a subdirectory, so the directory the store creates is
         /// the store's own and its mode is the store's doing rather than the scratch root's.
         fn store(&self) -> PathBuf {
-            self.0.join("state").join("agents.json")
+            self.0.join("state").join("service_accounts.json")
         }
     }
 
@@ -1047,7 +1141,7 @@ mod tests {
     /// A fixed clock, so nothing here depends on when it runs.
     const NOW: i64 = 1_800_000_000;
 
-    /// Thirty days out, as an operator wiring an agent into a config would state it.
+    /// Thirty days out, as an operator wiring a Service Account into a config would state it.
     fn in_thirty_days() -> Expiry {
         Expiry {
             expires_at: NOW + 30 * 24 * 60 * 60,
@@ -1058,24 +1152,24 @@ mod tests {
     /// **X-40 at the store.** Only a `User` mints, and the refusal happens before anything else
     /// this function decides.
     ///
-    /// The route's declaration is what a caller meets — `routes::agents::MAY_MINT`, enforced by the
+    /// The route's declaration is what a caller meets — `routes::service_accounts::MAY_MINT`, enforced by the
     /// guard and enumerated over the published surface. This is the same rule where it cannot be
     /// bypassed by a handler that reaches the store without declaring an access, which is the shape
     /// a later story would most plausibly reintroduce the hole in.
     ///
     /// Two things asserted beyond the refusal itself:
     ///
-    /// 1. **Nothing was written.** A `403` that had already recorded the agent is the whole defect
+    /// 1. **Nothing was written.** A `403` that had already recorded the Service Account is the whole defect
     ///    wearing the right status code.
-    /// 2. **It refuses before `admit_id`.** An agent handed an identifier this host would reject
+    /// 2. **It refuses before `admit_id`.** A Service Account handed an identifier this host would reject
     ///    anyway must be told it may not mint, not that its name was unusable — the second answer
     ///    is a probe into what this store would have accepted.
     #[test]
     fn only_a_user_mints_at_the_store() {
         let scratch = Scratch::new("who-may-mint");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
-        for kind in [PrincipalKind::Agent, PrincipalKind::Service] {
+        for kind in [PrincipalKind::ServiceAccount, PrincipalKind::Service] {
             let minter = Principal::new(
                 kind,
                 "incumbent",
@@ -1085,7 +1179,7 @@ mod tests {
             assert!(
                 matches!(
                     store.mint(&minter, "successor", in_thirty_days()),
-                    Err(AgentError::MayNotMint { kind: refused }) if refused == kind,
+                    Err(ServiceAccountError::MayNotMint { kind: refused }) if refused == kind,
                 ),
                 "a `{kind}` minted a successor, so revoking its own credential would not end the \
                  access it gave",
@@ -1096,7 +1190,7 @@ mod tests {
             assert!(
                 matches!(
                     store.mint(&minter, "../../etc/passwd", in_thirty_days()),
-                    Err(AgentError::MayNotMint { .. }),
+                    Err(ServiceAccountError::MayNotMint { .. }),
                 ),
                 "a `{kind}` was told about its identifier rather than about its kind",
             );
@@ -1126,15 +1220,15 @@ mod tests {
     ///
     /// 1. The token is absent from the file's bytes. On its own this passes for a host that stored
     ///    the token base64-encoded, or that stored nothing at all.
-    /// 2. The file genuinely records the agent — its id and its tenant are there — so "nothing was
+    /// 2. The file genuinely records the Service Account — its id and its tenant are there — so "nothing was
     ///    stored" is ruled out.
-    /// 3. **Every value in the file is presented to [`AgentStore::resolve`] and every one is
+    /// 3. **Every value in the file is presented to [`ServiceAccountStore::resolve`] and every one is
     ///    refused**, while the token itself resolves. That is the claim in the form an attacker
     ///    would test it: they have the file, they try what is in it, and none of it is a token.
     #[test]
     fn an_attacker_who_reads_the_store_obtains_no_usable_token() {
         let scratch = Scratch::new("verifier-only");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
         let minted = store
             .mint(&alice(), "triage-bot", in_thirty_days())
@@ -1149,14 +1243,14 @@ mod tests {
         );
         assert!(
             on_disk.contains("triage-bot") && on_disk.contains("acme"),
-            "the store must actually record the agent, or the assertion above passes for a store \
+            "the store must actually record the Service Account, or the assertion above passes for a store \
              that recorded nothing: {on_disk}",
         );
 
         assert_eq!(
             store.resolve(&token, NOW),
             Some(Principal::new(
-                PrincipalKind::Agent,
+                PrincipalKind::ServiceAccount,
                 "triage-bot",
                 Tenant::new("acme").expect("a literal tenant"),
             )),
@@ -1180,7 +1274,7 @@ mod tests {
             assert_eq!(
                 store.resolve(value, NOW),
                 None,
-                "a value read straight out of the store authenticated as an agent: {value}",
+                "a value read straight out of the store authenticated as a Service Account: {value}",
             );
         }
     }
@@ -1189,17 +1283,17 @@ mod tests {
     /// there is no argument anything a caller sent could have reached.
     ///
     /// The wire-level half — a body field, a header, a path segment — is
-    /// `routes::agents::tests`, which is where a caller's claim can actually be delivered.
+    /// `routes::service_accounts::tests`, which is where a caller's claim can actually be delivered.
     #[test]
     fn the_minted_principal_is_an_agent_of_the_minting_principals_tenant() {
         let scratch = Scratch::new("tenant");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
         let minted = store
             .mint(&alice(), "triage-bot", in_thirty_days())
             .expect("randomness");
 
-        assert_eq!(minted.principal.kind(), PrincipalKind::Agent);
+        assert_eq!(minted.principal.kind(), PrincipalKind::ServiceAccount);
         assert_eq!(minted.principal.id(), "triage-bot");
         assert_eq!(
             minted.principal.tenant().as_str(),
@@ -1217,7 +1311,7 @@ mod tests {
     #[test]
     fn an_expiry_this_host_will_not_honour_refuses_rather_than_being_clamped() {
         let scratch = Scratch::new("expiry");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
         let expired = store.mint(
             &alice(),
@@ -1228,7 +1322,7 @@ mod tests {
             },
         );
         assert!(
-            matches!(expired, Err(AgentError::AlreadyExpired { .. })),
+            matches!(expired, Err(ServiceAccountError::AlreadyExpired { .. })),
             "an expiry in the past must mint nothing at all",
         );
 
@@ -1243,7 +1337,10 @@ mod tests {
             },
         );
         assert!(
-            matches!(forever, Err(AgentError::ImplausibleLifetime { .. })),
+            matches!(
+                forever,
+                Err(ServiceAccountError::ImplausibleLifetime { .. })
+            ),
             "an expiry beyond what this host mints must refuse, not be shortened to fit",
         );
 
@@ -1253,7 +1350,7 @@ mod tests {
                 &alice(),
                 "annual",
                 Expiry {
-                    expires_at: NOW + MAX_AGENT_TOKEN_SECONDS,
+                    expires_at: NOW + MAX_SERVICE_ACCOUNT_TOKEN_SECONDS,
                     as_of: NOW,
                 },
             )
@@ -1270,7 +1367,7 @@ mod tests {
     #[test]
     fn a_token_stops_resolving_when_its_stated_expiry_passes() {
         let scratch = Scratch::new("lifetime");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
         let minted = store
             .mint(&alice(), "triage-bot", in_thirty_days())
@@ -1295,18 +1392,18 @@ mod tests {
         let scratch = Scratch::new("restart");
         let path = scratch.store();
 
-        let store = AgentStore::open(&path).expect("a fresh store");
+        let store = ServiceAccountStore::open(&path).expect("a fresh store");
         let minted = store
             .mint(&alice(), "triage-bot", in_thirty_days())
             .expect("randomness");
         let token = minted.token.as_str().to_string();
         drop(store);
 
-        let restarted = AgentStore::open(&path).expect("the store reopens");
+        let restarted = ServiceAccountStore::open(&path).expect("the store reopens");
         assert_eq!(
             restarted.resolve(&token, NOW),
             Some(Principal::new(
-                PrincipalKind::Agent,
+                PrincipalKind::ServiceAccount,
                 "triage-bot",
                 Tenant::new("acme").expect("a literal tenant"),
             )),
@@ -1329,13 +1426,13 @@ mod tests {
             ("not json", "this is not a store".to_string()),
             (
                 "a later format",
-                serde_json::json!({ "version": 2, "agents": {} }).to_string(),
+                serde_json::json!({ "version": 2, "service_accounts": {} }).to_string(),
             ),
             (
                 "an unusable tenant",
                 serde_json::json!({
                     "version": 1,
-                    "agents": { "0f": { "tenant": "../../etc", "id": "x", "expires_at": 0 } },
+                    "service_accounts": { "0f": { "tenant": "../../etc", "id": "x", "expires_at": 0 } },
                 })
                 .to_string(),
             ),
@@ -1343,16 +1440,16 @@ mod tests {
                 "an unusable id",
                 serde_json::json!({
                     "version": 1,
-                    "agents": { "0f": { "tenant": "acme", "id": "a/b", "expires_at": 0 } },
+                    "service_accounts": { "0f": { "tenant": "acme", "id": "a/b", "expires_at": 0 } },
                 })
                 .to_string(),
             ),
         ] {
             fs::write(&path, &contents).expect("a store file");
-            let refused = AgentStore::open(&path)
+            let refused = ServiceAccountStore::open(&path)
                 .expect_err("a store that cannot be read must be refused, {label}");
             assert!(
-                matches!(refused, AgentStoreError::Unreadable { .. }),
+                matches!(refused, ServiceAccountStoreError::Unreadable { .. }),
                 "for `{label}`, expected Unreadable, got: {refused}",
             );
             assert!(
@@ -1369,7 +1466,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let scratch = Scratch::new("modes");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
         store
             .mint(&alice(), "triage-bot", in_thirty_days())
             .expect("randomness");
@@ -1400,16 +1497,17 @@ mod tests {
 
         let scratch = Scratch::new("exposure");
         let path = scratch.store();
-        let store = AgentStore::open(&path).expect("a fresh store");
+        let store = ServiceAccountStore::open(&path).expect("a fresh store");
         store
             .mint(&alice(), "triage-bot", in_thirty_days())
             .expect("randomness");
         drop(store);
 
         fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).expect("a widened mode");
-        let refused = AgentStore::open(&path).expect_err("a writable store must be refused");
+        let refused =
+            ServiceAccountStore::open(&path).expect_err("a writable store must be refused");
         assert!(
-            matches!(refused, AgentStoreError::Writable { .. }),
+            matches!(refused, ServiceAccountStoreError::Writable { .. }),
             "expected Writable, got: {refused}",
         );
         assert!(
@@ -1428,7 +1526,7 @@ mod tests {
 
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("a widened mode");
         assert!(
-            AgentStore::open(&path).is_ok(),
+            ServiceAccountStore::open(&path).is_ok(),
             "a readable store discloses a roster and no token, so it must not take the host down",
         );
     }
@@ -1436,19 +1534,22 @@ mod tests {
     /// Replacing a live agent by minting over its name is refused.
     ///
     /// A replacement would revoke the token of whatever is using that name, and the first anybody
-    /// would know of it is an agent that stopped working. The refusal is scoped to the caller's own
+    /// would know of it is a Service Account that stopped working. The refusal is scoped to the caller's own
     /// tenant, so it can never answer a caller with the fact that some other tenant uses the name.
     #[test]
     fn a_name_already_taken_in_this_tenant_refuses_and_does_not_replace() {
         let scratch = Scratch::new("collision");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
         let first = store
             .mint(&alice(), "triage-bot", in_thirty_days())
             .expect("randomness");
         let refused = store.mint(&alice(), "triage-bot", in_thirty_days());
 
-        assert!(matches!(refused, Err(AgentError::AlreadyMinted { .. })));
+        assert!(matches!(
+            refused,
+            Err(ServiceAccountError::AlreadyMinted { .. })
+        ));
         assert!(
             store.resolve(first.token.as_str(), NOW).is_some(),
             "the live token must survive the refusal",
@@ -1470,7 +1571,7 @@ mod tests {
     #[test]
     fn an_unusable_identifier_is_refused() {
         let scratch = Scratch::new("ids");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
         for hostile in [
             "",
@@ -1478,27 +1579,31 @@ mod tests {
             "../../etc",
             "a.b",
             " ",
-            &"x".repeat(MAX_AGENT_ID + 1),
+            &"x".repeat(MAX_SERVICE_ACCOUNT_ID + 1),
         ] {
             assert!(
                 matches!(
                     store.mint(&alice(), hostile, in_thirty_days()),
-                    Err(AgentError::UnusableId { .. }),
+                    Err(ServiceAccountError::UnusableId { .. }),
                 ),
-                "`{hostile}` must be refused as an agent identifier",
+                "`{hostile}` must be refused as a Service Account identifier",
             );
         }
 
         assert!(store
-            .mint(&alice(), &"x".repeat(MAX_AGENT_ID), in_thirty_days())
+            .mint(
+                &alice(),
+                &"x".repeat(MAX_SERVICE_ACCOUNT_ID),
+                in_thirty_days()
+            )
             .is_ok());
     }
 
-    /// Two agents must never share a token, or one caller would resolve as another.
+    /// Two service_accounts must never share a token, or one caller would resolve as another.
     #[test]
     fn every_minted_token_is_distinct() {
         let scratch = Scratch::new("distinct");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
         let tokens: std::collections::BTreeSet<String> = (0..64)
             .map(|n| {
@@ -1513,8 +1618,63 @@ mod tests {
 
         assert_eq!(tokens.len(), 64, "minted tokens must not repeat");
         for token in &tokens {
-            assert_eq!(token.len(), TOKEN_BYTES * 2, "256 bits, hex encoded");
+            assert_eq!(token.len(), 5 + TOKEN_BYTES * 2, "fxsa_ plus 256 bits");
+            assert!(token.starts_with("fxsa_"));
         }
+    }
+
+    #[test]
+    fn a_legacy_unprefixed_token_still_resolves_after_reopen() {
+        const LEGACY: &str = "LEGACY-SENTINEL-NOT-A-REAL-TOKEN";
+        let scratch = Scratch::new("legacy-token");
+        let path = scratch.store();
+        let store = ServiceAccountStore::open(&path).expect("open");
+        {
+            let mut live = store.live();
+            live.insert(
+                Verifier::of(LEGACY),
+                ServiceAccount {
+                    tenant: "acme".to_owned(),
+                    id: "legacy-runner".to_owned(),
+                    expires_at: NOW + 3600,
+                },
+            );
+            store.write(&live).expect("persist legacy-shaped record");
+        }
+        drop(store);
+
+        let reopened = ServiceAccountStore::open(path).expect("reopen");
+        let principal = reopened
+            .resolve(LEGACY, NOW)
+            .expect("legacy token resolves");
+        assert_eq!(principal.kind(), PrincipalKind::ServiceAccount);
+        assert_eq!(principal.id(), "legacy-runner");
+        assert_eq!(principal.tenant().as_str(), "acme");
+    }
+
+    #[test]
+    fn a_user_lists_and_revokes_only_its_own_service_accounts() {
+        let scratch = Scratch::new("list-revoke");
+        let store = ServiceAccountStore::open(scratch.store()).expect("open");
+        let minted = store
+            .mint(&alice(), "runner", in_thirty_days())
+            .expect("mint");
+        let token = minted.token.as_str().to_owned();
+
+        assert_eq!(
+            store.list(&alice(), NOW).expect("list"),
+            vec![ServiceAccountSummary {
+                id: "runner".to_owned(),
+                expires_at: in_thirty_days().expires_at,
+            }]
+        );
+        store.revoke(&alice(), "runner").expect("revoke");
+        assert!(store.resolve(&token, NOW).is_none());
+        assert!(store.list(&alice(), NOW).expect("list after").is_empty());
+        assert!(matches!(
+            store.revoke(&alice(), "runner"),
+            Err(ServiceAccountError::NotFound { .. })
+        ));
     }
 
     /// A bearer credential that prints itself is a bearer credential in the logs.
@@ -1525,14 +1685,14 @@ mod tests {
     #[test]
     fn a_token_redacts_itself_and_a_verifier_does_not() {
         let scratch = Scratch::new("redaction");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
         let minted = store
             .mint(&alice(), "triage-bot", in_thirty_days())
             .expect("randomness");
 
         let printed = format!("{:?}", minted.token);
         assert!(!printed.contains(minted.token.as_str()), "{printed}");
-        assert_eq!(printed, "AgentToken(redacted)");
+        assert_eq!(printed, "ServiceAccountToken(redacted)");
 
         // And `Minted` as a whole, since that is the value a handler holds.
         let whole = format!("{minted:?}");
@@ -1553,7 +1713,7 @@ mod tests {
     #[test]
     fn no_refusal_carries_a_token() {
         let scratch = Scratch::new("refusals");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
         let minted = store
             .mint(&alice(), "triage-bot", in_thirty_days())
             .expect("randomness");
@@ -1590,21 +1750,21 @@ mod tests {
     /// The store is bounded, and it refuses at the bound rather than evicting a live agent —
     /// which would stop a config working somewhere for a reason nobody could attribute.
     ///
-    /// The second half is what keeps expiry from becoming a way round the refusal: agents nobody
+    /// The second half is what keeps expiry from becoming a way round the refusal: service_accounts nobody
     /// can use must not hold a place against the bound.
     #[test]
     fn a_full_store_refuses_and_expired_agents_do_not_consume_the_bound() {
         let scratch = Scratch::new("bound");
-        let store = AgentStore::open(scratch.store()).expect("a fresh store");
+        let store = ServiceAccountStore::open(scratch.store()).expect("a fresh store");
 
         // Inserted directly. Minting 4096 times would write the file 4096 times, and what is under
         // test is the bound rather than the writing — which its own tests cover.
         {
             let mut live = store.live();
-            for n in 0..MAX_LIVE_AGENTS {
+            for n in 0..MAX_LIVE_SERVICE_ACCOUNTS {
                 live.insert(
                     Verifier(format!("{n:064x}")),
-                    Agent {
+                    ServiceAccount {
                         tenant: "acme".to_string(),
                         id: format!("agent-{n}"),
                         expires_at: NOW + 60,
@@ -1616,7 +1776,7 @@ mod tests {
         assert!(
             matches!(
                 store.mint(&alice(), "one-more", in_thirty_days()),
-                Err(AgentError::TooManyLive { .. }),
+                Err(ServiceAccountError::TooManyLive { .. }),
             ),
             "a full store must refuse",
         );
@@ -1634,12 +1794,12 @@ mod tests {
                     },
                 )
                 .is_ok(),
-            "a store full of expired agents must admit an honest caller",
+            "a store full of expired service_accounts must admit an honest caller",
         );
         assert_eq!(
             store.live().len(),
             1,
-            "and the expired agents must be gone rather than merely unresolvable",
+            "and the expired service_accounts must be gone rather than merely unresolvable",
         );
     }
 }

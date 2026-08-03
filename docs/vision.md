@@ -21,7 +21,7 @@ states why: *a boundary that requires taste is a boundary that erodes.*
 | Domain | Test |
 |---|---|
 | **flux** (engine) | Does it change what happens when an effect executes? |
-| **flux-connectors** | Is it true of the vendor regardless of who runs it? |
+| **flux-connectors** | Is it true of the integration regardless of who runs it? |
 | **flux-exchange** | **Does it require holding a credential or knowing a tenant?** |
 | a downstream product | Is it true only of one company's customers? |
 
@@ -31,13 +31,19 @@ records.** Anything that fails our test belongs upstream or downstream — and
 **no flux-family repository names a downstream company**, which is the fourth row applied to the
 documentation itself.
 
+Every official integration is therefore a connector, including Docker, Kubernetes, SQL,
+observability, secret stores, and other protocol-rich systems. flux-connectors owns the declaration
+and any vendor-specific runtime artifact; Flux owns generic guarded mechanisms and local execution.
+Exchange is the optional hosted placement for the same connector address, not an HTTP-only class of
+integration: it owns tenant authority, runtime admission, isolation, streams, and leases.
+
 ## Who it is for
 
 **Its primary caller is non-human, not a human.** People sign in to wire things up and to see what
-happened; Service Accounts and hosted Managed Agents call operations all day. In this repository's
-legacy API a Service Account is still called an “agent principal”; that name is migration debt, not
-a second meaning of Flux's **Agent** (model + loop + bounded capabilities). This inverts the usual
-assumption for a
+happened; Service Accounts and hosted Managed Agents call operations all day. A **Service Account**
+is the non-human bearer principal; an **Agent** remains model + authored loop + bounded capabilities.
+The deprecated v0.16 `/api/agents` create alias is compatibility surface, not a second definition.
+This inverts the usual assumption for a
 credential-holding web service and it shapes everything: the API is the product and the console is
 the admin surface, not the other way round.
 
@@ -152,11 +158,10 @@ job, so they are answered rather than left hanging:
   produced blank facts, and changing it required synchronising two repositories. The exchange now
   owns one finder over what its own API actually serves. The useful seams survived — data still
   arrives as props and colour still comes from one token layer — without shared source ownership.
-- **Does `subscribe` ship before or after multi-tenant sign-in?** **After, and sign-in has now
-  landed.** The inbound confused-deputy argument is sound only once a principal exists; until it did,
-  a loopback bind stood in for one exactly as it does for `invoke`. Complete OIDC sign-in shipped in
-  v0.1.0, so the stated blocker is gone — what `subscribe` still waits on is a grant model to scope a
-  subscription with, which is why it is not yet a story.
+- **Does `subscribe` ship before or after multi-tenant sign-in?** **After.** Complete OIDC sign-in
+  shipped in v0.1.0, and X-101–X-105 now deliver authenticated `/api/subscribe` for generated socket
+  channels with closed declared event sets. Webhooks, polls, arbitrary streamed operation output,
+  replay, and lease liveness remain in the X-111 rich-runtime program.
 
 ---
 

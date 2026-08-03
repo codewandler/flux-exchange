@@ -20,7 +20,7 @@ features:
   - title: Its primary caller is an agent
     details: People sign in to wire things up and to see what happened. Agents are what call operations all day, so the API is the product and the console is the admin surface.
   - title: A caller names an operation, never a secret
-    details: Not a host, not a credential, not a tenant. Each of those is derived rather than accepted, which is what makes a stolen agent token bounded.
+    details: Not a host, not a credential, not a tenant. Each is derived rather than accepted, which is what makes a stolen Service Account token bounded.
   - title: What a build can do is a question you can ask it
     details: Every deployment answers GET /api/onboarding anonymously, describing what it can and cannot do. That answer, not this site, is the current one.
 ---

@@ -5,7 +5,7 @@ status: ready
 priority: 2
 epic: connections
 design: docs/designs/connection-instances.md
-note: "owner-raised 2026-08-01: a tenant with two Zendesk instances collides on tenants/<tenant>/<authority>/<service>/<credential> — the address has no instance dimension, so the second connection silently overwrites the first"
+note: "waiting for flux-connectors C-494 to publish the v0.18 instance-aware host ports; never substitute a local path dependency"
 ---
 
 # Two instances of one connector, told apart by a name the operator chose
@@ -120,6 +120,14 @@ refusal, not a fallback to a default.
   address is how two components stop agreeing about where a credential lives.
 - `Tenant::new` (`crates/exchange-host/src/principal.rs`) is the precedent for validating a segment
   at construction. Build on it; do not re-validate ad hoc.
+
+## Release checkpoint, 2026-08-03
+
+flux-connectors C-494 now implements `CredentialScope`, address-only enumeration, checked atomic
+secret batches and instance-aware credential/configuration host ports on its v0.18 candidate branch.
+This story deliberately does not consume that working tree through a path or Git dependency. Start
+the Exchange registry and migration only after the four connector crates are published together at
+v0.18 and this repository can move both connector and Flux engine pin sets in one commit.
 
 ## Unblocked, 2026-08-01
 

@@ -34,7 +34,7 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   [`credentials.rs`](../crates/exchange-host/src/credentials.rs) and
   [`connections.rs`](../crates/exchange-host/src/connections.rs).
 - **Enforced in code.** OIDC authorization codes, the client secret, ID tokens, session tokens,
-  sign-in binders, PKCE verifiers and agent tokens use redacting types or fixed refusal variants at
+  sign-in binders, PKCE verifiers and Service Account tokens use redacting types or fixed refusal variants at
   the seams where they are handled. The authentication argument is in
   [`oidc-signin.md`](designs/oidc-signin.md) and the local session rules are in
   [`identity-and-session.md`](designs/identity-and-session.md).
@@ -135,9 +135,9 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   declaration. Tests enumerate the anonymous and principal-kind-gated surfaces so a handler cannot
   become public merely by forgetting a check; see
   [`routes/mod.rs`](../crates/exchange-server/src/routes/mod.rs).
-- **Enforced in code.** Credential supply and rotation, settings mutation, grant editing and agent
-  minting admit `User` principals only. An agent cannot use a stolen agent token to create successor
-  agents or replace the credential behind its authority.
+- **Enforced in code.** Credential supply and rotation, settings mutation, grant editing and Service
+  Account lifecycle routes admit `User` principals only. A Service Account cannot use a stolen
+  token to create a successor principal or replace the credential behind its authority.
 - **Enforced in code.** Invocation is fail-closed. Without a grant store the invoker is not built;
   without an admitting tenant grant the operation is refused before a credential is read. Selectors
   decide from catalogue-declared risk, effects and idempotency, with explicit operation exceptions;
@@ -146,9 +146,10 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
 - **Known limitation.** Grants belong to a tenant, not to one principal. Every resolved principal
   in that tenant is evaluated against the same grant set. X-91 adds operator authorization for
   administrative routes; it does not silently turn tenant grants into per-user grants.
-- **Known limitation.** Agent tokens can be minted but cannot authenticate yet, and there is no
-  listing or revocation surface. Existing [X-35](stories/X-35-agent-access-epic.md) work must not be
-  made live until those lifecycle controls exist.
+- **Enforced in code.** Service Account tokens resolve through the same principal boundary as human
+  identity, remain tenant-bound, and can be listed and revoked only by a signed-in human. A token
+  authenticates; grants independently decide what that tenant may invoke or subscribe to. The
+  former Agent spelling is a v0.16 compatibility alias, not a second principal kind.
 
 ## Credentials and persistent state
 

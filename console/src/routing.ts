@@ -2,7 +2,7 @@
 
 import { decodeSearchView, encodeSearchView, type SearchView } from './catalog.mts'
 import { GRANTS_PATH } from './granting.mts'
-import { AGENTS_PATH } from './minting.mts'
+import { LEGACY_AGENTS_PATH, SERVICE_ACCOUNTS_PATH } from './minting.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { nextTick, ref, type Ref } from 'vue'
 
@@ -52,7 +52,7 @@ export function replaceExplorerView(view: SearchView): void {
  */
 export type Route =
   | { name: 'connect'; anchor?: string }
-  | { name: 'agents'; anchor?: string }
+  | { name: 'service-accounts'; anchor?: string }
   | { name: 'connections'; anchor?: string }
   | { name: 'grants'; connector?: string; anchor?: string }
   | { name: 'workflows'; anchor?: string }
@@ -128,7 +128,9 @@ export function parseRoute(hash: string): Route {
   // is not a surface of the platform — `surfaceOfRoute` maps it to nothing — because it is
   // something an operator does with the identity they already have rather than a seventh place to
   // go. See `minting.mts` for why the name is `/agents`.
-  if (path === AGENTS_PATH) return { name: 'agents', ...at }
+  if (path === SERVICE_ACCOUNTS_PATH || path === LEGACY_AGENTS_PATH) {
+    return { name: 'service-accounts', ...at }
+  }
 
   if (path === '/explorer') {
     // Before X-86 provider links were anchors into the four-column card grid. The grid is gone, so
@@ -172,6 +174,9 @@ export function migrateLegacySearch(route: Route, search: string): Route {
  */
 export function useRoute(): Ref<Route> {
   const initial = migrateLegacySearch(parseRoute(window.location.hash), window.location.search)
+  if (decodeURIComponent(window.location.hash.replace(/^#/, '')).split(/[?#]/, 1)[0] === LEGACY_AGENTS_PATH) {
+    window.history.replaceState(window.history.state, '', fragmentPath(SERVICE_ACCOUNTS_PATH))
+  }
   if (initial.name === 'explorer' && window.location.search) replaceExplorerView(initial.view)
   const route = ref<Route>(initial)
   window.addEventListener('hashchange', () => {

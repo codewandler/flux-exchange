@@ -348,6 +348,10 @@ async function read(endpoint: string, options: LoadOptions, init?: RequestInit):
     }
   }
 
+  // A successful DELETE has deliberately no representation. Treating its empty body as malformed
+  // would turn a completed revocation into an indeterminate failure in the console.
+  if (response.ok && response.status === 204) return { ok: true, body: null }
+
   // The body is read before the status is judged, because a refusal's body is where the reason is —
   // and a refusal with an unreadable body is still a refusal, never an unreadable success.
   let body: unknown
@@ -1923,38 +1927,106 @@ export async function replaceGrants(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Agents: the one answer in this console that is readable, valuable and unrepeatable.
+// Service Accounts: the one answer in this console that is readable, valuable and unrepeatable.
 //
-// `POST /api/agents` mints an agent principal for the caller's tenant and hands back its token
-// **once**. That is not a convention this console could relax — `crate::agent` stores a verifier,
+// `POST /api/service-accounts` mints a Service Account principal for the caller's tenant and hands back its token
+// **once**. That is not a convention this console could relax — the server stores a verifier,
 // so the host is genuinely unable to say it a second time — and it is why this section is shaped
 // differently from everything above it. Every other call here returns something the console may
 // keep and re-render: addresses, counts, ids, `held`. A minted token is the one value in this file
 // that must not outlive the view that shows it.
 //
-// So this section is exactly one function. There is deliberately **no** sibling that reads a token
-// back, no cache of the last mint, and no listing — partly because there would be nothing for them
-// to read, and partly because a second way to reach a token is a second place it can be shown
-// twice. `Agents.mts` holds the result in the view's own state and nothing above it ever sees one.
+// There is deliberately no function that reads a token back and no cache of the last mint. Listing
+// exposes ids and expiry only; a second way to reach the token would be a second place it could be
+// shown twice. `Agents.mts` holds the result in the view's own state and nothing above it sees one.
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Where an agent principal is minted for the caller's tenant.
+ * Where a Service Account principal is minted for the caller's tenant.
  *
  * A collection path with **no parameter**, and there is nowhere a tenant could be spelled into it:
  * the tenant is read from the principal this host resolved and from nothing a caller controls.
- * `routes::agents` carries the other half of this.
+ * `routes::service_accounts` carries the other half of this.
  */
-export const AGENTS_ENDPOINT = '/api/agents'
+export const SERVICE_ACCOUNTS_ENDPOINT = '/api/service-accounts'
+
+/** A Service Account as the management API lists it: identity and expiry, never credential data. */
+export interface ServiceAccountSummary {
+  id: string
+  expiresAt: number
+}
+
+export type ServiceAccountsState =
+  | { status: 'ready'; accounts: readonly ServiceAccountSummary[] }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export type RevokeServiceAccountOutcome =
+  | { status: 'revoked' }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+function readServiceAccounts(body: unknown): readonly ServiceAccountSummary[] | string {
+  if (!isObject(body) || !Array.isArray(body.service_accounts)) {
+    return 'no `service_accounts` array in the body'
+  }
+
+  const accounts: ServiceAccountSummary[] = []
+  for (const entry of body.service_accounts) {
+    if (!isObject(entry) || typeof entry.id !== 'string' || typeof entry.expires_at !== 'number') {
+      return 'a Service Account has no string `id` and numeric `expires_at`'
+    }
+    accounts.push({ id: entry.id, expiresAt: entry.expires_at })
+  }
+  return accounts
+}
+
+/** List this tenant's live Service Accounts without exposing tokens or verifiers. */
+export async function loadServiceAccounts(options: LoadOptions = {}): Promise<ServiceAccountsState> {
+  const answered = await read(SERVICE_ACCOUNTS_ENDPOINT, options)
+  if (!answered.ok) return { status: 'failed', failure: answered.failure }
+
+  const accounts = readServiceAccounts(answered.body)
+  if (typeof accounts === 'string') {
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable',
+        endpoint: SERVICE_ACCOUNTS_ENDPOINT,
+        status: 200,
+        detail: accounts,
+      },
+    }
+  }
+  return { status: 'ready', accounts }
+}
+
+/** Revoke one Service Account in this tenant. The id is a path segment, never a token. */
+export async function revokeServiceAccount(
+  id: string,
+  options: LoadOptions = {}
+): Promise<RevokeServiceAccountOutcome> {
+  const endpoint = `${SERVICE_ACCOUNTS_ENDPOINT}/${encodeURIComponent(id)}`
+  const answered = await read(endpoint, options, { method: 'DELETE' })
+  if (answered.ok) return { status: 'revoked' }
+
+  const error = serviceError(answered.body)
+  if (error !== null && answered.failure.status !== null) {
+    return {
+      status: 'refused',
+      refusal: { endpoint, status: answered.failure.status, error },
+    }
+  }
+  return { status: 'failed', failure: answered.failure }
+}
 
 /** What an operator states when minting. Two fields, and there is no third. */
-export interface NewAgent {
-  /** What to call the agent within this tenant. A name, never an address and never a tenant. */
+export interface NewServiceAccount {
+  /** What to call the Service Account within this tenant. A name, never an address or tenant. */
   id: string
   /**
    * When its token stops resolving, as seconds since the Unix epoch.
    *
-   * **Never defaulted, at either end.** `routes::agents` refuses a body that omits this rather than
+   * **Never defaulted, at either end.** `routes::service_accounts` refuses an omitted value rather than
    * choosing a lifetime for the caller, and a console that quietly filled one in would undo that
    * decision on every mint an operator makes from a browser — which, after this story, is all of
    * them. `Agents.mts` therefore ships an empty box rather than a sensible number.
@@ -1963,15 +2035,15 @@ export interface NewAgent {
 }
 
 /**
- * An agent this host has just minted, as `POST /api/agents` answers with one.
+ * An agent this host has just minted, as `POST /api/service-accounts` answers with one.
  *
  * `shown` is in the body and is deliberately **not** read. The service says `"shown": "once"`, and a
  * page that only stated the one-shot property when the service remembered to say so would fall
  * silent exactly when the service changed — which is the moment an operator most needs telling.
  * Being shown once is a consequence of what the store holds, so the screen states it from that.
  */
-export interface MintedAgent {
-  /** The principal that now exists: an agent, in the minting caller's tenant. */
+export interface MintedServiceAccount {
+  /** The principal that now exists: a Service Account in the minting caller's tenant. */
   principal: Principal
   /** When its token stops resolving, echoed by the service. Seconds since the Unix epoch. */
   expiresAt: number
@@ -1994,12 +2066,12 @@ export interface MintedAgent {
  * is the service's own sentence that says so.
  */
 export type MintOutcome =
-  | { status: 'minted'; minted: MintedAgent }
+  | { status: 'minted'; minted: MintedServiceAccount }
   | { status: 'refused'; refusal: ServiceRefusal }
   | { status: 'failed'; failure: ServiceFailure }
 
 /** A minted agent in a `201` body, or the reason the body is not one. */
-function readMinted(body: unknown): MintedAgent | string {
+function readMinted(body: unknown): MintedServiceAccount | string {
   if (!isObject(body)) return 'the body is not an object'
   const principal = readPrincipal(body)
   if (!principal) return 'no `principal` with an `id` and a `tenant` in the body'
@@ -2014,15 +2086,15 @@ function readMinted(body: unknown): MintedAgent | string {
 }
 
 /**
- * Mint an agent principal for the caller's tenant, and hand back its token once.
+ * Mint a Service Account principal for the caller's tenant, and hand back its token once.
  *
  * ```text
- * POST /api/agents   {"id":"ci-runner","expires_at":1793491200}
+ * POST /api/service-accounts   {"id":"ci-runner","expires_at":1793491200}
  * 201                {"principal":{…},"expires_at":1793491200,"token":"…","shown":"once"}
  * ```
  *
  * **The body carries two fields and there is nowhere to put a third.** No tenant — the tenant comes
- * from the principal this host resolved, and `routes::agents` ignores rather than refuses one in
+ * from the principal this host resolved, and `routes::service_accounts` ignores rather than refuses one in
  * the body precisely so that nobody can believe it was honoured. No name for the token, no scope,
  * no grant: none of those exist yet, and inventing a field the service would drop is how a console
  * starts describing a service that is not there.
@@ -2032,11 +2104,14 @@ function readMinted(body: unknown): MintedAgent | string {
  * returns is the only copy the console will ever have, and its caller is a view that dies when the
  * reader navigates away.
  */
-export async function mintAgent(agent: NewAgent, options: LoadOptions = {}): Promise<MintOutcome> {
-  const answered = await read(AGENTS_ENDPOINT, options, {
+export async function mintServiceAccount(
+  account: NewServiceAccount,
+  options: LoadOptions = {}
+): Promise<MintOutcome> {
+  const answered = await read(SERVICE_ACCOUNTS_ENDPOINT, options, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: agent.id, expires_at: agent.expiresAt }),
+    body: JSON.stringify({ id: account.id, expires_at: account.expiresAt }),
   })
 
   if (!answered.ok) {
@@ -2044,7 +2119,7 @@ export async function mintAgent(agent: NewAgent, options: LoadOptions = {}): Pro
     if (error !== null && answered.failure.status !== null) {
       return {
         status: 'refused',
-        refusal: { endpoint: AGENTS_ENDPOINT, status: answered.failure.status, error },
+        refusal: { endpoint: SERVICE_ACCOUNTS_ENDPOINT, status: answered.failure.status, error },
       }
     }
     return { status: 'failed', failure: answered.failure }
@@ -2054,7 +2129,7 @@ export async function mintAgent(agent: NewAgent, options: LoadOptions = {}): Pro
   if (typeof minted === 'string') {
     return {
       status: 'failed',
-      failure: { kind: 'unreadable', endpoint: AGENTS_ENDPOINT, status: 201, detail: minted },
+      failure: { kind: 'unreadable', endpoint: SERVICE_ACCOUNTS_ENDPOINT, status: 201, detail: minted },
     }
   }
 

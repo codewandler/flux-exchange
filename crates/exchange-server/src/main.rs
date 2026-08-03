@@ -13,7 +13,6 @@
 //! resolve a principal is refused at startup**, not warned about and served anyway. See
 //! [`bind::admit_bind`] and `docs/designs/http-surface.md`.
 
-mod agent;
 mod audit;
 mod bind;
 pub mod channel;
@@ -23,6 +22,7 @@ mod entropy;
 mod execution;
 mod oidc;
 mod routes;
+mod service_account;
 mod session;
 pub mod state;
 mod traffic;
@@ -39,7 +39,6 @@ use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::agent::{AgentStore, AGENT_STORE_SETTING};
 use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
 use crate::channel::{
     CatalogueChannelDeclarations, ChannelSupervisor, DeploymentChannelPlacement,
@@ -50,6 +49,9 @@ use crate::execution::{channel_execution_system, invoker};
 use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
 use crate::oidc::Oidc;
+use crate::service_account::{
+    ServiceAccountStore, LEGACY_AGENT_STORE_SETTING, SERVICE_ACCOUNT_STORE_SETTING,
+};
 use crate::state::AppState;
 
 /// The binary flag that declares the zero-configuration, one-tenant development composition.
@@ -219,7 +221,7 @@ fn configured_console() -> Option<PathBuf> {
 }
 
 /// Bind the ports this composition serves with: an identity provider, a credential store, and an
-/// agent store.
+/// Service Account store.
 ///
 /// Four ports, all independent, and every one of them defaults to *bound to nothing* with no
 /// fallback. The argument is the same in each case and it is the one that decides the shape: a
@@ -227,7 +229,7 @@ fn configured_console() -> Option<PathBuf> {
 /// so nothing here has to be turned *off* to be safe — only turned on to be useful.
 ///
 /// The development identity is armed by [`DEV_FLAG`] or [`DEV_IDENTITY_ENV`]; failing that, OIDC
-/// sign-in is offered if it was configured; the credential store and the agent store are bound by
+/// sign-in is offered if it was configured; the credential store and Service Account store are bound by
 /// their own settings. Unset and unconfigured binds nothing, which is the state a reachable bind is
 /// already refused in.
 ///
@@ -310,8 +312,8 @@ fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
              refuses instead of supervising unauthenticated vendor connections"
         );
     }
-    if let Some(store) = agent_store()? {
-        state = state.with_agents(store);
+    if let Some(store) = service_account_store()? {
+        state = state.with_service_accounts(store);
     }
     if let Some((workflows, pure, runs)) = workflow_store()? {
         state = state.with_workflows(workflows, pure, runs);
@@ -396,41 +398,72 @@ fn workflow_store() -> Result<Option<WorkflowBinding>, StartupRefusal> {
     Ok(None)
 }
 
-/// Bind the agent store the environment names, or bind none.
+/// Bind the Service Account store the environment names, or bind none.
 ///
 /// The same three states as the credential store, for the same reason and with one difference worth
-/// naming. **Unset binds nothing**, and `POST /api/agents` then refuses with `503` quoting this
+/// naming. **Unset binds nothing**, and `/api/service-accounts` then refuses with `503` quoting this
 /// setting — which is not the in-memory fallback X-09 refuses, because nothing is served from
 /// somewhere else: the host says it cannot hold the record, and a token it could not record is one
 /// nobody could ever revoke. **Set and unusable refuses to start**, since a store the operator named
 /// and this process could not open is a mistake with no later moment at which it announces itself —
 /// and, here, one of the ways it can be unusable is a mode that would let somebody else plant a
-/// verifier, which is an authentication bypass rather than an inconvenience. See `crate::agent`.
+/// verifier, which is an authentication bypass rather than an inconvenience. See `crate::service_account`.
 ///
 /// Not `#[cfg(unix)]`, unlike the credential store. What protects a *credential* in that file is the
 /// mode and nothing else, so a platform that cannot spell one gets no store at all; what protects an
-/// agent token here is that the store holds a digest rather than the token, which holds on every
-/// platform. The mode still matters — it is what stops a planted verifier — and `crate::agent`
+/// Service Account token here is that the store holds a digest rather than the token, which holds on every
+/// platform. The mode still matters — it is what stops a planted verifier — and `crate::service_account`
 /// states plainly what is lost where it cannot be checked.
-fn agent_store() -> Result<Option<Arc<AgentStore>>, StartupRefusal> {
-    let Ok(configured) = std::env::var(AGENT_STORE_SETTING) else {
-        warn!(
-            "no agent store is bound ({AGENT_STORE_SETTING} is unset), so minting an agent token \
-             will refuse. Set it to a path to let this host mint tokens for the agents that call \
-             it",
-        );
-        return Ok(None);
+fn service_account_store() -> Result<Option<Arc<ServiceAccountStore>>, StartupRefusal> {
+    let canonical = std::env::var(SERVICE_ACCOUNT_STORE_SETTING).ok();
+    let legacy = std::env::var(LEGACY_AGENT_STORE_SETTING).ok();
+    let configured = match service_account_store_path(canonical.as_deref(), legacy.as_deref())? {
+        Some(configured) => configured,
+        None => {
+            warn!(
+                "no Service Account store is bound ({SERVICE_ACCOUNT_STORE_SETTING} is unset), so management and bearer authentication will refuse"
+            );
+            return Ok(None);
+        }
     };
 
-    let store =
-        AgentStore::open(configured.trim()).map_err(|source| StartupRefusal::AgentStore {
+    if canonical.is_none() && legacy.is_some() {
+        warn!(
+            "{LEGACY_AGENT_STORE_SETTING} is deprecated; use {SERVICE_ACCOUNT_STORE_SETTING} before v0.17"
+        );
+    }
+
+    let store = ServiceAccountStore::open(&configured).map_err(|source| {
+        StartupRefusal::ServiceAccountStore {
             reason: source.to_string(),
-        })?;
+        }
+    })?;
 
-    // Read back off the bound store, so this line cannot name a file this process did not open.
     info!("{}", store.banner());
-
     Ok(Some(Arc::new(store)))
+}
+
+/// Resolve the canonical and one-release compatibility settings without reading global state.
+fn service_account_store_path(
+    canonical: Option<&str>,
+    legacy: Option<&str>,
+) -> Result<Option<String>, StartupRefusal> {
+    let configured = match (canonical, legacy) {
+        (None, None) => {
+            return Ok(None);
+        }
+        (Some(canonical), None) => canonical.trim(),
+        (None, Some(legacy)) => legacy.trim(),
+        (Some(canonical), Some(legacy)) if canonical.trim() == legacy.trim() => canonical.trim(),
+        (Some(_), Some(_)) => {
+            return Err(StartupRefusal::ServiceAccountStore {
+                reason: format!(
+                    "`{SERVICE_ACCOUNT_STORE_SETTING}` and deprecated `{LEGACY_AGENT_STORE_SETTING}` name different paths; set only the canonical setting"
+                ),
+            })
+        }
+    };
+    Ok(Some(configured.to_owned()))
 }
 
 /// Bind the credential store the environment names, or bind none.
@@ -752,6 +785,31 @@ mod tests {
     use tower::{Service, ServiceExt as _};
 
     use crate::oidc::config::AUTHORIZATION_ENDPOINT_ENV;
+
+    #[test]
+    fn service_account_store_setting_has_one_bounded_legacy_alias() {
+        assert_eq!(
+            service_account_store_path(Some(" /srv/accounts.json "), None)
+                .expect("the canonical setting is valid"),
+            Some("/srv/accounts.json".to_owned()),
+        );
+        assert_eq!(
+            service_account_store_path(None, Some(" /srv/accounts.json "))
+                .expect("the compatibility setting is valid"),
+            Some("/srv/accounts.json".to_owned()),
+        );
+        assert_eq!(
+            service_account_store_path(Some(" /srv/accounts.json "), Some("/srv/accounts.json"),)
+                .expect("the two spellings may agree"),
+            Some("/srv/accounts.json".to_owned()),
+        );
+
+        let refusal = service_account_store_path(Some("one"), Some("two"))
+            .expect_err("two paths are ambiguous")
+            .to_string();
+        assert!(refusal.contains(SERVICE_ACCOUNT_STORE_SETTING), "{refusal}");
+        assert!(refusal.contains(LEGACY_AGENT_STORE_SETTING), "{refusal}");
+    }
 
     /// **X-59's failing-first test.** The flag is one declaration carrying both axes of the local
     /// deployment: who the human is and that every address belongs to the one `dev` tenant. The

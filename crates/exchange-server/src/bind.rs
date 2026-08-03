@@ -138,13 +138,13 @@ pub enum StartupRefusal {
         reason: String,
     },
 
-    /// An agent store was named and could not be bound.
+    /// A Service Account store was named and could not be bound.
     ///
     /// A separate variant from [`CredentialStore`](Self::CredentialStore) rather than a shared
     /// "some store failed", because an operator fixes them in different files and one of this one's
     /// refusals — a mode somebody else could write — is an authentication bypass rather than a
     /// missing value. Rendered rather than typed for the reason above.
-    AgentStore {
+    ServiceAccountStore {
         /// The store's own refusal.
         reason: String,
     },
@@ -243,7 +243,7 @@ impl fmt::Display for StartupRefusal {
             Self::Serving { source } => write!(f, "stopped serving: {source}"),
             Self::DevIdentity { source } => write!(f, "{source}"),
             Self::CredentialStore { reason }
-            | Self::AgentStore { reason }
+            | Self::ServiceAccountStore { reason }
             | Self::SettingsStore { reason }
             | Self::GrantStore { reason }
             | Self::WorkflowStore { reason }
@@ -271,7 +271,7 @@ impl std::error::Error for StartupRefusal {
             | Self::ReachableBindWithDevelopmentIdentity { .. }
             | Self::DevelopmentMode { .. }
             | Self::CredentialStore { .. }
-            | Self::AgentStore { .. }
+            | Self::ServiceAccountStore { .. }
             | Self::SettingsStore { .. }
             | Self::GrantStore { .. }
             | Self::WorkflowStore { .. }

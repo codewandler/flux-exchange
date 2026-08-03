@@ -194,7 +194,7 @@ fn tenant() -> Tenant {
 
 /// The caller. An agent, because agents are what call operations all day.
 fn caller() -> Principal {
-    Principal::new(PrincipalKind::Agent, "triage-bot", tenant())
+    Principal::new(PrincipalKind::ServiceAccount, "triage-bot", tenant())
 }
 
 /// One of zendesk's declared settings, by its `binds` spelling.

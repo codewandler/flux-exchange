@@ -40,8 +40,8 @@ import { SURFACES, type Surface } from './surfaces.mts'
 /**
  * Where the mint screen lives, as a catalogue-style path the fragment router resolves.
  *
- * `/agents` and not `/connect`: `onboarding.mts` reserved this name for the operator-facing page
- * about a tenant's agents, and this is the first of it. That page's own argument for taking
+ * `/service-accounts` and not `/connect`: the first is the canonical non-human identity resource;
+ * the second is the operator-facing guide for connecting an App or Agent. That page's argument for taking
  * `/connect` instead was that a path reading like a collection of tenant records is a poor name for
  * a page holding none — which is exactly the reason it is the right name for this one, which does.
  *
@@ -49,7 +49,10 @@ import { SURFACES, type Surface } from './surfaces.mts'
  * the address bar, in every history entry after it, and in the referrer of every link the page then
  * offers. `test/agents.test.mjs` pins `parseRoute` to a bare `{ name: 'agents' }`.
  */
-export const AGENTS_PATH = '/agents'
+export const SERVICE_ACCOUNTS_PATH = '/service-accounts'
+
+/** The retired fragment accepted only so old bookmarks can be replaced with the canonical one. */
+export const LEGACY_AGENTS_PATH = '/agents'
 
 /**
  * The onboarding step that *is* this screen.
@@ -59,12 +62,12 @@ export const AGENTS_PATH = '/agents'
  * that list rather than a second list kept here. Reading the catalogue comes before it and needs no
  * token at all; minting is what the operator is doing rather than something the token can do.
  */
-export const MINT_STEP = 'be-minted'
+export const MINT_STEP = 'create-service-account'
 
 /**
  * The kinds of principal that may mint, as this console understands X-40.
  *
- * **This is a courtesy, not the rule.** The rule is `routes::agents::MAY_MINT`, enforced by the
+ * **This is a courtesy, not the rule.** The rule is `routes::service_accounts::MAY_MINT`, enforced by the
  * route's `Access::PrincipalOfKind` guard and again inside `AgentStore::mint`. What this list buys
  * is that an operator who cannot mint is told so instead of being offered a button and discovering
  * the `403` by pressing it — and when the two ever disagree, the service wins and its own sentence
@@ -82,7 +85,7 @@ export const MAY_MINT: readonly string[] = ['user']
  * makes revocation an incomplete remedy in a way no operator can see; a `Service` may not, because
  * nothing in this repository mints, verifies, lists or revokes a service credential, so admitting
  * it would put the same defect one level further out of sight. The full argument is in
- * `docs/designs/agent-access.md` and in `routes::agents`.
+ * `docs/designs/service-accounts.md` and in `routes::service_accounts`.
  */
 export function mayMint(principal: Principal | null): boolean {
   return principal !== null && MAY_MINT.includes(principal.kind)
@@ -132,7 +135,7 @@ export function tokenStanding(surfaces: readonly Surface[] = SURFACES): Standing
  * # What it claims, and when it must stop
  *
  * Two claims, with two different expiries. The first is that a token minted here is **presented
- * nowhere**, which stops being true the day anything on this host resolves an agent token — and
+ * nowhere**, which stops being true the day anything on this host resolves a Service Account token — and
  * that is the `authenticate` step, which is what `presentable` watches.
  *
  * The second used to be that **nothing is gated by a grant**, stated as plainly as possible and
@@ -166,12 +169,22 @@ export function authorisation(
   presentable: boolean = available(authenticationStep(), surfaces)
 ): string {
   const standing = tokenStanding(surfaces)
-  if (standing.length === 0 || presentable) return ''
+  if (standing.length === 0) return ''
+
+  if (presentable) {
+    return (
+      'This token authenticates the Service Account; it grants no authority by itself. What the ' +
+      'Service Account may invoke or subscribe to is bounded by a grant this tenant holds, selected ' +
+      'from declared risk, effects and idempotency rather than operation names. It never grants ' +
+      'access to a credential, connection configuration or grant editing, and it cannot create a ' +
+      'successor Service Account.'
+    )
+  }
 
   const live = standing.filter((entry) => entry.can)
 
   return (
-    'Nothing on this host resolves an agent token to a principal yet, so a token minted here is ' +
+    'Nothing on this host resolves a Service Account token to a principal yet, so a token minted here is ' +
     'presented nowhere and authorises nothing at all — including the ' +
     `${live.length === 1 ? 'capability' : 'capabilities'} listed here as available, which this ` +
     'service runs for the principals it can resolve and not for a token holder. When a token can ' +
@@ -191,7 +204,7 @@ export function authorisation(
  *
  * The console converts a lifetime an operator can reason about into the instant the service wants,
  * and shows them the instant before they send it. It does **not** supply the lifetime: the box
- * starts empty, because `routes::agents` refuses a body with no expiry rather than picking one, and
+ * starts empty, because `routes::service_accounts` refuses a body with no expiry rather than picking one, and
  * a console with a helpful default in it would quietly become the thing that picks.
  *
  * Read against this browser's clock, which is not the host's. A few seconds of skew is immaterial

@@ -5,9 +5,9 @@
 // existed nothing anywhere answered "what is this, and how do I connect to it?" for one. Everything
 // built so far serves the other caller.
 //
-// **Why it is data rather than a paragraph.** The state being described changes weekly. An agent can
-// be minted (X-36) and cannot yet authenticate (X-37); it can invoke nothing at all, and that one is
-// blocked upstream (X-11, X-12). Prose describing that is false within a release, and principle 7 of
+// **Why it is data rather than a paragraph.** The state being described changes weekly. Service
+// Account authentication and invocation are live now; Apps and hosted Agents are still target
+// architecture. Prose describing a particular build goes stale within a release, and principle 7 of
 // the vision — restated in `AGENTS.md` — makes a page implying a working service cost more than an
 // honest gap. So the page does not describe this build. It **derives** from `surfaces.mts`, the same
 // declaration `ConsoleShell.mts` builds the navigation from, and the derivation is the honesty:
@@ -25,17 +25,14 @@
 // route table rather than to whoever last edited it.
 //
 // The guard is still deliberately one-directional. A served surface is not proof that a *particular*
-// route exists — `identity` being served does not by itself mean `POST /api/agents` does. What the
+// route exists — `identity` being served does not by itself mean `POST /api/service-accounts` does. What the
 // rule buys is the direction that matters: it can only ever take a claim *off* the page, never put
 // one on. A surface regressing to unserved silently withdraws every step standing on it, and a step
 // no surface backs at all cannot be claimed however confidently it is written.
 //
-// **`authenticate` is the step with no surface, and that is the point.** The console's surfaces are
-// places an operator goes; authenticating is not one, so there is nothing in `surfaces.mts` to hang
-// it on — and by the rule above, a step with no backing surface is withheld. Which is exactly right
-// today: nothing on this host resolves an agent token to a principal. When X-37 lands, making this
-// step claimable takes a surface the navigation also shows, which is a visible edit rather than a
-// quiet one.
+// `authenticate` stands on the identity surface. `GET /api/session` is both the smallest bearer
+// probe and the route that returns the resolved principal, so the page can describe authentication
+// without inventing a second identity endpoint.
 //
 // This module is data and pure functions. It imports `surfaces.mts` and **nothing else** — not Vue,
 // not `service.mts`, which is the only module in this console that knows a network exists. That is
@@ -46,10 +43,8 @@ import { SURFACES, type Surface } from './surfaces.mts'
 /**
  * Where the onboarding page lives, as a catalogue-style path the fragment router resolves.
  *
- * `/connect` and not `/agents`: this is a reference about how to connect one, and `/agents` is the
- * name a *listing* of a tenant's agents would want when revocation (X-38) needs one. A path that
- * reads like a collection of tenant records is a poor name for a page whose whole discipline is
- * holding no tenant records.
+ * `/connect` and not `/service-accounts`: this is a reference for an App, Agent or automation that
+ * needs to connect. The Service Account collection is tenant management state; this page holds none.
  */
 export const ONBOARDING_PATH = '/connect'
 
@@ -213,20 +208,20 @@ export const STEPS: readonly Step[] = [
     pending: '',
   },
   {
-    id: 'be-minted',
-    title: 'Be issued an identity',
+    id: 'create-service-account',
+    title: 'Create a Service Account',
     summary:
-      'An agent is a principal of exactly one tenant. It does not sign in: a human who already is ' +
-      'mints it and hands over the token.',
+      'A Service Account is a non-human principal of exactly one tenant. A signed-in human creates ' +
+      'it and hands its one-time token to an App, Agent or automation.',
     surface: 'identity',
     call: {
       method: 'POST',
-      endpoint: '/api/agents',
+      endpoint: '/api/service-accounts',
       caller:
-        'A signed-in human, from this console. Not the agent — the route requires a principal, and ' +
-        'an agent has none until this call has been made for it.',
+        'A signed-in human, from this console. Not the App or Agent that will use it — creating ' +
+        'non-human identities is an operator action.',
       note:
-        'Send id, what to call the agent within the tenant, and expires_at, seconds since the Unix ' +
+        'Send id, what to call the Service Account within the tenant, and expires_at, seconds since the Unix ' +
         'epoch. The expiry is never defaulted: a body without one is refused rather than given a ' +
         'lifetime this host picked. There is no tenant field, and there is nowhere one could be ' +
         'put — the tenant is read from the caller this host resolved, and a tenant in the body is ' +
@@ -239,26 +234,23 @@ export const STEPS: readonly Step[] = [
   },
   {
     id: 'authenticate',
-    title: 'Authenticate as that identity',
+    title: 'Authenticate with a Service Account',
     summary:
-      'Present the token on a request and have this host resolve you to the agent principal it ' +
-      'minted, in that agent’s tenant.',
-    surface: null,
-    call: null,
-    // The last sentence used to read "The only principals a deployment resolves today are humans
-    // who signed in through its identity provider", and that is false on a composition this
-    // repository ships: a host armed with the development identity resolves whatever its roster
-    // names, which may be an `agent:` or a `service:` handle —
-    // `dev_identity::tests::a_handle_resolves_to_the_principal_the_roster_armed` drives one. The
-    // operative claim, that a token this host minted resolves nowhere, was and is true; the
-    // sentence around it was not, on the document whose whole argument is honesty (X-52).
-    pending:
-      'No route on this host accepts an agent token. Minting stores a verifier and hands you the ' +
-      'token, and nothing yet resolves one back to a principal — so an agent holding a token is ' +
-      'not a caller this service can identify. What a deployment does resolve is whatever its ' +
-      'identity port was handed: the humans an identity provider signed in, or — on a development ' +
-      'host — the handles its own roster names, which may be agents but are names rather than ' +
-      'tokens this service minted.',
+      'Present the one-time token as a bearer credential and have this host resolve the Service ' +
+      'Account in its tenant.',
+    surface: 'identity',
+    call: {
+      method: 'GET',
+      endpoint: '/api/session',
+      caller: 'The App, Agent or automation holding the Service Account token.',
+      note:
+        'Send Authorization: Bearer <token>. A successful response identifies the principal as ' +
+        'kind service_account and carries no credential material.',
+      warn:
+        'A Service Account receives no authority merely by authenticating. Tenant grants still ' +
+        'decide which declared operations and channels it may use.',
+    },
+    pending: '',
   },
   {
     id: 'invoke',
@@ -276,9 +268,8 @@ export const STEPS: readonly Step[] = [
       // parameters exists to keep off this page.
       endpoint: '/api/operations/{operation}/invoke',
       caller:
-        'Any principal this host resolved. Today that means a signed-in human: nothing here yet ' +
-        'resolves an agent token, which is the “Authenticate as that identity” step above — so an ' +
-        'agent cannot reach this route until that one lands, however live the route is.',
+        'Any principal this host resolved, including a signed-in human or a Service Account ' +
+        'presenting its bearer token.',
       note:
         '{operation} is the catalogue’s own id, as served at /api/catalogue/connectors, and the ' +
         'body is that operation’s declared parameters verbatim — there is no envelope, no tenant, ' +

@@ -34,11 +34,18 @@ about one can never be misread as a sentence about the other.
 ### Principals and tenants
 
 Who is asking, and on whose behalf. A **principal** is resolved by the host's identity port — a
-signed-in human, or an agent presenting a token of its own. A **tenant** is derived from that
+signed-in human or a **Service Account** presenting its own bearer token. A Service Account has no
+model or loop; it is the API identity an App, Agent or other automation may use. A **tenant** is derived from that
 principal and from nothing a caller controls, which is the invariant the whole
 [credential boundary](/boundary) rests on.
 
-### Connections and credentials
+### Connectors, connections and credentials
+
+A **Connector** is the compiled declaration of what one vendor can do: operations, services,
+credential requirements, settings, event types and channel bindings. It is not a running
+integration. The historical Rust catalogue type is still named `Provider`; in product vocabulary,
+“provider” is qualified as **Model Provider** or **Identity Provider** and vendor integrations are
+Connectors.
 
 A **connection** is one tenant's configured relationship with one connector: the credential it needs,
 plus any non-secret per-connection values a templated connector requires. The two are stored
@@ -46,6 +53,28 @@ separately on purpose — a subdomain is not a credential, and one store holding
 "held" mean two different things.
 
 A credential is addressed, never handed out. Nothing that reads a connection returns a secret value.
+
+### Apps and Agents
+
+An **App Package** is an immutable versioned Flux Program plus provenance and installation
+requirements. An **App** is one tenant's installed package revision with reviewed, frozen bindings:
+connections, operations, datasources, triggers, model profile, scopes, risk ceiling and quotas.
+
+An **Agent** is a model plus an authored loop plus bounded operation and datasource capabilities. A
+**Managed Agent** is such an Agent declaration hosted inside an installed App. Agent is never a
+synonym for Service Account: the first is an execution runtime; the second is an API principal.
+
+### Datasources, events and triggers
+
+A **Datasource Definition** declares a readable record/retrieval surface without tenant values or
+credentials. A **Datasource** is the tenant-bound readable surface an installed App or Managed Agent
+can use. Operations *do*; datasources *know*.
+
+An **Event Type** is a declared schema/name. An **Event Delivery** is one occurrence with source,
+identity and delivery outcome. A **Trigger Declaration** names an event label and an Agent or Journey
+target; a **Trigger** is the tenant-installed binding of that declaration to an installed source and
+target. A webhook is only one Channel transport that can admit deliveries—it is not an Event Type or
+a Trigger.
 
 ### `invoke`
 
@@ -95,4 +124,3 @@ The [repository](https://github.com/codewandler/flux-exchange) carries the itemi
 is not built, and it is expected to stay accurate — a page or a type that implies a working service
 costs more than an honest gap. This site is a *third* rendering of overlapping facts, so treat the
 descriptor as the source and this page as the vocabulary.
-

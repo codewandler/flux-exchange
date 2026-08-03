@@ -1,7 +1,7 @@
 // Minting an agent from the console, and the one property the whole screen is shaped by.
 //
-// **The property.** X-36 mints an agent principal and answers with its token **once**. That is not
-// a UI convention this console chose and could relax — `crate::agent` stores a *verifier*, so this
+// **The property.** X-107 mints a Service Account principal and answers with its token **once**. That is not
+// a UI convention this console chose and could relax — the server stores a *verifier*, so this
 // host is genuinely unable to say the token a second time. A screen that implied otherwise would be
 // promising something no code here can deliver, and the operator would find out at the moment it
 // costs them most: after they navigated away.
@@ -29,6 +29,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { nextTick } from 'vue'
 
 import { mount, rendered, text, attributes, nodes, one } from './mount.mjs'
 
@@ -57,7 +58,7 @@ async function screen() {
     return (await import('../src/Agents.mts')).default
   } catch (error) {
     return assert.fail(
-      `the console has no screen an operator can mint an agent from: \`src/Agents.mts\` did not load (${error.message}). X-36 shipped POST /api/agents and no UI, so the best answer this console can give an agent author is still "ask a human to curl"`
+      `the console has no screen an operator can mint an agent from: \`src/Agents.mts\` did not load (${error.message}). X-36 shipped POST /api/service-accounts and no UI, so the best answer this console can give an agent author is still "ask a human to curl"`
     )
   }
 }
@@ -82,18 +83,18 @@ async function minting() {
 /**
  * The token, in the shape this host mints one.
  *
- * 64 hex characters, which is the shape `routes::agents::carries_a_token` looks for rather than a
+ * 64 hex characters, which is the shape `routes::service_accounts::carries_a_token` checks rather than a
  * field called `token` — so a fixture of the right *shape* is what makes the assertions below about
  * where it may and may not appear mean anything.
  */
-const TOKEN = 'b3f1a90c47d25e6188ab0f73c5d94e2076bb18ff4a3c05d9e71286435fa0cd97'
+const TOKEN = 'fxsa_b3f1a90c47d25e6188ab0f73c5d94e2076bb18ff4a3c05d9e71286435fa0cd97'
 
 /** When the minted agent's token stops resolving, as the service echoes it: seconds since epoch. */
 const EXPIRES_AT = 1793491200
 
-/** `POST /api/agents` answering `201`. The one disclosure, and the whole point of the route. */
+/** `POST /api/service-accounts` answering `201`. The one disclosure, and the whole point of the route. */
 const MINTED = {
-  principal: { kind: 'agent', id: 'ci-runner', tenant: 'acme' },
+  principal: { kind: 'service_account', id: 'ci-runner', tenant: 'acme' },
   expires_at: EXPIRES_AT,
   token: TOKEN,
   shown: 'once',
@@ -118,14 +119,22 @@ const signedIn = (over = {}) => ({ status: 'ready', principal: principal(over) }
  * A stub transport installed as the platform's, remembering everything it was asked.
  *
  * Installed globally rather than injected, deliberately: the screen mints by calling
- * `service.mintAgent` with no transport of its own, so this is the real path and not a seam opened
+ * `service.mintServiceAccount` with no transport of its own, so this is the real path and not a seam opened
  * for the test.
  */
-function serving(status, body) {
+function serving(status, body, accounts = []) {
   const asked = []
   const previous = globalThis.fetch
   globalThis.fetch = async (url, init) => {
     asked.push({ url, init })
+    const method = init?.method ?? 'GET'
+    if (method === 'GET' && url === '/api/service-accounts') {
+      return new Response(JSON.stringify({ service_accounts: accounts }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    if (method === 'DELETE') return new Response(null, { status: 204 })
     return new Response(JSON.stringify(body), {
       status,
       headers: { 'content-type': 'application/json' },
@@ -143,6 +152,12 @@ async function mintFrom(view, { id = 'ci-runner', days = '30' } = {}) {
 
 /** Every element on the page a reader could click. */
 const clickable = (root) => nodes(root).filter((node) => typeof node.props.onClick === 'function')
+
+/** Let an immediately-started metadata read and its Vue render complete. */
+async function settle() {
+  await new Promise((resolve) => setImmediate(resolve))
+  await nextTick()
+}
 
 /** How many times a string appears in another. */
 function occurrences(haystack, needle) {
@@ -194,20 +209,25 @@ test('an_operator_mints_from_the_console_and_the_token_is_shown_exactly_once', a
       !rendered(view.root).includes(TOKEN),
       'the mint screen renders a token before anybody minted one'
     )
-    assert.equal(stub.asked.length, 0, 'the mint screen wrote to the service merely by being opened')
+    assert.equal(
+      stub.asked.filter(({ init }) => init?.method === 'POST').length,
+      0,
+      'the Service Account screen wrote to the service merely by being opened'
+    )
 
     await mintFrom(view, { id: 'ci-runner', days: '30' })
 
     // The write went where X-36 put it, as a POST, with the agent's name and an expiry the operator
     // stated. `expires_at` is never defaulted by this host — a body without one is refused — so a
     // console that omitted it would send a request that cannot succeed.
-    assert.equal(stub.asked.length, 1, 'minting must cost exactly one request')
-    const [{ url, init }] = stub.asked
+    const writes = stub.asked.filter(({ init }) => init?.method === 'POST')
+    assert.equal(writes.length, 1, 'minting must cost exactly one write request')
+    const [{ url, init }] = writes
     assert.equal(init.method, 'POST')
-    assert.equal(url, '/api/agents')
+    assert.equal(url, '/api/service-accounts')
     const sent = JSON.parse(init.body)
     assert.equal(sent.id, 'ci-runner', 'the agent is named by the operator, not by this console')
-    assert.equal(typeof sent.expires_at, 'number', 'an agent token always carries an expiry')
+    assert.equal(typeof sent.expires_at, 'number', 'a Service Account token always carries an expiry')
     assert.ok(
       sent.expires_at > Math.floor(Date.now() / 1000),
       `the expiry sent (${sent.expires_at}) is already past, so this host would refuse it`
@@ -261,6 +281,36 @@ test('an_operator_mints_from_the_console_and_the_token_is_shown_exactly_once', a
   }
 })
 
+test('a_human_lists_and_revokes_service_accounts_without_retrieving_credentials', async () => {
+  const Agents = await screen()
+  const held = [{ id: 'nightly_report', expires_at: EXPIRES_AT }]
+  const stub = serving(201, MINTED, held)
+
+  try {
+    const view = mount(Agents, { session: signedIn() })
+    await settle()
+
+    const before = text(view.root)
+    assert.match(before, /Current Service Accounts/)
+    assert.match(before, /nightly_report/)
+    assert.ok(!before.includes(TOKEN), 'listing retrieved or rendered a bearer token')
+    assert.doesNotMatch(before, /verifier/i, 'listing rendered verifier-shaped storage data')
+
+    const revoke = one(view.root, 'data-agents', 'revoke')
+    assert.ok(revoke, 'a listed Service Account has no revoke action')
+    await view.fire(revoke, 'onClick')
+
+    const deletion = stub.asked.find(({ init }) => init?.method === 'DELETE')
+    assert.ok(deletion, 'revocation sent no DELETE')
+    assert.equal(deletion.url, '/api/service-accounts/nightly_report')
+    assert.match(text(view.root), /nightly_report\s+no longer authenticates/)
+    assert.equal(one(view.root, 'data-agents', 'revoke'), null, 'the revoked account remains listed')
+    view.unmount()
+  } finally {
+    stub.restore()
+  }
+})
+
 // ---------------------------------------------------------------------------------------------
 // 2. Gone when the reader leaves, and it does not come back.
 // ---------------------------------------------------------------------------------------------
@@ -283,23 +333,23 @@ test('navigating_away_and_returning_cannot_show_the_token_again', async () => {
     )
 
     // Coming back. A fresh view of the same screen, and no second mint.
-    const asked = stub.asked.length
+    const writes = stub.asked.filter(({ init }) => init?.method === 'POST').length
     const again = mount(Agents, { session: signedIn() })
     assert.ok(
       !rendered(again.root).includes(TOKEN),
       'returning to the mint screen showed the token again, which this host cannot do — it stores a verifier, so anything the console can show twice is something the console kept'
     )
     assert.equal(
-      stub.asked.length,
-      asked,
-      'returning to the screen asked the service for something; there is no route that hands a minted token back, so whatever this was, it was not that'
+      stub.asked.filter(({ init }) => init?.method === 'POST').length,
+      writes,
+      'returning to the screen minted again; metadata listing must never retrieve or recreate a token'
     )
     again.unmount()
 
     // And there is nothing to ask. The service module exposes one way to obtain a token and it is
     // the mint itself: no reader, no cache, no "last minted".
     const readers = Object.keys(service).filter(
-      (name) => /token/i.test(name) && !/^mintAgent$/.test(name)
+      (name) => /token/i.test(name) && !/^mintServiceAccount$/.test(name)
     )
     assert.deepEqual(
       readers,
@@ -348,16 +398,11 @@ test('the_screen_offers_no_affordance_that_implies_the_token_can_be_retrieved', 
 
     view.unmount()
 
-    // And nothing in this console reaches for an agent by name. `/api/agents` is a collection with
-    // no parameter and this build serves nothing under it — no listing, no revoke (X-38) — so a
-    // console that spelled a path there would be inviting a `404` on the one screen an operator
-    // reaches when a token has leaked.
-    for (const { name, code } of appSourcesWithoutComments()) {
-      assert.ok(
-        !/\/api\/agents\//.test(code),
-        `\`src/${name}\` names a route under /api/agents/, and nothing in this build serves one`
-      )
-    }
+    assert.equal(
+      Object.keys(service).some((name) => /(?:read|load|get).*token/i.test(name)),
+      false,
+      'the console exposes a token retrieval function; listing and revocation must carry metadata only'
+    )
   } finally {
     stub.restore()
   }
@@ -369,7 +414,7 @@ test('the_screen_offers_no_affordance_that_implies_the_token_can_be_retrieved', 
 
 test('the_token_is_persisted_nowhere_by_this_console', async () => {
   const Agents = await screen()
-  const { AGENTS_PATH } = await minting()
+  const { SERVICE_ACCOUNTS_PATH } = await minting()
   const stub = serving(201, MINTED)
 
   /** A store that remembers being written to. Node defines neither, so these are the only ones. */
@@ -408,8 +453,8 @@ test('the_token_is_persisted_nowhere_by_this_console', async () => {
       assert.ok(!url.includes(TOKEN), `the token reached the request URL \`${url}\``)
     }
     assert.deepEqual(
-      parseRoute(`#${AGENTS_PATH}`),
-      { name: 'agents' },
+      parseRoute(`#${SERVICE_ACCOUNTS_PATH}`),
+      { name: 'service-accounts' },
       'the mint screen’s route carries fields; a route that can hold a token is a token in the address bar and in every history entry after it'
     )
 
@@ -475,7 +520,7 @@ test('nothing_above_the_view_is_given_the_token_to_hold', async () => {
   // half of "navigating away takes the token with it": a `v-if` tears the instance down and its
   // state with it, while a `v-show` leaves it mounted and holding the token behind whatever screen
   // the reader went to, and a `<KeepAlive>` around it does the same thing more deliberately.
-  const branch = /<template\s+v-(?:if|else-if)="route\.name === 'agents'">([\s\S]*?)<\/template>/.exec(app)
+  const branch = /<template\s+v-(?:if|else-if)="route\.name === 'service-accounts'">([\s\S]*?)<\/template>/.exec(app)
   assert.ok(
     branch,
     'the mint screen is not mounted behind a route branch that destroys it; a `v-show` or a wrapper that keeps it alive would leave the token in memory on the page the reader navigated to'
@@ -498,7 +543,7 @@ test('minting_is_offered_only_to_a_principal_this_host_would_admit', async () =>
   assert.deepEqual(
     [...MAY_MINT],
     ['user'],
-    'the console’s idea of who may mint no longer matches `routes::agents::MAY_MINT`, which admits a `User` and nothing else'
+    'the console’s idea of who may mint no longer matches `routes::service_accounts::MAY_MINT`, which admits a `User` and nothing else'
   )
 
   const form = async (session) => {
@@ -593,7 +638,7 @@ test('a_mint_that_never_reached_the_service_is_not_a_refusal', async () => {
 
     const body = text(view.root)
     assert.ok(
-      body.includes('/api/agents'),
+      body.includes('/api/service-accounts'),
       `a failed write must name the endpoint that did not answer; got: ${body}`
     )
     assert.equal(one(view.root, 'data-agents', 'token'), null)
@@ -658,7 +703,7 @@ test('what_the_token_can_and_cannot_do_today_is_derived_from_surfaces', async ()
   const authenticate = STEPS.find((step) => step.id === 'authenticate')
   const invoke = STEPS.find((step) => step.id === 'invoke')
   assert.ok(authenticate && invoke)
-  assert.equal(available(authenticate, SURFACES), false, 'X-37 has landed; this page needs rewriting')
+  assert.equal(available(authenticate, SURFACES), true, 'Service Account bearer authentication must stay live')
 
   // **Inverted by X-42, and this is the correction rather than a relaxation.** This read
   // `assert.equal(available(invoke, SURFACES), false)`, which was true of the console's screens and
@@ -678,11 +723,9 @@ test('what_the_token_can_and_cannot_do_today_is_derived_from_surfaces', async ()
     await mintFrom(view)
     const body = text(view.root)
 
-    // It authenticates nothing yet (X-37), in `surfaces.mts`'s own words rather than in a second
-    // sentence that could drift from it.
     assert.ok(
-      body.includes(withheld(authenticate, SURFACES)),
-      `the screen must say the token authenticates nothing yet, in the words the model already carries; got: ${body}`
+      body.includes(authenticate.summary),
+      `the screen must say the token authenticates as a Service Account; got: ${body}`
     )
     // And it authorises nothing beyond any principal (X-13).
     assert.ok(
@@ -758,10 +801,10 @@ test('the_derivation_is_live_and_takes_claims_off_the_page_rather_than_putting_t
     /no grant model/i,
     'the screen still tells an operator there is no grant model, which stopped being true in X-13'
   )
-  assert.equal(
+  assert.match(
     authorisation(SURFACES, /* a build where a token can be presented */ true),
-    '',
-    'the screen goes on answering what a token authorises in a build where one can actually be presented — that is a grant question (X-13) and this page must stop answering it rather than answer it wrongly'
+    /grants no authority by itself/i,
+    'a live bearer token must be distinguished from the grants that bound its authority'
   )
 })
 
@@ -842,15 +885,21 @@ test('the_clipboard_write_reports_what_actually_happened', async () => {
 // 7. Where it hangs, and what it is not.
 // ---------------------------------------------------------------------------------------------
 
-test('the_mint_screen_is_reachable_and_is_not_declared_a_platform_surface', async () => {
-  const { AGENTS_PATH } = await minting()
+test('the_service_account_screen_is_canonical_and_the_retired_fragment_redirects', async () => {
+  const { LEGACY_AGENTS_PATH, SERVICE_ACCOUNTS_PATH } = await minting()
 
   assert.equal(
-    parseRoute(`#${AGENTS_PATH}`).name,
-    'agents',
+    parseRoute(`#${SERVICE_ACCOUNTS_PATH}`).name,
+    'service-accounts',
     'no fragment resolves to the mint screen, so nothing can reach it'
   )
-  assert.notEqual(AGENTS_PATH, ONBOARDING_PATH, 'the mint screen and the onboarding page are one page')
+  assert.notEqual(SERVICE_ACCOUNTS_PATH, ONBOARDING_PATH, 'the mint screen and the onboarding page are one page')
+  assert.equal(parseRoute(`#${LEGACY_AGENTS_PATH}`).name, 'service-accounts')
+  assert.match(
+    source('routing.ts'),
+    /replaceState[\s\S]*SERVICE_ACCOUNTS_PATH/,
+    'the retired fragment resolves in memory but remains visible in browser history'
+  )
 
   // Reachable from the footer, beside the page that sends an agent author here. Not from the rail:
   // `surfaces.mts` states what this platform *is*, and minting is something an operator does on the
@@ -860,11 +909,11 @@ test('the_mint_screen_is_reachable_and_is_not_declared_a_platform_surface', asyn
   assert.ok(footer, 'App.vue renders no footer')
   assert.match(
     footer[1],
-    /AGENTS_PATH/,
+    /SERVICE_ACCOUNTS_PATH/,
     'the footer does not link to the mint screen, so an operator has no way to find it'
   )
   assert.ok(
-    !SURFACES.some((surface) => surface.path === AGENTS_PATH),
+    !SURFACES.some((surface) => surface.path === SERVICE_ACCOUNTS_PATH),
     'the mint screen is declared as a platform surface, which puts it in the main rail and claims this platform has a seventh surface'
   )
 

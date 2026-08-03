@@ -14,7 +14,7 @@ Managed Agent and Service Account one meaning across the Flux family and labels 
 live versus target architecture.
 
 > [!WARNING]
-> **Status: v0.15.0 — credentials, gated operations, versioned workflows, and generated channels.**
+> **Status: v0.16.0 — Service Accounts, gated operations, versioned workflows, and generated channels.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
 > connector catalogue and a session without OIDC setup. The ordinary composition supports a
@@ -22,8 +22,9 @@ live versus target architecture.
 > is configured. The authorization code is redeemed back-channel and the id token's signature is
 > verified against the provider's published keys, so `/api/signin` redirects to a real provider —
 > configure the eight `FLUX_EXCHANGE_OIDC_*` variables and it works end to end. Connections can be
-> created, listed, **rotated** and deleted per tenant, and an agent principal can be **minted** — it
-> cannot yet authenticate. **`invoke` runs**: `POST /api/operations/{operation}/invoke` executes one
+> created, listed, **rotated** and deleted per tenant. A signed-in human can create, list and revoke
+> **Service Accounts**, whose `fxsa_…` bearer tokens authenticate at the same guarded API boundary
+> as browser sessions. **`invoke` runs**: `POST /api/operations/{operation}/invoke` executes one
 > catalogue operation for the caller's tenant, with the request built by `connector_pack` from the
 > operation's own compiled Flux — **gated by a grant** since X-13, and limited to the forty
 > connectors whose base URL needs no per-tenant configuration. An operation runs only if one of the
@@ -93,6 +94,13 @@ MultiTenant
   refuses: socket, process, container, plugin  (they execute on this host)
 ```
 
+HTTP is the first delivered outbound runtime, not the product boundary. Every official integration
+— including Docker, Kubernetes, SQL, Prometheus and other rich protocols — is moving to a connector
+whose runtime is declared upstream. This service will execute or delegate those same connector
+addresses through the X-111 program; it will not grow a second Exchange-specific adapter catalogue.
+The current generated WebSocket channel path is the first hosted rich-protocol slice, while general
+socket/process/container/plugin dispatch, streamed results and leases remain planned work.
+
 **A grant selects operations by declared metadata, not by name.** A grant written as a list of ids
 is a list somebody maintains, and it stops covering a connector the moment that connector gains an
 operation. `risk <= low` covers the new one correctly on the day it lands. An agent's token grants
@@ -104,12 +112,13 @@ against one tenant's connections, not a vendor secret.
 | | |
 |---|---|
 | `crates/exchange-host` | Principal-derived tenancy, grants, runtime admission, credential/settings/channel stores, ordinary invocation, zero-I/O generated channel planning, and tenant-scoped workflow drafts plus immutable published versions. Workflow and channel execution still end in Flux and `connector_pack`; this crate holds no transport of its own. |
-| `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant connections and grants, agent minting, ordinary invocation, workflow authoring/publication, durable SQLite run records, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
+| `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant connections and grants, Service Account lifecycle and bearer authentication, ordinary invocation, workflow authoring/publication, durable SQLite run records, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
 | `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows, Activity and Channels. The workflow editor uses the upstream Flux graph contract, protects unsaved drafts, retains exact source, and paints durable value-free run events back onto nodes. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
-**Not built, despite being described in the design:** a second connection to one
+**Not built, despite being described in the design:** rich outbound runtime-plan dispatch, a second connection to one
 connector (the address has no instance dimension until upstream publishes one), webhook channels,
-durable event replay/inboxes, leases-in-anger, and the catalogue loader. Stored workflows,
+durable event replay/inboxes, general operation streams, isolated per-tenant workers,
+leases-in-anger, runtime artifact installation/attestation, and the catalogue loader. Stored workflows,
 workflow execution records and generated WebSocket channels moved off this list in X-98 and X-101.
 The credential store has moved off this
 list and is described below, and X-47 moved
@@ -139,24 +148,22 @@ The built-in composition admits local socket execution only when `--dev` selecte
 channel placement refuses before credentials are read; a product embedding `exchange-host` must
 bind its own operator-selected remote placement to run those channels safely.
 
-### An agent token is minted, and nothing yet verifies one
+### Service Accounts are the non-human API identity
 
-`POST /api/agents` mints an agent principal for the authenticated caller's tenant and returns its
-token **once**; this host keeps `SHA-256(token)` and never the token, in a store of its own bound by
-`FLUX_EXCHANGE_AGENTS`. Reading that store end to end yields the roster — which agents exist, in
-which tenants, until when — and no value anybody can present.
+`POST /api/service-accounts` creates a Service Account for the authenticated human's tenant and
+returns an `fxsa_…` token **once**. `GET /api/service-accounts` lists ids and expiries without token
+or verifier material; `DELETE /api/service-accounts/{id}` revokes one. The host keeps only
+`SHA-256(token)` in the owner-only file named by `FLUX_EXCHANGE_SERVICE_ACCOUNTS`.
 
-**Only a signed-in human mints.** An agent or a service presenting a credential of its own is
-refused with `403`, because a principal that can create principals is one whose revocation does not
-end the access it gave — the descendants would be ordinary agents with no recorded relationship to
-the token that was revoked. `docs/designs/agent-access.md` carries the argument, including why a
-`Service` is refused as well.
+The token is presented as `Authorization: Bearer …` and resolves to `kind: service_account` in its
+original tenant until expiry or revocation. Authentication grants nothing by itself: the same
+metadata-selected grants bound invocation and inbound subscriptions, and a Service Account cannot
+edit connections, settings or grants, create another principal, or read a credential.
 
-**Presenting such a token authenticates nothing yet.** Nothing binds the agent store to the
-`Identity` port, so a minted token is refused by every guarded route exactly as an unknown value is;
-and there is no way to list or revoke one, so minting is currently a one-way door until the token's
-own expiry passes. Both are the next two stories of the same epic, and the gap is stated here rather
-than left to be discovered by an operator who has just handed a token to an agent.
+For v0.16 only, `POST /api/agents` and `FLUX_EXCHANGE_AGENTS` remain compatibility spellings. The
+route emits deprecation, successor and v0.17-removal headers; differing canonical and legacy store
+paths refuse startup. Existing unprefixed tokens keep resolving without rewriting stored material.
+The [migration design](docs/designs/service-accounts.md) owns the removal checkpoint.
 
 ### The credential store, and what does not protect it
 

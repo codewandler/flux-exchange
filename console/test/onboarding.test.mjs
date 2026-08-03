@@ -172,7 +172,7 @@ test('the_derivation_is_live_and_not_a_coincidence', () => {
 
   // And the other direction, which is the one that protects a reader: a surface that regresses to
   // unserved takes its claim off the page with it.
-  const minted = step('be-minted')
+  const minted = step('create-service-account')
   assert.equal(available(minted, SURFACES), true)
   assert.equal(
     available(minted, asIf(minted.surface, { served: false })),
@@ -245,18 +245,18 @@ test('the_reason_a_step_is_withheld_is_the_surface_s_own_words', () => {
 // machinery that produces it.
 // ---------------------------------------------------------------------------------------------
 
-test('today_an_agent_can_be_minted_and_the_service_invokes_but_no_agent_can_authenticate', async () => {
+test('today_a_service_account_can_be_created_authenticate_and_invoke_with_a_grant', async () => {
   const html = await page()
 
   assert.equal(
-    available(step('be-minted')),
+    available(step('create-service-account')),
     true,
-    'X-36 mints an agent principal and shows its token once; the page must say so'
+    'the canonical resource creates a Service Account and shows its token once'
   )
   assert.equal(
     available(step('authenticate')),
-    false,
-    'nothing in this build resolves an agent token to a principal (X-37), and the page must not imply one does'
+    true,
+    'the Service Account store resolves its bearer token and the page must say so'
   )
 
   // **This assertion is inverted from what X-41 shipped, and the inversion is the point.** It read
@@ -277,10 +277,10 @@ test('today_an_agent_can_be_minted_and_the_service_invokes_but_no_agent_can_auth
   )
 
   // The concrete step that works today, on the page and not only in the model.
-  const mint = step('be-minted')
+  const mint = step('create-service-account')
   assert.equal(mint.call.method, 'POST')
-  assert.equal(mint.call.endpoint, '/api/agents')
-  assert.ok(html.includes('/api/agents'), `the page must name the route that mints an agent; got: ${html}`)
+  assert.equal(mint.call.endpoint, '/api/service-accounts')
+  assert.ok(html.includes('/api/service-accounts'), `the page must name the route that mints an agent; got: ${html}`)
   assert.match(
     html,
     /shown\s+(?:<[^>]*>)?once/i,

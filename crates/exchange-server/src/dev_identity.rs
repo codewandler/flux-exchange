@@ -13,7 +13,7 @@
 //! One environment variable, [`DEV_IDENTITY_ENV`], holding a roster of the principals it will mint:
 //!
 //! ```text
-//! FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,agent:triage-bot@acme
+//! FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,service_account:triage-bot@acme
 //! ```
 //!
 //! - **Unset** — no identity port is bound at all. That is the state the host already refuses a
@@ -44,7 +44,9 @@ pub const DEV_IDENTITY_ENV: &str = "FLUX_EXCHANGE_DEV_IDENTITY";
 /// The kinds a roster entry may name, in the spelling it must use.
 const KINDS: &[(&str, PrincipalKind)] = &[
     ("user", PrincipalKind::User),
-    ("agent", PrincipalKind::Agent),
+    ("service_account", PrincipalKind::ServiceAccount),
+    // v0.16 compatibility for development rosters written before X-107.
+    ("agent", PrincipalKind::ServiceAccount),
     ("service", PrincipalKind::Service),
 ];
 
@@ -320,7 +322,7 @@ mod tests {
             .expect("a rostered handle resolves")
             .expect("and is not anonymous");
         assert_eq!(bot.tenant().as_str(), "globex");
-        assert_eq!(bot.kind(), PrincipalKind::Agent);
+        assert_eq!(bot.kind(), PrincipalKind::ServiceAccount);
     }
 
     /// The trait's line, at the port itself: nothing presented is anonymous, something presented

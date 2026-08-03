@@ -82,9 +82,10 @@ pub enum PrincipalKind {
     /// A signed-in human. Manages connections, credentials and grants; may call operations
     /// interactively.
     User,
-    /// A non-human caller holding its own minted token. **The primary caller** — humans sign in to
-    /// wire things up and to see what happened; agents are what call operations all day.
-    Agent,
+    /// A non-human caller holding its own minted token. The legacy wire spelling `agent` remains a
+    /// deserialization alias through v0.16; serialization is always canonical.
+    #[serde(alias = "agent")]
+    ServiceAccount,
     /// Another backend acting on behalf of one of its own accounts and actors.
     Service,
 }
@@ -100,7 +101,7 @@ impl std::fmt::Display for PrincipalKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::User => "user",
-            Self::Agent => "agent",
+            Self::ServiceAccount => "service_account",
             Self::Service => "service",
         })
     }
@@ -146,7 +147,7 @@ impl Principal {
 
 impl std::fmt::Display for Principal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}:{}@{}", self.kind, self.id, self.tenant)
+        write!(f, "{}:{}@{}", self.kind, self.id, self.tenant)
     }
 }
 
@@ -186,14 +187,13 @@ mod tests {
 
     /// A kind renders the same way it serialises.
     ///
-    /// Two spellings of one thing is how a refusal comes to quote `Agent` at a caller that sent
-    /// `agent`, and the wire spelling is the one already published — by this type's `Serialize`,
-    /// and by the development identity's roster.
+    /// Two spellings of one thing is how a refusal comes to quote a retired noun at a caller that
+    /// sent the compatibility alias, so rendering always follows canonical serialization.
     #[test]
     fn a_kind_renders_as_it_serialises() {
         for kind in [
             PrincipalKind::User,
-            PrincipalKind::Agent,
+            PrincipalKind::ServiceAccount,
             PrincipalKind::Service,
         ] {
             assert_eq!(
@@ -203,14 +203,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_legacy_agent_kind_deserialises_only_as_a_service_account() {
+        let legacy: PrincipalKind = serde_json::from_str("\"agent\"").expect("legacy alias");
+        assert_eq!(legacy, PrincipalKind::ServiceAccount);
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("canonical serialization"),
+            "\"service_account\""
+        );
+    }
+
     /// A principal renders its tenant, because an audit line that omits it cannot be read twice.
     #[test]
     fn a_principal_displays_its_tenant() {
         let principal = Principal::new(
-            PrincipalKind::Agent,
+            PrincipalKind::ServiceAccount,
             "triage-bot",
             Tenant::new("acme").unwrap(),
         );
-        assert_eq!(principal.to_string(), "Agent:triage-bot@acme");
+        assert_eq!(principal.to_string(), "service_account:triage-bot@acme");
     }
 }

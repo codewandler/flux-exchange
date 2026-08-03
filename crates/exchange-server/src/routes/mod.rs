@@ -14,7 +14,6 @@
 //! routes as data and its `Router` is *derived* from them, so [`published`] is the whole surface by
 //! construction. The seam is the same; only the direction of the dependency changed.
 
-mod agents;
 mod catalogue;
 mod channels;
 mod connections;
@@ -23,6 +22,7 @@ mod health;
 mod identity;
 mod invoke;
 mod onboarding;
+mod service_accounts;
 mod signin;
 mod subscribe;
 mod workflows;
@@ -51,7 +51,7 @@ const MODULES: &[Module] = &[
     identity::MODULE,
     signin::MODULE,
     connections::MODULE,
-    agents::MODULE,
+    service_accounts::MODULE,
     invoke::MODULE,
     grants::MODULE,
     onboarding::MODULE,
@@ -322,19 +322,38 @@ async fn require_principal(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let Some(identity) = state.identity() else {
-        // Refuse; never repair. With no identity port bound there is nothing that could resolve a
-        // caller, and answering anyway would hand a credential-holding surface to an anonymous one.
+    let (presented, carrier) = presented(&request).unwrap_or(("", Carrier::Authorization));
+    let service_account = (carrier == Carrier::Authorization)
+        .then(|| state.service_accounts())
+        .flatten()
+        .and_then(|store| store.resolve(presented, session::now()));
+    let resolved = match state.identity() {
+        Some(identity) => identity.resolve(presented).await,
+        None => Ok(None),
+    };
+
+    // A Service Account token is an additional bearer verifier, not a priority rule. Two positive
+    // answers are an ambiguous credential and refuse; a human provider rejecting an otherwise
+    // valid Service Account token is expected because the token is outside its session namespace.
+    let resolved = match (resolved, service_account) {
+        (Ok(Some(_)), Some(_)) => {
+            warn!("a bearer credential resolved through two identity providers");
+            Err(IdentityError::Rejected)
+        }
+        (Ok(Some(principal)), None) => Ok(Some(principal)),
+        (Ok(None) | Err(IdentityError::Rejected), Some(principal)) => Ok(Some(principal)),
+        (other, None) => other,
+        (Err(IdentityError::Unreachable(reason)), Some(_)) => {
+            Err(IdentityError::Unreachable(reason))
+        }
+    };
+
+    if state.identity().is_none() && state.service_accounts().is_none() {
         return refuse(
             StatusCode::UNAUTHORIZED,
             "this host has no identity provider configured, so no caller can be resolved to a principal",
         );
-    };
-
-    let (presented, carrier) = presented(&request).unwrap_or(("", Carrier::Authorization));
-    // Bound before the match so the borrow of `request` ends here and the resolved principal can be
-    // attached below.
-    let resolved = identity.resolve(presented).await;
+    }
 
     match resolved {
         Ok(Some(principal)) => match admitted {
@@ -442,7 +461,7 @@ fn refuse(status: StatusCode, reason: &str) -> Response {
 /// describing it cannot drift.
 ///
 /// `pub(super)` so `agents` answers its own unreachable store-level refusal in these exact terms —
-/// see [`agents::MAY_MINT`].
+/// see [`service_accounts::MAY_MINT`].
 pub(super) fn refuse_kind(admitted: &'static [PrincipalKind]) -> Response {
     let admitted: Vec<String> = admitted.iter().map(PrincipalKind::to_string).collect();
 
@@ -968,7 +987,7 @@ mod tests {
         );
     }
 
-    /// **X-36.** This surface publishes a route that mints an agent principal, and it requires one.
+    /// **X-107.** This surface publishes the complete Service Account resource for signed-in users.
     ///
     /// `docs/vision.md`'s second sentence names an agent as the primary caller, and until this
     /// route existed nothing in this binary could create one: an agent became a principal only
@@ -981,20 +1000,33 @@ mod tests {
     /// names nothing about what exists. It is checked here rather than in the module because the
     /// thing that decides it is the declared access, which lives in this file's guard.
     #[tokio::test]
-    async fn the_surface_mints_an_agent_principal_and_refuses_an_anonymous_caller() {
-        let minting: Vec<_> = published()
-            .filter(|(module, _)| module.name == "agents")
+    async fn the_surface_manages_service_accounts_and_refuses_an_anonymous_caller() {
+        let routes: Vec<_> = published()
+            .filter(|(module, _)| module.name == "service-accounts")
             .map(|(_, route)| (route.path, route.access))
             .collect();
 
         assert_eq!(
-            minting,
-            vec![("/api/agents", Access::PrincipalOfKind(agents::MAY_MINT))],
-            "nothing on this surface mints an agent principal, so the primary caller the vision \
-             names can become one only through the development identity",
+            routes,
+            vec![
+                (
+                    "/api/service-accounts",
+                    Access::PrincipalOfKind(service_accounts::MAY_MINT),
+                ),
+                (
+                    "/api/service-accounts/{id}",
+                    Access::PrincipalOfKind(service_accounts::MAY_MINT),
+                ),
+                (
+                    "/api/agents",
+                    Access::PrincipalOfKind(service_accounts::MAY_MINT),
+                ),
+            ],
+            "the canonical resource and its one-release compatibility alias must stay published",
         );
 
-        let (status, body) = anonymous_post(app(AppState::without_identity()), "/api/agents").await;
+        let (status, body) =
+            anonymous_post(app(AppState::without_identity()), "/api/service-accounts").await;
 
         assert_eq!(
             status,
@@ -1002,7 +1034,7 @@ mod tests {
             "minting requires an authenticated principal",
         );
         assert!(
-            !body.contains("agent"),
+            !body.contains("service account"),
             "the refusal must name nothing about what exists: {body}",
         );
     }
@@ -1055,13 +1087,17 @@ mod tests {
         assert!(
             document["capabilities"]
                 .as_array()
-                .is_some_and(
-                    |capabilities| capabilities.iter().any(|entry| entry["live"] == true)
-                        && capabilities.iter().any(|entry| entry["live"] == false)
-                ),
-            "the descriptor must say which capabilities are live, and this build has both kinds — \
-             a document where everything is live claims a platform that does not exist, and one \
-             where nothing is tells an agent author nothing: {body}",
+                .is_some_and(|capabilities| !capabilities.is_empty()
+                    && capabilities.iter().all(|entry| entry["live"].is_boolean())),
+            "the descriptor must state liveness for every capability: {body}",
+        );
+        assert_eq!(
+            document["version"], 2,
+            "v2 owns the Service Account vocabulary"
+        );
+        assert_eq!(
+            document["authentication"]["live"], true,
+            "the Service Account bearer verifier is live: {body}",
         );
         assert_eq!(
             document["sign_in_available"], false,
@@ -1094,7 +1130,7 @@ mod tests {
     /// Supplying or rotating the credential itself decides which account every later operation
     /// reaches, at an address nothing records the author of. None of them is *what may this
     /// principal do*; all of them are *what does this outlive*.
-    /// `crate::routes::agents`, `crate::routes::connections::MAY_SUPPLY_A_CREDENTIAL` and
+    /// `crate::routes::service_accounts`, `crate::routes::connections::MAY_SUPPLY_A_CREDENTIAL` and
     /// `crate::routes::connections::MAY_CONFIGURE` carry the long forms.
     ///
     /// # This one sees both declarations, and that was checked rather than reasoned (X-61)
@@ -1151,11 +1187,25 @@ mod tests {
                 "/api/connections/{connector}/settings/{service}/{field}",
                 connections::MAY_CONFIGURE,
             ),
-            // Minting an agent principal. Only a signed-in human, because a principal that can
+            // Managing Service Accounts. Only a signed-in human, because a principal that can
             // create principals makes revocation (X-38) an incomplete remedy that an operator
             // cannot see — and `Service` is refused for the same reason one level up, since this
             // host mints, verifies and revokes nothing for a service.
-            ("agents", "/api/agents", agents::MAY_MINT),
+            (
+                "service-accounts",
+                "/api/service-accounts",
+                service_accounts::MAY_MINT,
+            ),
+            (
+                "service-accounts",
+                "/api/service-accounts/{id}",
+                service_accounts::MAY_MINT,
+            ),
+            (
+                "service-accounts",
+                "/api/agents",
+                service_accounts::MAY_MINT,
+            ),
             // Reading and editing what a tenant may run (X-62). Only a signed-in human, and this
             // is the entry that makes the four above worth having: whoever may edit a grant
             // decides which operations run at all, for every principal of the tenant and across

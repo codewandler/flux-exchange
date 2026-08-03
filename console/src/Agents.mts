@@ -1,10 +1,10 @@
-// Minting an agent, and the one disclosure this console will ever make.
+// Creating a Service Account, and the one disclosure this console will ever make.
 //
-// X-36 shipped `POST /api/agents` and deliberately no UI. X-41 published the page that tells an
+// X-36 shipped `POST /api/service-accounts` and deliberately no UI. X-41 published the page that tells an
 // agent author how to get an identity, and the best answer it could give was "ask a human to
 // `curl`". This is the human's screen, and it is shaped end to end by one property:
 //
-//   > **The token is shown once.** `crate::agent` keeps a *verifier*, so this host is genuinely
+//   > **The token is shown once.** The Service Account store keeps a *verifier*, so this host is genuinely
 //   > unable to say it a second time. That is the design, not a limitation to work around.
 //
 // Three consequences decide everything below.
@@ -18,10 +18,9 @@
 // in this `setup`'s own closure, and it is destroyed with the component instance. Navigating away
 // is not a handler that remembers to clear something; it is the state ceasing to exist.
 //
-// **There is no affordance that implies retrieval.** No "show again", no reveal toggle, no history,
-// no listing. The one control that touches the token after it is shown takes it *off* the page and
-// cannot put it back, because there is nothing left to put back. `service.mts` has no function that
-// could fetch one, which is the same statement one layer down.
+// **Management never implies retrieval.** Listing shows ids and expiry, and revocation takes an id.
+// Neither response can carry a token or verifier. The one control that touches a newly minted token
+// takes it off the page and cannot put it back because there is nothing left to retrieve.
 //
 // **The screen offers minting only to a principal this host would admit.** X-40 settled that: a
 // `User`, and nothing else. Offering the button to an agent or a service would teach an operator
@@ -33,16 +32,26 @@
 // screen will meet it: a cookie-carried caller **does** receive a readable token here, unlike at
 // `/api/session`. Cross-site is closed by `SameSite=Strict`. Same-origin script is not and cannot
 // be — the token is on the page by construction, and there is no arrangement in which a human is
-// shown one and script running as that human is not. The remedy is revocation, which is X-38 and is
-// not built; that is why the expiry is stated on every mint and is never defaulted.
+// shown one and script running as that human is not. The remedies are immediate revocation and a
+// bounded expiry; that is why the expiry is stated on every mint and is never defaulted.
 //
 // A render function rather than a single-file component, following `Connect.mts` and
 // `ConsoleShell.mts`: the claims above are only worth anything if a test drives them, and a render
 // function mounts under a plain `node --test` with no bundler and no new dependency. Its rules live
 // in `agents.css` for the reason `shell.css` gives.
 
-import { defineComponent, h, ref, shallowRef, type PropType, type VNode } from 'vue'
-import { AGENTS_ENDPOINT, mintAgent, type MintOutcome, type MintedAgent } from './service.mts'
+import { defineComponent, h, ref, shallowRef, watch, type PropType, type VNode } from 'vue'
+import {
+  SERVICE_ACCOUNTS_ENDPOINT,
+  loadServiceAccounts,
+  mintServiceAccount,
+  revokeServiceAccount,
+  type MintOutcome,
+  type MintedServiceAccount,
+  type RevokeServiceAccountOutcome,
+  type ServiceAccountSummary,
+  type ServiceAccountsState,
+} from './service.mts'
 import { SIGNIN_ENDPOINT, type ServiceFailure, type ServiceRefusal, type SessionState } from './service.mts'
 import {
   authorisation,
@@ -129,7 +138,7 @@ function copyNotice(copied: Copied | null): VNode | null {
 
 /** The one screen in this console that renders a credential value, and everything it owes for it. */
 function mintedPanel(
-  minted: MintedAgent,
+  minted: MintedServiceAccount,
   copied: Copied | null,
   copy: () => void,
   discard: () => void
@@ -143,7 +152,7 @@ function mintedPanel(
       `${SERVICE} does not keep this token. It keeps a verifier: enough to check a token presented ` +
         'later, and not enough to reconstruct one. So this host cannot show it to you again — not ' +
         'on this page, not on another, not through any route it serves — and nothing here is ' +
-        'holding a copy back. If it is lost, the remedy is to mint another agent, not to look it up.'
+        'holding a copy back. If it is lost, revoke this Service Account and create another; do not look it up.'
     ),
 
     // The disclosure. In text, in one place, and deliberately not in an attribute: a value in
@@ -163,7 +172,7 @@ function mintedPanel(
     ]),
 
     h('dl', { class: 'agents__facts' }, [
-      h('dt', null, 'Agent'),
+      h('dt', null, 'Service Account'),
       h('dd', null, h('code', null, minted.principal.id)),
       h('dt', null, 'Kind'),
       h('dd', null, minted.principal.kind),
@@ -178,10 +187,8 @@ function mintedPanel(
     h(
       'p',
       { class: 'agents__revocation' },
-      'There is no way to revoke this token — not from this console, and not from this host, which ' +
-        'serves no route that would. Until there is, a token that leaks stops working when the ' +
-        'expiry above passes and not before. That is the whole reason the lifetime is yours to ' +
-        'state and is never defaulted for you.'
+      'If this token is lost or exposed, use Revoke below. Revocation removes its verifier, so the ' +
+        'token stops authenticating immediately; expiry remains the backstop and is never defaulted.'
     ),
 
     // One-way. The reader has stored it and does not want it on a screen behind them; there is
@@ -263,6 +270,17 @@ export default defineComponent({
     /** What the last mint did, or `null` before there has been one. Carries the token. */
     const result = shallowRef<MintOutcome | null>(null)
 
+    /** Listed identities carry only id and expiry; no token can enter this state. */
+    const accountsState = shallowRef<ServiceAccountsState | null>(null)
+
+    /** The last revocation result and the id it concerned. */
+    const revocation = shallowRef<
+      ({ id: string } & RevokeServiceAccountOutcome) | null
+    >(null)
+
+    /** The id whose verifier is currently being removed. */
+    const revoking = ref<string | null>(null)
+
     /** Whether a mint is in flight, so the form cannot be submitted twice. */
     const busy = ref(false)
 
@@ -286,7 +304,22 @@ export default defineComponent({
       result.value = null
       copied.value = null
       busy.value = true
-      result.value = await mintAgent({ id: id.value.trim(), expiresAt: expiryFromNow(chosen) })
+      const outcome = await mintServiceAccount({
+        id: id.value.trim(),
+        expiresAt: expiryFromNow(chosen),
+      })
+      result.value = outcome
+      if (outcome.status === 'minted' && accountsState.value?.status === 'ready') {
+        const added: ServiceAccountSummary = {
+          id: outcome.minted.principal.id,
+          expiresAt: outcome.minted.expiresAt,
+        }
+        accountsState.value = {
+          status: 'ready',
+          accounts: [...accountsState.value.accounts.filter((entry) => entry.id !== added.id), added]
+            .sort((left, right) => left.id.localeCompare(right.id)),
+        }
+      }
       busy.value = false
     }
 
@@ -301,6 +334,35 @@ export default defineComponent({
       result.value = null
       copied.value = null
     }
+
+    async function refreshAccounts(): Promise<void> {
+      accountsState.value = await loadServiceAccounts()
+    }
+
+    async function revokeAccount(id: string): Promise<void> {
+      if (revoking.value !== null) return
+      revoking.value = id
+      const outcome = await revokeServiceAccount(id)
+      revocation.value = { id, ...outcome }
+      if (outcome.status === 'revoked' && accountsState.value?.status === 'ready') {
+        accountsState.value = {
+          status: 'ready',
+          accounts: accountsState.value.accounts.filter((entry) => entry.id !== id),
+        }
+        if (result.value?.status === 'minted' && result.value.minted.principal.id === id) discard()
+      }
+      revoking.value = null
+    }
+
+    // The session normally arrives after the component mounts. Load only once it proves this is a
+    // signed-in human; anonymous and Service Account callers are not invited to probe the route.
+    watch(
+      () => gateOf(props.session),
+      (gate) => {
+        if (gate === 'may-mint' && accountsState.value === null) void refreshAccounts()
+      },
+      { immediate: true }
+    )
 
     /** A labelled box. The name and the lifetime, which the operator states and this console does not. */
     const field = (name: string, label: string, hint: string, value: string, attributes: object) =>
@@ -328,7 +390,7 @@ export default defineComponent({
         field(
           'id',
           'Name',
-          'What to call this agent within your tenant. It is a name, not an address.',
+          'What to call this Service Account within your tenant. It is a name, not an address.',
           id.value,
           {
             placeholder: 'ci-runner',
@@ -339,8 +401,8 @@ export default defineComponent({
           'days',
           'Lifetime, in days',
           'Deliberately empty. This host refuses a mint with no expiry rather than choosing one, ' +
-            'and this console will not choose one either — a token that outlives the reason it ' +
-            'was made is the thing revocation would exist to fix, and revocation is not built.',
+            'and this console will not choose one either. Revocation ends a token now; expiry is ' +
+            'the backstop when nobody notices that it should be ended.',
           days.value,
           {
             inputmode: 'numeric',
@@ -363,8 +425,62 @@ export default defineComponent({
             'data-agents': 'mint',
             disabled: busy.value || !ready(),
           },
-          busy.value ? 'Minting…' : 'Mint an agent'
+          busy.value ? 'Creating…' : 'Create Service Account'
         ),
+      ].filter((node): node is VNode => node !== null))
+    }
+
+    function accountsPanel(): VNode {
+      const held = accountsState.value
+      const last = revocation.value
+
+      return h('section', { class: 'agents__accounts', 'data-agents': 'accounts' }, [
+        h('h2', null, 'Current Service Accounts'),
+        held === null
+          ? h('p', { role: 'status' }, 'Reading Service Accounts…')
+          : held.status === 'failed'
+            ? h('p', { class: 'failure', role: 'alert' }, [
+                h('code', null, held.failure.endpoint),
+                ` could not be read: ${held.failure.detail}`,
+              ])
+            : held.accounts.length === 0
+              ? h('p', { 'data-agents': 'accounts-empty' }, 'This tenant has no live Service Accounts.')
+              : h(
+                  'ul',
+                  { class: 'agents__accounts-list' },
+                  held.accounts.map((account) =>
+                    h('li', { class: 'agents__account', 'data-account': account.id }, [
+                      h('span', null, [
+                        h('code', null, account.id),
+                        ` — stops resolving ${instant(account.expiresAt)}`,
+                      ]),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          'data-agents': 'revoke',
+                          'data-account': account.id,
+                          disabled: revoking.value !== null,
+                          onClick: () => revokeAccount(account.id),
+                        },
+                        revoking.value === account.id ? 'Revoking…' : 'Revoke'
+                      ),
+                    ])
+                  )
+                ),
+        last?.status === 'revoked'
+          ? h('p', { role: 'status', 'data-agents': 'revoked' }, [
+              h('code', null, last.id),
+              ' no longer authenticates.',
+            ])
+          : null,
+        last?.status === 'refused' ? refusalNotice(last.refusal) : null,
+        last?.status === 'failed'
+          ? h('p', { class: 'failure', role: 'alert', 'data-agents': 'revoke-failed' }, [
+              h('code', null, last.failure.endpoint),
+              ` could not be completed: ${last.failure.detail}`,
+            ])
+          : null,
       ].filter((node): node is VNode => node !== null))
     }
 
@@ -388,9 +504,9 @@ export default defineComponent({
 
         case 'anonymous':
           return [
-            h('h2', null, 'Sign in to mint an agent'),
+            h('h2', null, 'Sign in to create a Service Account'),
             h('p', { class: 'agents__note' }, [
-              'An agent is a principal of exactly one tenant, and the tenant is read from whoever ',
+              'A Service Account is a principal of exactly one tenant, and the tenant is read from whoever ',
               'this service resolves you to be — never from anything this page could ask for. So ',
               'there is nobody to mint for until you sign in.',
             ]),
@@ -399,7 +515,7 @@ export default defineComponent({
 
         case 'may-not-mint':
           return [
-            h('h2', null, 'Only a signed-in person may create an agent'),
+            h('h2', null, 'Only a signed-in person may create a Service Account'),
             h('p', { class: 'agents__note' }, [
               'You are signed in as ',
               h('code', null, session.status === 'ready' && session.principal ? session.principal.kind : ''),
@@ -423,14 +539,14 @@ export default defineComponent({
       const outcome = result.value
 
       return h('section', { class: 'agents', 'data-page': 'agents' }, [
-        h('h1', null, 'Mint an agent'),
+        h('h1', null, 'Service Accounts'),
 
         h('p', { class: 'agents__lead' }, [
-          `${SERVICE}'s primary caller is an agent, not a human. An agent does not sign in: a `,
-          'person who is already signed in mints it and hands over the token, exactly once. This ',
-          'is where that happens — the call is ',
-          h('code', null, `POST ${AGENTS_ENDPOINT}`),
-          ', and what an agent author does with the result is on ',
+          'A Service Account is a durable non-human identity for an App, Agent or automation. A ',
+          'signed-in person creates it and hands over the token exactly once. This is where that ',
+          'happens — the call is ',
+          h('code', null, `POST ${SERVICE_ACCOUNTS_ENDPOINT}`),
+          ', and how an App or Agent uses the result is on ',
           h('a', { href: fragmentPath(ONBOARDING_PATH) }, 'Connect an agent'),
           '.',
         ]),
@@ -447,7 +563,7 @@ export default defineComponent({
         outcome?.status === 'refused' ? refusalNotice(outcome.refusal) : null,
         outcome?.status === 'failed'
           ? h('section', { class: 'failure', role: 'alert', 'data-agents': 'failed' }, [
-              h('h3', { class: 'failure__title' }, 'No agent was minted'),
+              h('h3', { class: 'failure__title' }, 'No Service Account was created'),
               h('p', { class: 'failure__endpoint' }, [
                 'Endpoint: ',
                 h('code', null, outcome.failure.endpoint),
@@ -455,6 +571,8 @@ export default defineComponent({
               h('p', { class: 'failure__message' }, failureSentence(outcome.failure)),
             ])
           : null,
+
+        gate === 'may-mint' ? accountsPanel() : null,
 
         standingPanel(),
       ].filter((node): node is VNode => node !== null))

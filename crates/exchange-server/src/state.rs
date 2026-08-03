@@ -6,12 +6,12 @@ use exchange_host::{
     ConnectionSettings, Identity, Invoker, PureEditorTools, SecretStore, WorkflowStore,
 };
 
-use crate::agent::AgentStore;
 use crate::bind::IdentityBinding;
 use crate::channel::ChannelSupervisor;
 use crate::connection_guard::ConnectionGuard;
 use crate::dev_identity::DevIdentity;
 use crate::oidc::Oidc;
+use crate::service_account::ServiceAccountStore;
 use crate::traffic::{InvocationClaim, Traffic, TrafficRefusal};
 use crate::workflow_runs::WorkflowRunStore;
 
@@ -51,14 +51,14 @@ pub struct AppState {
     /// not an `Option` — a guard with no store behind it costs nothing and guards nothing, and
     /// making it absent would give the routes a second thing to branch on.
     connections: Arc<ConnectionGuard>,
-    /// The agents this host has minted tokens for, if this composition bound a store for them.
+    /// The Service Accounts this host has minted tokens for, if this composition bound a store.
     ///
     /// A separate binding from [`credentials`](Self::credentials) and deliberately so: an agent
     /// verifier is this host's own record and a credential is a tenant's vendor secret, and
-    /// `crate::agent`'s module documentation carries the argument for why they are two stores. Every
+    /// `crate::service_account`'s module documentation carries the argument for why they are two stores. Every
     /// combination of the two is a real composition, so neither implies the other. `None` is a
     /// composition that bound none, and the mint route refuses rather than pretending.
-    agents: Option<Arc<AgentStore>>,
+    service_accounts: Option<Arc<ServiceAccountStore>>,
     /// What runs an operation, if this composition bound one.
     ///
     /// A separate binding from [`credentials`](Self::credentials) even though one is built from the
@@ -203,7 +203,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
-            agents: None,
+            service_accounts: None,
             invoker: None,
             workflows: None,
             pure_editor_tools: None,
@@ -229,7 +229,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
-            agents: None,
+            service_accounts: None,
             invoker: None,
             workflows: None,
             pure_editor_tools: None,
@@ -252,7 +252,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
-            agents: None,
+            service_accounts: None,
             invoker: None,
             workflows: None,
             pure_editor_tools: None,
@@ -285,7 +285,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
-            agents: None,
+            service_accounts: None,
             invoker: None,
             workflows: None,
             pure_editor_tools: None,
@@ -308,7 +308,7 @@ impl AppState {
             credentials: None,
             settings: None,
             connections: Arc::default(),
-            agents: None,
+            service_accounts: None,
             invoker: None,
             workflows: None,
             pure_editor_tools: None,
@@ -368,28 +368,27 @@ impl AppState {
         self.settings.as_ref()
     }
 
-    /// Bind the agent store this composition holds.
+    /// Bind the Service Account store this composition holds.
     ///
     /// An additive builder method for [`with_credentials`](Self::with_credentials)' reason, and the
     /// reason matters more with every one of these: the identity binding, the credential store and
-    /// the agent store are independent, every combination of them is a real composition, and five
+    /// the Service Account store are independent, every combination of them is a real composition,
+    /// and five
     /// constructors times two ports times two would be twenty. An additive method also leaves the
     /// existing spellings untouched, which is what lets two stories that each add a port land
     /// without colliding.
     ///
-    /// **Binding one does not make a caller resolvable**, so it must never influence
-    /// [`identity_binding`](Self::identity_binding) — X-36 mints agent tokens and nothing yet
-    /// verifies one, and even once X-37 does, an agent store is not an identity provider a *human*
-    /// can sign in through. `binding_an_agent_store_does_not_admit_a_reachable_bind` is that claim,
-    /// and it is here rather than in `bind` because pinning the enum is not pinning the wiring.
-    pub fn with_agents(mut self, agents: Arc<AgentStore>) -> Self {
-        self.agents = Some(agents);
+    /// A bound store resolves bearer tokens, so a composition with one has a real identity binding.
+    /// It does not make browser sign-in available: Service Accounts authenticate themselves and do
+    /// not turn a human into a principal.
+    pub fn with_service_accounts(mut self, service_accounts: Arc<ServiceAccountStore>) -> Self {
+        self.service_accounts = Some(service_accounts);
         self
     }
 
-    /// The agent store this composition bound, if it bound one.
-    pub fn agents(&self) -> Option<&Arc<AgentStore>> {
-        self.agents.as_ref()
+    /// The Service Account store this composition bound, if it bound one.
+    pub fn service_accounts(&self) -> Option<&Arc<ServiceAccountStore>> {
+        self.service_accounts.as_ref()
     }
 
     /// Bind what this composition runs operations with.
@@ -466,10 +465,11 @@ impl AppState {
     ///
     /// This is what [`admit_bind`](crate::bind::admit_bind) decides on.
     pub fn identity_binding(&self) -> IdentityBinding {
-        match self.identity {
-            BoundIdentity::None => IdentityBinding::Unbound,
-            BoundIdentity::Real(_) => IdentityBinding::Bound,
-            BoundIdentity::Development(_) => IdentityBinding::Development,
+        match (&self.identity, &self.service_accounts) {
+            (BoundIdentity::None, Some(_)) => IdentityBinding::Bound,
+            (BoundIdentity::None, None) => IdentityBinding::Unbound,
+            (BoundIdentity::Real(_), _) => IdentityBinding::Bound,
+            (BoundIdentity::Development(_), _) => IdentityBinding::Development,
         }
     }
 
@@ -663,40 +663,42 @@ mod tests {
         );
     }
 
-    /// **X-36.** Binding an agent store does not legalise a reachable bind.
+    /// **X-107.** Binding a Service Account store provides bearer identity on a reachable bind.
     ///
-    /// The same shape as the two above, and here for the reason they are here: pinning the enum is
-    /// not pinning the wiring. An agent store is a place to keep verifiers, not a thing that can
-    /// resolve a caller — nothing in this build verifies an agent token at all yet, and even once
-    /// X-37 does, a host on `0.0.0.0` whose only identity is the development roster is exactly the
-    /// composition `admit_bind` exists to refuse. The mistake this catches is somebody reasoning
-    /// "agents can authenticate now, so this host has an identity provider" and teaching
-    /// `identity_binding` to say so.
+    /// This is not browser sign-in. It is nevertheless a real verifier for the Authorization
+    /// carrier, so treating this composition as identity-less would reject the production use the
+    /// store exists to serve. Development identity remains loopback-only even when the same store is
+    /// present: adding a verifier must not make the secretless development roster reachable.
     #[test]
-    fn binding_an_agent_store_does_not_admit_a_reachable_bind() {
-        let directory =
-            std::env::temp_dir().join(format!("flux-exchange-state-agents-{}", std::process::id()));
+    fn binding_a_service_account_store_admits_a_reachable_bind() {
+        let directory = std::env::temp_dir().join(format!(
+            "flux-exchange-state-service_accounts-{}",
+            std::process::id()
+        ));
         let store = Arc::new(
-            crate::agent::AgentStore::open(directory.join("agents.json")).expect("a fresh store"),
+            crate::service_account::ServiceAccountStore::open(
+                directory.join("service_accounts.json"),
+            )
+            .expect("a fresh store"),
         );
 
         for state in [
-            AppState::without_identity().with_agents(store.clone()),
-            AppState::with_development_identity(dev()).with_agents(store.clone()),
-            AppState::oidc_without_a_token_exchange().with_agents(store.clone()),
+            AppState::without_identity().with_service_accounts(store.clone()),
+            AppState::oidc_without_a_token_exchange().with_service_accounts(store.clone()),
         ] {
             assert!(
-                admit_bind(addr("0.0.0.0:8080"), state.identity_binding()).is_err(),
-                "binding an agent store must not make a reachable bind legal",
+                admit_bind(addr("0.0.0.0:8080"), state.identity_binding()).is_ok(),
+                "a bound Service Account verifier must make bearer identity usable on a reachable bind",
             );
+            assert_eq!(state.identity_binding(), IdentityBinding::Bound);
         }
 
         assert_eq!(
             AppState::with_development_identity(dev())
-                .with_agents(store)
+                .with_service_accounts(store)
                 .identity_binding(),
             IdentityBinding::Development,
-            "and it must not change the binding a composition reports either",
+            "the secretless development roster remains loopback-only",
         );
 
         let _ = std::fs::remove_dir_all(&directory);

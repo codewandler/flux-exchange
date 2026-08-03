@@ -71,7 +71,7 @@ import {
   type WorkflowsState,
 } from './service.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
-import { AGENTS_PATH } from './minting.mts'
+import { SERVICE_ACCOUNTS_PATH } from './minting.mts'
 import { mayGrant } from './granting.mts'
 import { surfaceOfRoute } from './surfaces.mts'
 import { isDark, toggleTheme } from './theme'
@@ -478,7 +478,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         Where an operator mints one, and the one screen in this console that renders a credential
         value.
 
-        It is passed the session and nothing else, and it reads `/api/agents` for itself rather than
+        It is passed the session and nothing else, and it reads `/api/service-accounts` for itself rather than
         being handed a result — deliberately, and against this file's usual arrangement. This
         component is the root, so it outlives every screen; anything it were handed would still be
         in memory after the reader had navigated away, and what the mint answers with is the one
@@ -486,7 +486,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         claim about `App.vue` instead of a property of the view. `Agents.mts` sets out the whole of
         it.
       -->
-      <template v-else-if="route.name === 'agents'">
+      <template v-else-if="route.name === 'service-accounts'">
         <Agents :session="session" />
       </template>
 
@@ -715,7 +715,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
     <footer class="console__foot">
       <p>
         <a :href="fragmentPath(ONBOARDING_PATH)">Connect an agent</a> ·
-        <a :href="fragmentPath(AGENTS_PATH)">Mint an agent</a> · Catalogue read from
+        <a :href="fragmentPath(SERVICE_ACCOUNTS_PATH)">Service Accounts</a> · Catalogue read from
         <code>{{ CONNECTORS_ENDPOINT }}</code> ·
         <a href="https://github.com/codewandler/flux-exchange">codewandler/flux-exchange</a>
       </p>

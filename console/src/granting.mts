@@ -34,7 +34,7 @@ export const GRANTS_PATH = '/grants'
  * A **courtesy, not the rule.** `routes::grants::MAY_GRANT` is the rule and it is enforced in the
  * guard; this exists so the screen can say *why* there is no form rather than letting an operator
  * find the `403` themselves — and when the service refuses anyway, its own sentence is what gets
- * rendered, unedited. The same arrangement `minting.mts` makes for `POST /api/agents`, and for a
+ * rendered, unedited. The same arrangement `minting.mts` makes for `POST /api/service-accounts`, and for a
  * sharper reason: whoever may edit a grant decides what the tenant can run, which is strictly more
  * authority than minting one agent.
  */

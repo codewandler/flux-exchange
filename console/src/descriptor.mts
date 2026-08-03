@@ -55,7 +55,7 @@ export const DESCRIPTOR = 'flux-exchange.agent-onboarding'
  * It is here because the name above is ours: a caller cannot fall back on a standard's versioning,
  * so this document carries its own.
  */
-export const DESCRIPTOR_VERSION = 1
+export const DESCRIPTOR_VERSION = 2
 
 /** One call, as the document publishes it. */
 export interface DescriptorCall {

@@ -145,10 +145,9 @@ struct Service {
 /// `Authorization: Bearer <material>`, so anyone may discover the scheme by sending one request. It
 /// is published so an agent author does not have to.
 ///
-/// [`live`](Self::live) is what stops the scheme reading as a working one. Nothing on this host
-/// resolves an *agent* token to a principal yet (X-37), and the reason is not restated here — it is
-/// on the capability [`capability`](Self::capability) names, once, so the page and this document
-/// cannot describe one gap two ways.
+/// [`live`](Self::live) is derived from the declared identity surface. Service Account bearer
+/// authentication is live; keeping the flag derived means a future regression withdraws the claim
+/// from both the page and this document.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Authentication {
@@ -540,12 +539,10 @@ mod tests {
     /// to agree again, in the language that owns the route table, in the gate.
     const SERVED_BY: &[(&str, Option<&str>)] = &[
         ("read-the-catalogue", Some("/api/catalogue/connectors")),
-        ("be-minted", Some("/api/agents")),
-        // No route serves it, and no route *would*: this is a property of the identity port, not of
-        // the surface. Nothing this host binds resolves an agent token to a principal —
-        // `nothing_this_host_binds_resolves_an_agent_token` is the pin, and `crate::state`'s
-        // `binding_an_agent_store_does_not_admit_a_reachable_bind` is the other half.
-        ("authenticate", None),
+        ("create-service-account", Some("/api/service-accounts")),
+        // Resolving the bearer is exercised through the session route: it is the smallest call
+        // that both runs authentication and returns the principal it resolved.
+        ("authenticate", Some("/api/session")),
         ("invoke", Some("/api/operations/{operation}/invoke")),
         ("subscribe", Some("/api/subscribe")),
         // Workflow runs are durable and tenant-scoped; the collection is the capability's entry.
@@ -581,11 +578,6 @@ mod tests {
              declaration half of the catalogue rather than a separate agent capability.",
         ),
         (
-            "/api/session",
-            "who this host resolved the caller to be. A console affordance for a signed-in human; \
-             an agent that could call it would already know who it is.",
-        ),
-        (
             "/api/signin",
             "a browser redirect into an identity provider. Not a call an agent makes, and the one \
              fact about it an agent needs is the `sign_in_available` field.",
@@ -603,6 +595,16 @@ mod tests {
             "wiring a tenant up is the *human's* job — `docs/vision.md`: people sign in to wire \
              things up, agents call operations all day. An agent holding a token is deliberately \
              not told to go and manage its tenant's connections.",
+        ),
+        (
+            "/api/service-accounts/{id}",
+            "revocation is the item half of the create-service-account capability and an operator \
+             action, not a separate capability an Agent receives.",
+        ),
+        (
+            "/api/agents",
+            "the v0.16 compatibility alias for creating a Service Account. The descriptor teaches \
+             only the canonical resource and this alias is removed in v0.17.",
         ),
         ("/api/connections/{connector}", "as above."),
         (
@@ -932,30 +934,25 @@ mod tests {
         );
     }
 
-    /// The `authenticate` capability's "no route serves it" is a claim about the identity port, so
-    /// it is pinned where that fact lives rather than against the route table.
-    ///
-    /// Partial by construction — this asserts that binding the agent store gives this host nothing
-    /// that can resolve a caller, which is the shape X-37 will have to change. It is the same claim
-    /// `crate::state::tests::binding_an_agent_store_does_not_admit_a_reachable_bind` makes for the
-    /// bind rule, made here for the document that tells an agent it cannot yet authenticate.
+    /// A Service Account store is an identity binding even without browser sign-in.
     #[test]
-    fn nothing_this_host_binds_resolves_an_agent_token() {
+    fn a_service_account_store_is_a_live_bearer_identity_binding() {
         let directory = std::env::temp_dir().join(format!(
-            "flux-exchange-onboarding-agents-{}",
+            "flux-exchange-onboarding-service-accounts-{}",
             std::process::id()
         ));
         let store = Arc::new(
-            crate::agent::AgentStore::open(directory.join("agents.json")).expect("a fresh store"),
+            crate::service_account::ServiceAccountStore::open(
+                directory.join("service-accounts.json"),
+            )
+            .expect("a fresh store"),
         );
 
-        let state = AppState::without_identity().with_agents(store);
+        let state = AppState::without_identity().with_service_accounts(store);
 
-        assert!(
-            state.identity().is_none(),
-            "binding the agent store gave this host something that resolves callers; if an agent \
-             token now resolves to a principal, the `authenticate` capability is live and this \
-             document is telling agent authors otherwise",
+        assert_eq!(
+            state.identity_binding(),
+            crate::bind::IdentityBinding::Bound
         );
 
         let _ = std::fs::remove_dir_all(&directory);
@@ -1131,14 +1128,6 @@ mod tests {
                 .any(|capability| capability.live),
             "no capability is live, so this document tells an agent author nothing",
         );
-        assert!(
-            document
-                .capabilities
-                .iter()
-                .any(|capability| !capability.live),
-            "every capability is live, so this document claims a platform that does not exist",
-        );
-
         for capability in &document.capabilities {
             if capability.live {
                 assert!(

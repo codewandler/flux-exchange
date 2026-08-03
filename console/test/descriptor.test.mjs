@@ -253,15 +253,15 @@ test('the_descriptor_is_derived_and_not_a_coincidence', () => {
 
   // And the direction that protects a reader: a surface regressing to unserved withdraws the
   // capability standing on it from the served document, not only from the page.
-  const minted = STEPS.find((step) => step.id === 'be-minted')
+  const minted = STEPS.find((step) => step.id === 'create-service-account')
   assert.equal(available(minted, SURFACES), true)
   const regressed = JSON.parse(descriptorJson(asIf(minted.surface, { served: false })))
   assert.equal(
-    live(regressed, 'be-minted').live,
+    live(regressed, 'create-service-account').live,
     false,
     'a surface regressing to not-served leaves its capability standing in the document the service serves'
   )
-  assert.equal(live(regressed, 'be-minted').call, null)
+  assert.equal(live(regressed, 'create-service-account').call, null)
 
   // **And it derives from the right field.** This is the assertion that would have caught the
   // defect this document shipped with in round one: `invoke` is the one surface where "does the

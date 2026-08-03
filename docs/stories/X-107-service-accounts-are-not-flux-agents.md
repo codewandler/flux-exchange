@@ -1,11 +1,11 @@
 ---
 id: X-107
 title: "Service Accounts are not Flux Agents"
-status: ready
+status: done
 priority: 3
 epic: apps
 areas: [exchange-host, exchange-server, console, docs]
-design: docs/designs/released-domain-audit.md
+design: docs/designs/service-accounts.md
 note: "migrate the legacy agent-token API without invalidating existing callers; reserve Agent for the managed Flux runtime"
 ---
 
@@ -19,22 +19,27 @@ compatibility path for tokens and clients created through the legacy `/api/agent
 
 ## Acceptance
 
-- [ ] A design settles route/version compatibility, stored-kind migration, descriptor/console
+- [x] A design settles route/version compatibility, stored-kind migration, descriptor/console
       rollout and the date or condition that removes the legacy spelling.
-- [ ] Failing first, a newly minted non-human principal reports `service_account`, never `agent`,
+- [x] Failing first, a newly minted non-human principal reports `service_account`, never `agent`,
       while an existing stored legacy principal continues to authenticate within its original
       tenant and expiry.
-- [ ] The primary API and console say Service Account; any legacy route is visibly compatibility
+- [x] The primary API and console say Service Account; any legacy route is visibly compatibility
       surface and cannot mint a different kind of authority.
-- [ ] Grants remain metadata selectors over operations and bound resources. Neither spelling grants
+- [x] Grants remain metadata selectors over operations and bound resources. Neither spelling grants
       access to a credential, and only a signed-in human can mint one.
-- [ ] The anonymous descriptor, public capability page, changelog and migration documentation agree
+- [x] The anonymous descriptor, public capability page, changelog and migration documentation agree
       with the live routes.
 
 ## Progress
 
 - 2026-08-03: Raised by X-106 after the family glossary reserved Agent for model + loop + bounded
   capabilities. The current `/api/agents` principal is explicitly recorded as migration debt.
+- 2026-08-03: Accepted the complete resource design: canonical create/list/revoke API, bearer
+  authentication, one-minor route and environment compatibility, and v0.17 removal checkpoint.
+- 2026-08-03: Delivered the canonical `service_account` kind, human-only create/list/revoke API,
+  bearer resolution, console lifecycle management, descriptor v2 and public capability page. X-121
+  owns removal of the bounded v0.16 compatibility spellings.
 
 ## Notes
 

@@ -154,7 +154,11 @@ mod tests {
     use crate::{PrincipalKind, Tenant};
 
     fn principal(id: &str, tenant: &str) -> Principal {
-        Principal::new(PrincipalKind::Agent, id, Tenant::new(tenant).unwrap())
+        Principal::new(
+            PrincipalKind::ServiceAccount,
+            id,
+            Tenant::new(tenant).unwrap(),
+        )
     }
 
     fn lease_for(holder: Principal) -> Lease {

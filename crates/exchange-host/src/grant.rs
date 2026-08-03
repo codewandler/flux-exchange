@@ -21,9 +21,9 @@
 //!   edited rather than compiled in.
 //!
 //! **A tenant's grants are the tenant's, not one principal's.** Every principal this host resolves
-//! for a tenant is decided against the same set, which is the shape `docs/designs/agent-access.md`
-//! already describes — an agent token "authorises nothing beyond what any principal may do", which
-//! X-40 narrowed to *except that it may not create a principal*. Per-principal grants are a
+//! for a tenant is decided against the same set. A Service Account token authenticates one
+//! principal, then grants independently decide what its tenant may do; lifecycle routes remain
+//! restricted to a `User`. Per-principal grants are a
 //! narrowing this build does not make, and saying so is cheaper than implying otherwise: the
 //! refusal names the principal because that is who was refused, not because the grant was theirs.
 
@@ -224,7 +224,7 @@ impl Selector {
 
 /// One grant: a connector, and which of its operations are reachable.
 ///
-/// A grant never names a credential. That is the property that makes an agent token safe to hand
+/// A grant never names a credential. That is the property that makes a Service Account token safe to hand
 /// out — resolving the credential is the host's job, from the connection the grant points at, and a
 /// stolen token therefore yields a bounded set of *operations* rather than a vendor secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -847,7 +847,7 @@ mod tests {
     #[test]
     fn inbound_grants_admit_only_their_declared_event_subset() {
         let principal = Principal::new(
-            crate::PrincipalKind::Agent,
+            crate::PrincipalKind::ServiceAccount,
             "agent-1",
             Tenant::new("alpha").expect("tenant"),
         );
@@ -1046,7 +1046,7 @@ mod tests {
 
     fn caller() -> Principal {
         Principal::new(
-            crate::PrincipalKind::Agent,
+            crate::PrincipalKind::ServiceAccount,
             "triage-bot",
             Tenant::new("acme").expect("`acme` is a usable tenant"),
         )
