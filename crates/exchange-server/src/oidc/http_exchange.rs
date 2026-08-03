@@ -774,7 +774,8 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
     /// The claims every token in these tests carries.
     ///
     /// `aud` is the **list** spelling and `hd` is present so the happy path proves the signed
-    /// organization claim survives the verified-claims seam.
+    /// organization claim survives the verified-claims seam. `email` is deliberately hostile and
+    /// unmodelled: requesting its provider-required scope does not make it an identity input.
     fn claims() -> serde_json::Value {
         json!({
             "iss": ISSUER,
@@ -783,6 +784,7 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
             "exp": EXPIRES_AT,
             "nonce": "the-bound-nonce",
             "hd": "example.com",
+            "email": "outsider@hostile.example",
         })
     }
 

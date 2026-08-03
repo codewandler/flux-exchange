@@ -167,11 +167,11 @@ fn recorded() -> Reader<impl Fn(&str) -> Option<String>> {
 
 /// The scopes this host asks for, and the whole of what it asks for.
 ///
-/// **Signing in is not connecting.** `openid` identifies the human. Nothing here grants access to anything at the
-/// provider, and no vendor scope belongs in this list — connecting a provider is a different flow
-/// with a different consent screen, and a user who agreed to "sign in" has not agreed to that.
-/// Widening this constant would silently turn one consent into the other.
-pub const SCOPES: &str = "openid";
+/// **Signing in is not connecting.** `openid` identifies the human; `email` is the minimum
+/// additional scope Google's production flow requires for this client, not an authorization input.
+/// The email claim is neither parsed nor carried across the verified-claims seam. No vendor scope
+/// belongs here — connecting a provider is a different flow with a different consent screen.
+pub const SCOPES: &str = "openid email";
 
 /// This host's client secret at the provider.
 ///
@@ -1431,14 +1431,13 @@ mod tests {
         }
     }
 
-    /// Sign-in is not connecting. This host asks to learn who the human is and nothing else — any
-    /// vendor scope here would turn one consent screen into a different one without anybody
-    /// deciding to.
+    /// Sign-in is not connecting. This exact minimal pair satisfies Google's provider protocol;
+    /// neither scope grants vendor authority and the email claim is not an identity input.
     #[test]
     fn the_requested_scopes_identify_the_human_and_grant_nothing() {
         let scopes: Vec<&str> = SCOPES.split_whitespace().collect();
 
-        assert_eq!(scopes, ["openid"]);
+        assert_eq!(scopes, ["openid", "email"]);
         assert!(
             scopes.contains(&"openid"),
             "without `openid` this is not OIDC and there is no id token to bind a nonce to",

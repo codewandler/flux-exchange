@@ -14,7 +14,7 @@ Managed Agent and Service Account one meaning across the Flux family and labels 
 live versus target architecture.
 
 > [!WARNING]
-> **Status: v0.16.1 — Wave #1: safer identity, fair traffic, attributable deploys, and tested recovery.**
+> **Status: v0.16.2 — Wave #1: safer identity, fair traffic, attributable deploys, and tested recovery.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
 > connector catalogue and a session without OIDC setup. The ordinary composition supports both a

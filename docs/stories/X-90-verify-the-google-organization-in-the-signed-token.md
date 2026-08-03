@@ -21,8 +21,9 @@ instead of a provider-console setting whose accidental widening this host cannot
       equality with the configured value. A missing or mismatched claim refuses with no session.
 - [x] Never derive membership from `email` or an email suffix. Identity remains keyed by immutable
       OIDC `sub`.
-- [x] Reduce the sign-in scope to `openid`; remove unused `email`/`profile` claims and fields unless
-      a concrete in-tree consumer is identified in the same change.
+- [x] Request only the minimal Google-compliant `openid email` scope pair. Live production evidence
+      established `email` as a provider-protocol requirement, not an authorization input: do not
+      parse or use the email claim, and keep `profile` absent.
 - [x] Failing-first tests cover a matching, missing and mismatched signed claim; a mutation that
       trusts the authorization-request hint or email turns the gate red.
 - [x] Update the deployment configuration and runbook without committing an organization identifier
@@ -33,3 +34,7 @@ instead of a provider-console setting whose accidental widening this host cannot
 ## Notes
 - Google requires `hd` verification when a resource is domain-restricted and explicitly says not to
   use the `email` domain: <https://developers.google.com/identity/openid-connect/reference>.
+- 2026-08-03: the first versioned production attempt reached Google but Google refused the bare
+  `openid` authorization request. The v0.16.2 hotfix restores the smallest accepted request,
+  `openid email`; the signed `hd` claim still decides organization admission and immutable `sub`
+  still keys identity. Live verification remains, so this story stays in progress.

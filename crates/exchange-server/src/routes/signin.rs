@@ -1727,10 +1727,11 @@ mod tests {
         let challenge = parameter(location, "code_challenge").expect("a code challenge");
         assert_eq!(challenge.len(), 43, "SHA-256, base64url, unpadded");
 
-        // `openid`, and nothing else. Identity is the immutable `sub`; email/profile are unused.
+        // `openid email`, and nothing else. Identity is the immutable `sub`; the email claim is
+        // not parsed or used, while Google requires its scope for this client flow.
         assert_eq!(
             parameter(location, "scope"),
-            Some("openid"),
+            Some("openid%20email"),
             "sign-in asks to identify the human and to do nothing on their behalf",
         );
 
