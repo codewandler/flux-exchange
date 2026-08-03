@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use exchange_host::{
-    ConnectionRegistry, ConnectionSettings, Identity, Invoker, PureEditorTools, SecretStore,
-    WorkflowStore,
+    ConnectionRegistry, ConnectionSettings, Identity, Invoker, Principal, PureEditorTools,
+    SecretStore, WorkflowStore,
 };
 
 use crate::audit::AuditJournal;
@@ -12,16 +12,20 @@ use crate::bind::IdentityBinding;
 use crate::channel::ChannelSupervisor;
 use crate::connection_guard::ConnectionGuard;
 use crate::dev_identity::DevIdentity;
+use crate::local_identity::LocalUsers;
 use crate::oidc::Oidc;
+use crate::operator::OperatorPolicy;
 use crate::service_account::ServiceAccountStore;
+use crate::tenancy::Tenancy;
 use crate::traffic::{InvocationClaim, Traffic, TrafficRefusal};
 use crate::workflow_runs::WorkflowRunStore;
 
 /// The state the router hands to every route.
 ///
-/// It carries the *ports* a composition bound, never a credential and never a tenant. A tenant is
-/// read from a resolved principal and from nothing else — there is deliberately nothing here that
-/// a route could reach for instead.
+/// It carries the *ports* and deployment policy a composition bound, never a credential. A route
+/// still reads its tenant from the resolved principal and from nothing else. The optional
+/// single-tenant policy can only check that principal against the startup declaration; it offers no
+/// tenant value for a route to substitute.
 #[derive(Clone)]
 pub struct AppState {
     /// Durable non-secret evidence, when this composition bound it.
@@ -87,17 +91,22 @@ pub struct AppState {
     channels: Option<Arc<ChannelSupervisor>>,
     /// Process-wide bounds around anonymous sign-in allocation and operation execution.
     traffic: Traffic,
+    /// Deployment-owned administrative authority, keyed independently from principal kind.
+    operators: OperatorPolicy,
+    /// Startup tenancy policy. In the single-tenant shape this rejects disagreement; it never
+    /// rewrites a resolved principal into another tenant.
+    tenancy: Tenancy,
 }
 
 /// What this composition can offer a human who wants to sign in.
 ///
-/// Four states rather than an `Option`, because they are answered differently at `/api/signin`:
+/// Explicit states rather than an `Option`, because they are answered differently at `/api/signin`:
 /// "not configured" and "configured but unable to finish" are different mistakes with different
 /// fixes, and a caller shown one message for both gets sent to the wrong place. All of them are
 /// answered there rather than at the callback: the failure X-04's story names is a login that looks
 /// fine and dies at the last step.
 ///
-/// **These four states are the operator's, not the caller's.** What crosses the wire is
+/// **These states are the operator's, not the caller's.** What crosses the wire is
 /// [`available`](Self::available) — one boolean — and the argument for that collapse is on it.
 #[derive(Clone)]
 pub enum SignIn {
@@ -134,6 +143,10 @@ pub enum SignIn {
         automatic: bool,
     },
 
+    /// An owner-only verifier file is bound, so this host can authenticate a local human through
+    /// its own form without disclosing which provider kind backs the anonymous availability bit.
+    LocalUsers,
+
     /// A provider is bound and the flow can complete.
     Oidc(Arc<Oidc>),
 }
@@ -142,13 +155,13 @@ impl SignIn {
     /// Whether **this deployment can turn a caller into a principal**.
     ///
     /// That sentence is the whole of X-57. It used to read "is OIDC configured", which was the same
-    /// answer for three of the four states and the wrong one for the fourth: arming the development
+    /// answer for the original states and the wrong one for development: arming the development
     /// identity binds a port that mints principals from a roster and a `POST /api/session` that
     /// exchanges one for a session, and this reported that nobody could sign in. The console reads
     /// this field to decide whether to offer signing in at all, so the host most likely to be
     /// somebody's first run of this software was the one it declined to offer a way into.
     ///
-    /// # Four states collapse to one boolean, and the collapse is the point
+    /// # Provider states collapse to one boolean, and the collapse is the point
     ///
     /// The four are what an **operator** needs, because "not configured", "configured but unable to
     /// finish" and "signed in locally" have different remedies and different instructions —
@@ -176,7 +189,7 @@ impl SignIn {
     /// [`IdentityBinding::Development`]: crate::bind::IdentityBinding::Development
     pub fn available(&self) -> bool {
         match self {
-            SignIn::Oidc(_) | SignIn::Development { .. } => true,
+            SignIn::Oidc(_) | SignIn::Development { .. } | SignIn::LocalUsers => true,
             SignIn::Unconfigured | SignIn::NoTokenExchange => false,
         }
     }
@@ -199,6 +212,20 @@ enum BoundIdentity {
     Real(Arc<dyn Identity>),
     /// The development identity, which is loopback-only for as long as it is armed.
     Development(Arc<DevIdentity>),
+    /// Verifier-backed local humans, safe for a reachable bind and kept distinct from both OIDC
+    /// and the secret-free development roster.
+    LocalUsers(Arc<LocalUsers>),
+}
+
+fn initial_operator_policy() -> OperatorPolicy {
+    #[cfg(test)]
+    {
+        OperatorPolicy::all_users_for_test()
+    }
+    #[cfg(not(test))]
+    {
+        OperatorPolicy::default()
+    }
 }
 
 impl AppState {
@@ -222,6 +249,8 @@ impl AppState {
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -250,6 +279,8 @@ impl AppState {
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -275,6 +306,8 @@ impl AppState {
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -283,6 +316,28 @@ impl AppState {
         let mut state = Self::with_development_identity(identity);
         state.sign_in = SignIn::Development { automatic: true };
         state
+    }
+
+    /// A composition with verifier-backed local human sign-in.
+    pub fn with_local_users(identity: Arc<LocalUsers>) -> Self {
+        Self {
+            audit: None,
+            identity: BoundIdentity::LocalUsers(identity),
+            sign_in: SignIn::LocalUsers,
+            credentials: None,
+            settings: None,
+            connections: Arc::default(),
+            connection_registry: None,
+            service_accounts: None,
+            invoker: None,
+            workflows: None,
+            pure_editor_tools: None,
+            workflow_runs: None,
+            channels: None,
+            traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
+        }
     }
 
     /// A composition that federates sign-in to an OIDC provider.
@@ -310,6 +365,8 @@ impl AppState {
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -335,6 +392,8 @@ impl AppState {
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -342,6 +401,33 @@ impl AppState {
     pub fn with_audit(mut self, audit: Arc<AuditJournal>) -> Self {
         self.audit = Some(audit);
         self
+    }
+
+    /// Bind the deployment-owned operator policy.
+    pub fn with_operator_policy(mut self, operators: OperatorPolicy) -> Self {
+        self.operators = operators;
+        self
+    }
+
+    /// Select one startup tenant for this composition.
+    ///
+    /// This does not supply a tenant to handlers. It is a second check at the identity boundary:
+    /// the authenticated principal must already carry the configured tenant or authentication is
+    /// refused. That distinction prevents a token for one tenant becoming authority for another
+    /// after a deployment setting changes.
+    pub fn with_tenancy(mut self, tenancy: Tenancy) -> Self {
+        self.tenancy = tenancy;
+        self
+    }
+
+    /// Whether a provider-resolved principal agrees with the startup tenancy declaration.
+    pub fn admits_principal_tenant(&self, principal: &Principal) -> bool {
+        self.tenancy.admits(principal)
+    }
+
+    /// Whether this resolved principal may administer the deployment.
+    pub fn is_operator(&self, principal: &exchange_host::Principal) -> bool {
+        self.operators.admits(principal)
     }
 
     /// The durable application audit journal, if this composition bound one.
@@ -512,6 +598,7 @@ impl AppState {
             (BoundIdentity::None, None) => IdentityBinding::Unbound,
             (BoundIdentity::Real(_), _) => IdentityBinding::Bound,
             (BoundIdentity::Development(_), _) => IdentityBinding::Development,
+            (BoundIdentity::LocalUsers(_), _) => IdentityBinding::LocalUsers,
         }
     }
 
@@ -524,6 +611,7 @@ impl AppState {
             BoundIdentity::None => None,
             BoundIdentity::Real(identity) => Some(identity.clone()),
             BoundIdentity::Development(identity) => Some(identity.clone()),
+            BoundIdentity::LocalUsers(identity) => Some(identity.clone()),
         }
     }
 
@@ -535,6 +623,14 @@ impl AppState {
     pub fn development_identity(&self) -> Option<&Arc<DevIdentity>> {
         match &self.identity {
             BoundIdentity::Development(identity) => Some(identity),
+            _ => None,
+        }
+    }
+
+    /// The concrete local-users identity, for verifying a form credential and opening its session.
+    pub fn local_users(&self) -> Option<&Arc<LocalUsers>> {
+        match &self.identity {
+            BoundIdentity::LocalUsers(identity) => Some(identity),
             _ => None,
         }
     }
@@ -553,6 +649,11 @@ impl AppState {
                 }
             }
             SignIn::Oidc(oidc) => oidc.close_session(presented),
+            SignIn::LocalUsers => {
+                if let BoundIdentity::LocalUsers(identity) = &self.identity {
+                    identity.close_session(presented);
+                }
+            }
             SignIn::Unconfigured | SignIn::NoTokenExchange => {}
         }
     }
@@ -563,8 +664,16 @@ impl AppState {
     }
 
     /// Claim one bounded invocation slot and one request from the rolling window.
-    pub(crate) fn begin_invocation(&self) -> Result<InvocationClaim, TrafficRefusal> {
-        self.traffic.begin_invocation()
+    pub(crate) fn begin_invocation(
+        &self,
+        principal: &Principal,
+    ) -> Result<InvocationClaim, TrafficRefusal> {
+        self.traffic.begin_invocation(principal)
+    }
+
+    /// Fixed-cardinality process traffic measurements.
+    pub(crate) fn traffic_snapshot(&self) -> crate::traffic::TrafficSnapshot {
+        self.traffic.snapshot()
     }
 
     #[cfg(test)]
@@ -590,6 +699,15 @@ mod tests {
         Arc::new(DevIdentity::from_roster("user:alice@acme").expect("a well-formed roster"))
     }
 
+    fn local_users() -> Arc<LocalUsers> {
+        let (_, entry) =
+            crate::local_identity::generate("alice", "acme").expect("the OS supplies entropy");
+        Arc::new(
+            LocalUsers::from_json(&serde_json::to_string(&vec![entry]).expect("an entry document"))
+                .expect("valid local users"),
+        )
+    }
+
     /// A federated composition.
     ///
     /// The exchange is never called — deciding a binding redeems nothing — but `with_oidc` needs
@@ -613,6 +731,32 @@ mod tests {
 
     fn addr(raw: &str) -> SocketAddr {
         raw.parse().expect("a literal socket address")
+    }
+
+    /// X-59's state seam: the startup declaration checks the tenant a provider already resolved;
+    /// it neither invents one for a request nor translates authority between tenants.
+    #[test]
+    fn a_single_tenant_composition_refuses_disagreeing_provider_authority() {
+        let state = AppState::with_identity(dev())
+            .with_tenancy(Tenancy::single("acme").expect("a literal startup tenant"));
+        let acme = Principal::new(
+            exchange_host::PrincipalKind::User,
+            "alice",
+            exchange_host::Tenant::new("acme").expect("a literal tenant"),
+        );
+        let beta = Principal::new(
+            exchange_host::PrincipalKind::User,
+            "alice",
+            exchange_host::Tenant::new("beta").expect("a literal tenant"),
+        );
+
+        assert!(state.admits_principal_tenant(&acme));
+        assert!(!state.admits_principal_tenant(&beta));
+        assert_eq!(
+            beta.tenant().as_str(),
+            "beta",
+            "authority is never rewritten"
+        );
     }
 
     /// The seam `main` actually runs through, end to end: compose the state, ask it for its
@@ -658,6 +802,11 @@ mod tests {
             AppState::with_development_identity(dev()).identity_binding(),
             IdentityBinding::Development,
             "the development port must never report itself as a real binding",
+        );
+        assert_eq!(
+            AppState::with_local_users(local_users()).identity_binding(),
+            IdentityBinding::LocalUsers,
+            "a verifier-backed local identity must keep its own reachable-safe binding state",
         );
         assert_eq!(
             AppState::with_oidc(oidc()).identity_binding(),

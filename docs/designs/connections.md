@@ -205,15 +205,26 @@ that somebody else has one.
 
 ## A connection is what the credential store says it is
 
-**Decision: there is no second record. A connection exists exactly when the store holds a value at
-one of the addresses derived for that tenant and connector.**
+**Decision: a connection exists exactly when the store holds a value at one of the addresses
+derived for that tenant and connector. The audit journal is authoritative only for retained
+evidence of who last supplied a held credential and when; it is never existence state.**
 
-The alternative — a `connections` table beside the credential store — is one more thing that can
-disagree with the store, and the disagreement is not symmetric: a record with no credential is a
-connection that `401`s at the vendor, and a credential with no record is a live credential nothing
-lists. `DELETE` destroying the credential is then not a step that could be forgotten; it is the
-whole of what deleting means. That is the Acceptance item "deleting a connection destroys its
-credential", satisfied by construction rather than by remembering.
+The rejected alternative — a `connections` table beside the credential store — is one more thing
+that can disagree with the store, and the disagreement is not symmetric: a record with no
+credential is a connection that `401`s at the vendor, and a credential with no record is a live
+credential nothing lists. `DELETE` destroying the credential is then not a step that could be
+forgotten; it is the whole of what deleting means. That is the Acceptance item "deleting a
+connection destroys its credential", satisfied by construction rather than by remembering.
+
+X-60 adds a projection from X-95's durable audit journal, not a connection record. For each held
+credential, `GET /api/connections` and its item view report the principal and timestamp from the
+latest retained successful creation or rotation. The projection is queried inside the resolved
+principal's tenant and returns no credential-derived fact. If the journal is unbound or every
+matching record has been deleted, the connection remains listed and usable from the credential
+store and its attribution reads `unknown`; absence of evidence never becomes evidence that the
+credential is absent. Conversely, historical evidence beside an empty address never makes a
+credential appear held. This split is the correction to the old "there is no second record" claim:
+the store is authoritative for existence and use, the journal only for retained attribution.
 
 The cost is stated rather than hidden, and it is smaller than it looks. `SecretStore` is
 `get`/`put`/`delete` with no listing operation — deliberately, since Vault's does not either — so
@@ -578,12 +589,10 @@ tenant's agents create afterwards is created there.
 X-40 left `DELETE` open on a stated test — *what does this outlive?* — and the same test is what puts
 these two on the other side of it.
 
-- **Nothing records who supplied a credential.** *"A connection is what the credential store says it
-  is"* above is the reason: there is no record beside the store, deliberately. So
-  `GET /api/connections` answers `held: true` for a value an agent planted exactly as it does for the
-  one a human did. A rotation is more invisible still — X-39 made it a single atomic `put` with no
-  observable state in which anything is missing, which is a virtue for an operator and a gift to an
-  attacker.
+- **At the time of X-54, nothing recorded who supplied a credential.** X-60 subsequently projected
+  X-95's successful audit evidence beside `held`, with missing retained evidence reading `unknown`
+  rather than changing connection existence. The gate remains necessary defence in depth:
+  attribution neither prevents nor undoes a substitution.
 - **Revocation is not a remedy.** Revoking the agent's token stops the agent; it does not take the
   value back out of the store, and nothing points an operator at the address to look at. That is
   `agents::MAY_MINT`'s argument — an incomplete remedy an operator cannot see — reached by a

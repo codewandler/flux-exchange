@@ -1,7 +1,7 @@
 ---
 id: X-74
 title: "A deployment refuses a hazardous way of authenticating unless it opted in"
-status: ready
+status: done
 priority: 2
 epic: credential-acquisition
 design: docs/designs/credential-acquisition.md
@@ -49,24 +49,46 @@ distinguishable from "the vendor rejected these credentials", or an operator wil
 re-typing a password that was correct — the defect class X-17 and X-20 exist for.
 
 ## Acceptance
-- [ ] An `AuthPosture` (or equivalently-named value) in `exchange-host` decides admission from an
+- [x] An `AuthPosture` (or equivalently-named value) in `exchange-host` decides admission from an
       `AuthHazard`, with no constructor taking caller input.
-- [ ] `exchange-server` reads `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` **by name**, through the same
+      → `crates/exchange-host/src/acquisition.rs:120-169`; the connector reaches only `admit`, where
+      it is carried into a refusal and never changes the deployment-owned decision.
+- [x] `exchange-server` reads `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` **by name**, through the same
       by-name configuration path X-27 established — not a positional read, and not a fourth list of
       variable names beside the three that already describe one set.
-- [ ] **Failing-first test** — an acquisition declaring `ResourceOwnerSecretShared` is refused with
+      → `crates/exchange-server/src/auth_posture.rs:12-47` is one named constant, one injected
+      lookup, and the typed parser; `main.rs:314-322` runs it before any store is bound.
+- [x] **Failing-first test** — an acquisition declaring `ResourceOwnerSecretShared` is refused with
       the posture unset, and admitted with it armed. Write the refusing half first against a fixture
       declaring the hazard, and watch it pass for the wrong reason (nothing declares a hazard yet)
       before pinning it against a fixture that does.
-- [ ] A test that an unrecognised value in the variable **refuses at startup and names it**, rather
+      → `tests/auth_posture.rs:10-40` declares the hazard in the fixture. The first run failed at the
+      intended seam with unresolved imports for `AuthPosture` and `AuthPostureRefusal`; after the
+      implementation the focused host suite passes 3/3.
+- [x] A test that an unrecognised value in the variable **refuses at startup and names it**, rather
       than arming the recognised remainder.
-- [ ] The refusal carries its own status and is distinguishable from a vendor rejection — asserted,
+      → `auth_posture.rs:94-109` supplies a recognised entry followed by an unknown one and asserts
+      the whole read fails while naming both the setting and unknown value. `main::compose` promotes
+      that error to its own `StartupRefusal::AuthPosture` before binding authority.
+- [x] The refusal carries its own status and is distinguishable from a vendor rejection — asserted,
       following `every_refusal_states_the_status_it_answers_with`.
-- [ ] `README.md` and `AGENTS.md` § Status say that this is fail-closed and what the outage looks
+      → `AuthPostureRefusal::status` carries `403`; `tests/auth_posture.rs:57-72` matches the sole
+      variant and asserts it is not credential rejection's `401`.
+- [x] `README.md` and `AGENTS.md` § Status say that this is fail-closed and what the outage looks
       like, in the same change. A gate whose refusal is undocumented is X-13's lesson repeated.
+      → both name the unset default, recognised opt-in, startup refusal, future `403` symptom, and
+      the present fixture-only limit before upstream C-440.
 
 ## Progress
-- (not started)
+- **Done — Wave #1.** The published host owns the typed, fail-closed decision and refusal; the
+  binary reads the sole deployment setting by name and rejects unknown values before binding any
+  store or background authority. Admission itself remains an acquisition-time call, so X-75 can
+  hand a newly declared connector hazard to the already-tested rule without moving policy into a
+  request.
+- Focused evidence: host posture + existing hazard vocabulary 7/7; server posture parser 3/3;
+  focused host clippy with `-D warnings` clean. The server-wide clippy run was also attempted, but
+  concurrent Wave edits in X-60/X-91 were mid-flight and produced unrelated warnings; the final Wave
+  gate owns their integrated result.
 
 ## Notes
 - Depends on [[X-73]] for the vocabulary. Does **not** depend on [[X-75]] — the fixture stands in for

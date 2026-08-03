@@ -2,8 +2,8 @@
 //!
 //! # What signing in is, and what it is not
 //!
-//! Signing in establishes **who the operator is**. It asks the provider for `openid`, `email` and
-//! `profile` — see [`SCOPES`](config::SCOPES) — and it mints nothing for any vendor. Connecting a
+//! Signing in establishes **who the human is**. It asks the provider only for `openid` — see
+//! [`SCOPES`](config::SCOPES) — and it mints nothing for any vendor. Connecting a
 //! provider so that operations can run against it is a different flow with a different consent
 //! screen, and conflating them is how a user who agreed to "sign in with Acme" ends up having
 //! granted a service standing access to their mail.
@@ -121,7 +121,7 @@ impl Oidc {
              &state={state}\
              &nonce={nonce}\
              &code_challenge={challenge}\
-             &code_challenge_method={method}",
+             &code_challenge_method={method}{hosted_domain}",
             endpoint = self.config.authorization_endpoint(),
             client_id = urlencoded(self.config.client_id()),
             redirect_uri = urlencoded(self.config.redirect_uri()),
@@ -130,6 +130,11 @@ impl Oidc {
             nonce = begun.nonce,
             challenge = begun.challenge.as_str(),
             method = pkce::METHOD,
+            hosted_domain = self
+                .config
+                .hosted_domain()
+                .map(|domain| format!("&hd={}", urlencoded(domain)))
+                .unwrap_or_default(),
         );
 
         Ok(Authorization {
@@ -305,6 +310,14 @@ impl Oidc {
             return Err(SignInRefusal::NonceMismatch);
         }
 
+        // Google's `hd` parameter on the authorization request is only account-selection UX. The
+        // authority decision is this exact comparison against the signature-verified id token.
+        if self.config.hosted_domain().is_some()
+            && claims.hosted_domain.as_deref() != self.config.hosted_domain()
+        {
+            return Err(SignInRefusal::HostedDomainMismatch);
+        }
+
         // `sub` and not `email`. The subject is the provider's stable, immutable identifier; an
         // address is neither — it can be changed, released and re-registered to somebody else, and
         // at some providers it is self-asserted. A principal id that can be reassigned is a
@@ -440,6 +453,9 @@ pub enum SignInRefusal {
     /// The id token names no subject, so there is no stable identifier to be a principal.
     NoSubject,
 
+    /// The id token omitted or mismatched the configured signed hosted-domain claim.
+    HostedDomainMismatch,
+
     /// The authorization request could not be opened.
     NoFlow(FlowError),
 
@@ -481,7 +497,8 @@ impl SignInRefusal {
             | Self::AudienceMismatch
             | Self::Expired
             | Self::NonceMismatch
-            | Self::NoSubject => StatusCode::UNAUTHORIZED,
+            | Self::NoSubject
+            | Self::HostedDomainMismatch => StatusCode::UNAUTHORIZED,
             // This host's problem, kept distinct all the way out: an operator answers an outage and
             // a bad credential in opposite ways.
             Self::ProviderUnreachable(_) | Self::NoFlow(_) | Self::NoSession(_) => {
@@ -541,7 +558,8 @@ impl SignInRefusal {
             | Self::AudienceMismatch
             | Self::Expired
             | Self::NonceMismatch
-            | Self::NoSubject => {
+            | Self::NoSubject
+            | Self::HostedDomainMismatch => {
                 "the identity provider's answer was not accepted. Start again from the sign-in page"
             }
             Self::ProviderUnreachable(_) => {
@@ -616,6 +634,9 @@ impl fmt::Display for SignInRefusal {
                 f.write_str("the id token echoed no nonce, or not the one that was bound")
             }
             Self::NoSubject => f.write_str("the id token names no subject"),
+            Self::HostedDomainMismatch => f.write_str(
+                "the id token omitted or mismatched the configured signed hosted-domain claim",
+            ),
             Self::NoFlow(source) => write!(f, "{source}"),
             Self::NoSession(source) => write!(f, "{source}"),
         }
@@ -664,6 +685,14 @@ mod tests {
         )
     }
 
+    fn domain_restricted_oidc() -> Oidc {
+        Oidc::new(
+            OidcConfig::for_test(ISSUER, CLIENT_ID, TENANT)
+                .with_hosted_domain_for_test("example.com"),
+            Arc::new(Unused),
+        )
+    }
+
     /// Claims a well-behaved provider returns for a sign-in bound to [`NONCE`].
     fn good() -> SignedClaims {
         SignedClaims {
@@ -672,7 +701,7 @@ mod tests {
             subject: "248289761001".to_string(),
             nonce: Some(NONCE.to_string()),
             expires_at: 2_000_000_000,
-            email: Some("alice@example.com".to_string()),
+            hosted_domain: Some("example.com".to_string()),
         }
     }
 
@@ -809,6 +838,37 @@ mod tests {
         assert!(oidc().admit(&claims, NONCE, 1_000_000_000).is_ok());
     }
 
+    /// **X-90's failing-first admission table.** The authorization hint earns no authority; only
+    /// the exact signature-verified `hd` claim does.
+    #[test]
+    fn a_configured_hosted_domain_requires_an_exact_signed_claim() {
+        let oidc = domain_restricted_oidc();
+
+        assert!(oidc.admit(&good(), NONCE, 1_000_000_000).is_ok());
+        for claims in [
+            SignedClaims {
+                hosted_domain: None,
+                ..good()
+            },
+            SignedClaims {
+                hosted_domain: Some("attacker.example".to_string()),
+                ..good()
+            },
+            SignedClaims {
+                hosted_domain: Some("EXAMPLE.COM".to_string()),
+                ..good()
+            },
+        ] {
+            assert!(
+                matches!(
+                    oidc.admit(&claims, NONCE, 1_000_000_000),
+                    Err(SignInRefusal::HostedDomainMismatch)
+                ),
+                "a missing, mismatched, or differently-cased signed claim must refuse"
+            );
+        }
+    }
+
     /// Nothing in an id token names a tenant, and nothing could: the tenant is read from the
     /// configuration. Stated here because `SignedClaims` is the only thing crossing the seam, and a
     /// later field added to it must not become a second source.
@@ -819,7 +879,7 @@ mod tests {
         // Every free-text claim set to a tenant that exists and is not ours.
         let hostile = SignedClaims {
             subject: "globex".to_string(),
-            email: Some("someone@globex".to_string()),
+            hosted_domain: Some("globex".to_string()),
             ..good()
         };
 
@@ -1073,6 +1133,7 @@ mod tests {
                 SignInRefusal::Expired => StatusCode::UNAUTHORIZED,
                 SignInRefusal::NonceMismatch => StatusCode::UNAUTHORIZED,
                 SignInRefusal::NoSubject => StatusCode::UNAUTHORIZED,
+                SignInRefusal::HostedDomainMismatch => StatusCode::UNAUTHORIZED,
                 // This host could not do its job, and says so rather than blaming the caller.
                 SignInRefusal::ProviderUnreachable(_) => StatusCode::SERVICE_UNAVAILABLE,
                 SignInRefusal::NoFlow(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -1099,6 +1160,7 @@ mod tests {
             SignInRefusal::Expired,
             SignInRefusal::NonceMismatch,
             SignInRefusal::NoSubject,
+            SignInRefusal::HostedDomainMismatch,
             SignInRefusal::NoFlow(FlowError::NoEntropy {
                 source: std::io::Error::other("the test's, not the OS's"),
             }),
@@ -1356,13 +1418,32 @@ mod tests {
     #[test]
     fn configured_values_are_percent_encoded_into_the_url() {
         assert_eq!(urlencoded("flux-exchange"), "flux-exchange");
-        assert_eq!(
-            urlencoded("openid email profile"),
-            "openid%20email%20profile"
-        );
+        assert_eq!(urlencoded("openid"), "openid");
         assert_eq!(
             urlencoded("https://a.example/cb?x=1&y=2"),
             "https%3A%2F%2Fa.example%2Fcb%3Fx%3D1%26y%3D2",
+        );
+    }
+
+    /// The hosted domain in the authorization URL is only a Google account-selection hint. The
+    /// admission test above separately proves it cannot substitute for the signed claim.
+    #[test]
+    fn a_hosted_domain_is_sent_as_an_encoded_authorization_hint() {
+        let url = Oidc::new(
+            OidcConfig::for_test(ISSUER, CLIENT_ID, TENANT)
+                .with_hosted_domain_for_test("example.com&prompt=none"),
+            Arc::new(Unused),
+        )
+        .authorize()
+        .expect("the OS has randomness")
+        .url;
+
+        assert!(url.contains("&scope=openid&"), "{url}");
+        assert!(url.ends_with("&hd=example.com%26prompt%3Dnone"), "{url}");
+        assert_eq!(
+            url.matches("prompt=").count(),
+            0,
+            "the hint cannot inject a query: {url}"
         );
     }
 }

@@ -31,7 +31,7 @@
 //!
 //! # Status
 //!
-//! **v0.16.0, and the service around these types runs operations and generated channels.** Since X-12,
+//! **v0.16.1, and the service around these types runs operations and generated channels.** Since X-12,
 //! `POST /api/operations/{operation}/invoke` executes one catalogue operation for the caller's
 //! tenant through [`Invoker`], over a credential store, a connection-settings store and an OIDC
 //! sign-in. What is *not* built is itemized in the repository README, and keeping that page
@@ -127,7 +127,7 @@ pub use flux_lang::editor::{EditorTraceEvent, EditorTraceObserver};
 /// engine line is pinned once, in the workspace manifest; this is the doorway to the one it names.
 pub use flux_runtime::{ToolContext, ToolRegistry};
 
-pub use acquisition::AuthHazard;
+pub use acquisition::{AuthHazard, AuthPosture, AuthPostureRefusal};
 pub use channel::{
     ChannelId, ChannelPlanRefusal, ChannelRecord, ChannelRefusal, Channels,
     ConnectorChannelPlanner, MemoryChannels,

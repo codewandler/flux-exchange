@@ -1,0 +1,5 @@
+# Production images fail on every known vulnerability, including negligible severity. An exception
+# belongs here only when the vulnerable code is demonstrably unreachable in this service. Keep each
+# exception to one vulnerability/package tuple and include an owner, expiry and justification, as
+# narrowly as the RustSec exceptions in `.github/workflows/ci.yml`.
+ignore: []

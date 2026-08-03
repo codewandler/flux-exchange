@@ -20,8 +20,9 @@ pub const BIND_ENV: &str = "FLUX_EXCHANGE_BIND";
 
 /// Whether this composition bound an [`Identity`](exchange_host::Identity) port.
 ///
-/// A two-state answer rather than the port itself: the bind decision does not care *how* a caller
-/// would be authenticated, only whether anything could.
+/// An admission state rather than the port itself: the bind decision distinguishes the
+/// secret-free development identity from bindings that prove a credential, while keeping the
+/// concrete verifier/provider out of this layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityBinding {
     /// An identity provider is configured, so a request can become a principal.
@@ -36,6 +37,9 @@ pub enum IdentityBinding {
     /// reachable bind whose authentication is a name anybody can guess is worse than no
     /// authentication, because the surface in front of it believes every caller.
     Development,
+    /// A static, owner-only verifier file is bound. This is a real secret-backed local binding,
+    /// distinct from OIDC `Bound` and from the guessable development roster.
+    LocalUsers,
 }
 
 /// Decide whether the server may listen on `bind`.
@@ -55,7 +59,7 @@ pub fn admit_bind(bind: SocketAddr, identity: IdentityBinding) -> Result<(), Sta
     }
 
     match identity {
-        IdentityBinding::Bound => Ok(()),
+        IdentityBinding::Bound | IdentityBinding::LocalUsers => Ok(()),
         IdentityBinding::Unbound => Err(StartupRefusal::ReachableBindWithoutIdentity { bind }),
         // The development identity is the one binding that can resolve a principal and still must
         // not be exposed. This is the refusal the story asks for in place of a default.
@@ -81,9 +85,27 @@ pub fn admit_audit(bind: SocketAddr, audit_bound: bool) -> Result<(), StartupRef
 /// value, and distinguish failures an operator answers differently — is met below.
 #[derive(Debug)]
 pub enum StartupRefusal {
+    /// The deployment's authentication-hazard policy named a value this build does not know.
+    AuthPosture {
+        /// The by-name, redaction-safe configuration refusal.
+        reason: String,
+    },
+
     /// The `--dev` shorthand could not derive its one local principal.
     DevelopmentMode {
         /// What startup input was missing or unusable. It carries no credential value.
+        reason: String,
+    },
+
+    /// The provider-independent single-tenant declaration was malformed or contradicted `--dev`.
+    Tenancy {
+        /// The redaction-safe startup refusal.
+        reason: String,
+    },
+
+    /// The verifier-backed local users file could not be safely loaded.
+    LocalUsers {
+        /// The redaction-safe file refusal.
         reason: String,
     },
 
@@ -241,7 +263,10 @@ impl From<DevIdentityRefusal> for StartupRefusal {
 impl fmt::Display for StartupRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AuthPosture { reason } => write!(f, "{reason}"),
             Self::DevelopmentMode { reason } => write!(f, "{reason}"),
+            Self::Tenancy { reason } => write!(f, "{reason}"),
+            Self::LocalUsers { reason } => write!(f, "{reason}"),
             // Names both things that would have worked, because the operator cannot tell from the
             // outside which half of the pair they meant to change.
             Self::ReachableBindWithoutIdentity { bind } => write!(
@@ -302,10 +327,13 @@ impl fmt::Display for StartupRefusal {
 impl std::error::Error for StartupRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::ReachableBindWithoutIdentity { .. }
+            Self::AuthPosture { .. }
+            | Self::ReachableBindWithoutIdentity { .. }
             | Self::ReachableBindWithDevelopmentIdentity { .. }
             | Self::ReachableBindWithoutAudit { .. }
             | Self::DevelopmentMode { .. }
+            | Self::Tenancy { .. }
+            | Self::LocalUsers { .. }
             | Self::CredentialStore { .. }
             | Self::ServiceAccountStore { .. }
             | Self::SettingsStore { .. }
@@ -385,6 +413,17 @@ mod tests {
     #[test]
     fn a_reachable_bind_is_admitted_once_an_identity_is_bound() {
         assert!(admit_bind(addr("0.0.0.0:8080"), IdentityBinding::Bound).is_ok());
+    }
+
+    /// A verifier-backed local file is neither federation nor a development roster. It is still a
+    /// real secret-backed binding, so it independently makes a reachable listener admissible.
+    #[test]
+    fn verifier_backed_local_users_admit_a_reachable_bind_as_their_own_state() {
+        assert!(admit_bind(addr("0.0.0.0:8080"), IdentityBinding::LocalUsers).is_ok());
+        assert!(matches!(
+            admit_bind(addr("0.0.0.0:8080"), IdentityBinding::Development),
+            Err(StartupRefusal::ReachableBindWithDevelopmentIdentity { .. })
+        ));
     }
 
     /// The hole X-03 must not open: arming a development identity resolves principals, so it would

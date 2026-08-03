@@ -101,13 +101,14 @@ const MINTED = {
 }
 
 /**
- * The `403`, verbatim — `routes::refuse_kind(MAY_MINT)` composes it from the declared kinds.
+ * The `403`, verbatim — operator authority is independent from the signed-in principal kind.
  *
  * This is the sentence that makes the console's own guess about who may mint a courtesy rather than
  * a rule: the console withholds the form to avoid offering an operator something they will be
  * refused, and the service is what actually decides.
  */
-const MAY_NOT_MINT = 'this route admits only a principal of kind: user'
+const MAY_NOT_MINT =
+  'this route requires an operator configured by FLUX_EXCHANGE_OPERATOR_SUBJECTS'
 
 /** A resolved principal, in the shape `GET /api/session` publishes one. */
 const principal = (over = {}) => ({ kind: 'user', id: 'alice', tenant: 'acme', ...over })
@@ -601,7 +602,7 @@ test('minting_is_offered_only_to_a_principal_this_host_would_admit', async () =>
   assert.equal(loading.gate, 'loading')
 })
 
-test('a_refusal_is_the_services_own_sentence_and_no_token_is_invented', async () => {
+test('an_operator_policy_refusal_is_shown_whole_and_no_token_is_invented', async () => {
   const Agents = await screen()
   const stub = serving(403, { error: MAY_NOT_MINT })
 

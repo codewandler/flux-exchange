@@ -184,10 +184,10 @@
 //! `GET` still answers `200` for such a connection, with each credential's `held` telling the truth
 //! about it. **That is deliberate and X-18 decided not to change it here**: a connector may legally
 //! hold a subset of what it declares — `tests::a_connection_may_carry_a_subset_of_what_is_declared`
-//! — so "half destroyed" and "deliberately partial" render identically, and nothing distinguishes
-//! them without a record beside the store, which this module deliberately does not keep (see
-//! [`list`]). Giving `GET` a status of its own therefore needs that record designed first, and is
-//! its own story rather than a line here.
+//! — so "half destroyed" and "deliberately partial" render identically. X-60's audit projection
+//! records successful suppliers, not deletion intent or connection state, and therefore does not
+//! turn that evidence into a lifecycle status. Giving `GET` a status of its own still needs that
+//! state designed first and remains its own story rather than a line here.
 //!
 //! Each refusal is a check-then-write, so it only means anything while nothing interleaves with it,
 //! and the two are decided from reads of different width — so
@@ -218,9 +218,8 @@ use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
     address_path, admit_tenant_occupancy, declared_settings, host_pinning, stored_bytes,
     ConnectionLabel, ConnectionRefusal, ConnectorDeclaration, CredentialRef, CredentialScope,
-    DeclaredCredential, DeclaredSetting, HostPinning, InstanceId, Principal, PrincipalKind,
-    RegistryRefusal, Secret, SecretBatch, SecretStore, SettingsRefusal, StoreError, Tenant,
-    TenantInstances,
+    DeclaredCredential, DeclaredSetting, HostPinning, InstanceId, Principal, RegistryRefusal,
+    Secret, SecretBatch, SecretStore, SettingsRefusal, StoreError, Tenant, TenantInstances,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -316,8 +315,6 @@ pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
 /// can name an origin. Closing that needs a place for an **operator** to pin an allowed host per
 /// tenant — a surface that does not exist, with its own authorization question. See
 /// `docs/designs/connection-settings.md` § 4.
-pub(super) const MAY_CONFIGURE: &[PrincipalKind] = &[PrincipalKind::User];
-
 /// **Who may put a credential value into this tenant's store: a `User`, and nothing else.**
 ///
 /// The two routes that write a credential — `POST /api/connections/{connector}` and
@@ -341,11 +338,10 @@ pub(super) const MAY_CONFIGURE: &[PrincipalKind] = &[PrincipalKind::User];
 /// stated test — *what does this outlive?* — and the same test is what puts these two on the other
 /// side of it:
 ///
-/// - **Nothing records who supplied a credential.** A connection is what the credential store says
-///   it is (`docs/designs/connections.md`) — there is no record beside it, by design — so
-///   `GET /api/connections` answers `held: true` for a value an agent planted exactly as it does
-///   for the one a human did. A rotation is more invisible still: it replaces in place, with no
-///   observable state in which anything is missing.
+/// - **At the time of X-54, nothing recorded who supplied a credential.** X-60 subsequently
+///   projected X-95's successful audit evidence beside `held`, without making that evidence the
+///   source of connection existence. The gate remains defence in depth: missing retained evidence
+///   honestly reads `unknown`, and attribution does not undo a substitution.
 /// - **Revocation is not a remedy.** Revoking the agent's token stops the agent; it does not take
 ///   the value back out of the store, and nothing points an operator at the address to look at.
 ///   That is `agents::MAY_MINT`'s argument — an incomplete remedy an operator cannot see — reached
@@ -400,8 +396,6 @@ pub(super) const MAY_CONFIGURE: &[PrincipalKind] = &[PrincipalKind::User];
 /// an `Operator` variant on [`PrincipalKind`] here would put a policy model in the identity
 /// vocabulary, where nothing mints it, nothing revokes it and no identity port knows how to return
 /// it. It is written down rather than left to be inferred from the absence of a test.
-pub(super) const MAY_SUPPLY_A_CREDENTIAL: &[PrincipalKind] = &[PrincipalKind::User];
-
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
     name: "connections",
@@ -417,7 +411,7 @@ pub(super) const MODULE: Module = Module {
             // can say so instead of failing an invocation for a reason nobody can act on — the
             // same argument the settings `GET` collection is open on.
             path: "/api/connections",
-            access: Access::Principal,
+            access: Access::Operator,
             method_router: collection_route,
         },
         Route {
@@ -433,7 +427,7 @@ pub(super) const MODULE: Module = Module {
             // Whether an agent should reach a destructive route is the grant-shaped question,
             // which is X-13's. See `crate::routes::service_accounts`.
             path: "/api/connections/{connector}",
-            access: Access::Principal,
+            access: Access::Operator,
             method_router: connection_route,
         },
         Route {
@@ -445,7 +439,7 @@ pub(super) const MODULE: Module = Module {
             // has been granted the credential position, nothing records who supplied one, and
             // revoking the token that did it does not take the value back out.
             path: "/api/connections/{connector}",
-            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            access: Access::Operator,
             method_router: create_route,
         },
         Route {
@@ -463,7 +457,7 @@ pub(super) const MODULE: Module = Module {
             // of the substitution [`MAY_SUPPLY_A_CREDENTIAL`] describes — and rotation exists for
             // revoking a leaked secret, which is an operator's act rather than a caller's.
             path: "/api/connections/{connector}/credentials/{credential}",
-            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            access: Access::Operator,
             method_router: credential_route,
         },
         Route {
@@ -471,7 +465,7 @@ pub(super) const MODULE: Module = Module {
             // The answer is derived from the connector's own operations and from the resolved
             // principal, and carries no value.
             path: "/api/connections/{connector}/settings",
-            access: Access::Principal,
+            access: Access::Operator,
             method_router: settings_route,
         },
         Route {
@@ -485,37 +479,37 @@ pub(super) const MODULE: Module = Module {
             // credential to — and an agent's token grants access to an operation, never to a
             // credential. [`MAY_CONFIGURE`] carries the argument, including why the gate is the
             // whole write surface rather than the host-shaped fields alone.
-            access: Access::PrincipalOfKind(MAY_CONFIGURE),
+            access: Access::Operator,
             method_router: setting_route,
         },
         Route {
             path: "/api/connections/{connector}/label",
-            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            access: Access::Operator,
             method_router: legacy_label_route,
         },
         Route {
             path: "/api/connections/{connector}/instances/{label}",
-            access: Access::Principal,
+            access: Access::Operator,
             method_router: instance_read_route,
         },
         Route {
             path: "/api/connections/{connector}/instances/{label}",
-            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            access: Access::Operator,
             method_router: instance_write_route,
         },
         Route {
             path: "/api/connections/{connector}/instances/{label}/settings",
-            access: Access::Principal,
+            access: Access::Operator,
             method_router: instance_settings_route,
         },
         Route {
             path: "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
-            access: Access::PrincipalOfKind(MAY_CONFIGURE),
+            access: Access::Operator,
             method_router: instance_setting_route,
         },
         Route {
             path: "/api/connections/{connector}/instances/{label}/credentials/{credential}",
-            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            access: Access::Operator,
             method_router: instance_credential_route,
         },
     ],
@@ -620,10 +614,11 @@ struct RotatedCredential {
 
 /// Every connection this tenant holds.
 ///
-/// Derived from the store rather than from a record beside it: a connection exists exactly when the
-/// store holds a value at one of the addresses derived for that tenant and connector. There is no
-/// second source of truth to disagree with the credentials, which is also what makes `DELETE`
-/// destroying them not a step somebody could forget.
+/// Existence is derived from the store: a connection exists exactly when it holds a value at one of
+/// the addresses derived for that tenant and connector. Retained audit evidence is projected only
+/// as supplier attribution and degrades to `unknown`, so there is no second source of connection
+/// truth to disagree with the credentials. That is also what makes `DELETE` destroying them not a
+/// step somebody could forget.
 async fn list(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -957,10 +952,13 @@ async fn connection_views(
         let held = held(store, &addresses)
             .await
             .map_err(|error| store_failed(&error))?;
-        return Ok((!held.is_empty())
-            .then(|| named_view(provider, &addresses, &held, None, None))
-            .into_iter()
-            .collect());
+        if held.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut answer = named_view(provider, &addresses, &held, None, None);
+        add_supplier_attribution(state, tenant, provider, None, &mut answer)
+            .map_err(|response| *response)?;
+        return Ok(vec![answer]);
     }
     let inventory = inventory(store, tenant, declaration).await?;
     let labels = match state.connection_registry() {
@@ -975,13 +973,24 @@ async fn connection_views(
             .addresses(tenant)
             .map_err(|refusal| connection_refused(&refusal))?;
         let label = (labels.len() == 1).then(|| &labels[0]);
-        views.push(named_view(
+        let mut answer = named_view(
             provider,
             &addresses,
             &held_names(declaration, &inventory.legacy),
             label.map(|entry| &entry.label),
             label.map(|entry| &entry.instance),
-        ));
+        );
+        add_supplier_attribution(
+            state,
+            tenant,
+            provider,
+            // A label over a sole legacy address changes only the naming overlay. Its supplier
+            // evidence was recorded against the legacy connection target and remains there.
+            None,
+            &mut answer,
+        )
+        .map_err(|response| *response)?;
+        views.push(answer);
     }
     let ids = inventory.ids();
     for (instance, references) in &inventory.instances {
@@ -1006,15 +1015,72 @@ async fn connection_views(
                 .collect()
         };
         let label = labels.iter().find(|entry| entry.instance == *instance);
-        views.push(named_view(
+        let mut answer = named_view(
             provider,
             &addresses,
             &held_names(declaration, references),
             label.map(|entry| &entry.label),
             Some(instance),
-        ));
+        );
+        add_supplier_attribution(
+            state,
+            tenant,
+            provider,
+            label.map(|entry| entry.label.as_str()),
+            &mut answer,
+        )
+        .map_err(|response| *response)?;
+        views.push(answer);
     }
     Ok(views)
+}
+
+/// Add current supplier evidence to a connection projection without making it existence state.
+///
+/// Only held credentials are queried. A historical record beside an empty address must not make a
+/// credential look current, just as a missing record beside a held address must not make the
+/// connection disappear. The durable journal is optional on loopback; no journal and no matching
+/// retained row are both represented honestly as `unknown`.
+fn add_supplier_attribution(
+    state: &AppState,
+    tenant: &Tenant,
+    provider: &'static Provider,
+    instance_label: Option<&str>,
+    connection: &mut Value,
+) -> Result<(), Box<Response>> {
+    let credentials = connection
+        .get_mut("credentials")
+        .and_then(Value::as_array_mut)
+        .expect("the connection view always carries a credential array");
+    for credential in credentials {
+        let held = credential["held"].as_bool().unwrap_or(false);
+        let name = credential["name"]
+            .as_str()
+            .expect("a projected credential always has its declared name");
+        let evidence = match (held, state.audit()) {
+            (true, Some(journal)) => journal
+                .latest_credential_supplier(tenant.as_str(), provider.id, name, instance_label)
+                .map_err(|error| Box::new(super::audit_unavailable(error)))?,
+            _ => None,
+        };
+        let attribution = match evidence.and_then(|record| {
+            record
+                .actor
+                .map(|actor| (actor.kind, actor.id, record.timestamp))
+        }) {
+            Some((kind, id, at)) => json!({
+                "status": "known",
+                "principal": { "kind": kind, "id": id },
+                "at": at,
+            }),
+            None => json!({ "status": "unknown" }),
+        };
+        credential
+            .as_object_mut()
+            .expect("a projected credential is always an object")
+            .insert("last_supplied".to_owned(), attribution);
+    }
+    Ok(())
 }
 
 /// Resolve `?connection=` inside the principal's tenant for the invocation adapter.
@@ -3504,6 +3570,20 @@ mod tests {
         (app, store)
     }
 
+    /// A connection surface backed by a caller-supplied store and durable evidence journal.
+    fn audited_app(store: Arc<TestStore>, journal: Arc<crate::audit::AuditJournal>) -> Router {
+        super::super::app(
+            AppState::with_development_identity(Arc::new(
+                DevIdentity::from_roster(
+                    "user:alice@acme,user:carol@acme,user:bob@globex,agent:triage-bot@acme",
+                )
+                .expect("a well-formed roster"),
+            ))
+            .with_credentials(store)
+            .with_audit(journal),
+        )
+    }
+
     /// An app with both tenants armed, a credential store **and** a settings store bound.
     ///
     /// Two stores, handed back separately, because the whole of X-47's placement argument is that
@@ -3786,6 +3866,134 @@ mod tests {
              store is what says so — {:?}",
             store.addresses(),
         );
+    }
+
+    /// **X-60's failing-first test.** Evidence attributes each held credential, but is never the
+    /// source of truth for whether the connection exists.
+    #[tokio::test]
+    async fn deleting_supplier_evidence_leaves_the_connection_held_usable_and_unknown() {
+        let scratch = Scratch::new();
+        let audit_path = scratch.join("audit").join("events.sqlite3");
+        let store = Arc::new(TestStore::default());
+        let journal = Arc::new(
+            crate::audit::AuditJournal::bind(&audit_path).expect("a durable evidence journal"),
+        );
+        let app = audited_app(store.clone(), journal.clone());
+
+        let (status, created) = connect_zendesk(&app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let (status, created) = connect_zendesk(&app, "bob").await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let (status, attributed) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::OK, "{attributed}");
+        assert_eq!(
+            attributed["credentials"][0]["last_supplied"]["status"], "known",
+            "successful creation evidence attributes the credential: {attributed}",
+        );
+        assert_eq!(
+            attributed["credentials"][0]["last_supplied"]["principal"],
+            json!({ "kind": "user", "id": "alice" }),
+        );
+        assert!(
+            attributed["credentials"][0]["last_supplied"]["at"]
+                .as_str()
+                .is_some(),
+            "attribution names when the principal supplied it: {attributed}",
+        );
+        assert!(
+            !attributed.to_string().contains(SENTINEL),
+            "supplier evidence is principal-and-time only, never credential-derived: {attributed}",
+        );
+        let (_, globex) = call(&app, "bob", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(
+            globex["credentials"][0]["last_supplied"]["principal"],
+            json!({ "kind": "user", "id": "bob" }),
+            "a target shared by two tenants must be filtered by tenant in the evidence query: {globex}",
+        );
+        assert!(!globex.to_string().contains("alice"));
+
+        // Delete the entire evidence source while preserving the credential store. Rebinding an
+        // empty journal models loss or retention of the record without giving the route a test-only
+        // deletion API.
+        drop(app);
+        drop(journal);
+        std::fs::remove_file(&audit_path).expect("the closed evidence journal can be deleted");
+        let replacement = Arc::new(
+            crate::audit::AuditJournal::bind(&audit_path).expect("a new empty evidence journal"),
+        );
+        let app = audited_app(store.clone(), replacement);
+
+        let (status, unattributed) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::OK, "{unattributed}");
+        assert_eq!(unattributed["credentials"][0]["held"], true);
+        assert_eq!(
+            unattributed["credentials"][0]["last_supplied"],
+            json!({ "status": "unknown" }),
+            "missing evidence must not become evidence that nobody supplied the credential: {unattributed}",
+        );
+
+        // It is usable management state, not a ghost listing: a different human can rotate it,
+        // and that successful write becomes the new current attribution.
+        let (status, rotated) = call(
+            &app,
+            "carol",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": "ROTATED-AFTER-EVIDENCE-LOSS" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rotated}");
+        assert_eq!(
+            store
+                .at("tenants/acme/com.zendesk.api/api_token")
+                .as_deref(),
+            Some("ROTATED-AFTER-EVIDENCE-LOSS"),
+        );
+        let (_, reattributed) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(
+            reattributed["credentials"][0]["last_supplied"]["principal"],
+            json!({ "kind": "user", "id": "carol" }),
+            "the latest successful supplier, rather than the original creator, is current: {reattributed}",
+        );
+        assert!(!reattributed
+            .to_string()
+            .contains("ROTATED-AFTER-EVIDENCE-LOSS"));
+
+        // A refused later attempt is evidence of a refusal, not evidence of a supplier.
+        let (status, refused) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": "x".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1) })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{refused}");
+        let (_, still_carol) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(
+            still_carol["credentials"][0]["last_supplied"]["principal"],
+            json!({ "kind": "user", "id": "carol" }),
+            "only successful writes can become current supplier evidence: {still_carol}",
+        );
+
+        // The same connector in another tenant reveals neither the principal nor the timestamp.
+        let (status, other_tenant) =
+            call(&app, "bob", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::OK, "{other_tenant}");
+        assert_eq!(
+            other_tenant["credentials"][0]["last_supplied"],
+            json!({ "status": "unknown" }),
+        );
+        assert!(!other_tenant.to_string().contains("carol"));
+
+        let (status, anonymous) =
+            call(&app, "", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{anonymous}");
+        assert!(!anonymous.to_string().contains("carol"));
     }
 
     /// **The Acceptance's failing-first test.** An authenticated principal of one tenant cannot
@@ -6722,8 +6930,8 @@ mod tests {
             assert!(
                 answered["error"]
                     .as_str()
-                    .is_some_and(|error| error.contains("user")),
-                "the refusal must name the kind that would have worked: {answered}",
+                    .is_some_and(|error| error.contains(crate::operator::OPERATOR_SUBJECTS_ENV)),
+                "the refusal must name the operator policy to fix: {answered}",
             );
             assert!(
                 !answered.to_string().contains("attacker-controlled"),
@@ -6838,8 +7046,8 @@ mod tests {
         assert!(
             answered["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("user")),
-            "the refusal must name the kind that would have worked: {answered}",
+                .is_some_and(|error| error.contains(crate::operator::OPERATOR_SUBJECTS_ENV)),
+            "the refusal must name the operator policy to fix: {answered}",
         );
         assert!(
             !answered.to_string().contains(SUBSTITUTED),
@@ -6875,8 +7083,8 @@ mod tests {
         assert!(
             answered["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("user")),
-            "the refusal must name the kind that would have worked: {answered}",
+                .is_some_and(|error| error.contains(crate::operator::OPERATOR_SUBJECTS_ENV)),
+            "the refusal must name the operator policy to fix: {answered}",
         );
         assert!(
             !answered.to_string().contains(SUBSTITUTED),
@@ -6942,7 +7150,7 @@ mod tests {
     ///   of the token that did it. Whether an agent should reach a destructive route at all is the
     ///   grant-shaped question, which is X-13's.
     #[tokio::test]
-    async fn an_agent_may_still_read_a_connection_and_disconnect_one() {
+    async fn an_agent_cannot_read_or_disconnect_operator_owned_connections() {
         let (app, store) = connected_app();
 
         let (status, created) = connect_zendesk(&app, "alice").await;
@@ -6952,8 +7160,8 @@ mod tests {
             let (status, read) = call(&app, "triage-bot", Method::GET, path, None).await;
             assert_eq!(
                 status,
-                StatusCode::OK,
-                "an agent must be able to see whether its tenant is connected: {read}",
+                StatusCode::FORBIDDEN,
+                "connection inventory is operator state under X-91: {read}",
             );
             assert!(
                 !read.to_string().contains(SENTINEL),
@@ -6971,9 +7179,20 @@ mod tests {
         .await;
         assert_eq!(
             status,
-            StatusCode::NO_CONTENT,
-            "destroying a connection is the grant-shaped question (X-13), not the kind-shaped one",
+            StatusCode::FORBIDDEN,
+            "destroying credential-bearing state requires operator authority",
         );
+        assert!(!store.addresses().is_empty(), "{:?}", store.addresses());
+
+        let (status, _) = call(
+            &app,
+            "alice",
+            Method::DELETE,
+            "/api/connections/zendesk",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
         assert!(store.addresses().is_empty(), "{:?}", store.addresses());
     }
 
@@ -7258,8 +7477,8 @@ mod tests {
         );
     }
 
-    /// Every route requires a principal, and the ones that require a particular **kind** are named
-    /// here beside the constant each is declared with.
+    /// **X-91.** Every connection route is administrative and declares operator authority at the
+    /// route-table boundary.
     ///
     /// Asserted here as well as in the surface-wide enumeration, because that one compares against a
     /// list somebody edits and this one cannot be satisfied by editing a list: [`Access::Anonymous`]
@@ -7277,54 +7496,15 @@ mod tests {
     /// [`tests::an_agent_may_still_read_a_connection_and_disconnect_one`] is the behavioural half of
     /// that, since this test alone cannot tell a path gated for one verb from one gated whole.
     #[test]
-    fn every_route_here_requires_a_principal_and_the_kind_gated_ones_are_named() {
-        let gated: Vec<(&str, &[PrincipalKind])> = MODULE
-            .routes
-            .iter()
-            .filter_map(|route| match route.access {
-                Access::Principal => None,
-                Access::PrincipalOfKind(kinds) => Some((route.path, kinds)),
-                Access::Anonymous => panic!(
-                    "a connection is tenant data and answers no caller this host cannot identify: \
-                     {}",
-                    route.path,
-                ),
-            })
-            .collect();
-
-        assert_eq!(
-            gated,
-            vec![
-                ("/api/connections/{connector}", MAY_SUPPLY_A_CREDENTIAL),
-                (
-                    "/api/connections/{connector}/credentials/{credential}",
-                    MAY_SUPPLY_A_CREDENTIAL,
-                ),
-                (
-                    "/api/connections/{connector}/settings/{service}/{field}",
-                    MAY_CONFIGURE,
-                ),
-                (
-                    "/api/connections/{connector}/label",
-                    MAY_SUPPLY_A_CREDENTIAL,
-                ),
-                (
-                    "/api/connections/{connector}/instances/{label}",
-                    MAY_SUPPLY_A_CREDENTIAL,
-                ),
-                (
-                    "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
-                    MAY_CONFIGURE,
-                ),
-                (
-                    "/api/connections/{connector}/instances/{label}/credentials/{credential}",
-                    MAY_SUPPLY_A_CREDENTIAL,
-                ),
-            ],
-            "who may reach a tenant's connections changed; every entry is a decision that belongs \
-             beside the constant it names rather than only in a route table, and these are what \
-             are gated: {gated:?}",
-        );
+    fn every_connection_route_declares_operator_authority() {
+        for route in MODULE.routes {
+            assert_eq!(
+                route.access,
+                Access::Operator,
+                "{} must remain operator-only",
+                route.path
+            );
+        }
     }
 
     /// What a listing actually costs, and the invariant underneath it.

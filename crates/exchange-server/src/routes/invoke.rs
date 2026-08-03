@@ -143,13 +143,17 @@ async fn run(
             )
                 .into_response();
         }
+        let _claim = match state.begin_invocation(&principal) {
+            Ok(claim) => claim,
+            Err(refusal) => return rate_limited(refusal),
+        };
         return super::workflows::invoke_published(state, principal, workflow.to_owned(), params)
             .await;
     }
     let Some(invoker) = state.invoker() else {
         return no_invoker();
     };
-    let _claim = match state.begin_invocation() {
+    let _claim = match state.begin_invocation(&principal) {
         Ok(claim) => claim,
         Err(refusal) => return rate_limited(refusal),
     };
@@ -448,16 +452,29 @@ mod tests {
 
     /// Drive one `POST` through a fully assembled app and report the status and the parsed body.
     async fn post_json(state: AppState, path: &str, body: Value) -> (StatusCode, Value) {
+        post_json_with_forwarded_for(state, path, body, None).await
+    }
+
+    async fn post_json_with_forwarded_for(
+        state: AppState,
+        path: &str,
+        body: Value,
+        forwarded_for: Option<&str>,
+    ) -> (StatusCode, Value) {
         let mut service = super::super::app(state).into_service::<Body>();
         std::future::poll_fn(|cx| service.poll_ready(cx))
             .await
             .expect("a router is always ready");
 
-        let request = HttpRequest::builder()
+        let mut request = HttpRequest::builder()
             .method("POST")
             .uri(path)
             .header(header::AUTHORIZATION, format!("Bearer {}", "triage-bot"))
-            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(forwarded_for) = forwarded_for {
+            request = request.header("x-forwarded-for", forwarded_for);
+        }
+        let request = request
             .body(Body::from(body.to_string()))
             .expect("a well-formed request");
 
@@ -562,6 +579,64 @@ mod tests {
             post_json(state, path, json!({})).await.0,
             StatusCode::TOO_MANY_REQUESTS
         );
+    }
+
+    #[tokio::test]
+    async fn spoofed_forwarding_headers_do_not_select_principal_buckets() {
+        let state = identified()
+            .with_invoker(invoker_holding(all_of_github()))
+            .with_traffic(Traffic::for_test_with_principal(
+                1,
+                10,
+                1,
+                2,
+                std::time::Duration::from_secs(60),
+            ));
+        let path = "/api/operations/not-in-the-catalogue/invoke";
+
+        assert_eq!(
+            post_json_with_forwarded_for(state.clone(), path, json!({}), Some("192.0.2.1"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            post_json_with_forwarded_for(state, path, json!({}), Some("198.51.100.9"))
+                .await
+                .0,
+            StatusCode::TOO_MANY_REQUESTS,
+            "changing a caller-controlled forwarding header cannot mint another budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_remains_responsive_while_invocation_concurrency_is_saturated() {
+        let state = identified().with_traffic(Traffic::for_test(
+            1,
+            10,
+            1,
+            std::time::Duration::from_secs(60),
+        ));
+        let principal = Principal::new(
+            exchange_host::PrincipalKind::User,
+            "holder",
+            exchange_host::Tenant::new("acme").expect("tenant"),
+        );
+        let _held = state.begin_invocation(&principal).expect("hold sole slot");
+        let mut service = super::super::app(state).into_service::<Body>();
+        std::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .expect("router ready");
+        let response = service
+            .call(
+                HttpRequest::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router infallible");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// A tenant this host serves has connected nothing, so the operation refuses **by address** —

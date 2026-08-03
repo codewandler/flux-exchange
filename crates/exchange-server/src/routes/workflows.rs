@@ -6,8 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, MethodRouter};
 use axum::{Extension, Json};
 use exchange_host::{
-    editor_catalog, editor_schema, validate_workflow, Principal, PrincipalKind, WorkflowEdit,
-    WorkflowRefusal,
+    editor_catalog, editor_schema, validate_workflow, Principal, WorkflowEdit, WorkflowRefusal,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -15,64 +14,62 @@ use serde_json::{json, Value};
 use super::{Access, Module, Route};
 use crate::state::AppState;
 
-pub(super) const MAY_AUTHOR: &[PrincipalKind] = &[PrincipalKind::User];
-
 pub(super) const MODULE: Module = Module {
     name: "workflows",
     routes: &[
         Route {
             path: "/api/workflows",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: collection_route,
         },
         Route {
             path: "/api/workflows/editor-catalog",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: editor_catalog_route,
         },
         Route {
             path: "/api/workflows/{workflow}",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: draft_route,
         },
         Route {
             path: "/api/workflows/{workflow}/validate",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: validate_route,
         },
         Route {
             path: "/api/workflows/{workflow}/publish",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: publish_route,
         },
         Route {
             path: "/api/workflows/{workflow}/versions",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: versions_route,
         },
         Route {
             path: "/api/workflows/{workflow}/versions/{version}",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: version_route,
         },
         Route {
             path: "/api/workflows/{workflow}/runs",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: workflow_runs_route,
         },
         Route {
             path: "/api/workflow-runs",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: activity_route,
         },
         Route {
             path: "/api/workflow-runs/{run}",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: run_route,
         },
         Route {
             path: "/api/workflow-runs/{run}/cancel",
-            access: Access::PrincipalOfKind(MAY_AUTHOR),
+            access: Access::Operator,
             method_router: cancel_route,
         },
     ],

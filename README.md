@@ -14,12 +14,12 @@ Managed Agent and Service Account one meaning across the Flux family and labels 
 live versus target architecture.
 
 > [!WARNING]
-> **Status: v0.16.0 — Service Accounts, gated operations, versioned workflows, and generated channels.**
+> **Status: v0.16.1 — Wave #1: safer identity, fair traffic, attributable deploys, and tested recovery.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
-> connector catalogue and a session without OIDC setup. The ordinary composition supports a
-> **complete** OIDC sign-in and refuses to start on a reachable address while no identity provider
-> is configured. The authorization code is redeemed back-channel and the id token's signature is
+> connector catalogue and a session without OIDC setup. The ordinary composition supports both a
+> verifier-only local users file and **complete** OIDC sign-in, and refuses to start on a reachable
+> address while neither safe binding is configured. The authorization code is redeemed back-channel and the id token's signature is
 > verified against the provider's published keys, so `/api/signin` redirects to a real provider —
 > configure the eight `FLUX_EXCHANGE_OIDC_*` variables and it works end to end. Connections can be
 > created, listed, **rotated** and deleted per tenant. With `FLUX_EXCHANGE_CONNECTIONS` bound, one
@@ -46,6 +46,14 @@ live versus target architecture.
 > admits. `FLUX_EXCHANGE_CHANNELS` names the durable channel declarations; the built-in binary runs
 > sockets locally only under the single-tenant `--dev` composition and refuses to invent a local
 > placement for a multi-tenant deployment.
+>
+> Authentication acquisition is also **fail-closed**. A connector declaring a hazardous way to
+> obtain a credential is refused unless the deployment explicitly names that hazard in
+> `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` (currently
+> `resource_owner_secret_shared`). Unset permits none; an unknown name refuses startup rather than
+> being skipped. When hazardous acquisition lands in X-75, forgetting this opt-in will look like a
+> connection outage: the host answers `403` and names the connector and hazard before contacting
+> the vendor. A vendor rejecting supplied credentials remains a different failure.
 >
 > See [What exists today](#what-exists-today) for the honest inventory before planning around any
 > of this.
@@ -109,6 +117,13 @@ is a list somebody maintains, and it stops covering a connector the moment that 
 operation. `risk <= low` covers the new one correctly on the day it lands. An agent's token grants
 access to *operations*, never to credentials — so a stolen token yields a bounded operation set
 against one tenant's connections, not a vendor secret.
+
+**Authentication hazards are admitted by declared property, not connector name.** The production
+default allows none. `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS=resource_owner_secret_shared` is an explicit
+deployment-level exception for an acquisition that presents the resource owner's secret to this
+host; it is read only at startup and cannot be overridden by a request. The policy is applied again
+when acquisition is attempted, so a catalogue update cannot bypass a check that happened only at
+boot. No released connector declares a hazard yet; upstream C-440 will make the first path live.
 
 ## What exists today
 
@@ -221,6 +236,7 @@ point-by-point credential move.
 
 ```bash
 cargo run -- --dev              # user:${USER}@dev on 127.0.0.1:8080; no OIDC setup
+cargo run -- local-user-secret alice acme  # mint a reachable-safe local login once
 cargo test --workspace
 cd console && npm install && npm run dev
 ```
@@ -230,6 +246,11 @@ explicit `FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,...` roster remains availab
 needs named tenants or more than one principal. With `--dev`, follow **Sign in** and choose
 **Continue as the local development user**; the host establishes the sole implied user's browser
 session and returns to the console.
+
+For a reachable self-hosted console without OIDC, put the generator's JSON entry in an owner-only
+(`0600`) file and set `FLUX_EXCHANGE_LOCAL_USERS` to it. The file stores only a verifier; the opaque
+secret is shown once and submitted through `/api/signin`'s same-origin form. This is a separate
+secret-backed identity state, not a relaxation of the loopback-only development roster.
 
 Rust 1.88 or newer — the floor `Cargo.toml`'s `rust-version` states. ⚠ *This said 1.87 through
 three releases and was false the whole time; `jsonwebtoken` and `time` both require 1.88. X-30

@@ -35,7 +35,7 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.16.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
+**v0.16.1. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
 authentication, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
@@ -76,6 +76,14 @@ into it. Expect `503` with no store bound,
 `403 not_granted` with one bound and the tenant empty. The [README](README.md) carries the
 itemized inventory of what is *not* built, and keeping it accurate is part of the job — a page that
 implies a working service costs more than an honest gap.
+
+⚠ **Hazardous credential acquisition is fail-closed** (X-74). Unset,
+`FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` permits no declared hazard; an unknown entry refuses startup and
+names it. `resource_owner_secret_shared` is the only recognised opt-in. Once X-75 makes that
+acquisition reachable, omitting the opt-in will look like a connection outage: the host answers its
+own `403` refusal naming the connector and hazard before any vendor request, distinct from the vendor
+rejecting credentials. No released connector declares a hazard until upstream C-440 lands, so the
+current path is fixture-tested rather than live.
 
 ## Build / test / run
 

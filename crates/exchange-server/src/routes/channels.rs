@@ -7,26 +7,24 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put, MethodRouter};
 use axum::{Extension, Json};
-use exchange_host::{ChannelId, ChannelRecord, Principal, PrincipalKind};
+use exchange_host::{ChannelId, ChannelRecord, Principal};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{Access, Module, Route};
 use crate::state::AppState;
 
-pub(super) const OPERATORS: &[PrincipalKind] = &[PrincipalKind::User];
-
 pub(super) const MODULE: Module = Module {
     name: "channels",
     routes: &[
         Route {
             path: "/api/channels",
-            access: Access::PrincipalOfKind(OPERATORS),
+            access: Access::Operator,
             method_router: collection,
         },
         Route {
             path: "/api/channels/{id}",
-            access: Access::PrincipalOfKind(OPERATORS),
+            access: Access::Operator,
             method_router: item,
         },
     ],

@@ -25,7 +25,11 @@
 // so this element can be rendered in a test where `window` does not exist.
 
 import { defineComponent, h, type PropType, type VNode } from 'vue'
-import { SIGNIN_ENDPOINT, type SessionState } from './service.mts'
+import {
+  SIGNIN_ENDPOINT,
+  type SessionState,
+  type SignInAvailabilityState,
+} from './service.mts'
 import { SURFACES, type Surface } from './surfaces.mts'
 import { fragmentPath } from './routing.ts'
 
@@ -104,7 +108,24 @@ function inventory(absent: readonly Surface[]): VNode {
 }
 
 /** Who the service says you are, or the honest absence of an answer. */
-function identity(session: SessionState, emit: (event: 'signOut' | 'retrySession') => void): VNode {
+function signIn(availability: SignInAvailabilityState): VNode {
+  if (availability.status === 'ready' && availability.available) {
+    // An anchor and never a fetch: federation answers with a redirect, while a local provider
+    // answers with its same-origin form. Browser navigation is correct for both.
+    return h('a', { class: 'shell__signin', href: SIGNIN_ENDPOINT, 'data-shell': 'signin' }, 'Sign in')
+  }
+  if (availability.status === 'loading') {
+    return h('span', { class: 'shell__quiet' }, 'Checking sign-in…')
+  }
+  return h('span', { class: 'shell__quiet' },
+    availability.status === 'failed' ? 'Sign-in availability unknown' : 'Sign-in unavailable')
+}
+
+function identity(
+  session: SessionState,
+  availability: SignInAvailabilityState,
+  emit: (event: 'signOut' | 'retrySession') => void
+): VNode {
   const surface = SURFACES.find((candidate) => candidate.id === IDENTITY)
   const box = (state: string, children: unknown[]) =>
     h(
@@ -138,16 +159,14 @@ function identity(session: SessionState, emit: (event: 'signOut' | 'retrySession
         ' did not answer.',
       ]),
       h('button', { class: 'shell__signout', type: 'button', onClick: () => emit('retrySession') }, 'Retry'),
-      h('a', { class: 'shell__signin', href: SIGNIN_ENDPOINT, 'data-shell': 'signin' }, 'Sign in'),
+      signIn(availability),
     ])
   }
 
   if (!session.principal) {
     return box('anonymous', [
       h('span', { class: 'shell__quiet' }, 'Not signed in'),
-      // An anchor and never a fetch: `/api/signin` answers `303` to the identity provider, and a
-      // fetch would follow that redirect inside the page while the address bar never moved.
-      h('a', { class: 'shell__signin', href: SIGNIN_ENDPOINT, 'data-shell': 'signin' }, 'Sign in'),
+      signIn(availability),
     ])
   }
 
@@ -177,6 +196,8 @@ export default defineComponent({
   props: {
     /** What `/api/session` said. Read, never invented. */
     session: { type: Object as PropType<SessionState>, required: true },
+    /** Whether sign-in actually works on this deployment. */
+    signInAvailability: { type: Object as PropType<SignInAvailabilityState>, required: true },
     /** The surface the reader is on, or `null` for a route that belongs to none. */
     active: { type: String as PropType<string | null>, default: null },
   },
@@ -199,7 +220,7 @@ export default defineComponent({
             [SERVICE, h('span', { class: 'shell__brand-tag' }, 'console')]
           ),
           h('div', { class: 'shell__bar-end' }, [
-            identity(props.session, emit),
+            identity(props.session, props.signInAvailability, emit),
             // The theme toggle belongs to the app, which owns the only module that touches
             // `window`. Slotted so this element stays renderable where there is no document.
             slots.theme ? h('div', { class: 'shell__theme' }, slots.theme()) : null,

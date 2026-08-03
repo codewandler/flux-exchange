@@ -14,17 +14,21 @@
 //! [`bind::admit_bind`] and `docs/designs/http-surface.md`.
 
 mod audit;
+mod auth_posture;
 mod bind;
 pub mod channel;
 mod connection_guard;
 mod dev_identity;
 mod entropy;
 mod execution;
+mod local_identity;
 mod oidc;
+mod operator;
 mod routes;
 mod service_account;
 mod session;
 pub mod state;
+mod tenancy;
 mod traffic;
 mod workflow_runs;
 
@@ -47,13 +51,18 @@ use crate::channel::{
 };
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
 use crate::execution::{channel_execution_system, invoker};
+use crate::local_identity::{
+    generate as generate_local_user, LocalUserRefusal, LocalUsers, LOCAL_USERS_SETTING,
+};
 use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
 use crate::oidc::Oidc;
+use crate::operator::{OperatorPolicy, OPERATOR_SUBJECTS_ENV};
 use crate::service_account::{
     ServiceAccountStore, LEGACY_AGENT_STORE_SETTING, SERVICE_ACCOUNT_STORE_SETTING,
 };
 use crate::state::AppState;
+use crate::tenancy::{Tenancy, TENANT_SETTING};
 
 /// The binary flag that declares the zero-configuration, one-tenant development composition.
 const DEV_FLAG: &str = "--dev";
@@ -64,11 +73,14 @@ const USER_ENV: &str = "USER";
 /// Startup choices that must agree across identity and runtime admission.
 #[derive(Debug, PartialEq, Eq)]
 enum Startup {
-    /// The existing composition: an explicit roster or OIDC may resolve several tenants, and local
-    /// runtimes are refused.
-    MultiTenant,
+    /// The ordinary provider composition, with tenancy selected independently from identity.
+    Configured { tenancy: Tenancy },
     /// One loopback-only development principal, fixed to the one `dev` tenant at startup.
-    Development { roster: String },
+    Development {
+        roster: String,
+        operator_subject: String,
+        tenancy: Tenancy,
+    },
 }
 
 impl Startup {
@@ -77,8 +89,14 @@ impl Startup {
         let requested = requests_development(std::env::args_os().skip(1));
         let explicit_roster = std::env::var_os(DEV_IDENTITY_ENV).is_some();
         let user = std::env::var(USER_ENV).ok();
+        let tenant = std::env::var(TENANT_SETTING).ok();
 
-        Self::select(requested, explicit_roster, user.as_deref())
+        Self::select(
+            requested,
+            explicit_roster,
+            user.as_deref(),
+            tenant.as_deref(),
+        )
     }
 
     /// Select a startup shape from already-read inputs, so tests never race over process state.
@@ -86,11 +104,21 @@ impl Startup {
         requested: bool,
         explicit_roster: bool,
         user: Option<&str>,
+        configured_tenant: Option<&str>,
     ) -> Result<Self, StartupRefusal> {
+        let configured_tenancy =
+            configured_tenant
+                .map(Tenancy::single)
+                .transpose()
+                .map_err(|source| StartupRefusal::Tenancy {
+                    reason: source.to_string(),
+                })?;
         // An explicit roster is the operator's more precise declaration. Do not overwrite it or
         // silently collapse principals from several tenants into `dev`.
         if explicit_roster || !requested {
-            return Ok(Self::MultiTenant);
+            return Ok(Self::Configured {
+                tenancy: configured_tenancy.unwrap_or_default(),
+            });
         }
 
         let Some(user) = user.filter(|user| !user.is_empty()) else {
@@ -102,24 +130,58 @@ impl Startup {
             });
         };
 
+        let tenancy = Tenancy::single("dev").map_err(|source| StartupRefusal::Tenancy {
+            reason: source.to_string(),
+        })?;
+        if configured_tenancy
+            .as_ref()
+            .is_some_and(|configured| configured != &tenancy)
+        {
+            return Err(StartupRefusal::Tenancy {
+                reason: format!(
+                    "{DEV_FLAG} declares tenant `dev`, but {TENANT_SETTING} declares a different tenant; remove one declaration or make them agree"
+                ),
+            });
+        }
+
         Ok(Self::Development {
             roster: format!("user:{user}@dev"),
+            operator_subject: user.to_owned(),
+            tenancy,
         })
     }
 
     /// The runtime class selected by this startup declaration.
     const fn deployment(&self) -> Deployment {
         match self {
-            Self::MultiTenant => Deployment::MultiTenant,
-            Self::Development { .. } => Deployment::SingleTenant,
+            Self::Configured { tenancy } | Self::Development { tenancy, .. } => {
+                tenancy.deployment()
+            }
+        }
+    }
+
+    /// The tenancy policy applied at the identity boundary.
+    fn tenancy(&self) -> &Tenancy {
+        match self {
+            Self::Configured { tenancy } | Self::Development { tenancy, .. } => tenancy,
+        }
+    }
+
+    /// The sole automatic development user, who is safely the operator on a loopback-only host.
+    fn development_operator(&self) -> Option<&str> {
+        match self {
+            Self::Development {
+                operator_subject, ..
+            } => Some(operator_subject),
+            Self::Configured { .. } => None,
         }
     }
 
     /// An implied development roster, or `None` when the normal identity configuration applies.
     fn development_roster(&self) -> Option<&str> {
         match self {
-            Self::MultiTenant => None,
-            Self::Development { roster } => Some(roster),
+            Self::Configured { .. } => None,
+            Self::Development { roster, .. } => Some(roster),
         }
     }
 }
@@ -153,6 +215,16 @@ async fn main() -> ExitCode {
         };
     }
 
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("local-user-secret")) {
+        return match local_user_secret(std::env::args().skip(2)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                error!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     match serve().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(refusal) => {
@@ -162,6 +234,24 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Mint one opaque local-user credential and its ready-to-store verifier entry.
+fn local_user_secret(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    let user = arguments
+        .next()
+        .ok_or_else(|| "usage: flux-exchange local-user-secret <user> <tenant>".to_owned())?;
+    let tenant = arguments
+        .next()
+        .ok_or_else(|| "usage: flux-exchange local-user-secret <user> <tenant>".to_owned())?;
+    if arguments.next().is_some() {
+        return Err("usage: flux-exchange local-user-secret <user> <tenant>".to_owned());
+    }
+    let (secret, entry) = generate_local_user(&user, &tenant).map_err(|error| error.to_string())?;
+    let entry = serde_json::to_string_pretty(&vec![entry]).map_err(|error| error.to_string())?;
+    println!("secret (shown once): {}", secret.expose_once());
+    println!("users file entry:\n{entry}");
+    Ok(())
 }
 
 /// Query retained evidence locally without adding an HTTP enumeration surface.
@@ -309,7 +399,32 @@ fn configured_console() -> Option<PathBuf> {
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
 fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefusal> {
-    let mut state = compose_identity(startup)?;
+    // Read deployment policy before binding any store or background authority. No released
+    // connector declares a hazard yet; X-75 hands this posture to the acquisition binding when the
+    // first one does. Parsing it now makes an unknown opt-in a startup refusal instead of a policy
+    // that silently lost an entry.
+    let _auth_posture =
+        auth_posture::configured().map_err(|source| StartupRefusal::AuthPosture {
+            reason: source.to_string(),
+        })?;
+    let mut state = compose_identity(startup)?.with_tenancy(startup.tenancy().clone());
+    let operators = startup
+        .development_operator()
+        .map_or_else(OperatorPolicy::from_env, |subject| {
+            OperatorPolicy::one(subject.to_owned())
+        });
+    if !operators.available() {
+        warn!(
+            "no usable operator policy is bound; administrative routes refuse every caller (set {OPERATOR_SUBJECTS_ENV} to comma-separated immutable OIDC subjects)"
+        );
+    }
+    if startup.development_operator().is_some() {
+        warn!(
+            armed_by = DEV_FLAG,
+            "the sole automatic development user is this loopback-only deployment's operator"
+        );
+    }
+    state = state.with_operator_policy(operators);
     let audit = audit_store()?;
     if let Some(store) = service_account_store()? {
         // A Service Account verifier is an identity binding in its own right, so it must be bound
@@ -753,6 +868,10 @@ fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>
 /// be built. Unset and unconfigured binds nothing, which is the state a reachable bind is already
 /// refused in.
 fn compose_identity(startup: &Startup) -> Result<AppState, StartupRefusal> {
+    if let Ok(path) = std::env::var(LOCAL_USERS_SETTING) {
+        return compose_local_users(LocalUsers::open(&path));
+    }
+
     let implied = startup
         .development_roster()
         .map(DevIdentity::from_roster)
@@ -787,6 +906,22 @@ fn compose_identity(startup: &Startup) -> Result<AppState, StartupRefusal> {
     } else {
         Ok(AppState::with_development_identity(Arc::new(dev)))
     }
+}
+
+/// Turn a loaded verifier file into its distinct identity state, or make any file refusal a
+/// startup refusal. Taking the result keeps malformed-startup behavior testable without racing on
+/// process environment.
+fn compose_local_users(
+    loaded: Result<LocalUsers, LocalUserRefusal>,
+) -> Result<AppState, StartupRefusal> {
+    let users = loaded.map_err(|source| StartupRefusal::LocalUsers {
+        reason: source.to_string(),
+    })?;
+    info!(
+        users = users.len(),
+        "verifier-backed local human sign-in is configured"
+    );
+    Ok(AppState::with_local_users(Arc::new(users)))
 }
 
 /// Offer OIDC sign-in, or say precisely why it is not on offer.
@@ -925,6 +1060,20 @@ mod tests {
     use crate::oidc::config::AUTHORIZATION_ENDPOINT_ENV;
 
     #[test]
+    fn a_malformed_local_users_entry_refuses_process_composition_and_names_the_entry() {
+        let marker = "plaintext-must-not-be-echoed";
+        let loaded = LocalUsers::from_json(&format!(
+            r#"[{{"user":"alice","tenant":"acme","verifier":"{marker}"}}]"#
+        ));
+        let refusal = match compose_local_users(loaded) {
+            Err(refusal) => refusal.to_string(),
+            Ok(_) => panic!("a malformed verifier file was accepted"),
+        };
+        assert!(refusal.contains("entry 1"), "{refusal}");
+        assert!(!refusal.contains(marker), "{refusal}");
+    }
+
+    #[test]
     fn service_account_store_setting_has_one_bounded_legacy_alias() {
         assert_eq!(
             service_account_store_path(Some(" /srv/accounts.json "), None)
@@ -958,15 +1107,40 @@ mod tests {
         assert!(requests_development(["ignored-before", "--dev"]));
         assert!(!requests_development(["--development"]));
 
-        let dev = Startup::select(true, false, Some("timo"))
+        let dev = Startup::select(true, false, Some("timo"), None)
             .expect("a startup user makes the development shorthand usable");
         assert_eq!(dev.deployment(), Deployment::SingleTenant);
         assert_eq!(dev.development_roster(), Some("user:timo@dev"));
 
-        let explicit = Startup::select(true, true, Some("timo"))
+        let explicit = Startup::select(true, true, Some("timo"), None)
             .expect("an explicit development roster remains authoritative");
         assert_eq!(explicit.deployment(), Deployment::MultiTenant);
         assert_eq!(explicit.development_roster(), None);
+    }
+
+    /// The production declaration is independent from the provider: both OIDC/local users and an
+    /// explicit development roster reach the same runtime and identity-boundary policy.
+    #[test]
+    fn one_tenant_is_selected_independently_from_authentication() {
+        let hosted = Startup::select(false, false, None, Some("acme"))
+            .expect("a provider-independent tenant");
+        assert_eq!(hosted.deployment(), Deployment::SingleTenant);
+        assert_eq!(
+            hosted.tenancy().tenant().map(|tenant| tenant.as_str()),
+            Some("acme")
+        );
+        assert_eq!(hosted.development_roster(), None);
+
+        let rostered = Startup::select(true, true, Some("ignored"), Some("acme"))
+            .expect("an explicit roster may use the same independent declaration");
+        assert_eq!(rostered.deployment(), Deployment::SingleTenant);
+        assert_eq!(rostered.development_roster(), None);
+
+        let refusal = Startup::select(true, false, Some("timo"), Some("other"))
+            .expect_err("--dev always means dev and must not be silently redefined")
+            .to_string();
+        assert!(refusal.contains(DEV_FLAG), "{refusal}");
+        assert!(refusal.contains(TENANT_SETTING), "{refusal}");
     }
 
     /// A missing startup user is a named refusal, not a silently anonymous development host and
@@ -974,7 +1148,7 @@ mod tests {
     #[test]
     fn dev_refuses_when_the_startup_user_cannot_be_named() {
         for user in [None, Some("")] {
-            let message = Startup::select(true, false, user)
+            let message = Startup::select(true, false, user, None)
                 .expect_err("the shorthand needs a real startup user")
                 .to_string();
             assert!(message.contains(DEV_FLAG), "{message}");
@@ -988,7 +1162,8 @@ mod tests {
     /// new entry point rather than inheriting X-03's roster test by assertion.
     #[tokio::test]
     async fn dev_resolves_the_startup_user_to_dev_and_no_request_can_rename_it() {
-        let startup = Startup::select(true, false, Some("timo")).expect("a development startup");
+        let startup =
+            Startup::select(true, false, Some("timo"), None).expect("a development startup");
         let state = compose_identity(&startup).expect("the implied roster is valid");
         let mut service = routes::app(state).into_service::<Body>();
         std::future::poll_fn(|cx| service.poll_ready(cx))
@@ -1022,7 +1197,8 @@ mod tests {
     /// Authorization header. The response carries the token only as an HttpOnly cookie.
     #[tokio::test]
     async fn dev_signin_is_a_real_browser_action_and_not_an_instruction_page() {
-        let startup = Startup::select(true, false, Some("timo")).expect("a development startup");
+        let startup =
+            Startup::select(true, false, Some("timo"), None).expect("a development startup");
         let state = compose_identity(&startup).expect("the implied roster is valid");
         let app = routes::app(state);
 

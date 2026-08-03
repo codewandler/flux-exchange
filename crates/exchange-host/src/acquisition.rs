@@ -19,6 +19,8 @@
 //! month by somebody who never read their policy. The alternative is a list of connector names,
 //! which is correct on the day it is written and silently wrong afterwards.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 /// A named weakness in **how a credential is obtained**, declared by the connector.
@@ -94,4 +96,107 @@ pub enum AuthHazard {
     /// deployment to make knowingly, and the reason this type exists rather than a refusal being
     /// hard-coded.
     ResourceOwnerSecretShared,
+}
+
+impl AuthHazard {
+    /// The stable configuration spelling of this hazard.
+    ///
+    /// Matched exhaustively here rather than obtained by serialising the enum. Deployment policy
+    /// is configuration an operator audits, and changing a serde helper must not silently change
+    /// the string that grants a weaker authentication path.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ResourceOwnerSecretShared => "resource_owner_secret_shared",
+        }
+    }
+}
+
+impl std::fmt::Display for AuthHazard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A deployment's startup-selected policy over declared authentication hazards.
+///
+/// The default refuses every hazard. A composition may explicitly construct a posture from typed
+/// hazards it read at startup; there is deliberately no method that takes a request, header, body,
+/// connector id or other caller-controlled policy input. The connector id reaches only
+/// [`admit`](Self::admit), where it makes a refusal actionable and never changes the decision.
+///
+/// Admission is evaluated when an acquisition is attempted, not when a catalogue is loaded. That
+/// is what keeps the rule true after a running deployment learns a connector declaration it did
+/// not have at boot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthPosture {
+    allowed: BTreeSet<AuthHazard>,
+}
+
+impl AuthPosture {
+    /// The production default: no declared authentication hazard is allowed.
+    pub fn fail_closed() -> Self {
+        Self::default()
+    }
+
+    /// Construct the policy an operator explicitly selected at startup.
+    ///
+    /// This takes only closed, typed [`AuthHazard`] values. Parsing deployment configuration and
+    /// refusing unknown spellings belongs to the composition, before it constructs this value.
+    pub fn allowing(hazards: impl IntoIterator<Item = AuthHazard>) -> Self {
+        Self {
+            allowed: hazards.into_iter().collect(),
+        }
+    }
+
+    /// Decide one connector acquisition from the hazard the connector declares.
+    ///
+    /// `connector` is carried only into the refusal. A deployment opts in to a property once,
+    /// never to a list of connector names, so a newly catalogued connector inherits the same rule.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthPostureRefusal::HazardNotAllowed`] when this deployment did not explicitly allow the
+    /// declared hazard.
+    pub fn admit(&self, connector: &str, hazard: AuthHazard) -> Result<(), AuthPostureRefusal> {
+        if self.allowed.contains(&hazard) {
+            return Ok(());
+        }
+
+        Err(AuthPostureRefusal::HazardNotAllowed {
+            connector: connector.to_owned(),
+            hazard,
+        })
+    }
+}
+
+/// Why a credential acquisition was refused by deployment policy.
+///
+/// Separate from a vendor rejection: this host made the decision before any request left the
+/// process, so telling an operator to re-enter a correct password would be the wrong remedy.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuthPostureRefusal {
+    /// The connector declared a hazard this deployment did not opt into.
+    #[error(
+        "connector `{connector}` declares authentication hazard `{hazard}`, and this deployment did \
+         not allow it; no acquisition request was sent"
+    )]
+    HazardNotAllowed {
+        /// The connector whose acquisition was attempted.
+        connector: String,
+        /// The declared hazard that was not allowed.
+        hazard: AuthHazard,
+    },
+}
+
+impl AuthPostureRefusal {
+    /// The HTTP status this refusal carries when a composition exposes acquisition over HTTP.
+    ///
+    /// Kept on the refusal so two acquisition surfaces cannot answer the same policy decision
+    /// differently. `403` says the deployment forbade a declared path. A vendor rejecting
+    /// otherwise admitted credentials is a later, separate refusal and must not use this status.
+    pub const fn status(&self) -> u16 {
+        match self {
+            Self::HazardNotAllowed { .. } => 403,
+        }
+    }
 }

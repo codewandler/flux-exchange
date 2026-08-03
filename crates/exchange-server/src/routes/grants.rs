@@ -78,7 +78,7 @@ use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
     ConnectorSurface, Effect, Grant, Grants, Idempotency, InboundGrant, OperationFacts, Principal,
-    PrincipalKind, Risk, Selector,
+    Risk, Selector,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -134,8 +134,6 @@ use crate::state::AppState;
 /// [`MAY_CONFIGURE`](super::connections::MAY_CONFIGURE) both record, and it is the same gap rather
 /// than a third one: answering it needs a notion of who *administers* a tenant, which is a policy
 /// model this identity vocabulary does not have and which no kind gate can supply.
-pub(super) const MAY_GRANT: &[PrincipalKind] = &[PrincipalKind::User];
-
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
     name: "grants",
@@ -151,7 +149,7 @@ pub(super) const MODULE: Module = Module {
             // No parameter, and there is nowhere one could go: the tenant is read off the resolved
             // principal, and a grant is addressed by the connector *inside* the body it carries.
             path: "/api/grants",
-            access: Access::PrincipalOfKind(MAY_GRANT),
+            access: Access::Operator,
             method_router: grants_route,
         },
         Route {
@@ -159,7 +157,7 @@ pub(super) const MODULE: Module = Module {
             // evaluating a policy is not one typo away from applying it, and so the answer is a
             // `POST` with a body rather than a selector smuggled through a query string.
             path: "/api/grants/preview",
-            access: Access::PrincipalOfKind(MAY_GRANT),
+            access: Access::Operator,
             method_router: preview_route,
         },
     ],
