@@ -5,6 +5,7 @@ status: ready
 priority: 0
 epic: remote-deployment
 areas: [exchange-server, lifecycle, protocol, windows]
+design: docs/designs/local-release-v1.md
 note: "Milestone 1 — Flux owns a child only after that exact process reports its bound address and compiled identity over a dedicated one-shot channel"
 ---
 
@@ -39,19 +40,22 @@ supervisor, authenticated control channel and later start/status/stop behavior.
       or a shared named pipe as a readiness fallback.
 - [ ] After every required store and safety check succeeds and the socket has bound, Exchange writes
       exactly one UTF-8 JSON record of at most 16 KiB and closes the channel. The record has schema
-      identity `exchange.supervisor-ready.v1` and contains only the actual loopback socket address,
-      the child's OS process-start identity, and the compiled release/build and protocol identities.
-      EOF before one complete record, a second record, trailing bytes, an unknown field required for
-      interpretation or a record over the bound is a refusal for the supervisor.
+      identity `exchange.supervisor-ready.v1` and the exact provider-owned shape in
+      `docs/designs/local-release-v1.md`: actual loopback socket address, OS process-start identity,
+      release identity and executable digest, plus the six exact protocol fields shared by channel,
+      manifest and compatibility output. EOF before one complete record, a second record, trailing
+      bytes, an unknown field or a record over the bound is a refusal for the supervisor.
 - [ ] The process identity contains both the PID as a diagnostic and an OS-derived start identity
       that distinguishes PID reuse. The readiness contract never claims a PID alone proves
       ownership, and Exchange emits no PID file for Flux to trust. Native Unix and Windows tests
       compare the reported start identity with the handle/process the parent actually spawned.
 - [ ] The release/build and protocol portion is produced from the same typed source as
       `flux-exchange compatibility --json` and agrees exactly for Exchange API, effective-catalogue,
-      invoke request/response and `exchange.connection-plan` versions. Supervised startup does not
-      infer a protocol from the package version, and the side-effect-free compatibility command
-      still binds no listener and opens no store.
+      invoke request, invoke response, connection plan and supervisor versions. Their serialized keys
+      are exactly `exchange_api`, `effective_catalogue_response`, `invoke_request`, `invoke_response`,
+      `connection_plan` and `supervisor`. Supervised startup does not infer a protocol from the
+      package version, and the side-effect-free compatibility command still binds no listener and
+      opens no store.
 - [ ] The one-shot channel carries no log line, progress event, HTTP byte or later control traffic.
       Application stdout/stderr remain ordinary log streams, the bound socket carries application
       traffic, and Flux C-510's owner-only control channel is separate. Closing or losing the
@@ -75,11 +79,14 @@ supervisor, authenticated control channel and later start/status/stop behavior.
 - 2026-08-04: Filed from the supervision amendment to cross-repository Decision 0004. The audit
   separated Exchange's launch/readiness protocol from Flux C-510's process supervisor and control
   channel.
+- 2026-08-04: Reconciled the exact readiness record with X-126's provider-owned local-release v1
+  contract after Flux C-510's independently written shape diverged. Exchange owns the fixture;
+  channel, manifest, compatibility and readiness now use the same six protocol keys.
 
 ## Notes
 
 - Cross-repository authority:
-  `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at `71fea6c`.
+  `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at `013a2ab`.
 - X-126 depends on this story so the released executable and signed manifest carry the same
   compatibility identity the supervisor validates. Flux C-510 consumes the record and owns the
   long-lived supervisor; this story does not add a downloader, daemon manager or stop command.
