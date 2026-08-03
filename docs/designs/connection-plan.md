@@ -13,11 +13,20 @@ orchestrator; it does not add another connection identity, store, or vendor sche
 ## The declaration is the form
 
 `GET /api/connections/{connector}/plan` is an operator-only read. It projects
-`connector_catalog::Provider::config` in declaration order. The response is versioned as
+`connector_catalog::Provider::config` and `Provider::auth` in declaration order. The response is versioned as
 `exchange.connection-plan.v1` and starts its `fields` array with the synthetic `name` field. Every
-remaining row comes from one catalogue `ConfigField`, with its stable service-qualified identity,
-human label, requiredness, input kind, declared binding, closed choices, submission target, and a
-`set` boolean. No Exchange-owned connector or vendor field list participates.
+remaining configuration row comes from one catalogue `ConfigField`, with its stable
+service-qualified identity, human label, requiredness, input kind, declared binding, additional
+bindings, closed choices, submission target, and a `set` boolean. No Exchange-owned connector or
+vendor field list participates.
+
+Catalogue 0.18 still carries some credentials only in `Provider::auth`, with no `ConfigField` form
+metadata. Dropping them would make Slack, OpenAI, Intercom and other connectors look complete while
+their declared credential address is empty. The projection therefore synthesizes a conservative
+secret row for every auth target no config row binds. Its label falls back to the declared credential
+name, it is required for completion, and its provenance states that richer form metadata was absent.
+This is generic over `Provider::auth`, not a list of affected connectors. A catalogue census keeps
+every auth target represented if upstream adds another metadata-poor credential.
 
 The declaration's `binds` value decides the target generically:
 
@@ -35,6 +44,11 @@ Credential declarations that several service-local form rows bind to one provide
 one submission target. The rows retain their declaration identities and point at the same target;
 the composite request accepts the target identity once, so a shared Zendesk token is never requested
 or written several times merely because several services use it.
+
+`also_binds` remains ordered declaration metadata on its one row. It creates neither another input
+nor another submitted value. If the existing settings vocabulary cannot route all of those bindings,
+the row says so and remains incomplete; the projection never drops the extra binding to make a field
+look routable.
 
 ## Selecting and naming a connection
 
@@ -88,6 +102,7 @@ password controls, closed rows are selects, and all other rows are text-like inp
 Flux consumes the same JSON contract and target identities. Scriptable aliases such as `--site`,
 `--domain`, or `--endpoint` may resolve to a published field identity, but are not schema. A vendor
 secret has no argv representation: a non-interactive client must use secure stdin/prompt or an
-Exchange-owned browser handoff. The committed contract fixture is intentionally vendor-neutral and
-is exercised by the server projection and browser client so a later Flux consumer can bind the same
-artifact without importing Exchange or console code.
+Exchange-owned browser handoff. The committed contract fixture is intentionally vendor-neutral. The
+server projection and browser client exercise it here. X-125 is not complete until the actual Flux
+CLI consumer also exercises that same artifact; a future consumer is not evidence that the present
+acceptance passed.
