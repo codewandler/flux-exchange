@@ -1,7 +1,7 @@
 ---
 id: X-125
 title: "Generate one complete labelled connection plan for browser and CLI"
-status: ready
+status: in-progress
 priority: 0
 epic: connections
 areas: [console, exchange-server, catalogue]
