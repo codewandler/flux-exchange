@@ -32,3 +32,8 @@ credential-bearing state.
       policy contents or session material.
 - [ ] Update console refusal handling and operator documentation; produce a versioned Fly release and
       live-verify both an operator and an ordinary member.
+
+## Progress
+- 2026-08-03: Production binds the sole maintainer's immutable Google subject, and X-123 makes the
+  deployment pipeline refuse if that private policy metadata is absent or not fully deployed. The
+  ordinary-member half of the live walkthrough remains before this story can close.

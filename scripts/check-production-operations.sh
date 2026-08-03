@@ -12,12 +12,13 @@ check_root() {
   local fly_config="$root/fly.toml"
   local deploy_workflow="$root/.github/workflows/production.yml"
   local snapshot_workflow="$root/.github/workflows/snapshot-watch.yml"
+  local config_verifier="$root/scripts/verify-production-config.sh"
   local release_verifier="$root/scripts/verify-production-release.sh"
   local snapshot_verifier="$root/scripts/verify-fly-snapshot.sh"
-  local base_count immutable_count build_count locked_count
+  local base_count immutable_count build_count locked_count preflight_line image_build_line
 
   for required in "$dockerfile" "$fly_config" "$deploy_workflow" "$snapshot_workflow" \
-    "$release_verifier" "$snapshot_verifier"; do
+    "$config_verifier" "$release_verifier" "$snapshot_verifier"; do
     [ -f "$required" ] || { fail "missing ${required#"$root"/}"; return 1; }
   done
 
@@ -45,6 +46,14 @@ check_root() {
   grep -Eq 'scripts/verify-production-release\.sh' "$deploy_workflow" || {
     fail 'production deploy must run the post-deploy verifier'; return 1;
   }
+  grep -Eq 'scripts/verify-production-config\.sh --self-test' "$deploy_workflow" || {
+    fail 'the repository gate must self-test the production configuration verifier'; return 1;
+  }
+  preflight_line="$(awk '/scripts\/verify-production-config\.sh[[:space:]]*$/ { line = NR } END { print line }' "$deploy_workflow")"
+  image_build_line="$(awk '/name:[[:space:]]*Build exactly the selected checkout/ { print NR; exit }' "$deploy_workflow")"
+  [ -n "$preflight_line" ] && [ -n "$image_build_line" ] && [ "$preflight_line" -lt "$image_build_line" ] || {
+    fail 'production must verify operator configuration before building an image'; return 1;
+  }
   grep -Eq 'anchore/scan-action@[0-9a-f]{40}' "$deploy_workflow" || {
     fail 'production deploy must scan the image with a SHA-pinned action'; return 1;
   }
@@ -52,12 +61,25 @@ check_root() {
     fail 'production deploy must emit an SBOM with a SHA-pinned action'; return 1;
   }
 
+  grep -Eq 'flyctl secrets list .*--json' "$config_verifier" || {
+    fail 'production configuration verification must read Fly secret metadata'; return 1;
+  }
+  grep -Fq 'FLUX_EXCHANGE_OPERATOR_SUBJECTS' "$config_verifier" || {
+    fail 'production configuration verification must require the operator policy'; return 1;
+  }
+  grep -Fq 'Deployed' "$config_verifier" || {
+    fail 'production configuration verification must require deployed status'; return 1;
+  }
+  grep -Eq 'operator_policy:[[:space:]]*"deployed"' "$release_verifier" || {
+    fail 'production evidence must record the value-free operator policy result'; return 1;
+  }
+
   grep -Eq '^  schedule:' "$snapshot_workflow" || { fail 'snapshot verification must run on a schedule'; return 1; }
   grep -Eq 'scripts/verify-fly-snapshot\.sh' "$snapshot_workflow" || {
     fail 'snapshot workflow must run the bounded snapshot verifier'; return 1;
   }
 
-  if grep -Eq '(^|[[:space:]])rg[[:space:]]' "$release_verifier" "$snapshot_verifier"; then
+  if grep -Eq '(^|[[:space:]])rg[[:space:]]' "$config_verifier" "$release_verifier" "$snapshot_verifier"; then
     fail 'workflow verifiers must not depend on ripgrep being preinstalled'; return 1
   fi
 }
@@ -71,13 +93,40 @@ self_test() {
     'RUN cargo build --locked' 'FROM scratch AS runtime' >"$fixture_dir/Dockerfile"
   printf '%s\n' '[mounts]' 'snapshot_retention = 14' 'scheduled_snapshots = true' >"$fixture_dir/fly.toml"
   printf '%s\n' 'environment:' '  name: production' \
+    'run: scripts/verify-production-config.sh --self-test' \
+    'run: scripts/verify-production-config.sh' \
+    'name: Build exactly the selected checkout' \
     'uses: anchore/scan-action@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
     'uses: anchore/sbom-action@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     'run: scripts/verify-production-release.sh' >"$fixture_dir/.github/workflows/production.yml"
   printf '%s\n' 'on:' '  schedule:' 'run: scripts/verify-fly-snapshot.sh' >"$fixture_dir/.github/workflows/snapshot-watch.yml"
-  printf '%s\n' ':' >"$fixture_dir/scripts/verify-production-release.sh"
+  printf '%s\n' 'flyctl secrets list --app "$APP" --json' \
+    'FLUX_EXCHANGE_OPERATOR_SUBJECTS' 'Deployed' >"$fixture_dir/scripts/verify-production-config.sh"
+  printf '%s\n' 'operator_policy: "deployed"' >"$fixture_dir/scripts/verify-production-release.sh"
   printf '%s\n' ':' >"$fixture_dir/scripts/verify-fly-snapshot.sh"
   check_root "$fixture_dir"
+
+  cp "$fixture_dir/.github/workflows/production.yml" "$fixture_dir/production.valid"
+  sed -i '/^run: scripts\/verify-production-config\.sh$/d' "$fixture_dir/.github/workflows/production.yml"
+  if check_root "$fixture_dir" >/dev/null 2>&1; then
+    fail 'self-test accepted a production workflow without the operator-policy preflight'
+    return 1
+  fi
+  mv "$fixture_dir/production.valid" "$fixture_dir/.github/workflows/production.yml"
+
+  sed -i 's/FLUX_EXCHANGE_OPERATOR_SUBJECTS/ANOTHER_SETTING/' "$fixture_dir/scripts/verify-production-config.sh"
+  if check_root "$fixture_dir" >/dev/null 2>&1; then
+    fail 'self-test accepted a verifier that did not require the operator policy'
+    return 1
+  fi
+  sed -i 's/ANOTHER_SETTING/FLUX_EXCHANGE_OPERATOR_SUBJECTS/' "$fixture_dir/scripts/verify-production-config.sh"
+
+  sed -i 's/Deployed/Staged/' "$fixture_dir/scripts/verify-production-config.sh"
+  if check_root "$fixture_dir" >/dev/null 2>&1; then
+    fail 'self-test accepted an operator policy that was not deployed'
+    return 1
+  fi
+  sed -i 's/Staged/Deployed/' "$fixture_dir/scripts/verify-production-config.sh"
 
   printf '%s\n' 'rg -q expected file' >"$fixture_dir/scripts/verify-production-release.sh"
   if check_root "$fixture_dir" >/dev/null 2>&1; then
