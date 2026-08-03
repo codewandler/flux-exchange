@@ -41,9 +41,11 @@ label from X-14, not a host, authority, credential address, instance UUID or run
       create a labelled connection, list its existing labels, select one for editing, and rename a
       label without moving the host-minted instance UUID, credential or settings.
 - [ ] Every required secret and non-secret setting is present exactly once, with stable field
-      identity, service, human label, required/optional status, input kind and submission target.
-      A declared required field that cannot be rendered or routed makes the plan visibly incomplete;
-      it is never silently omitted.
+      identity, service, human label, required/optional status, input kind, submission target and
+      zero or more machine-readable CLI aliases. Aliases are projected generically from declaration
+      metadata or one documented field-identity rule; Exchange carries no connector-specific alias
+      table. A duplicate alias or a declared required field that cannot be rendered or routed makes
+      the plan refuse or remain visibly incomplete; it is never silently omitted.
 - [ ] **Failing-first census test:** the generated contract includes Jira Cloud's declared site,
       account email and API token, and Zendesk's declared subdomain/domain, account email and API
       token. The test derives those expectations from the shipped connector declarations and fails
@@ -52,6 +54,17 @@ label from X-14, not a host, authority, credential address, instance UUID or run
       same generic projection exposes it without a GitLab-only Exchange schema. The connector owns
       its API path and the host's operator policy admits the origin; neither model input nor a
       Service Account can choose or change the origin.
+- [ ] A custom authority has durable, explicit `proposed`, `approved` and `revoked` lifecycle state
+      scoped to the tenant and host-minted connection instance. The plan reports the value-free
+      state to an eligible connection owner and lets an authorized operator review the exact
+      normalized origin before approval. Writing a credential or ordinary setting never implies
+      approval, and restart never turns a proposal into active authority.
+- [ ] Proposal, approval, replacement and revocation are separate checked transitions. Only the
+      configured operator authority can activate, replace or revoke a custom origin; every
+      transition revalidates the connector declaration and deployment policy, is recorded without
+      credential-shaped values, and refuses before transport on an unsupported scheme, malformed
+      origin, stale proposal, unknown state or unauthorized principal. Revocation does not silently
+      fall back to a different origin.
 - [ ] A closed declared set carries its permitted choices in the plan and both clients render it as
       a choice/dropdown rather than unrestricted text. [[X-80]] is a prerequisite and retains its
       complete acceptance: clients learn choices from one successful read, while fields without a
@@ -71,11 +84,16 @@ label from X-14, not a host, authority, credential address, instance UUID or run
       retry/compensation semantics and an overall incomplete/partial state until every required step
       succeeds. A failing-first persistence test drives a refusal in the middle and proves the
       reported state matches what survived.
-- [ ] The Exchange console and Flux CLI consume the same versioned plan response and submission
-      semantics. A contract fixture is exercised through both clients; neither client maintains
-      vendor-specific required-field, routing or completion logic. Interactive prompts and flags
-      such as `--endpoint`, `--site` or `--domain` are aliases onto declared field identities, not a
-      second schema.
+- [ ] The response and submission name one exact connection-plan schema identity and version. An
+      unsupported or missing version is refused before accepting any value, with no best-effort
+      downgrade. The server projection and Exchange console exercise one committed, vendor-neutral
+      contract fixture and neither maintains vendor-specific required-field, alias, routing or
+      completion logic.
+- [ ] Flux C-509 owns the actual CLI consumer proof against that same committed fixture and
+      submission semantics. X-125 publishes the fixture for that downstream proof but does not wait
+      for Flux to complete before its Exchange API and console can be delivered. Interactive flags
+      such as `--endpoint`, `--site` or `--domain` resolve through aliases in the plan onto declared
+      field identities; they are not a second schema.
 - [ ] The console renders existing labels and allows a human to rename them, shows required versus
       optional fields and choice controls, and distinguishes complete, incomplete, refused and
       partially-applied states without displaying any stored value.
@@ -90,11 +108,16 @@ label from X-14, not a host, authority, credential address, instance UUID or run
   owns the complete labelled plan, the submission target for every setting, and the browser choice
   control together. Rendering only Intercom's dropdown before that plan could select and route a
   labelled connection would still leave Jira and Zendesk silently incomplete.
+- 2026-08-04: Decision 0004 split the circular cross-repository acceptance: this story owns the
+  versioned Exchange API, console and shared fixture; Flux C-509 owns proof that the real CLI
+  consumes it. The release-seam audit also made custom-origin authority an explicit persisted
+  proposal/approval/revocation lifecycle rather than something inferred from a settings write.
 
 ## Notes
 
 - Cross-repository authority:
-  `../flux-roadmap/decisions/0002-declaration-driven-connection-onboarding.md`.
+  `../flux-roadmap/decisions/0002-declaration-driven-connection-onboarding.md` and
+  `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md`.
 - Reuse X-14's label-to-host-minted-UUID lifecycle and X-47's setting storage. Do not create another
   connection identity or configuration store for the form.
 - A custom origin is configuration selected by an operator under deployment policy, never request
