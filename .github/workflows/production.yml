@@ -130,6 +130,7 @@ jobs:
           ./scripts/check-current-version.sh
           ./scripts/check-production-operations.sh --self-test
           ./scripts/check-production-operations.sh
+          ./scripts/verify-production-config.sh --self-test
 
       - name: Install cargo-audit 0.22.0
         run: cargo install cargo-audit --version 0.22.0 --locked
@@ -169,6 +170,9 @@ jobs:
             echo '::error::production FLY_API_TOKEN is absent; use an app-scoped Fly deploy token'
             exit 1
           fi
+
+      - name: Require the deployed operator policy
+        run: ./scripts/verify-production-config.sh
 
       - name: Build exactly the selected checkout
         id: image

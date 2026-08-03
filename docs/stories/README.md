@@ -174,6 +174,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-109 — Refine flow editor feedback and navigation](X-109-refine-flow-editor-feedback-and-navigation.md)
 - [X-110 — Edit inbound channel grants in the console](X-110-edit-inbound-grants-in-the-console.md) · channel creation without an inbound grant editor leaves the operator unable to complete create → grant → subscribe
 - [X-112 — Align the Exchange roadmap with rich connector runtimes](X-112-align-the-exchange-roadmap-with-rich-runtimes.md) · state explicitly that Docker/Kubernetes/SQL/observability remain connectors and are hosted through declared runtimes; replace stale 'not yet filed' text with the complete program
+- [X-123 — Production refuses an operatorless deployment](X-123-production-refuses-an-operatorless-deployment.md) · The deploy checks Fly's value-free secret metadata before building and after rollout, so an absent operator policy cannot ship silently.
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

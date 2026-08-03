@@ -8,6 +8,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Operations
 
+- **Production refuses an absent operator policy before it builds an image** (X-123). The workflow
+  checks Fly's value-free secret metadata before build and again after rollout, requiring exactly
+  one deployed `FLUX_EXCHANGE_OPERATOR_SUBJECTS` entry. Retained evidence records only that the
+  policy was deployed, never its digest or the identity-provider subjects it contains.
+
 - **The first protected-main v0.16.1 release and its recovery point are verified** (X-93, X-94).
   The retained 90-day artifact ties one reviewed source commit to the scan-clean static image, SBOM,
   Fly release and live machine verification; the post-release encrypted snapshot remains inside the

@@ -27,8 +27,9 @@ Before deploying:
 - [ ] Set `FLUX_EXCHANGE_OPERATOR_SUBJECTS` to the immutable OIDC subjects of the smallest operator
       set. Do not use email addresses, display names or the hosted domain; an unset policy makes
       every management route fail closed.
-- [ ] Put only `FLUX_EXCHANGE_OIDC_CLIENT_SECRET` in Fly secrets. Keep credentials and tokens out of
-      `fly.toml`, shell history, tickets and logs.
+- [ ] Put `FLUX_EXCHANGE_OIDC_CLIENT_SECRET` and the private operator-subject policy in Fly secrets.
+      The first is a credential; the second identifies real people even though it is not secret
+      material. Keep both out of `fly.toml`, tickets and logs.
 - [ ] Verify the actual Fly volume reports encryption enabled; do not infer this from `fly.toml`,
       because the volume is created separately.
 - [ ] Verify there is exactly one machine and one attached volume. Do not scale this file-backed
@@ -161,6 +162,12 @@ fly secrets set FLUX_EXCHANGE_OIDC_CLIENT_SECRET='<client secret>'
 fly secrets set FLUX_EXCHANGE_OPERATOR_SUBJECTS='<immutable OIDC subject>[,<another subject>]'
 gh workflow run production.yml -f source_sha='<full commit SHA on protected main>'
 ```
+
+The production workflow refuses before building an image unless Fly reports exactly one
+`FLUX_EXCHANGE_OPERATOR_SUBJECTS` entry with status `Deployed`, and checks it again after rollout.
+`flyctl secrets list` exposes only names, digests and deployment status: the verifier keeps that
+metadata in a temporary directory, retains neither the digest nor the subjects, and records only
+`operator_policy: deployed` in the production evidence.
 
 **A partial configuration refuses at startup and names the variable that is missing** (X-27), so a
 typo is a clear failure rather than a mysterious `401` an hour later. Every URL must be `https` — the

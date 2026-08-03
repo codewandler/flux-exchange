@@ -45,6 +45,9 @@ require_header "$work_dir/api.headers" cache-control 'no-store'
 
 flyctl releases --app "$APP" --json >"$work_dir/releases.json"
 flyctl machines list --app "$APP" --json >"$work_dir/machines.json"
+# Recheck after rollout as well as before the image build. The setting could have changed during a
+# long gate or scan; retained evidence must describe the deployment that is actually running.
+./scripts/verify-production-config.sh >/dev/null
 
 machine_count="$(jq '[.[] | select(.state == "started")] | length' "$work_dir/machines.json")"
 [ "$machine_count" = 1 ] || fail "expected one started machine, found $machine_count"
@@ -65,6 +68,7 @@ jq -n \
   --arg fly_machine "$machine_id" \
   '{verified_at: $verified_at, source_sha: $source_sha, image_digest: $image_digest,
     application_version: $version, fly_release: $fly_release, fly_machine: $fly_machine,
-    health: "ok", security_headers: "verified", api_cache_control: "no-store"}' >"$EVIDENCE_FILE"
+    health: "ok", security_headers: "verified", api_cache_control: "no-store",
+    operator_policy: "deployed"}' >"$EVIDENCE_FILE"
 
 jq . "$EVIDENCE_FILE"
