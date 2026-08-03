@@ -53,6 +53,7 @@ use super::{audit_unavailable, rate_limited, record_audit, Access, Module, Route
 use crate::audit::{
     Action as AuditAction, Outcome as AuditOutcome, RequestId, Target as AuditTarget,
 };
+use crate::dev_identity::DEV_IDENTITY_ENV;
 use crate::oidc::config::{
     AUTHORIZATION_ENDPOINT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, ISSUER_ENV, JWKS_URI_ENV,
     REDIRECT_URI_ENV, TENANT_ENV, TOKEN_ENDPOINT_ENV,
@@ -318,8 +319,10 @@ async fn callback(
         // page above is true — and `development_page` is not the answer either: a browser arriving
         // mid-redirect asked to finish a flow, not for instructions. This host planted no `state`
         // and never will, which is exactly [`SignInRefusal::UnknownState`] — the same `400` and the
-        // same phrase a forged `state` gets on a federated host, so this route stays the oracle for
-        // nothing that `a_callback_without_a_code_is_not_an_oracle_for_a_live_state` made it.
+        // same phrase a forged `state` gets on a federated host. That narrow equivalence prevents
+        // probing whether a particular state is live. It does not hide the provider kind in every
+        // callback arm: an explicit provider `error` remains a credential refusal (`401`) on a
+        // federated host, while this non-federated host has no provider answer to refuse (`400`).
         SignIn::Development { .. } => {
             return refused_authentication(
                 &state,
@@ -671,6 +674,7 @@ fn document_with_action(
 /// one is a compile error here and the decision above gets re-read rather than silently rotting.
 #[allow(dead_code)]
 const WITHHELD_FROM_THE_PAGE: &[&str] = &[
+    DEV_IDENTITY_ENV,
     ISSUER_ENV,
     AUTHORIZATION_ENDPOINT_ENV,
     TOKEN_ENDPOINT_ENV,
@@ -2249,6 +2253,10 @@ mod tests {
 
         // The same line the two `503` pages hold: the remedy's shape, never this deployment's
         // settings. See `unconfigured_page`.
+        assert!(
+            WITHHELD_FROM_THE_PAGE.contains(&DEV_IDENTITY_ENV),
+            "the withheld-variable guard must cover the development roster variable itself",
+        );
         for variable in WITHHELD_FROM_THE_PAGE {
             assert!(
                 !body.contains(variable),
@@ -2278,5 +2286,48 @@ mod tests {
         );
         assert!(headers.get(SET_COOKIE).is_none(), "{body}");
         assert!(!carries_a_token(&body), "{body}");
+    }
+
+    /// **X-68's callback-arm regression test.** A provider's refusal remains a credential failure,
+    /// while a host with no provider cannot claim to have rejected a provider credential.
+    ///
+    /// This distinction is intentional operator signal, not an oracle claim: both answers issue
+    /// nothing and reflect only the provider kind already exposed by visiting `/api/signin`.
+    #[tokio::test]
+    async fn a_provider_error_is_distinct_from_a_non_federated_callback() {
+        let federated = oidc_app(Arc::new(StubExchange::returning(claims("unused"))));
+        let development = super::super::app(development());
+
+        let (federated_status, federated_headers, federated_body) =
+            call(federated, get(&format!("{CALLBACK}?error=access_denied"))).await;
+        let (development_status, development_headers, development_body) =
+            call(development, get(&format!("{CALLBACK}?error=access_denied"))).await;
+
+        assert_eq!(
+            federated_status,
+            StatusCode::UNAUTHORIZED,
+            "{federated_body}"
+        );
+        assert_eq!(
+            development_status,
+            StatusCode::BAD_REQUEST,
+            "{development_body}"
+        );
+        assert!(
+            federated_headers.get(SET_COOKIE).is_none(),
+            "{federated_body}"
+        );
+        assert!(
+            development_headers.get(SET_COOKIE).is_none(),
+            "{development_body}"
+        );
+        assert!(
+            !federated_body.contains("access_denied"),
+            "{federated_body}"
+        );
+        assert!(
+            !development_body.contains("access_denied"),
+            "{development_body}"
+        );
     }
 }

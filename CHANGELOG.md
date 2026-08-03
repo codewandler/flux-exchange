@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sign-in callback diagnostics now match their documented provider boundary** (X-68). An explicit
+  federated-provider refusal remains a credential failure while a development host has no provider
+  answer to reject; tests pin that intentional distinction and prove neither path issues a session
+  or reflects the provider's error. The anonymous development sign-in page's withholding guard now
+  explicitly covers the development identity roster variable.
+
 ### Changed
 
 - **The roadmap now makes Exchange the hosted runtime for every connector kind** (X-111, X-112).
