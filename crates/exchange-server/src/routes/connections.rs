@@ -5,6 +5,8 @@
 //! GET    /api/connections               every connection this tenant holds
 //! POST   /api/connections/{connector}   connect one, with the values it declares
 //! GET    /api/connections/{connector}   one connection, as addresses and never as values
+//! GET/POST /api/connections/{connector}/plan
+//!                                       project and apply a labelled declaration-driven plan
 //! DELETE /api/connections/{connector}   disconnect, destroying every credential it holds
 //! PUT    /api/connections/{connector}/credentials/{credential}
 //!                                       replace one credential's value, in place
@@ -219,7 +221,7 @@ use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
     address_path, admit_tenant_occupancy, declared_settings, host_pinning, stored_bytes,
-    AcquisitionRefusal, AuthPostureRefusal, ConnectionLabel, ConnectionRefusal,
+    AcquisitionRefusal, AuthPostureRefusal, ConnectionLabel, ConnectionRefusal, ConnectionRegistry,
     ConnectorDeclaration, CredentialRef, CredentialScope, DeclaredCredential, DeclaredSetting,
     HostPinning, InstanceId, PasswordRedemption, Principal, RefreshRedemption, RegistryRefusal,
     Secret, SecretBatch, SecretStore, SettingsRefusal, StoreError, Tenant, TenantInstances,
@@ -233,6 +235,8 @@ use crate::audit::{
     Action as AuditAction, Outcome as AuditOutcome, RequestId, Target as AuditTarget,
 };
 use crate::state::AppState;
+
+mod plan;
 
 /// The setting that names the credential store, quoted when none is bound.
 ///
@@ -406,6 +410,11 @@ pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
 pub(super) const MODULE: Module = Module {
     name: "connections",
     routes: &[
+        Route {
+            path: "/api/connections/{connector}/plan",
+            access: Access::Operator,
+            method_router: plan::route,
+        },
         Route {
             // Under `/api` for the reason the session route is: `vite dev` owns the origin and
             // proxies `/api` to this host, so anything outside that prefix is answered by the SPA
@@ -2282,6 +2291,7 @@ async fn create_instance(
             label: label.to_string(),
         });
     }
+    let mut pending_label = None;
     let instance = match existing_requested {
         Some(stale) => stale,
         None => {
@@ -2294,6 +2304,12 @@ async fn create_instance(
             {
                 return registry_refused(&refusal);
             }
+            pending_label = Some(PendingLabel::new(
+                registry.as_ref(),
+                principal.tenant(),
+                provider.id,
+                &label,
+            ));
             instance
         }
     };
@@ -2462,6 +2478,9 @@ async fn create_instance(
         }
         return store_failed(&error);
     }
+    if let Some(pending) = pending_label.as_mut() {
+        pending.commit();
+    }
     (
         StatusCode::CREATED,
         Json(json!({
@@ -2471,6 +2490,59 @@ async fn create_instance(
         })),
     )
         .into_response()
+}
+
+/// A new registry row is preparation for credential creation, not a connection by itself.
+///
+/// The UUID is deliberately retained when a stale row predates this request (retry resumes it),
+/// while a row this request just assigned is removed on every early return. This keeps the
+/// existing handler's cross-store failure honest without trying to roll back a credential that did
+/// commit.
+struct PendingLabel<'a> {
+    registry: &'a dyn ConnectionRegistry,
+    tenant: &'a Tenant,
+    connector: &'a str,
+    label: &'a ConnectionLabel,
+    committed: bool,
+}
+
+impl<'a> PendingLabel<'a> {
+    fn new(
+        registry: &'a dyn ConnectionRegistry,
+        tenant: &'a Tenant,
+        connector: &'a str,
+        label: &'a ConnectionLabel,
+    ) -> Self {
+        Self {
+            registry,
+            tenant,
+            connector,
+            label,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingLabel<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(refusal) = self
+                .registry
+                .remove(self.tenant, self.connector, self.label)
+            {
+                error!(
+                    %refusal,
+                    connector = self.connector,
+                    label = self.label.as_str(),
+                    "a refused connection create could not remove its uncommitted label"
+                );
+            }
+        }
+    }
 }
 
 async fn show_instance(
@@ -10086,10 +10158,11 @@ mod tests {
             assert_eq!(references, vec![legacy]);
         }
 
-        /// A registry row is durable before the credential batch starts. A transient failure must
-        /// reuse that inert UUID rather than turning every retry into a duplicate-label conflict.
+        /// A registry row prepared for a credential batch is not yet a connection. A transient
+        /// refusal removes it, so retry is a fresh create rather than a duplicate-label conflict
+        /// or an inert connection visible to another caller.
         #[tokio::test]
-        async fn a_failed_atomic_migration_can_be_retried_with_the_same_label() {
+        async fn a_failed_atomic_migration_rolls_back_its_label_and_can_be_retried() {
             let scratch = Scratch::new();
             let store = scratch.store();
             let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
@@ -10115,23 +10188,42 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "{body}");
 
-            for expected in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::CREATED] {
-                let (status, body) = call(
-                    &app,
-                    "alice",
-                    Method::POST,
-                    "/api/connections/zendesk/instances/sandbox",
-                    Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
-                )
-                .await;
-                assert_eq!(status, expected, "{body}");
-            }
-
             let tenant = Tenant::new("acme").expect("plain tenant");
-            let entries =
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            let after_refusal =
                 exchange_host::ConnectionRegistry::entries(registry.as_ref(), &tenant, "zendesk")
                     .expect("registry rows");
-            assert_eq!(entries.len(), 2, "the retry must not mint a third UUID");
+            assert_eq!(
+                after_refusal.len(),
+                1,
+                "only the established label survives"
+            );
+            assert_eq!(after_refusal[0].label.as_str(), "prod");
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let after_retry =
+                exchange_host::ConnectionRegistry::entries(registry.as_ref(), &tenant, "zendesk")
+                    .expect("registry rows");
+            assert_eq!(after_retry.len(), 2);
+            assert!(after_retry
+                .iter()
+                .any(|entry| entry.label.as_str() == "sandbox"));
         }
 
         /// Deleting the naming overlay cannot hide connections: existence and UUIDs come back from

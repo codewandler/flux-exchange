@@ -642,6 +642,10 @@ mod tests {
              it is operator work rather than another public capability.",
         ),
         (
+            "/api/connections/{connector}/plan",
+            "the declaration-driven projection and orchestrator beneath connections; credential values are never an agent capability.",
+        ),
+        (
             "/api/connections/{connector}/label",
             "as above; naming the sole connection is operator metadata.",
         ),

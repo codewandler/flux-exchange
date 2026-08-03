@@ -1654,6 +1654,9 @@ mod tests {
             ("apps", "/api/apps/{app}/activity"),
             ("apps", "/api/apps/{app}/sessions"),
             ("apps", "/api/app-deliveries/{delivery}/retry"),
+            // The complete plan can both disclose held connection metadata and accept credentials
+            // and request-steering settings, so both verbs remain operator work.
+            ("connections", "/api/connections/{connector}/plan"),
             // X-91 makes connection inventory administrative too: knowing which vendor accounts
             // are held is operator state, not ordinary-member catalogue access.
             ("connections", "/api/connections"),
