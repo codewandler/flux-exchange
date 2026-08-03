@@ -717,7 +717,6 @@ async fn create(
     }
 
     let stored: Vec<String> = body.credentials.keys().cloned().collect();
-    crate::audit::connection_created(&principal, provider.id);
     (
         StatusCode::CREATED,
         Json(view(provider, &addresses, &stored)),
@@ -860,7 +859,6 @@ async fn rotate(
     if let Err(error) = store.put(&reference, &secret).await {
         return rotation_failed(provider, &credential, &reference, &error);
     }
-    crate::audit::credential_rotated(&principal, provider.id, &credential);
     if let Some(channels) = state.channels() {
         channels.restart(principal.tenant(), provider.id);
     }
@@ -957,7 +955,6 @@ async fn remove(
         return partly_destroyed(provider, &error, destroyed, left_behind);
     }
 
-    crate::audit::connection_removed(&principal, provider.id);
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -1098,7 +1095,6 @@ async fn set_setting(
         return settings_refused(&refusal);
     }
 
-    crate::audit::setting_set(&principal, provider.id, &setting.service, &setting.binds());
     if let Some(channels) = state.channels() {
         channels.restart(principal.tenant(), provider.id);
     }
@@ -1132,12 +1128,6 @@ async fn clear_setting(
         Err(refusal) => settings_refused(&refusal),
         Ok(false) => nothing_to_clear(provider, &setting),
         Ok(true) => {
-            crate::audit::setting_cleared(
-                &principal,
-                provider.id,
-                &setting.service,
-                &setting.binds(),
-            );
             if let Some(channels) = state.channels() {
                 channels.restart(principal.tenant(), provider.id);
             }

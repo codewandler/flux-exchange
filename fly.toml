@@ -83,7 +83,7 @@ primary_region = 'fra'
   # address with no way to authenticate a caller is not a bug to fix later.
   FLUX_EXCHANGE_BIND = '0.0.0.0:8080'
 
-  # The five stores, all on the volume. Every one of them defaults to *bound to nothing* with no
+  # The six stores, all on the volume. Every one of them defaults to *bound to nothing* with no
   # fallback to memory: a store that fell back would start, serve every route correctly, look exactly
   # like a working one, and lose everything on restart (X-09).
   #
@@ -107,6 +107,10 @@ primary_region = 'fra'
   FLUX_EXCHANGE_SETTINGS = '/data/settings/store.json'
   FLUX_EXCHANGE_GRANTS = '/data/grants/store.json'
   FLUX_EXCHANGE_WORKFLOWS = '/data/workflows'
+  # A reachable bind refuses without this journal. The process creates the nested directory 0700
+  # and database 0600, retains at least 30 days and never places credential-shaped material in its
+  # closed record vocabulary.
+  FLUX_EXCHANGE_AUDIT = '/data/audit/events.sqlite3'
 
   # The console the image carries, served at `/` by the same origin that answers `/api` — see X-83
   # for why it cannot be anywhere else.

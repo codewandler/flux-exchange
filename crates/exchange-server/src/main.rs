@@ -39,7 +39,8 @@ use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::bind::{admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
+use crate::audit::{AuditJournal, AUDIT_SETTING};
+use crate::bind::{admit_audit, admit_bind, StartupRefusal, BIND_ENV, DEFAULT_BIND};
 use crate::channel::{
     CatalogueChannelDeclarations, ChannelSupervisor, DeploymentChannelPlacement,
     GeneratedChannelRunner,
@@ -142,6 +143,16 @@ async fn main() -> ExitCode {
         )
         .init();
 
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("audit-query")) {
+        return match audit_query(std::env::args().skip(2)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                error!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     match serve().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(refusal) => {
@@ -153,14 +164,76 @@ async fn main() -> ExitCode {
     }
 }
 
+/// Query retained evidence locally without adding an HTTP enumeration surface.
+fn audit_query(arguments: impl Iterator<Item = String>) -> Result<(), String> {
+    enum Query {
+        Event(String),
+        Actor(String),
+        Target(String),
+    }
+
+    let mut arguments = arguments.peekable();
+    let mut query = None;
+    let mut limit = 100_u16;
+    while let Some(flag) = arguments.next() {
+        let value = arguments
+            .next()
+            .ok_or_else(|| format!("{flag} requires a value"))?;
+        match flag.as_str() {
+            "--event-id" if query.is_none() => query = Some(Query::Event(value)),
+            "--actor" if query.is_none() => query = Some(Query::Actor(value)),
+            "--target" if query.is_none() => query = Some(Query::Target(value)),
+            "--limit" => {
+                limit = value
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|limit| (1..=1000).contains(limit))
+                    .ok_or_else(|| "--limit must be between 1 and 1000".to_owned())?;
+            }
+            "--event-id" | "--actor" | "--target" => {
+                return Err("choose exactly one of --event-id, --actor or --target".to_owned())
+            }
+            _ => return Err(format!("unknown audit-query option `{flag}`")),
+        }
+    }
+    let query =
+        query.ok_or_else(|| "choose exactly one of --event-id, --actor or --target".to_owned())?;
+    let configured = std::env::var(AUDIT_SETTING)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{AUDIT_SETTING} does not name an audit journal"))?;
+    let journal = AuditJournal::open_read_only(&configured).map_err(|error| error.to_string())?;
+    let records = match query {
+        Query::Event(event_id) => journal.by_event_id(&event_id),
+        Query::Actor(actor) => {
+            let parts: Vec<&str> = actor.split('/').collect();
+            let [tenant, kind, id] = parts.as_slice() else {
+                return Err("--actor must be tenant/kind/id".to_owned());
+            };
+            journal.by_actor(tenant, kind, id, limit)
+        }
+        Query::Target(target) => {
+            let Some((kind, value)) = target.split_once('/') else {
+                return Err("--target must be kind/value".to_owned());
+            };
+            journal.by_target(kind, value, limit)
+        }
+    }
+    .map_err(|error| error.to_string())?;
+    for record in records {
+        println!(
+            "{}",
+            serde_json::to_string(&record).map_err(|error| error.to_string())?
+        );
+    }
+    Ok(())
+}
+
 /// Start the server, or refuse and say why.
 async fn serve() -> Result<(), StartupRefusal> {
     let startup = Startup::configured()?;
-    let state = compose(&startup)?;
     let bind = configured_bind()?;
-
-    // Before the socket, not after: a listener that opens and then closes has still been open.
-    admit_bind(bind, state.identity_binding())?;
+    let state = compose(&startup, bind)?;
 
     report_deployment(startup.deployment());
     report_surface();
@@ -235,8 +308,23 @@ fn configured_console() -> Option<PathBuf> {
 ///
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
-fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
+fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefusal> {
     let mut state = compose_identity(startup)?;
+    let audit = audit_store()?;
+    if let Some(store) = service_account_store()? {
+        // A Service Account verifier is an identity binding in its own right, so it must be bound
+        // before reachable-address admission is decided.
+        state = state.with_service_accounts(store);
+    }
+
+    // Before any credential, grant, workflow or channel store is restored. A composition that
+    // will refuse its public socket must not exercise background authority on the way there. The
+    // identity refusal stays first because it is the older, more fundamental public-bind rule.
+    admit_bind(bind, state.identity_binding())?;
+    admit_audit(bind, audit.is_some())?;
+    if let Some(audit) = audit {
+        state = state.with_audit(audit);
+    }
 
     // Bound before the invoker, because the invoker reads it. A composition with no settings store
     // still builds one — it gets an empty configuration, which is X-12's behaviour: the connectors
@@ -312,14 +400,33 @@ fn compose(startup: &Startup) -> Result<AppState, StartupRefusal> {
              refuses instead of supervising unauthenticated vendor connections"
         );
     }
-    if let Some(store) = service_account_store()? {
-        state = state.with_service_accounts(store);
-    }
     if let Some((workflows, pure, runs)) = workflow_store()? {
         state = state.with_workflows(workflows, pure, runs);
     }
 
     Ok(state)
+}
+
+/// Bind the durable application audit journal, or bind none for a loopback composition.
+#[cfg(unix)]
+fn audit_store() -> Result<Option<Arc<AuditJournal>>, StartupRefusal> {
+    let Ok(configured) = std::env::var(AUDIT_SETTING) else {
+        warn!(
+            "no durable audit journal is bound ({AUDIT_SETTING} is unset); loopback remains \
+             available, but a reachable bind will refuse"
+        );
+        return Ok(None);
+    };
+    let journal = AuditJournal::bind(&configured).map_err(|error| StartupRefusal::AuditStore {
+        reason: error.to_string(),
+    })?;
+    info!(path = %journal.path().display(), "audit evidence: owner-only SQLite journal, minimum 30-day retention");
+    Ok(Some(Arc::new(journal)))
+}
+
+#[cfg(not(unix))]
+fn audit_store() -> Result<Option<Arc<AuditJournal>>, StartupRefusal> {
+    Ok(None)
 }
 
 /// Bind persistent channel declarations, or bind none. Unset is an unavailable capability rather

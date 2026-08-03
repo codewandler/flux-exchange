@@ -64,6 +64,22 @@ pub struct Oidc {
     sessions: SessionStore,
 }
 
+/// A provider answer admitted as one principal, before it becomes a local session.
+///
+/// Kept inside this module so the route can durably mark the session attempt in the one safe gap:
+/// after every identity check passed, before [`SessionStore::open`] mutates local authority.
+pub(crate) struct SessionAdmission {
+    principal: Principal,
+    expires_at: i64,
+    as_of: i64,
+}
+
+impl SessionAdmission {
+    pub(crate) fn principal(&self) -> &Principal {
+        &self.principal
+    }
+}
+
 impl Oidc {
     /// Bind a provider, given something that can redeem an authorization code.
     ///
@@ -139,6 +155,17 @@ impl Oidc {
         code: &str,
         binder: &str,
     ) -> Result<SessionToken, SignInRefusal> {
+        let admission = self.complete_admission(state, code, binder).await?;
+        self.open_admitted(admission)
+    }
+
+    /// Redeem and verify a callback, stopping immediately before local session creation.
+    pub(crate) async fn complete_admission(
+        &self,
+        state: &str,
+        code: &str,
+        binder: &str,
+    ) -> Result<SessionAdmission, SignInRefusal> {
         let pending = match self.pending.claim(state, binder) {
             Claimed::Authorization(pending) => pending,
             Claimed::Unknown => return Err(SignInRefusal::UnknownState),
@@ -158,8 +185,30 @@ impl Oidc {
             .map_err(SignInRefusal::from)?;
 
         // The one reading this sign-in gets, taken once the provider has answered so that a slow
-        // token endpoint cannot make it stale, and passed down from here.
-        self.admit_and_open(&claims, &pending.nonce, now())
+        // token endpoint cannot make it stale, and passed through session creation unchanged.
+        let as_of = now();
+        let principal = self.admit(&claims, &pending.nonce, as_of)?;
+        Ok(SessionAdmission {
+            principal,
+            expires_at: claims.expires_at,
+            as_of,
+        })
+    }
+
+    /// Open the already-admitted local session.
+    pub(crate) fn open_admitted(
+        &self,
+        admission: SessionAdmission,
+    ) -> Result<SessionToken, SignInRefusal> {
+        self.sessions
+            .open(
+                admission.principal,
+                Expiry::Credential {
+                    expires_at: admission.expires_at,
+                    as_of: admission.as_of,
+                },
+            )
+            .map_err(SignInRefusal::NoSession)
     }
 
     /// Close the local session represented by the token a guarded request presented.
@@ -199,6 +248,7 @@ impl Oidc {
     /// Separate from [`Oidc::complete`] and taking `now` as an argument for the reason
     /// [`Oidc::admit`] does: the window this closes is sub-second, so the only way to state it as a
     /// test is to name the instant rather than to race one.
+    #[cfg(test)]
     fn admit_and_open(
         &self,
         claims: &SignedClaims,
@@ -210,18 +260,11 @@ impl Oidc {
         // The session ends when the id token does. The `exp` goes across verbatim: a provider that
         // issues a five-minute token gets a five-minute session, because a host that outlived the
         // credential it was shown would be asserting an identity nobody is still vouching for.
-        let token = self
-            .sessions
-            .open(
-                principal.clone(),
-                Expiry::Credential {
-                    expires_at: claims.expires_at,
-                    as_of: now,
-                },
-            )
-            .map_err(SignInRefusal::NoSession)?;
-        crate::audit::signed_in(&principal);
-        Ok(token)
+        self.open_admitted(SessionAdmission {
+            principal,
+            expires_at: claims.expires_at,
+            as_of: now,
+        })
     }
 
     /// Every check this host makes on a signature-verified id token, and the principal it yields.

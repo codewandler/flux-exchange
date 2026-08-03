@@ -232,7 +232,6 @@ async fn mint(
 
     match service_accounts.mint(&principal, &body.id, expiry) {
         Ok(minted) => {
-            crate::audit::service_account_minted(&principal, &minted.principal);
             (
                 StatusCode::CREATED,
                 Json(json!({

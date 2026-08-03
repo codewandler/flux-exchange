@@ -29,7 +29,7 @@ Before deploying:
       because the volume is created separately.
 - [ ] Verify there is exactly one machine and one attached volume. Do not scale this file-backed
       deployment horizontally.
-- [ ] Verify the five store paths remain nested below `/data`, the image still runs as uid `10001`,
+- [ ] Verify the six store paths remain nested below `/data`, the image still runs as uid `10001`,
       and no prior store directory or snapshot is being attached accidentally.
 - [ ] Inspect the commit and working-tree diff that `fly deploy` will build. Until X-93 lands, record
       the commit and any uncommitted changes with the deployment record.
@@ -46,6 +46,8 @@ After deploying:
       verify API responses additionally carry `Cache-Control: no-store`.
 - [ ] Verify saturation answers `429` without taking health down, and inspect audit events for stable
       action/actor/target fields with no token, credential, setting value or request body.
+- [ ] Query one live event by id, actor and target, restart the machine, and query the event again.
+      Confirm its `timestamp` is retained and no field can hold request or credential material.
 - [ ] Record the machine, volume, release, source commit and verification time. Link an incident or
       exception rather than weakening a check silently.
 
@@ -139,7 +141,8 @@ Nothing is wrong; nobody has been granted anything.
 
 ## What a redeploy does and does not keep
 
-**Keeps** — credentials, agents, settings and grants. All four are on the volume.
+**Keeps** — credentials, Service Accounts, settings, grants, workflows, run activity and application
+audit evidence. All are on the volume; audit rows younger than 30 days are retained across restarts.
 
 **Loses** — every session. `SessionStore` is a `Mutex<HashMap<…>>` in memory, so a deploy signs
 everyone out and they sign in again. This is worth stating because it looks like a bug and is not; a
@@ -188,8 +191,31 @@ docker run --rm -v flux-exchange-local:/data \
   -e FLUX_EXCHANGE_CREDENTIALS=/data/credentials/store.json \
   -e FLUX_EXCHANGE_GRANTS=/data/grants/store.json \
   -e FLUX_EXCHANGE_WORKFLOWS=/data/workflows \
+  -e FLUX_EXCHANGE_AUDIT=/data/audit/events.sqlite3 \
   flux-exchange:local
 ```
+
+## Reading and deleting audit evidence
+
+The journal is not an HTTP surface. Tenant principals cannot enumerate it. A Fly organization
+member with SSH access can run the binary's read-only query command inside the machine:
+
+```bash
+fly ssh console --command 'flux-exchange audit-query --event-id <event-id>'
+fly ssh console --command 'flux-exchange audit-query --actor codewandler/user/<principal-id> --limit 100'
+fly ssh console --command 'flux-exchange audit-query --target invocation/<operation-id> --limit 100'
+```
+
+Each result is one JSON object per line. The command accepts exactly one query shape and bounds
+`--limit` to 1–1000. The `exchange` uid can append, finish and age rows out after the 30-day minimum.
+A Fly organization member with SSH can read them because SSH reaches that uid. Early deletion
+requires that runtime uid to alter the database or a Fly organization administrator to replace or
+destroy the volume; neither power is available to an Exchange tenant principal.
+
+The fixed alert policies are retained records as well as `warn` events in stdout: 20 authentication
+refusals in five minutes, 10 authorization refusals for one actor in five minutes, and every
+credential or grant change. Fly log search is the notification stream, not the retention source;
+the SQLite journal remains authoritative when shorter-lived platform logs expire.
 
 ## The process traffic boundary
 
