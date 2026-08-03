@@ -260,6 +260,14 @@ jobs:
           ./scripts/check-action-pins.sh --self-test
           ./scripts/check-action-pins.sh
 
+      - name: Security reporting and dependency-update policy stay complete
+        # Live controls are verified after mutation through GitHub's read-only API. This checks the
+        # committed half without an administration token, inside an already-required context so an
+        # older open branch is not stranded by a check name it cannot emit.
+        run: |
+          ./scripts/check-repository-security.sh --self-test
+          ./scripts/check-repository-security.sh
+
   crate-versions:
     name: workspace, host pin and current prose versions agree
     runs-on: ubuntu-latest

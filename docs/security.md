@@ -2,8 +2,8 @@
 
 This is the contributor and operator map of flux-exchange's security boundary. It describes the
 software and the observed public deployment as of 2026-08-02. It is not a vulnerability-reporting
-channel; [X-92](stories/X-92-private-reporting-and-protected-main.md) adds `SECURITY.md` only when a
-private channel exists to receive a report.
+channel; suspected vulnerabilities belong in the monitored private route named by
+[`SECURITY.md`](../SECURITY.md).
 
 The north star is the [vision](vision.md): **the credential never crosses the boundary; the
 authority does.** The detailed decisions remain in their designs and source. This document links to
@@ -294,19 +294,34 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
 
 - **Enforced in code.** CI builds, tests, lints and formats Rust; tests and builds both Node trees;
   audits locked Rust dependencies and both npm trees; checks the MSRV; and self-tests the action-pin
-  and crate-version scanners. Every third-party action is pinned to a full commit SHA. See
+  crate-version and repository-security scanners. Every third-party action is pinned to a full
+  commit SHA. See
   [`ci.yml`](../.github/workflows/ci.yml) and
-  [`check-action-pins.sh`](../scripts/check-action-pins.sh).
+  [`check-action-pins.sh`](../scripts/check-action-pins.sh). Dependabot covers the Cargo workspace,
+  both Node trees and GitHub Actions; its one Flux-family group keeps engine and connector pins in
+  the same update.
 - **Enforced in code.** Dependency-audit exceptions are explicit and narrow. The current RSA
   advisory is ignored only because this service verifies provider signatures and generates no RSA
   keys; every other RustSec warning remains denied.
 - **Enforced in code.** The runtime container contains no compiler or package manager, runs as fixed
   non-root uid `10001`, uses an exec-form entrypoint and installs the CA roots needed for OIDC TLS.
   The decisions are recorded in [`Dockerfile`](../Dockerfile).
-- **Deployment-dependent.** On 2026-08-02 GitHub reported no main-branch protection, private
-  vulnerability reporting, Dependabot security updates, secret scanning, push protection,
-  non-provider scanning or validity checks. [X-92](stories/X-92-private-reporting-and-protected-main.md)
-  makes those repository controls part of the maintained posture.
+- **Deployment-dependent.** Read-only GitHub API verification on 2026-08-03 reported private
+  vulnerability reporting, Dependabot security updates, secret scanning and push protection
+  enabled. Active default-branch ruleset `20297512` requires a pull request, resolved conversations,
+  every established Rust/Node/site check, and an up-to-date base; it blocks deletion and force-push
+  with no bypass actors. Its approval count is deliberately zero while this is a single-maintainer
+  repository, because requiring an independent approval would make every pull request unmergeable;
+  it must rise to one when a second maintainer can review. These are live repository settings rather
+  than properties of a checkout, while [`SECURITY.md`](../SECURITY.md),
+  [`dependabot.yml`](../.github/dependabot.yml) and the self-testing
+  [`check-repository-security.sh`](../scripts/check-repository-security.sh) keep their committed
+  contract reviewable.
+- **Known limitation.** The same API verification reported validity checks and non-provider-pattern
+  scanning disabled. GitHub documents both as requiring Team or Enterprise Cloud plus GitHub Secret
+  Protection for an organization-owned repository, while `codewandler` reports plan `free`. X-92
+  remains in progress rather than claiming those two controls; completing it requires an
+  organization plan/product change before the settings can be enabled and verified.
 - **Known limitation.** Production is deployed manually with `fly deploy`; the v0.13.0 deployment
   was built from a working tree containing uncommitted changes. The image therefore cannot be
   proven from an immutable reviewed commit even though the live version and headers were verified.
@@ -324,7 +339,7 @@ The story files are the contract; this table is only the ranked map.
 |---|---|---|
 | P0 | [X-90 — Verify the Google organization in the signed token](stories/X-90-verify-the-google-organization-in-the-signed-token.md) | Make organization admission survive a provider-console mistake. |
 | P0 | [X-91 — Signing in does not make every member an operator](stories/X-91-signing-in-does-not-make-every-member-an-operator.md) | Preserve broad authentication while narrowing administrative authority. |
-| P0 | [X-92 — Private reporting and protected main](stories/X-92-private-reporting-and-protected-main.md) | Give findings a safe channel and prevent unreviewed or known-secret changes reaching main. |
+| P0 | [X-92 — Private reporting and protected main](stories/X-92-private-reporting-and-protected-main.md) | Give findings a safe channel and prevent unchecked or known-secret changes reaching main. |
 | P1 | [X-93 — Production comes from a reviewed commit](stories/X-93-production-comes-from-a-reviewed-commit.md) | Make a live image traceable to a gated SHA. |
 | P1 | [X-94 — Persistent state has a tested recovery path](stories/X-94-persistent-state-has-a-tested-recovery-path.md) | Give the single credential-bearing volume an observed restore path. |
 | P1 | [X-96 — Traffic controls are fair as well as bounded](stories/X-96-traffic-controls-are-fair-as-well-as-bounded.md) | Keep one caller from consuming the shared backstop. |
