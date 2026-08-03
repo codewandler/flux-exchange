@@ -27,7 +27,7 @@ upstream Flux editor schema, and manages the declared event subsets of persisten
 
 ## The engine line
 
-`connector-pack` 0.17 and the engine crates are aligned on Flux 0.54 for X-101. They remain one atomic
+`connector-pack` 0.18 and the engine crates are aligned on Flux 0.54 for X-14. They remain one atomic
 pin set: two engine versions are two incompatible `Tool` traits even when their names are identical.
 The manifest, resolved-lock and compile-time seam tests keep that rule executable.
 

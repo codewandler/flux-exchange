@@ -1,11 +1,11 @@
 ---
 id: X-14
 title: "Two instances of one connector, told apart by a name the operator chose"
-status: ready
+status: in-progress
 priority: 2
 epic: connections
 design: docs/designs/connection-instances.md
-note: "waiting for flux-connectors C-494 to publish the v0.18 instance-aware host ports; never substitute a local path dependency"
+note: "flux-connectors v0.18 is published; implementing the registry, atomic first-to-second migration, label-scoped management, and invocation selection against registry crates only"
 ---
 
 # Two instances of one connector, told apart by a name the operator chose
