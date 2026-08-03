@@ -1,7 +1,7 @@
 ---
 id: X-102
 title: Persist and supervise connector channels
-status: in-progress
+status: done
 epic: generated-connector-channels
 design: docs/designs/generated-connector-websocket-channels.md
 ---
@@ -13,11 +13,11 @@ Keep one tenant-owned vendor channel alive independently of subscribers and rest
 Exchange restart.
 
 ## Acceptance
-- [ ] Failing-first tests prove tenant-derived storage, restoration and transient reconnect.
-- [ ] A channel references an existing connection and declared binding; request bodies cannot set
+- [x] Failing-first tests prove tenant-derived storage, restoration and transient reconnect.
+- [x] A channel references an existing connection and declared binding; request bodies cannot set
       tenant, endpoint, credential or placement.
-- [ ] Credential or connection-setting rotation restarts the affected supervisor.
-- [ ] Placement is resolved by an operator-owned port and refuses before credentials are read.
+- [x] Credential or connection-setting rotation restarts the affected supervisor.
+- [x] Placement is resolved by an operator-owned port and refuses before credentials are read.
 
 ## Progress
 
@@ -30,3 +30,5 @@ Exchange restart.
   and connector runner bindings remain dependency-ordered follow-up work.
 - 2026-08-02: story opened; implementation starts behind host-owned store and runner ports so the
   unpublished connector/Flux release line is not bypassed with a sibling dependency.
+- 2026-08-03: the complete main and tag gates passed and the supervised channel host shipped in
+  v0.15.0.

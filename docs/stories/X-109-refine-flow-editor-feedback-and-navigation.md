@@ -1,7 +1,7 @@
 ---
 id: X-109
 title: Refine flow editor feedback and navigation
-status: in-progress
+status: done
 epic: flow-editor
 design: docs/designs/flow-editor.md
 ---
@@ -18,7 +18,7 @@ when a draft has unsaved work or an invalid parameter object.
       unavailable.
 - [x] Invalid node and run parameter JSON has inline, accessible feedback.
 - [x] An empty operation search result is distinguishable from a catalogue that failed to load.
-- [ ] Console tests and build pass without adding literal colours outside the token system.
+- [x] Console tests and build pass without adding literal colours outside the token system.
 
 ## Progress
 - 2026-08-03: story opened after exercising the released editor and finding that selecting another
@@ -26,3 +26,5 @@ when a draft has unsaved work or an invalid parameter object.
 - 2026-08-03: dirty-draft navigation now requires an explicit discard, saved/modified and publish
   state remain visible, malformed parameter objects report inline and palette emptiness is distinct
   from catalogue failure. Focused console coverage passes; the full release gate remains.
+- 2026-08-03: the full console test/build job passed on main run 30788013022 and the refinements
+  shipped in v0.15.0.

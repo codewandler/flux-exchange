@@ -24,18 +24,9 @@ lockfile and compile-time tests.
 ## Now (in progress)
 - [X-59 — A deployment can hold one tenant and stop asking which](X-59-single-tenant-deployment.md) · the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · the first deployment any flux-family repository has made, so it sets the precedent the siblings copy. One machine deliberately — the credential store fsyncs the whole file under one mutex and a fly volume is per-machine, so two machines is two divergent stores with no reconciliation
-- [X-100 — The development command keeps a real browser session](X-100-dev-command-keeps-a-browser-session.md) · a route fixture covered --dev, but no repeatable test spawned cargo run; meanwhile the explicit-roster page rendered <handle> as an empty HTML element
-- [X-101 — Serve generated connector channels](X-101-generated-connector-channels-epic.md) · persistent tenant-owned channels, explicit inbound grants, one multiplexed agent WebSocket
-- [X-102 — Persist and supervise connector channels](X-102-persist-and-supervise-connector-channels.md)
-- [X-103 — Grant declared inbound events](X-103-grant-declared-inbound-events.md)
-- [X-104 — Multiplex agent channel subscriptions](X-104-multiplex-agent-channel-subscriptions.md)
-- [X-105 — Publish the live subscribe surface](X-105-publish-live-subscribe-surface.md)
-- [X-109 — Refine flow editor feedback and navigation](X-109-refine-flow-editor-feedback-and-navigation.md)
-- [X-110 — Edit inbound channel grants in the console](X-110-edit-inbound-grants-in-the-console.md) · channel creation without an inbound grant editor leaves the operator unable to complete create → grant → subscribe
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-92 — Private reporting and protected main](X-92-private-reporting-and-protected-main.md) · Observed 2026-08-02: private vulnerability reporting, secret scanning, Dependabot security updates and main protection are all disabled.
-- [X-81 — Four places state this project's version and three of them are wrong](X-81-the-version-a-page-states-is-checked.md) · found by X-73's implementor, 2026-08-02: lib.rs says v0.7.0, AGENTS.md and README.md say v0.9.0, the manifest says 0.11.0. lib.rs's is the published crate's front-page doc comment, so docs.rs is serving the wrong one — and nothing in the gate compares any of them to the manifest
 - [X-95 — Audit evidence survives the process](X-95-audit-evidence-survives-the-process.md) · X-87 emits structured success events, but they have no correlation id, durable sink, retention target or alert policy.
 
 ### the primary caller can authenticate
@@ -151,6 +142,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-71 — The console's dev server follows the address the service was told to bind](X-71-the-console-proxy-follows-the-bind.md) · found by X-69 while walking its own page, 2026-08-01: console/vite.config.ts hard-codes the default bind, so a reader who sets FLUX_EXCHANGE_BIND gets a console that cannot reach the service
 - [X-73 — A weakness in how a credential is obtained is a declared kind, not a rung on the risk ladder](X-73-a-hazard-is-a-kind-not-a-level.md) · the vocabulary the filter is written against: AuthHazard::ResourceOwnerSecretShared, citing RFC 9700 §2.4 and CWE-522. Not a fifth Risk value — a password grant buying a read-only token is Risk::Low and hazardous, so at_most(High) would admit it
 - [X-77 — A reader following a family link lands on a documentation site, not on a repository](X-77-the-family-links-go-to-the-family-sites.md) · owner-raised 2026-08-02, the day the site went live: index.md sends a reader to github.com for flux and flux-connectors, so following the family link drops them out of the docs and into a source tree. Both sibling sites are published and neither is linked
+- [X-81 — Four places state this project's version and three of them are wrong](X-81-the-version-a-page-states-is-checked.md) · found by X-73's implementor, 2026-08-02: lib.rs says v0.7.0, AGENTS.md and README.md say v0.9.0, the manifest says 0.11.0. lib.rs's is the published crate's front-page doc comment, so docs.rs is serving the wrong one — and nothing in the gate compares any of them to the manifest
 - [X-83 — The console is served by the host it talks to](X-83-the-console-is-served-by-the-host-it-talks-to.md) · the console reaches the API only through the Vite dev proxy, which npm run build does not emit — and it cannot be hosted elsewhere, because SameSite=Strict means the browser never attaches the session cookie cross-origin. Ordered before X-84, which has nothing to put in an image until this exists
 - [X-85 — Run the latest published connector line](X-85-run-the-latest-published-connector-line.md) · connector-pack 0.13.0 sets the compatible engine line to Flux 0.49; the exchange moves both pin sets together before its Fly machine is replaced
 - [X-86 — One search bar over the catalogue this exchange actually serves](X-86-an-exchange-owned-catalogue-finder.md) · owner-directed 2026-08-02: retire the copied explorer; exchange owns one search bar with connector, service and operation tabs, and adds channels only when it has real channel data
@@ -159,7 +151,15 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-89 — The security posture is discoverable and its gaps are tracked](X-89-document-and-extend-the-security-posture.md) · Document the controls X-87 hardened, label deployment assumptions and limitations honestly, and turn the remaining security work into ranked stories.
 - [X-98 — A versioned visual and source flow editor](X-98-a-versioned-flow-editor.md) · connector operations plus the pure cognition group; immutable publication, dual grants and node-addressed run records
 - [X-99 — The development build keeps the declared MSRV](X-99-dev-build-keeps-the-declared-msrv.md) · cargo run -- --dev regressed when bundled SQLite moved beyond Rust 1.88; align Exchange and Flux on the compatible registry line and prove the real browser round trip
+- [X-100 — The development command keeps a real browser session](X-100-dev-command-keeps-a-browser-session.md) · a route fixture covered --dev, but no repeatable test spawned cargo run; meanwhile the explicit-roster page rendered <handle> as an empty HTML element
+- [X-101 — Serve generated connector channels](X-101-generated-connector-channels-epic.md) · persistent tenant-owned channels, explicit inbound grants, one multiplexed agent WebSocket
+- [X-102 — Persist and supervise connector channels](X-102-persist-and-supervise-connector-channels.md)
+- [X-103 — Grant declared inbound events](X-103-grant-declared-inbound-events.md)
+- [X-104 — Multiplex agent channel subscriptions](X-104-multiplex-agent-channel-subscriptions.md)
+- [X-105 — Publish the live subscribe surface](X-105-publish-live-subscribe-surface.md)
 - [X-106 — Adopt the released Flux and connector domain lines](X-106-adopt-the-released-domain-lines.md) · Release gate opened 2026-08-03: connector-pack 0.16 requires Flux 0.52; audit the shipped contracts before Exchange builds on them
+- [X-109 — Refine flow editor feedback and navigation](X-109-refine-flow-editor-feedback-and-navigation.md)
+- [X-110 — Edit inbound channel grants in the console](X-110-edit-inbound-grants-in-the-console.md) · channel creation without an inbound grant editor leaves the operator unable to complete create → grant → subscribe
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

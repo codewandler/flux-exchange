@@ -1,7 +1,7 @@
 ---
 id: X-100
 title: The development command keeps a real browser session
-status: in-progress
+status: done
 priority: 0
 epic: local-identity
 areas: [exchange-server, supply-chain]
@@ -23,13 +23,16 @@ resolves that cookie back to the same `dev` principal.
       authenticated session over HTTP.
 - [x] Both ordinary CI and the tag-triggered publication gate run that exact process test, so a route
       fixture cannot stand in for a broken CLI composition.
-- [ ] The complete repository gate passes and the repair is included in the next release.
+- [x] The complete repository gate passes and the repair is included in the next release.
 
 ## Progress
 - 2026-08-03: The existing tests cover `Startup::select`, the assembled router and a real socket,
   separately. X-99 also recorded one manual process walk, but no committed test kept those pieces
   together. The reported page exposed a second bug: raw `<handle>` in host-authored HTML is parsed as
   an element, leaving the visible instruction as `Authorization: Bearer `.
+- 2026-08-03: the first CI process run exposed ANSI-coloured tracing under `CARGO_TERM_COLOR=always`;
+  the harness now gives the spawned server a machine-readable log environment. Main run 30788013022
+  and tag/publish run 30788162730 both passed the exact Cargo command browser round trip in v0.15.0.
 
 ## Notes
 - Cargo's first `--` is the argument-forwarding boundary. `cargo run --dev` does not pass `--dev` to
