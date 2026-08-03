@@ -189,6 +189,7 @@ docker volume create flux-exchange-local
 docker run --rm -v flux-exchange-local:/data \
   -e FLUX_EXCHANGE_BIND=127.0.0.1:8080 \
   -e FLUX_EXCHANGE_CREDENTIALS=/data/credentials/store.json \
+  -e FLUX_EXCHANGE_CONNECTIONS=/data/connections/store.json \
   -e FLUX_EXCHANGE_GRANTS=/data/grants/store.json \
   -e FLUX_EXCHANGE_WORKFLOWS=/data/workflows \
   -e FLUX_EXCHANGE_AUDIT=/data/audit/events.sqlite3 \

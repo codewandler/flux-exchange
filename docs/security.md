@@ -38,8 +38,8 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   the seams where they are handled. The authentication argument is in
   [`oidc-signin.md`](designs/oidc-signin.md) and the local session rules are in
   [`identity-and-session.md`](designs/identity-and-session.md).
-- **Enforced in code.** Tenant assignments, grants, settings and agent verifier records are kept in
-  stores separate from credential material. Invocation reads a tenant once from the resolved
+- **Enforced in code.** Tenant assignments, connection labels, grants, settings and Service Account
+  verifier records are kept in stores separate from credential material. Invocation reads a tenant once from the resolved
   principal and binds both credential and setting ports from that value in one expression; see
   [`invoke.rs`](../crates/exchange-host/src/invoke.rs).
 - **Enforced in code.** Operational audit records are a separate, durable, typed journal and are
@@ -162,6 +162,11 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   a truncated store. Delete rewrites immediately, and connection rotation replaces a credential
   without a deliberate absent window. Partial multi-value deletion reports what was removed and
   what may remain.
+- **Enforced in code.** Multiple connections use a host-minted UUID in the credential address and a
+  separate tenant-scoped operator label. Existence comes from scoped credential inventory, not the
+  naming overlay. First-to-second and two-to-one transitions are checked atomic batches; a backend
+  that cannot prove inventory and atomic mutation retains the sole legacy surface and refuses the
+  plural operation.
 - **Enforced in code.** One credential value is limited to 8 KiB and one tenant's credentials to
   64 KiB. Non-secret settings have separate 1 KiB-per-value and 16 KiB-per-tenant bounds. These
   limits bound both storage and the cost of whole-file rewrites; their reasons live beside the

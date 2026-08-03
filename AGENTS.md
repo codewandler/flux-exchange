@@ -43,7 +43,9 @@ tenant, per-connection settings gated to signed-in humans (X-47), and — since 
 do. Since X-98 it also stores tenant workflow drafts, publishes immutable versions, runs them
 through Flux with dual grant gates, and records value-free node activity. Since X-101 it persists
 and supervises generated connector WebSocket channels, gates closed declared event sets, and fans
-them out through authenticated `/api/subscribe`.** `cargo run` binds loopback and refuses to start
+them out through authenticated `/api/subscribe`. Since X-14 a tenant may hold several labelled
+connections to one connector; invocation selects one explicitly and the first-to-second credential
+migration is atomic.** `cargo run` binds loopback and refuses to start
 on a reachable address with no identity provider configured.
 
 **Signing in without an identity provider works on loopback** (X-57, v0.9.0+). Arm
@@ -147,13 +149,13 @@ separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
-**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.17 and
+**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.18 and
 `connector-pack` links here. What is left is one rule, and it is the one that bites:
 
 - **The flux engine line is `0.54`, and it is written down once** — in `[workspace.dependencies]`
   in the root `Cargo.toml`, under the `ENGINE_LINE` marker. Every `codewandler-flux-*` pin carries
   that value, and no member manifest pins one at all.
-- **It is set by what `connector-pack` requires, never by what is newest.** `connector-pack` 0.17.0
+- **It is set by what `connector-pack` requires, never by what is newest.** `connector-pack` 0.18.0
   requires `codewandler-flux-runtime ^0.54`, and that is the whole reason 0.54 is allowed now — the
   exchange stayed on 0.52 until the compatible connector release was published.
   `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, and two engine versions

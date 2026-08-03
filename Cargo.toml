@@ -33,7 +33,7 @@ time = { version = "0.3.55", features = ["formatting", "parsing"] }
 # `exchange-host`'s `tests/engine_line.rs` reads this file and refuses a second one. Bumping the
 # engine is therefore editing this number and the pins beside it, in this file, and nothing else.
 #
-# **It is 0.54 because `connector-pack` 0.17.0 requires it** (X-101), and that ordering is the rule
+# **It is 0.54 because `connector-pack` 0.18.0 requires it** (X-101), and that ordering is the rule
 # rather than a coincidence. A `0.x` requirement is `>=0.54.0, <0.55.0` to Cargo, so the line *is*
 # the compatibility unit: `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, and two
 # `flux-runtime` versions in one graph are two distinct traits with identical names — Cargo resolves
@@ -72,7 +72,7 @@ flux-system = { package = "codewandler-flux-system", version = "0.54" }
 flux-web = { package = "codewandler-flux-web", version = "0.54" }
 flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 
-# The connector crates, all on the 0.17 line. `connector-catalog` has no dependencies at all and
+# The connector crates, all on the 0.18 line. `connector-catalog` has no dependencies at all and
 # `connector-secrets` defaults to no features (its Vault client and reqwest sit behind `vault`).
 #
 # `connector-address` is the **address vocabulary**, and it replaces `connector-spec` here.
@@ -85,10 +85,10 @@ flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 #
 # `connector-pack` is an ordinary `exchange-host` dependency: invocation and channel planning both
 # end there, while the composing server owns the guarded transports and never names the pack.
-connector-address = { package = "codewandler-connector-address", version = "0.17" }
-connector-catalog = { package = "codewandler-connector-catalog", version = "0.17" }
-connector-pack = { package = "codewandler-connector-pack", version = "0.17" }
-connector-secrets = { package = "codewandler-connector-secrets", version = "0.17" }
+connector-address = { package = "codewandler-connector-address", version = "0.18" }
+connector-catalog = { package = "codewandler-connector-catalog", version = "0.18" }
+connector-pack = { package = "codewandler-connector-pack", version = "0.18" }
+connector-secrets = { package = "codewandler-connector-secrets", version = "0.18" }
 # The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family
 # precedent is sibling flux-connectors, which already uses reqwest and jsonwebtoken for exactly this
 # exchange; the alternative was hand-rolling signature verification, which nobody should do.

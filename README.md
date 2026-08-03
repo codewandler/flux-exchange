@@ -22,7 +22,10 @@ live versus target architecture.
 > is configured. The authorization code is redeemed back-channel and the id token's signature is
 > verified against the provider's published keys, so `/api/signin` redirects to a real provider —
 > configure the eight `FLUX_EXCHANGE_OIDC_*` variables and it works end to end. Connections can be
-> created, listed, **rotated** and deleted per tenant. A signed-in human can create, list and revoke
+> created, listed, **rotated** and deleted per tenant. With `FLUX_EXCHANGE_CONNECTIONS` bound, one
+> tenant can hold several labelled instances of the same connector; invocation selects one with
+> `?connection=<label>` and refuses ambiguity rather than choosing an account. A signed-in human
+> can create, list and revoke
 > **Service Accounts**, whose `fxsa_…` bearer tokens authenticate at the same guarded API boundary
 > as browser sessions. **`invoke` runs**: `POST /api/operations/{operation}/invoke` executes one
 > catalogue operation for the caller's tenant, with the request built by `connector_pack` from the
@@ -111,12 +114,12 @@ against one tenant's connections, not a vendor secret.
 
 | | |
 |---|---|
-| `crates/exchange-host` | Principal-derived tenancy, grants, runtime admission, credential/settings/channel stores, ordinary invocation, zero-I/O generated channel planning, and tenant-scoped workflow drafts plus immutable published versions. Workflow and channel execution still end in Flux and `connector_pack`; this crate holds no transport of its own. |
-| `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant connections and grants, Service Account lifecycle and bearer authentication, ordinary invocation, workflow authoring/publication, durable SQLite run records and typed 30-day audit evidence, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
+| `crates/exchange-host` | Principal-derived tenancy, grants, connection-instance naming, runtime admission, credential/settings/channel stores, ordinary invocation, zero-I/O generated channel planning, and tenant-scoped workflow drafts plus immutable published versions. Workflow and channel execution still end in Flux and `connector_pack`; this crate holds no transport of its own. |
+| `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant labelled connection instances and grants, Service Account lifecycle and bearer authentication, ordinary invocation, workflow authoring/publication, durable SQLite run records and typed 30-day audit evidence, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
 | `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows, Activity and Channels. The workflow editor uses the upstream Flux graph contract, protects unsaved drafts, retains exact source, and paints durable value-free run events back onto nodes. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
-**Not built, despite being described in the design:** rich outbound runtime-plan dispatch, a second connection to one
-connector (the address has no instance dimension until upstream publishes one), webhook channels,
+**Not built, despite being described in the design:** rich outbound runtime-plan dispatch, generated
+channel binding to a selected connection instance (X-122), webhook channels,
 durable event replay/inboxes, general operation streams, isolated per-tenant workers,
 leases-in-anger, runtime artifact installation/attestation, and the catalogue loader. Stored workflows,
 workflow execution records and generated WebSocket channels moved off this list in X-98 and X-101.
@@ -193,6 +196,26 @@ that `rm` on the store file alone does not touch.
 
 The binary binds it when `FLUX_EXCHANGE_CREDENTIALS` names a path; unset, the connection routes
 refuse and name the setting rather than pretending a store exists.
+
+### Several connections to one connector
+
+`FLUX_EXCHANGE_CONNECTIONS` names the durable label-to-UUID registry. It contains operator labels
+and host-minted UUIDs, never credential or setting values, and its path must be outside every working
+tree. With no registry bound, the source-compatible sole legacy connection surface remains live.
+
+A signed-in human labels an existing sole connection with
+`PUT /api/connections/{connector}/label`, then creates another at
+`POST /api/connections/{connector}/instances/{label}`. Management, settings and credential rotation
+have matching label-scoped resources. Invocation uses
+`POST /api/operations/{operation}/invoke?connection={label}`; the JSON body remains exactly the
+operation's parameter object. Omitting the label is valid only when the tenant holds zero or one
+connection for that connector.
+
+Existence comes from credential addresses, not from this registry. The file store can enumerate a
+tenant/authority scope and apply the first-to-second address migration as one checked atomic batch.
+A backend that cannot prove both operations—currently including the Vault binding—continues to
+support sole legacy connections but refuses plural management. Exchange never falls back to a
+point-by-point credential move.
 
 ## Try it
 

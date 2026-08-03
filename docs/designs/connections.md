@@ -738,3 +738,26 @@ that test is what says so.
   reads the template and not the choice set, so it returns `WholeAuthority` and X-47's rule refuses
   the connector. That is fail-closed and correct under the rule as written; teaching `host_pinning`
   to admit a closed set is a safety-surface change that belongs in a story of its own, not in a bump.
+
+## Addendum, 2026-08-03 — X-14 replaces the second-connection placeholder
+
+The historical `409` sections above describe the safe state before the shared address and store
+contracts could express plurality. Connector v0.18 now publishes the complete boundary, and X-14
+has consumed it. The legacy `POST /api/connections/{connector}` remains create-only and still
+refuses an occupied connector—it did not become an upsert—but plurality is live at the explicit
+label-scoped resource:
+
+```text
+PUT    /api/connections/{connector}/label
+POST   /api/connections/{connector}/instances/{label}
+GET    /api/connections/{connector}/instances/{label}
+PUT    /api/connections/{connector}/instances/{label}
+DELETE /api/connections/{connector}/instances/{label}
+```
+
+The label is a tenant-scoped naming overlay over a host-minted canonical UUID. Credential inventory,
+not the overlay, remains authoritative for existence; deleting the overlay leaves held UUIDs listed
+and unnamed. The first-to-second transition is one scope-checked atomic batch that moves every
+legacy credential and writes the new instance. A backend without scoped inventory and atomic batch
+support keeps sole legacy connections and refuses this plural surface. The complete decision and
+acceptance contract now live in [`connection-instances.md`](connection-instances.md).

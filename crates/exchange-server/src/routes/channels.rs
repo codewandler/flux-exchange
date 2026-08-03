@@ -111,8 +111,8 @@ async fn create(
         supervisor.mint_id(),
         principal.tenant().clone(),
         proposed.connector.clone(),
-        // The current connection model permits one connection per connector; callers cannot name
-        // a separate connection authority in this body.
+        // X-122 owns the durable, rename-safe binding to an X-14 instance. Until then channels are
+        // sole-connection-only and this body still cannot name an authority, UUID or address.
         proposed.connector,
         proposed.binding,
         proposed.events,

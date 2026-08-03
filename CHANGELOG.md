@@ -29,6 +29,20 @@ All notable changes to this project are documented in this file. The format is b
   append identifier-and-count-only alerts and emit warning notifications. The Fly composition puts
   the journal on its encrypted volume; the runbook names read and early-deletion powers.
 
+- **A tenant can hold several labelled connections to one connector** (X-14). Exchange persists a
+  tenant-scoped label-to-host-minted-UUID overlay while deriving connection existence from scoped
+  credential addresses. Label-scoped management includes settings and atomic rotation; invocation
+  selects with `?connection=<label>` while preserving the operation's raw JSON body, and refuses an
+  omitted selector when several connections exist.
+
+  Creating the second connection migrates the first and writes the second in one checked
+  `SecretBatch`; deleting one of two returns the survivor to the legacy address atomically. Stores
+  without proven inventory and batch support retain sole legacy connections and refuse plural
+  management rather than falling back to point writes. `FLUX_EXCHANGE_CONNECTIONS` names the
+  durable non-secret label registry. Label-scoped mutations retain label-specific, value-free audit
+  targets. Generated channels remain sole-connection-only until X-122 gives their durable records a
+  rename-safe instance binding.
+
 - **Service Accounts are now a complete non-human identity resource** (X-107). Signed-in humans can
   create, list and revoke them at `/api/service-accounts`; creation returns a new `fxsa_…` token
   once, the durable store retains only its verifier, and bearer presentation resolves the canonical

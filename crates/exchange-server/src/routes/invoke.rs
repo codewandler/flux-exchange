@@ -1,7 +1,7 @@
 //! Running one operation.
 //!
 //! ```text
-//! POST /api/operations/{operation}/invoke
+//! POST /api/operations/{operation}/invoke[?connection=<label>]
 //! body: the operation's declared parameters, verbatim — no envelope
 //! → 200 { "operation": …, "content": …, "view": …, "is_error": false }
 //! → 4xx { "refusal": …, "operation": …, "sent": "no", "retryable": false, "message": … }
@@ -9,15 +9,18 @@
 //!
 //! **This module is an adapter and nothing else.** It reads a principal out of the guard's
 //! extension, reads an operation id out of the path, hands both to
-//! [`exchange_host::Invoker::invoke`], and turns the answer into a status. Every decision that
+//! [`exchange_host::Invoker::invoke_for_instance`], and turns the answer into a status. Every decision that
 //! matters — the catalogue lookup, the deployment gate, the credential address, the request itself
 //! — is made in `exchange-host` and, below that, in `connector_pack`. There is deliberately nothing
 //! here to get wrong.
 //!
 //! # What a caller supplies, and what it cannot
 //!
-//! One noun: `{operation}`, the catalogue's own spelling of an operation id
-//! (`zendesk-ticket-show`). The body is the parameter object and nothing else.
+//! `{operation}` is the catalogue's own spelling of an operation id (`zendesk-ticket-show`). The
+//! optional `connection` query names an operator label within the principal's tenant; Exchange
+//! resolves it to a held host-minted UUID. With one connection it may be omitted. With several it
+//! is required, and no default or first match exists. The body remains the parameter object and
+//! nothing else.
 //!
 //! **There is no envelope**, and that is the shape rather than a validation. An envelope is a place
 //! to put a field, and the field that eventually gets added is `endpoint`, or `base_url`, or
@@ -25,7 +28,8 @@
 //! for exactly that reason. **There is no tenant segment either**, not even an ignored one — an
 //! ignored tenant segment is worse than an honoured one, because it reads as authoritative in every
 //! log line and client SDK, and the first person who "fixes" the inconsistency by honouring it
-//! breaks the north star in a diff that looks like a cleanup.
+//! breaks the north star in a diff that looks like a cleanup. Unknown query axes are denied too: a
+//! caller cannot supply a UUID, authority, host or credential address by moving it out of the body.
 //!
 //! The tenant comes from [`Extension<Principal>`], which only the guard inserts.
 //! `super::tests::no_published_route_takes_a_tenant_in_its_path` walks the whole surface for the
@@ -64,12 +68,13 @@
 //! Zendesk `404` into a host error would destroy the distinction between "the vendor said no" and
 //! "we could not ask", which is the distinction this whole surface exists to keep.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{post, MethodRouter};
 use axum::{Extension, Json};
 use exchange_host::{InvokeRefusal, Principal, Sent};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::warn;
 
@@ -109,11 +114,18 @@ fn invoke_route() -> MethodRouter<AppState> {
     post(run)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InvocationQuery {
+    connection: Option<String>,
+}
+
 /// Run one operation for the caller's tenant.
 async fn run(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Path(operation): Path<String>,
+    Query(query): Query<InvocationQuery>,
     Json(params): Json<Value>,
 ) -> Response {
     if let Some(workflow) = operation
@@ -121,6 +133,16 @@ async fn run(
         .and_then(|operation| operation.strip_suffix(".run"))
         .filter(|workflow| !workflow.is_empty() && !workflow.contains('.'))
     {
+        if query.connection.is_some() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "refusal": "invalid_connection_selector",
+                    "message": "a stored workflow is not one connector connection; remove `connection`",
+                })),
+            )
+                .into_response();
+        }
         return super::workflows::invoke_published(state, principal, workflow.to_owned(), params)
             .await;
     }
@@ -132,7 +154,34 @@ async fn run(
         Err(refusal) => return rate_limited(refusal),
     };
 
-    match invoker.invoke(&principal, &operation, params).await {
+    let selected =
+        match connector_catalog::operation(connector_catalog::OperationKey::id(&operation))
+            .and_then(|entry| {
+                connector_catalog::provider(connector_catalog::ProviderKey::id(entry.provider))
+            }) {
+            Some(provider) => match super::connections::invocation_instance(
+                &state,
+                &principal,
+                provider,
+                query.connection.as_deref(),
+            )
+            .await
+            {
+                Ok(selected) => selected,
+                Err(response) => return response,
+            },
+            None => None,
+        };
+
+    let outcome = match selected.as_ref() {
+        Some(instance) => {
+            invoker
+                .invoke_for_instance(&principal, &operation, instance, params)
+                .await
+        }
+        None => invoker.invoke(&principal, &operation, params).await,
+    };
+    match outcome {
         Ok(invocation) => (StatusCode::OK, Json(invocation)).into_response(),
         Err(refusal) => {
             // To the log at `warn` when this host could not be sure the request stayed home. That
@@ -296,6 +345,49 @@ mod tests {
         }
     }
 
+    struct TwoGithubInstances {
+        references: Vec<exchange_host::CredentialRef>,
+    }
+
+    #[exchange_host::async_trait]
+    impl exchange_host::SecretStore for TwoGithubInstances {
+        async fn get(
+            &self,
+            reference: &exchange_host::CredentialRef,
+        ) -> Result<exchange_host::Secret, exchange_host::StoreError> {
+            Err(exchange_host::StoreError::NotFound {
+                path: exchange_host::address_path(reference),
+            })
+        }
+
+        async fn put(
+            &self,
+            _: &exchange_host::CredentialRef,
+            _: &exchange_host::Secret,
+        ) -> Result<(), exchange_host::StoreError> {
+            unreachable!("no test here writes a credential")
+        }
+
+        async fn delete(
+            &self,
+            _: &exchange_host::CredentialRef,
+        ) -> Result<(), exchange_host::StoreError> {
+            unreachable!("no test here destroys a credential")
+        }
+
+        async fn references(
+            &self,
+            scope: &exchange_host::CredentialScope,
+        ) -> Result<Vec<exchange_host::CredentialRef>, exchange_host::StoreError> {
+            Ok(self
+                .references
+                .iter()
+                .filter(|reference| scope.contains(reference))
+                .cloned()
+                .collect())
+        }
+    }
+
     /// A bound grant store holding a fixed set, for [`EmptyStore`]'s reason: a local type rather
     /// than a memory store published from `exchange-host`.
     ///
@@ -327,6 +419,20 @@ mod tests {
                 // No connection settings bound: these tests drive connectors that need none.
                 Arc::new(exchange_host::MemoryConfig::new()),
                 Arc::new(HeldGrants(grants)),
+            )
+            .expect("a usable workspace root"),
+        )
+    }
+
+    fn invoker_over(
+        credentials: Arc<dyn exchange_host::SecretStore>,
+    ) -> Arc<exchange_host::Invoker> {
+        Arc::new(
+            crate::execution::invoker(
+                exchange_host::Deployment::MultiTenant,
+                credentials,
+                Arc::new(exchange_host::MemoryConfig::new()),
+                Arc::new(HeldGrants(all_of_github())),
             )
             .expect("a usable workspace root"),
         )
@@ -568,5 +674,87 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
         assert_eq!(body["refusal"], "not_granted");
+    }
+
+    /// Unknown query fields are refused by shape. A caller cannot smuggle a host, authority, raw
+    /// instance UUID, or credential address alongside the operation's verbatim parameter body.
+    #[tokio::test]
+    async fn no_query_parameter_can_name_a_host_authority_uuid_or_credential_address() {
+        for field in ["host", "authority", "instance", "credential_address"] {
+            let path =
+                format!("/api/operations/github-repo-get/invoke?{field}=SENTINEL-NOT-AN-ADDRESS");
+            let (status, _) = post_json(
+                identified().with_invoker(invoker_holding(all_of_github())),
+                &path,
+                json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+        }
+    }
+
+    /// Omitting a label is sole-only. Naming one selects its UUID internally and the eventual
+    /// missing-credential refusal names that derived address, proving the raw parameter body was
+    /// not wrapped or repurposed for connection metadata.
+    #[tokio::test]
+    async fn connection_query_selects_a_label_and_omission_is_ambiguous() {
+        let first = exchange_host::InstanceId::parse("0d3f79ae-b6df-4f77-8f77-438436c3b2ef")
+            .expect("first id");
+        let second = exchange_host::InstanceId::parse("3a4bbf6d-5a20-4cdf-bfd7-18f1831fe2fd")
+            .expect("second id");
+        let reference = |instance: &exchange_host::InstanceId| {
+            exchange_host::CredentialRef::for_instance(
+                "acme",
+                "com.github.api",
+                instance.as_str(),
+                "default",
+                "token",
+            )
+            .expect("github reference")
+        };
+        let credentials: Arc<dyn exchange_host::SecretStore> = Arc::new(TwoGithubInstances {
+            references: vec![reference(&first), reference(&second)],
+        });
+        let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+        let tenant = exchange_host::Tenant::new("acme").expect("tenant");
+        for (label, instance) in [("prod", &first), ("sandbox", &second)] {
+            exchange_host::ConnectionRegistry::assign(
+                registry.as_ref(),
+                &tenant,
+                "github",
+                &exchange_host::ConnectionLabel::new(label).expect("label"),
+                instance,
+            )
+            .expect("name instance");
+        }
+        let state = identified()
+            .with_credentials(credentials.clone())
+            .with_connection_registry(registry)
+            .with_invoker(invoker_over(credentials));
+
+        let params = json!({ "owner": "codewandler", "repo": "flux-exchange" });
+        let (status, body) = post_json(
+            state.clone(),
+            "/api/operations/github-repo-get/invoke",
+            params.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "ambiguous_connection");
+
+        let (status, body) = post_json(
+            state,
+            "/api/operations/github-repo-get/invoke?connection=prod",
+            params,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .expect("message")
+                .contains(first.as_str()),
+            "the host-resolved UUID must be the address used: {body}",
+        );
     }
 }

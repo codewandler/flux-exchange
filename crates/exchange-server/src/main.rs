@@ -326,6 +326,10 @@ fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefus
         state = state.with_audit(audit);
     }
 
+    if let Some(registry) = connection_registry()? {
+        state = state.with_connection_registry(registry);
+    }
+
     // Bound before the invoker, because the invoker reads it. A composition with no settings store
     // still builds one — it gets an empty configuration, which is X-12's behaviour: the connectors
     // that need nothing per connection run, and the ones that do refuse by name.
@@ -707,6 +711,33 @@ fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>
     info!("{}", store.banner());
 
     Ok(Some(Arc::new(store)))
+}
+
+/// Bind the durable label-to-UUID overlay, or bind none for sole-connection compatibility.
+#[cfg(unix)]
+fn connection_registry(
+) -> Result<Option<Arc<dyn exchange_host::ConnectionRegistry>>, StartupRefusal> {
+    use exchange_host::{ConnectionRegistryStore, CONNECTION_REGISTRY_SETTING};
+
+    let Ok(configured) = std::env::var(CONNECTION_REGISTRY_SETTING) else {
+        warn!(
+            "no connection registry is bound ({CONNECTION_REGISTRY_SETTING} is unset); sole legacy connections still work, but labels and multiple instances refuse"
+        );
+        return Ok(None);
+    };
+    let store = ConnectionRegistryStore::bind_configured(Some(&configured)).map_err(|source| {
+        StartupRefusal::ConnectionRegistry {
+            reason: source.to_string(),
+        }
+    })?;
+    info!("{}", store.banner());
+    Ok(Some(Arc::new(store)))
+}
+
+#[cfg(not(unix))]
+fn connection_registry(
+) -> Result<Option<Arc<dyn exchange_host::ConnectionRegistry>>, StartupRefusal> {
+    Ok(None)
 }
 
 /// No file store on this platform; a composition here binds its own or holds none.

@@ -16,7 +16,7 @@ immutable workflow publication, durable value-free run activity and live WebSock
 Webhooks, durable event replay/inboxes and leases-in-anger remain unbuilt. See
 [README](../../README.md) § Status.
 
-The engine seam is aligned: connector-pack 0.17 and Flux 0.54 move as one pin set, held by manifest,
+The engine seam is aligned: connector-pack 0.18 and Flux 0.54 move as one pin set, held by manifest,
 lockfile and compile-time tests.
 
 <!-- BEGIN track:board -->
@@ -37,8 +37,10 @@ _Almost everything else downstream of the vision waits on X-11 — `connector-pa
 - [X-108 — Host installed Flux Apps and Managed Agents](X-108-host-installed-flux-apps.md) · Flux App/channel contracts are published on the connector-compatible line; design Exchange-owned package installation and tenant bindings before implementation
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · waiting for flux-connectors C-494 to publish the v0.18 instance-aware host ports; never substitute a local path dependency
 - [X-60 — An operator can find out who supplied a credential](X-60-who-supplied-this-credential.md) · found by X-54, 2026-08-01: nothing records who supplied a credential, which is half the reason X-54's kind gate was needed — and it means an operator cannot audit a substitution after the fact, including one another human made
+
+### generated connector channels
+- [X-122 — Bind a generated channel to one immutable connection instance](X-122-bind-channels-to-connection-instances.md) · X-14 makes invocation instance-aware; generated channels still store the connector id as their connection and need a rename-safe UUID binding
 
 ### the host acquires a credential, and a weak way of acquiring one is labelled
 _Every credential this service holds today arrived the same way: **a human pasted it in.**_
@@ -108,6 +110,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-11 — Align the flux engine line so connector-pack can link](X-11-align-the-engine-line.md) · UNBLOCKED 2026-08-01: upstream published 0.9.0. connector-pack now requires flux-runtime ^0.46 and 0.46.0 exists, so the ^0.41-vs-0.45 conflict is gone. connector-spec is replaced by connector-address and stopped at 0.8
 - [X-12 — Invoke an operation](X-12-invoke.md) · the caller names an operation id and nothing else about the request is theirs — not the host, not the credential, not the tenant. That is the whole confused-deputy answer
 - [X-13 — Grants gate invocation](X-13-grants-gate-invoke.md) · Selector and Grant are already tested types in exchange-host; this is where they become the thing standing between a principal and an effect
+- [X-14 — Two instances of one connector, told apart by a name the operator chose](X-14-two-instances-of-one-connector.md) · delivered in v0.16: durable tenant-scoped labels, host-minted UUIDs, atomic first-to-second migration, per-instance settings/rotation and explicit invocation selection
 - [X-15 — A sign-in a victim did not start cannot become a session in their browser](X-15-login-csrf.md) · found by X-04's implementor, 2026-08-01: server-side `state` does NOT close login-CSRF. An attacker who legitimately starts a sign-in here, authenticates as themselves, then walks a victim into the callback with that genuinely-bound state has the victim's browser holding the attacker's session
 - [X-16 — A session ends when the identity behind it does](X-16-session-expiry.md) · deferred twice — X-03 left it to X-04 on the grounds that an id token has an `exp` to bind to, and X-04 deferred it again because no composition could produce an id token. X-04 now can, so the reason is gone
 - [X-17 — An operator can tell their own misconfiguration from a refused credential](X-17-exchange-failure-modes.md) · found by X-04's two reviewers, 2026-08-01: `ExchangeError::Rejected` collapses four causes, one of which is this host's own client secret being wrong — and it is logged as 'the provider refused the authorization code'

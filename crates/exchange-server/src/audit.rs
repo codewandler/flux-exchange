@@ -61,6 +61,7 @@ pub enum Action {
     SessionClosed,
     ServiceAccountMinted,
     ServiceAccountRevoked,
+    ConnectionLabeled,
     ConnectionCreated,
     CredentialRotated,
     ConnectionRemoved,
@@ -80,6 +81,7 @@ impl Action {
             Self::SessionClosed => "session_closed",
             Self::ServiceAccountMinted => "service_account_minted",
             Self::ServiceAccountRevoked => "service_account_revoked",
+            Self::ConnectionLabeled => "connection_labeled",
             Self::ConnectionCreated => "connection_created",
             Self::CredentialRotated => "credential_rotated",
             Self::ConnectionRemoved => "connection_removed",
@@ -145,12 +147,27 @@ pub enum Target {
     Connection {
         connector: String,
     },
+    ConnectionInstance {
+        connector: String,
+        label: String,
+    },
     Credential {
         connector: String,
         credential: String,
     },
+    InstanceCredential {
+        connector: String,
+        label: String,
+        credential: String,
+    },
     Setting {
         connector: String,
+        service: String,
+        field: String,
+    },
+    InstanceSetting {
+        connector: String,
+        label: String,
         service: String,
         field: String,
     },
@@ -175,15 +192,35 @@ impl Target {
             Self::ServiceAccounts => ("service_accounts", "service_accounts".to_owned()),
             Self::ServiceAccount { id } => ("service_account", id.clone()),
             Self::Connection { connector } => ("connection", connector.clone()),
+            Self::ConnectionInstance { connector, label } => {
+                ("connection_instance", format!("{connector}/{label}"))
+            }
             Self::Credential {
                 connector,
                 credential,
             } => ("credential", format!("{connector}/{credential}")),
+            Self::InstanceCredential {
+                connector,
+                label,
+                credential,
+            } => (
+                "instance_credential",
+                format!("{connector}/{label}/{credential}"),
+            ),
             Self::Setting {
                 connector,
                 service,
                 field,
             } => ("setting", format!("{connector}/{service}/{field}")),
+            Self::InstanceSetting {
+                connector,
+                label,
+                service,
+                field,
+            } => (
+                "instance_setting",
+                format!("{connector}/{label}/{service}/{field}"),
+            ),
             Self::Grants { tenant } => ("grants", tenant.clone()),
             Self::Invocation { operation } => ("invocation", operation.clone()),
             Self::Alert {
