@@ -523,6 +523,11 @@ pub(super) const MODULE: Module = Module {
             method_router: instance_setting_route,
         },
         Route {
+            path: "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
+            access: Access::Operator,
+            method_router: plan::authority_route,
+        },
+        Route {
             path: "/api/connections/{connector}/instances/{label}/credentials/{credential}",
             access: Access::Operator,
             method_router: instance_credential_route,
@@ -3577,6 +3582,28 @@ fn nothing_to_clear(provider: &'static Provider, setting: &DeclaredSetting) -> R
 /// value.
 fn settings_refused(refusal: &SettingsRefusal) -> Response {
     let (status, extra) = match refusal {
+        SettingsRefusal::AuthorityUnsupported { connector, setting } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector, "field": setting }),
+        ),
+        SettingsRefusal::AuthorityUnset { connector, setting } => (
+            StatusCode::CONFLICT,
+            json!({ "connector": connector, "field": setting }),
+        ),
+        SettingsRefusal::AuthorityRevisionConflict {
+            connector,
+            setting,
+            expected,
+            current,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "expected": expected.to_string(),
+                "current": current.to_string(),
+            }),
+        ),
         SettingsRefusal::InstanceUnsupported {
             connector,
             instance,

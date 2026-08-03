@@ -1758,13 +1758,13 @@ mod file {
                 path: path.display().to_string(),
                 reason: error.to_string(),
             })?;
-        if let Some(schema) = decoded.get("schema") {
-            if schema.as_str() != Some(STORE_SCHEMA) {
+        if let Some(schema) = decoded.get("schema").and_then(serde_json::Value::as_str) {
+            if schema != STORE_SCHEMA {
                 return Err(SettingsStoreError::Unusable {
                     path: path.display().to_string(),
                     reason: format!(
                         "unsupported settings schema `{}`; supported schema is `{STORE_SCHEMA}`",
-                        schema.as_str().unwrap_or("non-string")
+                        schema
                     ),
                 });
             }
@@ -2465,6 +2465,7 @@ mod file {
     #[cfg(test)]
     mod authority_tests {
         use super::*;
+        use crate::HostPinning;
         use std::os::unix::fs::PermissionsExt as _;
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::{Arc, Barrier};
@@ -2473,7 +2474,8 @@ mod file {
 
         impl CustomOriginPolicy for TestPolicy {
             fn admits(&self, connector: &str, declared: &DeclaredSetting) -> bool {
-                connector == "okta" && declared.binds() == "endpoint.domain"
+                let (candidate_connector, candidate) = candidate();
+                connector == candidate_connector && declared == &candidate
             }
         }
 
@@ -2499,14 +2501,31 @@ mod file {
             }
         }
 
+        fn candidate() -> (&'static str, DeclaredSetting) {
+            connector_catalog::providers()
+                .iter()
+                .copied()
+                .find_map(|provider| {
+                    super::super::declared_settings(provider)
+                        .ok()?
+                        .into_iter()
+                        .find(|declared| {
+                            matches!(
+                                super::super::host_pinning(provider, declared),
+                                HostPinning::WholeAuthority(_)
+                            )
+                        })
+                        .map(|declared| (provider.id, declared))
+                })
+                .expect("catalogue has a whole-authority declaration")
+        }
+
+        fn connector() -> &'static str {
+            candidate().0
+        }
+
         fn setting() -> DeclaredSetting {
-            let provider = connector_catalog::provider(connector_catalog::ProviderKey::id("okta"))
-                .expect("okta");
-            super::super::declared_settings(provider)
-                .expect("settings")
-                .into_iter()
-                .find(|setting| setting.binds() == "endpoint.domain")
-                .expect("okta domain")
+            candidate().1
         }
 
         fn instance() -> InstanceId {
@@ -2528,17 +2547,23 @@ mod file {
             let store = bind(&path);
 
             store
-                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "one.example")
+                .set_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    "one.example",
+                )
                 .expect("proposal");
             let first = store
-                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                 .expect("status");
             assert_eq!(first.state, AuthorityState::Proposed);
             let first_revision = first.revision.expect("revision");
             assert_eq!(
                 store.get_for_instance(
                     tenant.as_str(),
-                    "okta",
+                    connector(),
                     Some(&instance),
                     "default",
                     declared.field(),
@@ -2548,10 +2573,16 @@ mod file {
 
             // Even byte-identical writes are new proposals and cannot inherit approval.
             store
-                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "one.example")
+                .set_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    "one.example",
+                )
                 .expect("new proposal");
             let second = store
-                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                 .expect("status");
             let second_revision = second.revision.expect("revision");
             assert!(second_revision > first_revision);
@@ -2559,7 +2590,7 @@ mod file {
             assert!(matches!(
                 store.approve_authority_for_instance(
                     &tenant,
-                    "okta",
+                    connector(),
                     Some(&instance),
                     &declared,
                     first_revision
@@ -2571,7 +2602,7 @@ mod file {
             store
                 .approve_authority_for_instance(
                     &tenant,
-                    "okta",
+                    connector(),
                     Some(&instance),
                     &declared,
                     second_revision,
@@ -2581,7 +2612,7 @@ mod file {
             let store = bind(&path);
             assert_eq!(
                 store
-                    .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                    .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                     .expect("status")
                     .state,
                 AuthorityState::Approved
@@ -2589,7 +2620,7 @@ mod file {
             assert_eq!(
                 store.get_for_instance(
                     tenant.as_str(),
-                    "okta",
+                    connector(),
                     Some(&instance),
                     "default",
                     declared.field(),
@@ -2599,7 +2630,7 @@ mod file {
             store
                 .revoke_authority_for_instance(
                     &tenant,
-                    "okta",
+                    connector(),
                     Some(&instance),
                     &declared,
                     second_revision,
@@ -2609,7 +2640,7 @@ mod file {
             let store = bind(&path);
             assert_eq!(
                 store
-                    .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                    .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                     .expect("status")
                     .state,
                 AuthorityState::Revoked
@@ -2617,7 +2648,7 @@ mod file {
             assert_eq!(
                 store.get_for_instance(
                     tenant.as_str(),
-                    "okta",
+                    connector(),
                     Some(&instance),
                     "default",
                     declared.field(),
@@ -2625,13 +2656,19 @@ mod file {
                 None
             );
             store
-                .clear_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .clear_for_instance(&tenant, connector(), Some(&instance), &declared)
                 .expect("clear");
             store
-                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "one.example")
+                .set_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    "one.example",
+                )
                 .expect("recreate");
             let recreated = store
-                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                 .expect("status");
             assert!(recreated.revision.expect("revision") > second_revision);
         }
@@ -2645,10 +2682,16 @@ mod file {
             let instance = instance();
             let store = Arc::new(bind(&path));
             store
-                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "first.example")
+                .set_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    "first.example",
+                )
                 .expect("proposal");
             let revision = store
-                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                 .expect("status")
                 .revision
                 .expect("revision");
@@ -2663,7 +2706,7 @@ mod file {
                     barrier.wait();
                     store.set_for_instance(
                         &tenant,
-                        "okta",
+                        connector(),
                         Some(&instance),
                         &declared,
                         "replacement.example",
@@ -2680,7 +2723,7 @@ mod file {
                     barrier.wait();
                     store.approve_authority_for_instance(
                         &tenant,
-                        "okta",
+                        connector(),
                         Some(&instance),
                         &declared,
                         revision,
@@ -2691,7 +2734,7 @@ mod file {
             writer.join().expect("writer").expect("write");
             let _ = approver.join().expect("approver");
             let status = store
-                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                 .expect("status");
             assert_eq!(status.state, AuthorityState::Proposed);
             assert!(status.revision.expect("revision") > revision);
@@ -2710,7 +2753,20 @@ mod file {
 
             fs::write(
                 &path,
-                br#"{"acme":{"okta":{"default":{"endpoint.domain":"legacy.example"}}}}"#,
+                br#"{"schema":{"ordinary":{"default":{"endpoint.name":"legacy.example"}}}}"#,
+            )
+            .expect("legacy tenant named schema");
+            SettingsStore::bind(&path).expect("non-string schema is a legacy tenant id");
+
+            let declared = setting();
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"acme":{{"{}":{{"{}":{{"{}":"legacy.example"}}}}}}}}"#,
+                    connector(),
+                    declared.service,
+                    declared.binds(),
+                ),
             )
             .expect("legacy fixture");
             SettingsStore::bind(&path)
@@ -2730,17 +2786,23 @@ mod file {
             let instance = instance();
             let store = bind(&path);
             store
-                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "first.example")
+                .set_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    "first.example",
+                )
                 .expect("proposal");
             let before = store
-                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                 .expect("status");
             let directory = path.parent().expect("directory");
             fs::set_permissions(directory, fs::Permissions::from_mode(0o500))
                 .expect("make unwritable");
             let refused = store.set_for_instance(
                 &tenant,
-                "okta",
+                connector(),
                 Some(&instance),
                 &declared,
                 "second.example",
@@ -2750,7 +2812,7 @@ mod file {
             assert!(refused.is_err());
             assert_eq!(
                 store
-                    .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                    .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                     .expect("status"),
                 before
             );

@@ -662,6 +662,10 @@ mod tests {
             "as above; selecting which endpoint receives this connection's credential is an operator action.",
         ),
         (
+            "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
+            "as above; explicit approval or revocation of a custom origin is an operator action.",
+        ),
+        (
             "/api/connections/{connector}/instances/{label}/credentials/{credential}",
             "as above, and it accepts a credential value which the agent descriptor must never invite an agent to supply.",
         ),

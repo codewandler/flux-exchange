@@ -10,10 +10,13 @@ use std::fmt;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, MethodRouter};
+use axum::routing::{get, put, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{ConfigField, Provider};
-use exchange_host::{ConnectionLabel, DeclaredSetting, HostPinning, InstanceId, TenantInstances};
+use exchange_host::{
+    AuthorityState, AuthorityStatus, ConnectionLabel, DeclaredSetting, HostPinning, InstanceId,
+    TenantInstances,
+};
 use serde::de::{MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -25,9 +28,14 @@ pub(super) fn route() -> MethodRouter<AppState> {
     get(show).post(apply)
 }
 
+pub(super) fn authority_route() -> MethodRouter<AppState> {
+    put(approve_authority).delete(revoke_authority)
+}
+
 #[derive(Default, Deserialize)]
 struct Selection {
     name: Option<String>,
+    version: Option<String>,
 }
 
 /// Secret values exist only in this request type and the existing credential request types.
@@ -41,6 +49,29 @@ struct Submission {
     current_name: Option<String>,
     #[serde(default)]
     values: SubmittedValues,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthoritySubmission {
+    version: String,
+    revision: String,
+}
+
+#[derive(Serialize)]
+struct AuthorityResponse {
+    version: &'static str,
+    connector: String,
+    label: String,
+    service: String,
+    field: String,
+    authority: AuthorityTransition,
+}
+
+#[derive(Serialize)]
+struct AuthorityTransition {
+    state: AuthorityViewState,
+    revision: String,
 }
 
 /// A map that refuses duplicate JSON keys instead of accepting the last secret silently.
@@ -121,6 +152,36 @@ struct FieldView {
     choices: Option<Vec<ChoiceView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authority: Option<AuthorityView>,
+}
+
+#[derive(Clone, Serialize)]
+struct AuthorityView {
+    state: AuthorityViewState,
+    revision: Option<String>,
+    actions: Option<AuthorityActions>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum AuthorityViewState {
+    Unset,
+    Proposed,
+    Approved,
+    Revoked,
+}
+
+#[derive(Clone, Serialize)]
+struct AuthorityActions {
+    approve: AuthorityAction,
+    revoke: AuthorityAction,
+}
+
+#[derive(Clone, Serialize)]
+struct AuthorityAction {
+    method: &'static str,
+    target: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -191,6 +252,7 @@ struct TargetSpec {
 struct DescribedField {
     view: FieldView,
     target: Option<TargetSpec>,
+    custom_origin: bool,
 }
 
 struct ConnectionContext {
@@ -205,6 +267,13 @@ async fn show(
     Path(connector): Path<String>,
     Query(query): Query<Selection>,
 ) -> Response {
+    if let Some(version) = query
+        .version
+        .as_deref()
+        .filter(|version| *version != VERSION)
+    {
+        return unsupported_version(version);
+    }
     let Some(provider) = catalogued(&connector) else {
         return unknown_connector(&connector);
     };
@@ -221,6 +290,9 @@ async fn apply(
     Path(connector): Path<String>,
     Json(body): Json<Submission>,
 ) -> Response {
+    if body.version != VERSION {
+        return unsupported_version(&body.version);
+    }
     let Some(provider) = catalogued(&connector) else {
         return unknown_connector(&connector);
     };
@@ -230,14 +302,6 @@ async fn apply(
         Ok(plan) => plan,
         Err(response) => return response,
     };
-    if body.version != VERSION {
-        return preflight_refused(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!("unsupported connection plan version `{}`", body.version),
-            &unselected,
-        );
-    }
-
     let name = match ConnectionLabel::new(&body.name) {
         Ok(name) => name,
         Err(refusal) => {
@@ -291,7 +355,10 @@ async fn apply(
         );
     }
 
-    let descriptions = match describe(provider) {
+    let Some(settings_store) = state.settings() else {
+        return no_settings_store();
+    };
+    let descriptions = match describe_for(provider, settings_store.as_ref()) {
         Ok(descriptions) => descriptions,
         Err(refusal) => return settings_refused(&refusal),
     };
@@ -663,7 +730,12 @@ async fn apply(
                 }),
             ));
         } else {
-            steps.push(step(&target.id, StepOutcome::Applied, None));
+            let reason = descriptions
+                .iter()
+                .find(|description| description.target.as_ref().is_some_and(|spec| spec.id == target.id))
+                .is_some_and(|description| description.custom_origin)
+                .then_some("proposal persisted; explicit authority approval is required before runtime use");
+            steps.push(step(&target.id, StepOutcome::Applied, reason));
         }
     }
 
@@ -807,6 +879,201 @@ async fn apply(
         }),
     )
         .into_response()
+}
+
+async fn approve_authority(
+    state: State<AppState>,
+    principal: Extension<Principal>,
+    request_id: Extension<RequestId>,
+    path: Path<(String, String, String, String)>,
+    Json(body): Json<AuthoritySubmission>,
+) -> Response {
+    transition_authority(state, principal, request_id, path, body, true).await
+}
+
+async fn revoke_authority(
+    state: State<AppState>,
+    principal: Extension<Principal>,
+    request_id: Extension<RequestId>,
+    path: Path<(String, String, String, String)>,
+    Json(body): Json<AuthoritySubmission>,
+) -> Response {
+    transition_authority(state, principal, request_id, path, body, false).await
+}
+
+async fn transition_authority(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(request_id): Extension<RequestId>,
+    Path((connector, label, service, field)): Path<(String, String, String, String)>,
+    body: AuthoritySubmission,
+    approve: bool,
+) -> Response {
+    if body.version != VERSION {
+        return unsupported_version(&body.version);
+    }
+    let revision =
+        match canonical_revision(&body.revision) {
+            Some(revision) => revision,
+            None => return refuse(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "authority revision must be a canonical decimal integer from 1 through u64::MAX",
+                json!({ "revision": body.revision }),
+            ),
+        };
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(settings) = state.settings() else {
+        return no_settings_store();
+    };
+    let Some(declared) = DeclaredSetting::parse(&service, &field) else {
+        return unreadable_field(provider, &service, &field);
+    };
+    let declarations = match declared_settings(provider) {
+        Ok(declarations) => declarations,
+        Err(refusal) => return settings_refused(&refusal),
+    };
+    if !declarations.contains(&declared) || !settings.is_custom_origin(provider.id, &declared) {
+        return settings_refused(&SettingsRefusal::AuthorityUnsupported {
+            connector: provider.id.to_owned(),
+            setting: declared.binds(),
+        });
+    }
+    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(instance) => instance,
+        Err(response) => return response,
+    };
+    let action = if approve {
+        AuditAction::SettingAuthorityApproved
+    } else {
+        AuditAction::SettingAuthorityRevoked
+    };
+    let audit = match begin_audit(
+        &state,
+        &request_id,
+        &principal,
+        action,
+        AuditTarget::InstanceSetting {
+            connector: provider.id.to_owned(),
+            label: label.clone(),
+            service: declared.service.clone(),
+            field: declared.binds(),
+        },
+    ) {
+        Ok(audit) => audit,
+        Err(response) => return *response,
+    };
+    let result = if approve {
+        settings.approve_authority_for_instance(
+            principal.tenant(),
+            provider.id,
+            instance.as_ref(),
+            &declared,
+            revision,
+        )
+    } else {
+        settings.revoke_authority_for_instance(
+            principal.tenant(),
+            provider.id,
+            instance.as_ref(),
+            &declared,
+            revision,
+        )
+    };
+    let transition = match result {
+        Ok(status) => status,
+        Err(refusal) => {
+            let response = authority_refused(&refusal);
+            if let Err(audit_response) =
+                audit.finish(&state, &request_id, &principal, response.status())
+            {
+                return *audit_response;
+            }
+            return response;
+        }
+    };
+    // Persisted authority invalidates the runtime snapshot immediately. Audit finalization can
+    // refuse independently, but it must not leave a pre-revocation channel alive.
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
+    if let Err(response) = audit.finish(&state, &request_id, &principal, StatusCode::OK) {
+        return *response;
+    };
+    Json(AuthorityResponse {
+        version: VERSION,
+        connector: provider.id.to_owned(),
+        label,
+        service: declared.service.clone(),
+        field: declared.binds(),
+        authority: AuthorityTransition {
+            state: transition.state.into(),
+            revision: transition
+                .revision
+                .expect("transition has revision")
+                .to_string(),
+        },
+    })
+    .into_response()
+}
+
+fn canonical_revision(revision: &str) -> Option<u64> {
+    if revision.is_empty()
+        || revision.starts_with('0')
+        || !revision.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    revision.parse().ok().filter(|revision| *revision > 0)
+}
+
+impl From<AuthorityState> for AuthorityViewState {
+    fn from(state: AuthorityState) -> Self {
+        match state {
+            AuthorityState::Unset => Self::Unset,
+            AuthorityState::Proposed => Self::Proposed,
+            AuthorityState::Approved => Self::Approved,
+            AuthorityState::Revoked => Self::Revoked,
+        }
+    }
+}
+
+fn unsupported_version(requested: &str) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({
+            "code": "unsupported_connection_plan_version",
+            "requested": requested,
+            "supported": VERSION,
+        })),
+    )
+        .into_response()
+}
+
+fn authority_refused(refusal: &SettingsRefusal) -> Response {
+    match refusal {
+        SettingsRefusal::AuthorityUnset { .. } => refuse(
+            StatusCode::CONFLICT,
+            refusal.to_string(),
+            json!({ "code": "origin_not_proposed" }),
+        ),
+        SettingsRefusal::AuthorityRevisionConflict {
+            expected, current, ..
+        } => refuse(
+            StatusCode::CONFLICT,
+            refusal.to_string(),
+            json!({
+                "code": "stale_origin_revision",
+                "requested": expected.to_string(),
+                "current": current.to_string(),
+            }),
+        ),
+        other => settings_refused(other),
+    }
 }
 
 /// Add or replace one declared credential on an already-held labelled connection.
@@ -983,11 +1250,12 @@ async fn project(
     selection: Option<&str>,
 ) -> Result<Plan, Response> {
     let context = connection_context(state, principal, provider, selection).await?;
-    let described = describe(provider).map_err(|refusal| settings_refused(&refusal))?;
+    let settings = state.settings().ok_or_else(no_settings_store)?;
+    let described =
+        describe_for(provider, settings.as_ref()).map_err(|refusal| settings_refused(&refusal))?;
     // A shared target is one browser control. Refuse an internally ambiguous declaration on GET
     // as well as POST rather than publishing a plan the write side cannot honor.
     submission_targets(provider, &described).map_err(|response| *response)?;
-    let settings = state.settings().ok_or_else(no_settings_store)?;
     let credentials = state.credentials().ok_or_else(no_store)?;
     let declared = declared_credentials(provider);
     let declaration = declaration(provider, &declared);
@@ -1014,6 +1282,7 @@ async fn project(
         }),
         choices: None,
         reason: None,
+        authority: None,
     });
 
     for mut field in described {
@@ -1030,6 +1299,23 @@ async fn project(
                         Err(error) => return Err(store_failed(&error)),
                     }
                 }
+                Destination::Settings(declared) if field.custom_origin => {
+                    let status = settings
+                        .authority_status_for_instance(
+                            principal.tenant(),
+                            provider.id,
+                            context.selected_instance.as_ref(),
+                            &declared[0],
+                        )
+                        .map_err(|refusal| settings_refused(&refusal))?;
+                    field.view.authority = Some(authority_view(
+                        provider.id,
+                        selection.expect("selected above"),
+                        &declared[0],
+                        status,
+                    ));
+                    status.state == AuthorityState::Approved
+                }
                 Destination::Settings(declared) => declared.iter().all(|setting| {
                     settings.is_set_for_instance(
                         principal.tenant(),
@@ -1040,6 +1326,13 @@ async fn project(
                 }),
             },
         };
+        if field.custom_origin && selection.is_none() {
+            field.view.authority = Some(AuthorityView {
+                state: AuthorityViewState::Unset,
+                revision: None,
+                actions: None,
+            });
+        }
         fields.push(field.view);
     }
 
@@ -1114,12 +1407,35 @@ async fn connection_context(
     })
 }
 
+#[cfg(test)]
 fn describe(provider: &'static Provider) -> Result<Vec<DescribedField>, SettingsRefusal> {
+    describe_with_policy(provider, |_, _| false)
+}
+
+fn describe_for(
+    provider: &'static Provider,
+    settings: &dyn exchange_host::ConnectionSettings,
+) -> Result<Vec<DescribedField>, SettingsRefusal> {
+    describe_with_policy(provider, |connector, declared| {
+        settings.is_custom_origin(connector, declared)
+    })
+}
+
+fn describe_with_policy(
+    provider: &'static Provider,
+    custom_origin: impl Fn(&str, &DeclaredSetting) -> bool,
+) -> Result<Vec<DescribedField>, SettingsRefusal> {
     let declared_settings = declared_settings(provider)?;
     let mut described: Vec<DescribedField> = provider
         .config
         .iter()
-        .map(|field| describe_config(provider, field, &declared_settings))
+        .map(|field| {
+            let parsed = DeclaredSetting::parse(field.service, field.binds);
+            let custom = parsed
+                .as_ref()
+                .is_some_and(|declared| custom_origin(provider.id, declared));
+            describe_config(provider, field, &declared_settings, custom)
+        })
         .collect();
     let bound_credentials: BTreeSet<String> = described
         .iter()
@@ -1158,12 +1474,14 @@ fn describe(provider: &'static Provider) -> Result<Vec<DescribedField>, Settings
                 target: Some(TargetView { id: target.clone() }),
                 choices: None,
                 reason: None,
+                authority: None,
             },
             target: Some(TargetSpec {
                 id: target,
                 destination: Destination::Credential(credential.name.to_owned()),
                 choices: None,
             }),
+            custom_origin: false,
         });
     }
     Ok(described)
@@ -1173,6 +1491,7 @@ fn describe_config(
     provider: &'static Provider,
     field: &ConfigField,
     declared_settings: &[DeclaredSetting],
+    custom_origin: bool,
 ) -> DescribedField {
     let parsed = DeclaredSetting::parse(field.service, field.binds);
     let choices = choices_for(provider, field, parsed.as_ref());
@@ -1209,7 +1528,7 @@ fn describe_config(
         match parsed {
             Some(primary)
                 if declared_settings.contains(&primary)
-                    && host_pinning(provider, &primary).tenant_may_supply() =>
+                    && (host_pinning(provider, &primary).tenant_may_supply() || custom_origin) =>
             {
                 let id = format!("setting.{}.{}", field.service, field.binds);
                 (
@@ -1268,9 +1587,59 @@ fn describe_config(
             target: target_view,
             choices,
             reason,
+            authority: None,
         },
         target,
+        custom_origin,
     }
+}
+
+fn authority_view(
+    connector: &str,
+    label: &str,
+    declared: &DeclaredSetting,
+    status: AuthorityStatus,
+) -> AuthorityView {
+    let revision = status.revision.map(|revision| revision.to_string());
+    let actions = revision.as_ref().map(|_| {
+        let target = format!(
+            "/api/connections/{}/instances/{}/settings/{}/{}/authority",
+            encode_segment(connector),
+            encode_segment(label),
+            encode_segment(&declared.service),
+            encode_segment(&declared.binds()),
+        );
+        AuthorityActions {
+            approve: AuthorityAction {
+                method: "PUT",
+                target: target.clone(),
+            },
+            revoke: AuthorityAction {
+                method: "DELETE",
+                target,
+            },
+        }
+    });
+    AuthorityView {
+        state: status.state.into(),
+        revision,
+        actions,
+    }
+}
+
+fn encode_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0xf) as usize]));
+        }
+    }
+    encoded
 }
 
 fn choices_for(
@@ -1343,22 +1712,28 @@ mod tests {
     use std::fs::DirBuilder;
     use std::os::unix::fs::DirBuilderExt as _;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
     use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        async_trait, ConfigStore, ConnectionSettings, CredentialRef, CredentialScope,
-        CredentialStore, Field, MemoryConnectionRegistry, Secret, SecretBatch, SecretStore,
-        SettingsRefusal, SettingsStore, StoreError, Tenant,
+        async_trait, ChannelId, ChannelRecord, Channels, ConfigStore, ConnectionSettings,
+        CredentialRef, CredentialScope, CredentialStore, Field, MemoryChannels,
+        MemoryConnectionRegistry, Secret, SecretBatch, SecretStore, SettingsRefusal, SettingsStore,
+        StoreError, Tenant,
     };
     use serde_json::{json, Value};
+    use tokio_util::sync::CancellationToken;
     use tower::Service;
 
     use crate::audit::{Action, AuditJournal};
+    use crate::channel::{
+        ChannelDeclarations, ChannelEventSink, ChannelPlacement, ChannelPlacementResolver,
+        ChannelRunError, ChannelRunner, ChannelStatus, ChannelSupervisor,
+    };
     use crate::dev_identity::DevIdentity;
 
     const ROSTER: &str = "user:alice@acme,service_account:worker@acme";
@@ -1400,6 +1775,237 @@ mod tests {
     struct FailFirstCredentialBatch {
         inner: Arc<dyn SecretStore>,
         failed: AtomicBool,
+    }
+
+    #[derive(Clone)]
+    struct OriginCandidate {
+        provider: &'static Provider,
+        declared: DeclaredSetting,
+    }
+
+    fn origin_candidate() -> OriginCandidate {
+        connector_catalog::providers()
+            .iter()
+            .copied()
+            .find_map(|provider| {
+                (!provider.auth.is_empty()).then_some(())?;
+                declared_settings(provider)
+                    .ok()?
+                    .into_iter()
+                    .find_map(|declared| {
+                        matches!(
+                            host_pinning(provider, &declared),
+                            HostPinning::WholeAuthority(_)
+                        )
+                        .then_some(OriginCandidate { provider, declared })
+                    })
+            })
+            .expect("catalogue has an authenticated whole-authority declaration")
+    }
+
+    struct AuthoritySettings {
+        inner: SettingsStore,
+        candidate: OriginCandidate,
+        status: Mutex<AuthorityStatus>,
+        next_revision: AtomicU64,
+        break_audit_on_revoke: Option<Arc<AuditJournal>>,
+    }
+
+    impl AuthoritySettings {
+        fn new(path: &Path, candidate: OriginCandidate) -> Self {
+            Self {
+                inner: SettingsStore::bind(path).expect("settings store"),
+                candidate,
+                status: Mutex::new(AuthorityStatus {
+                    state: AuthorityState::Unset,
+                    revision: None,
+                }),
+                next_revision: AtomicU64::new(1),
+                break_audit_on_revoke: None,
+            }
+        }
+
+        fn matches(&self, connector: &str, declared: &DeclaredSetting) -> bool {
+            connector == self.candidate.provider.id && declared == &self.candidate.declared
+        }
+    }
+
+    impl ConfigStore for AuthoritySettings {
+        fn get(
+            &self,
+            tenant: &str,
+            provider: &str,
+            service: &str,
+            field: Field<'_>,
+        ) -> Option<String> {
+            self.inner.get(tenant, provider, service, field)
+        }
+    }
+
+    impl ConnectionSettings for AuthoritySettings {
+        fn set(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            declared: &DeclaredSetting,
+            value: &str,
+        ) -> Result<(), SettingsRefusal> {
+            self.set_for_instance(tenant, connector, None, declared, value)
+        }
+
+        fn set_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            value: &str,
+        ) -> Result<(), SettingsRefusal> {
+            if self.matches(connector, declared) {
+                let revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
+                *self.status.lock().expect("authority status") = AuthorityStatus {
+                    state: AuthorityState::Proposed,
+                    revision: Some(revision),
+                };
+                Ok(())
+            } else {
+                self.inner
+                    .set_for_instance(tenant, connector, instance, declared, value)
+            }
+        }
+
+        fn clear(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            declared: &DeclaredSetting,
+        ) -> Result<bool, SettingsRefusal> {
+            self.clear_for_instance(tenant, connector, None, declared)
+        }
+
+        fn clear_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+        ) -> Result<bool, SettingsRefusal> {
+            if self.matches(connector, declared) {
+                let mut status = self.status.lock().expect("authority status");
+                let existed = status.revision.is_some();
+                *status = AuthorityStatus {
+                    state: AuthorityState::Unset,
+                    revision: None,
+                };
+                Ok(existed)
+            } else {
+                self.inner
+                    .clear_for_instance(tenant, connector, instance, declared)
+            }
+        }
+
+        fn is_set(&self, tenant: &Tenant, connector: &str, declared: &DeclaredSetting) -> bool {
+            self.is_set_for_instance(tenant, connector, None, declared)
+        }
+
+        fn is_set_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+        ) -> bool {
+            if self.matches(connector, declared) {
+                self.status.lock().expect("authority status").state == AuthorityState::Approved
+            } else {
+                self.inner
+                    .is_set_for_instance(tenant, connector, instance, declared)
+            }
+        }
+
+        fn held_bytes(&self, tenant: &Tenant) -> usize {
+            self.inner.held_bytes(tenant)
+        }
+
+        fn is_custom_origin(&self, connector: &str, declared: &DeclaredSetting) -> bool {
+            self.matches(connector, declared)
+        }
+
+        fn authority_status_for_instance(
+            &self,
+            _tenant: &Tenant,
+            connector: &str,
+            _instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            if !self.matches(connector, declared) {
+                return Err(SettingsRefusal::AuthorityUnsupported {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                });
+            }
+            Ok(*self.status.lock().expect("authority status"))
+        }
+
+        fn approve_authority_for_instance(
+            &self,
+            _tenant: &Tenant,
+            connector: &str,
+            _instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            revision: u64,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            self.transition(connector, declared, revision, AuthorityState::Approved)
+        }
+
+        fn revoke_authority_for_instance(
+            &self,
+            _tenant: &Tenant,
+            connector: &str,
+            _instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            revision: u64,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            let status = self.transition(connector, declared, revision, AuthorityState::Revoked)?;
+            if let Some(audit) = &self.break_audit_on_revoke {
+                audit.refuse_writes_for_test();
+            }
+            Ok(status)
+        }
+    }
+
+    impl AuthoritySettings {
+        fn transition(
+            &self,
+            connector: &str,
+            declared: &DeclaredSetting,
+            revision: u64,
+            state: AuthorityState,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            if !self.matches(connector, declared) {
+                return Err(SettingsRefusal::AuthorityUnsupported {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                });
+            }
+            let mut status = self.status.lock().expect("authority status");
+            let Some(current) = status.revision else {
+                return Err(SettingsRefusal::AuthorityUnset {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                });
+            };
+            if current != revision {
+                return Err(SettingsRefusal::AuthorityRevisionConflict {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                    expected: revision,
+                    current,
+                });
+            }
+            status.state = state;
+            Ok(*status)
+        }
     }
 
     #[async_trait]
@@ -1545,6 +2151,118 @@ mod tests {
         }
     }
 
+    fn authority_harness(candidate: OriginCandidate) -> Harness {
+        let scratch = Scratch::new();
+        let credentials = CredentialStore::bind(scratch.join("credentials")).expect("credentials");
+        let settings: Arc<dyn ConnectionSettings> = Arc::new(AuthoritySettings::new(
+            &scratch.join("settings.json"),
+            candidate,
+        ));
+        let registry = Arc::new(MemoryConnectionRegistry::default());
+        let audit =
+            Arc::new(AuditJournal::bind(scratch.join("audit/events.sqlite")).expect("audit"));
+        let state = AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster(ROSTER).expect("roster"),
+        ))
+        .with_credentials(credentials.secrets())
+        .with_settings(settings)
+        .with_connection_registry(registry.clone())
+        .with_audit(audit.clone());
+        Harness {
+            app: super::super::super::app(state),
+            registry,
+            audit,
+            _scratch: scratch,
+        }
+    }
+
+    struct NoChannelDeclarations;
+    impl ChannelDeclarations for NoChannelDeclarations {
+        fn events(&self, _: &str, _: &str) -> Option<BTreeSet<String>> {
+            None
+        }
+    }
+
+    struct NoChannelPlacement;
+    impl ChannelPlacementResolver for NoChannelPlacement {
+        fn resolve(&self, _: &ChannelRecord) -> Result<ChannelPlacement, ChannelRunError> {
+            Err(ChannelRunError::NoPlacement)
+        }
+    }
+
+    struct NoChannelRunner;
+    #[async_trait]
+    impl ChannelRunner for NoChannelRunner {
+        async fn run(
+            &self,
+            _: ChannelRecord,
+            _: ChannelPlacement,
+            _: Arc<dyn ChannelEventSink>,
+            _: CancellationToken,
+        ) -> Result<(), ChannelRunError> {
+            unreachable!("placement refusal prevents the runner")
+        }
+    }
+
+    fn authority_harness_with_channel(
+        candidate: OriginCandidate,
+    ) -> (
+        Harness,
+        Arc<ChannelSupervisor>,
+        ChannelId,
+        Arc<AuthoritySettings>,
+    ) {
+        let scratch = Scratch::new();
+        let credentials = CredentialStore::bind(scratch.join("credentials")).expect("credentials");
+        let registry = Arc::new(MemoryConnectionRegistry::default());
+        let audit =
+            Arc::new(AuditJournal::bind(scratch.join("audit/events.sqlite")).expect("audit"));
+        let mut settings =
+            AuthoritySettings::new(&scratch.join("settings.json"), candidate.clone());
+        settings.break_audit_on_revoke = Some(audit.clone());
+        let settings = Arc::new(settings);
+        let records = Arc::new(MemoryChannels::default());
+        let channel_id = ChannelId::new("ch_origin").expect("channel id");
+        records
+            .set(
+                ChannelRecord::new(
+                    channel_id.clone(),
+                    Tenant::new("acme").expect("tenant"),
+                    candidate.provider.id,
+                    InstanceId::parse("11111111-1111-4111-8111-111111111111").expect("instance"),
+                    "events",
+                    ["changed".to_owned()].into_iter().collect(),
+                )
+                .expect("channel record"),
+            )
+            .expect("persist channel");
+        let supervisor = ChannelSupervisor::new(
+            records,
+            Arc::new(NoChannelDeclarations),
+            Arc::new(NoChannelPlacement),
+            Arc::new(NoChannelRunner),
+        );
+        let state = AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster(ROSTER).expect("roster"),
+        ))
+        .with_credentials(credentials.secrets())
+        .with_settings(settings.clone())
+        .with_connection_registry(registry.clone())
+        .with_audit(audit.clone())
+        .with_channels(supervisor.clone());
+        (
+            Harness {
+                app: super::super::super::app(state),
+                registry,
+                audit,
+                _scratch: scratch,
+            },
+            supervisor,
+            channel_id,
+            settings,
+        )
+    }
+
     async fn call(
         app: &Router,
         handle: &str,
@@ -1681,6 +2399,15 @@ mod tests {
     }
 
     #[test]
+    fn authority_revision_is_canonical_decimal_u64() {
+        assert_eq!(canonical_revision("1"), Some(1));
+        assert_eq!(canonical_revision(&u64::MAX.to_string()), Some(u64::MAX));
+        for refused in ["", "0", "01", "+1", "-1", "18446744073709551616"] {
+            assert_eq!(canonical_revision(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
     fn a_noncredential_secret_is_visible_but_never_routed_to_settings() {
         let provider = catalogued("jira").expect("jira");
         let field = ConfigField {
@@ -1698,7 +2425,7 @@ mod tests {
             also_binds: &[],
             declaration_json: "{}",
         };
-        let described = describe_config(provider, &field, &[]);
+        let described = describe_config(provider, &field, &[], false);
         assert!(described.view.secret);
         assert_eq!(described.view.input, "secret");
         assert!(!described.view.routable);
@@ -1882,6 +2609,47 @@ mod tests {
             live_plans.push(plan);
         }
 
+        // Released 0.18 policies remain dormant. Exercise the same projection with a generic
+        // typed policy so the shared fixture's authority member is checked rather than ignored.
+        let (authority_provider, authority_declared) = connector_catalog::providers()
+            .iter()
+            .find_map(|provider| {
+                declared_settings(provider)
+                    .ok()?
+                    .into_iter()
+                    .find_map(|declared| {
+                        matches!(
+                            host_pinning(provider, &declared),
+                            HostPinning::WholeAuthority(_)
+                        )
+                        .then_some((*provider, declared))
+                    })
+            })
+            .expect("catalogue has a whole-authority declaration");
+        assert!(describe(authority_provider)
+            .expect("production description")
+            .iter()
+            .all(|field| !field.custom_origin));
+        let mut authority_field =
+            describe_with_policy(authority_provider, |connector, declared| {
+                connector == authority_provider.id && declared == &authority_declared
+            })
+            .expect("typed-policy description")
+            .into_iter()
+            .find(|field| field.custom_origin)
+            .expect("active custom-origin row")
+            .view;
+        authority_field.authority = Some(authority_view(
+            authority_provider.id,
+            "production",
+            &authority_declared,
+            AuthorityStatus {
+                state: AuthorityState::Proposed,
+                revision: Some(42),
+            },
+        ));
+        live_fields.push(serde_json::to_value(authority_field).expect("authority wire row"));
+
         assert_eq!(keys(&fixture), keys(&live_plans[0]));
         assert_eq!(keys(&fixture["apply"]), keys(&live_plans[0]["apply"]));
         assert_eq!(key_union(&fixture_fields), key_union(&live_fields));
@@ -1954,6 +2722,267 @@ mod tests {
         assert!(live_plans
             .iter()
             .any(|plan| has_shared_target(plan["fields"].as_array().expect("served fields"))));
+    }
+
+    #[tokio::test]
+    async fn custom_origin_plan_requires_revisioned_operator_approval_and_revocation() {
+        let candidate = origin_candidate();
+        let provider = candidate.provider;
+        let declared = candidate.declared.clone();
+        let credential = provider.auth[0].name;
+        let harness = authority_harness(candidate);
+        let plan_path = format!("/api/connections/{}/plan", provider.id);
+
+        for (method, path, body) in [
+            (Method::GET, format!("{plan_path}?version=future"), None),
+            (
+                Method::POST,
+                "/api/connections/not-a-connector/plan".to_owned(),
+                Some(json!({"version":"future","name":"production","values":{}})),
+            ),
+            (
+                Method::PUT,
+                "/api/connections/not-a-connector/instances/production/settings/default/endpoint.custom_origin/authority".to_owned(),
+                Some(json!({"version":"future","revision":"1"})),
+            ),
+        ] {
+            let (status, response) = call(&harness.app, "alice", method, &path, body).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(response, json!({
+                "code":"unsupported_connection_plan_version",
+                "requested":"future",
+                "supported":VERSION,
+            }));
+        }
+
+        let setting_target = format!("setting.{}.{}", declared.service, declared.binds());
+        let credential_target = format!("credential.{credential}");
+        let (status, response) = call(
+            &harness.app,
+            "alice",
+            Method::POST,
+            &plan_path,
+            Some(json!({
+                "version": VERSION,
+                "name": "production",
+                "values": {
+                    credential_target: SENTINEL,
+                    setting_target.clone(): "custom.example.test"
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let step = response["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .find(|step| step["target"] == setting_target)
+            .expect("authority step");
+        assert_eq!(
+            step["reason"],
+            "proposal persisted; explicit authority approval is required before runtime use"
+        );
+
+        let (status, plan) = call(
+            &harness.app,
+            "alice",
+            Method::GET,
+            &format!("{plan_path}?name=production"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        let field = plan["fields"]
+            .as_array()
+            .expect("fields")
+            .iter()
+            .find(|field| field["target"]["id"] == setting_target)
+            .expect("authority field");
+        assert_eq!(field["set"], false);
+        assert_eq!(field["authority"]["state"], "proposed");
+        assert_eq!(field["authority"]["revision"], "1");
+        let target = format!(
+            "/api/connections/{}/instances/production/settings/{}/{}/authority",
+            provider.id,
+            declared.service,
+            declared.binds()
+        );
+        assert_eq!(
+            field["authority"]["actions"]["approve"],
+            json!({"method":"PUT","target":target})
+        );
+
+        let transition = json!({"version":VERSION,"revision":"1"});
+        let (status, _) = call(
+            &harness.app,
+            "worker",
+            Method::PUT,
+            &target,
+            Some(transition.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, approved) = call(
+            &harness.app,
+            "alice",
+            Method::PUT,
+            &target,
+            Some(transition.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{approved}");
+        assert_eq!(
+            approved,
+            json!({
+                "version":VERSION,
+                "connector":provider.id,
+                "label":"production",
+                "service":declared.service,
+                "field":declared.binds(),
+                "authority":{"state":"approved","revision":"1"}
+            })
+        );
+        let (_, approved_plan) = call(
+            &harness.app,
+            "alice",
+            Method::GET,
+            &format!("{plan_path}?name=production"),
+            None,
+        )
+        .await;
+        let approved_field = approved_plan["fields"]
+            .as_array()
+            .expect("fields")
+            .iter()
+            .find(|field| field["target"]["id"] == setting_target)
+            .expect("authority field");
+        assert_eq!(approved_field["set"], true);
+        assert_eq!(approved_field["authority"]["state"], "approved");
+        let (status, stale) = call(
+            &harness.app,
+            "alice",
+            Method::DELETE,
+            &target,
+            Some(json!({"version":VERSION,"revision":"2"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(stale["code"], "stale_origin_revision");
+        let (status, revoked) = call(
+            &harness.app,
+            "alice",
+            Method::DELETE,
+            &target,
+            Some(transition),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{revoked}");
+        assert_eq!(
+            revoked["authority"],
+            json!({"state":"revoked","revision":"1"})
+        );
+        let (_, revoked_plan) = call(
+            &harness.app,
+            "alice",
+            Method::GET,
+            &format!("{plan_path}?name=production"),
+            None,
+        )
+        .await;
+        let revoked_field = revoked_plan["fields"]
+            .as_array()
+            .expect("fields")
+            .iter()
+            .find(|field| field["target"]["id"] == setting_target)
+            .expect("authority field");
+        assert_eq!(revoked_field["set"], false);
+        assert_eq!(revoked_field["authority"]["state"], "revoked");
+        let setting_path = target.strip_suffix("/authority").expect("setting route");
+        let (status, _) = call(&harness.app, "alice", Method::DELETE, setting_path, None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, unset) = call(
+            &harness.app,
+            "alice",
+            Method::PUT,
+            &target,
+            Some(json!({"version":VERSION,"revision":"1"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(unset["code"], "origin_not_proposed");
+
+        let records = harness
+            .audit
+            .by_actor("acme", "user", "alice", 100)
+            .expect("audit records");
+        assert!(records
+            .iter()
+            .any(|record| record.action == Action::SettingAuthorityApproved));
+        assert!(records
+            .iter()
+            .any(|record| record.action == Action::SettingAuthorityRevoked));
+    }
+
+    #[tokio::test]
+    async fn persisted_revocation_restarts_channels_before_audit_finalization_can_refuse() {
+        let candidate = origin_candidate();
+        let provider = candidate.provider;
+        let declared = candidate.declared.clone();
+        let credential = provider.auth[0].name;
+        let (harness, supervisor, channel_id, settings) = authority_harness_with_channel(candidate);
+        let target = format!(
+            "/api/connections/{}/instances/production/settings/{}/{}/authority",
+            provider.id,
+            declared.service,
+            declared.binds()
+        );
+        let (status, response) = call(
+            &harness.app,
+            "alice",
+            Method::POST,
+            &format!("/api/connections/{}/plan", provider.id),
+            Some(json!({
+                "version":VERSION,
+                "name":"production",
+                "values":{
+                    (format!("credential.{credential}")):SENTINEL,
+                    (format!("setting.{}.{}", declared.service, declared.binds())):"custom.example.test"
+                }
+            })),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let transition = json!({"version":VERSION,"revision":"1"});
+        let (status, response) = call(
+            &harness.app,
+            "alice",
+            Method::PUT,
+            &target,
+            Some(transition.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+
+        supervisor.stop(&channel_id);
+        assert_eq!(supervisor.status(&channel_id), ChannelStatus::Stopped);
+        let (status, _) = call(
+            &harness.app,
+            "alice",
+            Method::DELETE,
+            &target,
+            Some(transition),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_ne!(
+            supervisor.status(&channel_id),
+            ChannelStatus::Stopped,
+            "persisted revocation must synchronously restart the stored channel before audit completion"
+        );
+        assert_eq!(
+            settings.status.lock().expect("authority status").state,
+            AuthorityState::Revoked,
+        );
     }
 
     #[tokio::test]

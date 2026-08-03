@@ -1710,6 +1710,10 @@ mod tests {
             ),
             (
                 "connections",
+                "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
+            ),
+            (
+                "connections",
                 "/api/connections/{connector}/instances/{label}/credentials/{credential}",
             ),
             // Managing Service Accounts. Only a signed-in human, because a principal that can
