@@ -67,7 +67,7 @@ self_test() {
     fail 'self-test accepted a stale snapshot'
   fi
 
-  if (verify "$fixture_dir/volumes.json" "$fixture_dir/snapshots.json" "$now") | rg -q 'credential-shaped'; then
+  if (verify "$fixture_dir/volumes.json" "$fixture_dir/snapshots.json" "$now") | grep -Eq 'credential-shaped'; then
     fail 'self-test found an identifier in public evidence'
   fi
   printf 'snapshot verifier self-test passed\n'

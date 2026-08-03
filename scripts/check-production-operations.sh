@@ -12,9 +12,12 @@ check_root() {
   local fly_config="$root/fly.toml"
   local deploy_workflow="$root/.github/workflows/production.yml"
   local snapshot_workflow="$root/.github/workflows/snapshot-watch.yml"
+  local release_verifier="$root/scripts/verify-production-release.sh"
+  local snapshot_verifier="$root/scripts/verify-fly-snapshot.sh"
   local base_count immutable_count build_count locked_count
 
-  for required in "$dockerfile" "$fly_config" "$deploy_workflow" "$snapshot_workflow"; do
+  for required in "$dockerfile" "$fly_config" "$deploy_workflow" "$snapshot_workflow" \
+    "$release_verifier" "$snapshot_verifier"; do
     [ -f "$required" ] || { fail "missing ${required#"$root"/}"; return 1; }
   done
 
@@ -53,13 +56,17 @@ check_root() {
   grep -Eq 'scripts/verify-fly-snapshot\.sh' "$snapshot_workflow" || {
     fail 'snapshot workflow must run the bounded snapshot verifier'; return 1;
   }
+
+  if grep -Eq '(^|[[:space:]])rg[[:space:]]' "$release_verifier" "$snapshot_verifier"; then
+    fail 'workflow verifiers must not depend on ripgrep being preinstalled'; return 1
+  fi
 }
 
 self_test() {
   local fixture_dir
   fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/flux-exchange-production.XXXXXX")"
   trap 'rm -rf "$fixture_dir"' RETURN
-  mkdir -p "$fixture_dir/.github/workflows"
+  mkdir -p "$fixture_dir/.github/workflows" "$fixture_dir/scripts"
   printf '%s\n' 'FROM base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa AS build' \
     'RUN cargo build --locked' 'FROM scratch AS runtime' >"$fixture_dir/Dockerfile"
   printf '%s\n' '[mounts]' 'snapshot_retention = 14' 'scheduled_snapshots = true' >"$fixture_dir/fly.toml"
@@ -68,7 +75,16 @@ self_test() {
     'uses: anchore/sbom-action@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
     'run: scripts/verify-production-release.sh' >"$fixture_dir/.github/workflows/production.yml"
   printf '%s\n' 'on:' '  schedule:' 'run: scripts/verify-fly-snapshot.sh' >"$fixture_dir/.github/workflows/snapshot-watch.yml"
+  printf '%s\n' ':' >"$fixture_dir/scripts/verify-production-release.sh"
+  printf '%s\n' ':' >"$fixture_dir/scripts/verify-fly-snapshot.sh"
   check_root "$fixture_dir"
+
+  printf '%s\n' 'rg -q expected file' >"$fixture_dir/scripts/verify-production-release.sh"
+  if check_root "$fixture_dir" >/dev/null 2>&1; then
+    fail 'self-test accepted an undeclared workflow-runner dependency'
+    return 1
+  fi
+  printf '%s\n' ':' >"$fixture_dir/scripts/verify-production-release.sh"
 
   sed -i 's/@sha256:[a-f0-9]*/:latest/' "$fixture_dir/Dockerfile"
   if check_root "$fixture_dir" >/dev/null 2>&1; then
