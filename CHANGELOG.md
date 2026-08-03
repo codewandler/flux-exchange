@@ -8,6 +8,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Connection setting reads publish catalogue-declared closed choices** (X-80). A client can build
+  Intercom's region picker from one successful `GET` instead of provoking a refused write; fields
+  without a closed set omit `choices`, and stored tenant values remain unreadable. The same response
+  contract covers sole and labelled connection instances.
+
 - **Service Accounts can now discover their exact remote connector surface** (X-113).
   Authenticated `GET /api/catalogue/effective` intersects the invoker's credential and non-secret
   settings ports with the resolved principal's tenant grants, returns only usable

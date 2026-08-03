@@ -48,10 +48,12 @@
 //! `default`, because `contentful` declares `endpoint.space_id` under two services and a value
 //! silently filed under the wrong one is a management write into a space nobody named.
 //!
-//! **Values go in and do not come back out**, as everywhere else on this surface: `GET` answers with
-//! `binds` targets and a `set` boolean. That is stricter than the "not a secret" argument requires,
-//! and it is the direction that cannot be wrong — a `username` field holds an account name or an
-//! email address, which is a customer's personal data whatever the field is called.
+//! **Tenant values go in and do not come back out**, as everywhere else on this surface: `GET`
+//! answers with `binds` targets, a `set` boolean, and any closed choices the catalogue declares.
+//! Those choices are connector metadata, never the tenant's stored value. Withholding the stored
+//! value is stricter than the "not a secret" argument requires, and it is the direction that cannot
+//! be wrong — a `username` field holds an account name or an email address, which is a customer's
+//! personal data whatever the field is called.
 //!
 //! # Where the tenant comes from, and what a caller may say
 //!
@@ -3146,8 +3148,10 @@ struct SuppliedSetting {
 /// `endpoint.subdomain` because its operations' Flux says so. See
 /// `exchange_host::declared_settings` for why a `base_url` scan is not the same answer.
 ///
-/// **No values.** A `set` boolean per field, so an operator can see what is left to supply without
-/// this host handing back a customer's account identifiers.
+/// **No tenant values.** A `set` boolean per field, so an operator can see what is left to supply
+/// without this host handing back a customer's account identifiers. A [`HostPinning::ChosenFrom`]
+/// field also publishes its catalogue-declared choices: they are the permitted input vocabulary,
+/// not anything read from this tenant's store.
 async fn list_settings(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -3180,6 +3184,10 @@ async fn list_settings(
                 "set": store.is_set(principal.tenant(), provider.id, setting),
                 "suppliable": pinning.tenant_may_supply(),
             });
+
+            if let HostPinning::ChosenFrom(choices) = &pinning {
+                view["choices"] = json!(choices);
+            }
 
             if let HostPinning::WholeAuthority(template) = &pinning {
                 view["reason"] = json!(format!(
@@ -3324,7 +3332,7 @@ async fn list_instance_settings(
         .iter()
         .map(|setting| {
             let pinning = host_pinning(provider, setting);
-            json!({
+            let mut view = json!({
                 "service": setting.service,
                 "field": setting.binds(),
                 "set": store.is_set_for_instance(
@@ -3334,7 +3342,11 @@ async fn list_instance_settings(
                     setting,
                 ),
                 "suppliable": pinning.tenant_may_supply(),
-            })
+            });
+            if let HostPinning::ChosenFrom(choices) = &pinning {
+                view["choices"] = json!(choices);
+            }
+            view
         })
         .collect();
     Json(json!({
@@ -7952,6 +7964,71 @@ mod tests {
         )
         .await;
         assert_eq!(listed["configurable"], true, "{listed}");
+    }
+
+    /// **X-80's failing-first test.** A client learns a closed setting's choices from one successful
+    /// read, without deliberately offering a bad value to make the write route quote them back.
+    ///
+    /// This asserts the served response rather than consulting `connector_catalog` itself: the
+    /// regression was never that the catalogue lacked the choices, but that this surface threw
+    /// them away after [`host_pinning`] had already recovered them.
+    #[tokio::test]
+    async fn one_settings_get_publishes_the_permitted_value_list() {
+        let (app, _store, _settings, _scratch) = configurable_app();
+
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/intercom/settings",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body["settings"]
+            .as_array()
+            .expect("the response carries settings")
+            .iter()
+            .find(|row| row["service"] == "default" && row["field"] == "endpoint.host")
+            .expect("intercom's declared region setting is present");
+        assert_eq!(
+            row["choices"],
+            json!([
+                "api.intercom.io",
+                "api.eu.intercom.io",
+                "api.au.intercom.io"
+            ]),
+            "a client must be able to build the permitted-value control from this one GET: {body}",
+        );
+    }
+
+    /// The absence half of X-80's response contract: an unrestricted field has no `choices` key.
+    /// An empty array would be ambiguous with a declared empty set and could make a client render a
+    /// control in which nothing can be selected; omission means the ordinary field rules apply.
+    #[tokio::test]
+    async fn a_setting_without_a_closed_set_publishes_no_choices() {
+        let (app, _store, _settings, _scratch) = configurable_app();
+
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/zendesk/settings",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for row in body["settings"]
+            .as_array()
+            .expect("the response carries settings")
+        {
+            assert!(
+                row.get("choices").is_none(),
+                "a non-closed field must omit `choices` rather than publish an empty list: {row}",
+            );
+        }
     }
 
     /// A tenant sitting on its settings allowance can still replace a value with one the same size.

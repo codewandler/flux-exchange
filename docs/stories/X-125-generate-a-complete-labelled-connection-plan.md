@@ -85,6 +85,11 @@ label from X-14, not a host, authority, credential address, instance UUID or run
 - 2026-08-03: Filed from cross-repository Decision 0002 after the first-run tutorial exposed that a
   runtime-ready GitLab/Jira path still cannot be established from either client. X-80 was promoted to
   priority-zero ready work as this story's explicit response-contract prerequisite.
+- 2026-08-03: X-80 publishes closed choices on the existing settings reads. The console deliberately
+  gains no isolated setting picker there because it has no settings form to put one in: this story
+  owns the complete labelled plan, the submission target for every setting, and the browser choice
+  control together. Rendering only Intercom's dropdown before that plan could select and route a
+  labelled connection would still leave Jira and Zendesk silently incomplete.
 
 ## Notes
 
