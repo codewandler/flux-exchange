@@ -42,6 +42,10 @@ lockfile and compile-time tests.
 ### Apps
 - [X-108 — Host installed Flux Apps and Managed Agents](X-108-host-installed-flux-apps.md) · Flux App/channel contracts are published on the connector-compatible line; design Exchange-owned package installation and tenant bindings before implementation
 
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-80 — A client learns a connector's permitted values only by being refused](X-80-a-client-cannot-see-the-choices-it-must-pick-from.md) · Decision 0002 prerequisite to X-125: publish closed choices before one generated browser/CLI connection form can render them
+- [X-125 — Generate one complete labelled connection plan for browser and CLI](X-125-generate-a-complete-labelled-connection-plan.md) · Milestone 1 — one declaration-driven contract asks for the label, every secret and setting, and exposes incomplete or partial state honestly to browser and Flux CLI
+
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
@@ -53,7 +57,6 @@ lockfile and compile-time tests.
 - [X-21 — A half connection is distinguishable from a deliberately partial one](X-21-half-connection-visibility.md) · raised by X-18's implementor, 2026-08-01: GET answers 200 for a connection whose delete failed half way, which reads as 'connected' — but a connector may legitimately hold a subset of what it declares, so the two render identically and telling them apart needs a record this module deliberately does not keep
 - [X-50 — A connector that needs no credential can actually be connected](X-50-a-connector-that-needs-nothing-can-be-connected.md) · found adjacent to X-49, 2026-08-01: the console disables Connect for a connector that declares no credentials — a state X-46 made reachable and X-49 pinned the *render* of, but nobody can act on it
 - [X-79 — A catalogue-declared closed set is only honoured on an endpoint field](X-79-a-closed-set-on-a-non-endpoint-field-is-ignored.md) · found by X-70's independent review, 2026-08-02: the SettingKind::Username short-circuit at settings.rs:507 returns before the choices_for lookup ten lines later, so a closed set declared on a non-endpoint field is silently ignored. Nothing shipped is affected and the census test would fire — but the rule reads as general and is not
-- [X-80 — A client learns a connector's permitted values only by being refused](X-80-a-client-cannot-see-the-choices-it-must-pick-from.md) · found by X-70 and confirmed by its review, 2026-08-02: GET .../settings reports suppliable: true for a ChosenFrom field without publishing the choices, so the console cannot render a region dropdown without provoking a 422 first — the same shape as X-46, where the console read a connector's declarations out of a deliberate refusal
 
 ### a public documentation site
 _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
