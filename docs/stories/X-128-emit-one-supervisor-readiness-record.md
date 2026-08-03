@@ -4,7 +4,7 @@ title: "Emit one trusted readiness record for a supervised Exchange"
 status: ready
 priority: 0
 epic: remote-deployment
-areas: [exchange-server, lifecycle, protocol, windows]
+areas: [exchange-server, lifecycle, linux, macos, protocol, windows]
 design: docs/designs/local-release-v1.md
 note: "Milestone 1 — Flux owns a child only after that exact process reports its bound address and compiled identity over a dedicated one-shot channel"
 ---
@@ -34,10 +34,17 @@ supervisor, authenticated control channel and later start/status/stop behavior.
       deployment startup. It requires a loopback bind with port `0`, lets the operating system
       choose the port, and refuses a non-loopback or preselected nonzero port before listening. The
       published address is read from the bound socket; there is no reserve-then-rebind port race.
-- [ ] Supervised mode requires one dedicated inherited one-shot channel supplied by the parent: a
-      pipe file descriptor on Unix and an inheritable pipe handle on Windows. It refuses an absent,
-      malformed, non-inherited or wrong-kind channel. It never opens a caller-named filesystem path
-      or a shared named pipe as a readiness fallback.
+- [ ] The inherited-handle discovery ABI is exact. Unix runs only `--supervised`: readiness is the
+      write-only pipe at FD 3, liveness is the read-only pipe at FD 4, and every other nonstandard FD
+      is closed. Windows runs `--supervised` with exactly
+      `--supervisor-readiness-handle <H>` and `--supervisor-liveness-handle <H>`, where the two
+      distinct nonzero HANDLE values are canonical decimal `usize` strings and the parent supplies
+      exactly them through
+      `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. Exchange validates the pipe kind/usable direction and
+      refuses absent, duplicate, malformed, non-inherited or wrong-kind capabilities. No reserved
+      `STARTUPINFO` field, caller path/shared named pipe, env/stdin/stdout discovery or generic
+      arbitrary handle/FD option exists. The numeric Windows handles are the sole non-secret argv
+      exception; no control/vendor/Service Account value is one.
 - [ ] After every required store and safety check succeeds and the socket has bound, Exchange writes
       exactly one UTF-8 JSON record of at most 16 KiB and closes the channel. The record has schema
       identity `exchange.supervisor-ready.v1` and the exact provider-owned shape in
@@ -47,8 +54,13 @@ supervisor, authenticated control channel and later start/status/stop behavior.
       bytes, an unknown field or a record over the bound is a refusal for the supervisor.
 - [ ] The process identity contains both the PID as a diagnostic and an OS-derived start identity
       that distinguishes PID reuse. The readiness contract never claims a PID alone proves
-      ownership, and Exchange emits no PID file for Flux to trust. Native Unix and Windows tests
-      compare the reported start identity with the handle/process the parent actually spawned.
+      ownership, and Exchange emits no PID file for Flux to trust. `pid` is `1..=u32::MAX`; bind host
+      is the literal `127.0.0.1` or `::1` and port is `1..=65535`. The closed tagged identities are
+      exactly Linux `{kind:"linux-proc-start",boot_id,ticks}`, macOS
+      `{kind:"macos-proc-start",seconds,microseconds}` and Windows
+      `{kind:"windows-process-creation",filetime}`, with native sources, decimal encodings and bounds
+      from the design. Native Linux, macOS and Windows tests compare the record with the already-open
+      child handle using the same source.
 - [ ] The release/build and protocol portion is produced from the same typed source as
       `flux-exchange compatibility --json` and agrees exactly for Exchange API, effective-catalogue,
       invoke request, invoke response, connection plan and supervisor versions. Their serialized keys
@@ -60,6 +72,13 @@ supervisor, authenticated control channel and later start/status/stop behavior.
       Application stdout/stderr remain ordinary log streams, the bound socket carries application
       traffic, and Flux C-510's owner-only control channel is separate. Closing or losing the
       readiness reader cannot redirect the record to either stream.
+- [ ] A separate inherited liveness pipe makes Exchange cooperate with owner death on every target.
+      The supervisor retains the write end and writes nothing; before any store/listener work,
+      Exchange starts a native thread blocking on the read end. EOF, any byte or read error invokes
+      immediate non-unwinding process exit. Supervisor normal exit or `SIGKILL` on Linux/macOS, and
+      supervisor normal exit or `TerminateProcess` on Windows, therefore cannot leave Exchange
+      running even when Tokio is wedged. Liveness descriptors never reach connector children and
+      carry no readiness/control payload.
 - [ ] No credential, setting, grant body, Service Account token/verifier, session value or control
       credential is serializable in the readiness type. A sentinel test drives success and every
       startup refusal and proves the readiness bytes and captured stdout/stderr contain none of
@@ -68,11 +87,15 @@ supervisor, authenticated control channel and later start/status/stop behavior.
       refusal or bind failure emits none; a foreign process answering `/health`, a planted PID file
       and a reused PID cannot satisfy the parent-side fixture; corrupt schema, address,
       process-start, release or protocol identity is rejected before lifecycle ownership is
-      committed.
-- [ ] Native Windows and Unix tests spawn the real server through the inherited handle/descriptor,
+      committed. Wrong/aliased Unix FDs, each malformed Windows handle flag, handles outside the
+      explicit list, stdout readiness and every start-identity tag/encoding/domain mutation fail.
+- [ ] Native Linux, macOS and Windows tests spawn the real server through the exact inherited ABI,
       validate the one-shot record against `compatibility --json`, connect to its reported address,
-      then terminate it through the owned process handle. No test treats `/health` as readiness,
-      though health may remain an independent application liveness endpoint after ownership exists.
+      then use `SIGKILL` for the Unix supervisor or `TerminateProcess` for the Windows supervisor and
+      prove the Exchange process/port disappear within a bounded deadline. A fixture wedges the
+      async runtime while the native liveness thread still exits.
+      No test treats `/health` as readiness, though health remains independent liveness after
+      ownership exists.
 
 ## Progress
 
@@ -82,6 +105,10 @@ supervisor, authenticated control channel and later start/status/stop behavior.
 - 2026-08-04: Reconciled the exact readiness record with X-126's provider-owned local-release v1
   contract after Flux C-510's independently written shape diverged. Exchange owns the fixture;
   channel, manifest, compatibility and readiness now use the same six protocol keys.
+- 2026-08-04: The implementation audit replaced generic "pipe or handle" prose with fixed Unix FDs,
+  an explicit Windows inherited HANDLE-list ABI, three closed native process-start identities and a
+  provider-owned liveness pipe/thread so supervisor death cannot orphan Exchange on macOS or any
+  other supported platform.
 
 ## Notes
 

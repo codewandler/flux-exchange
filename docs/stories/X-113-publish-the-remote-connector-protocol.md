@@ -49,5 +49,7 @@ one-shot invoke route.
 ## Notes
 
 - Depends on X-124. Flux C-503 consumes this contract through its embedded native Exchange binding.
+- X-129 binds stable local-release protocol identities to these delivered routes and production wire
+  types. That follow-up versions the contract; it does not reopen or replace X-113's behavior.
 - X-101…X-105's `/api/subscribe` framing remains the delivered starting point for X-117, not part of
   this story's acceptance.

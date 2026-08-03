@@ -84,11 +84,13 @@ label from X-14, not a host, authority, credential address, instance UUID or run
       retry/compensation semantics and an overall incomplete/partial state until every required step
       succeeds. A failing-first persistence test drives a refusal in the middle and proves the
       reported state matches what survived.
-- [ ] The response and submission name one exact connection-plan schema identity and version. An
-      unsupported or missing version is refused before accepting any value, with no best-effort
-      downgrade. The server projection and Exchange console exercise one committed, vendor-neutral
-      contract fixture and neither maintains vendor-specific required-field, alias, routing or
-      completion logic.
+- [ ] The response and submission identity is exactly `exchange.connection-plan.v1`, matching the
+      `connection_plan` value in X-126's provider contract. An unsupported or missing identity is
+      refused before accepting any value, with no best-effort downgrade. The server projection and
+      Exchange console exercise one committed, vendor-neutral positive/adversarial fixture under
+      `tests/fixtures/exchange-connection-plan-v1/`; its exact wire type/test is the prerequisite that
+      permits X-126 to advertise this id. Neither client maintains vendor-specific required-field,
+      alias, routing or completion logic.
 - [ ] Flux C-509 owns the actual CLI consumer proof against that same committed fixture and
       submission semantics. X-125 publishes the fixture for that downstream proof but does not wait
       for Flux to complete before its Exchange API and console can be delivered. Interactive flags
@@ -112,6 +114,9 @@ label from X-14, not a host, authority, credential address, instance UUID or run
   versioned Exchange API, console and shared fixture; Flux C-509 owns proof that the real CLI
   consumes it. The release-seam audit also made custom-origin authority an explicit persisted
   proposal/approval/revocation lifecycle rather than something inferred from a settings write.
+- 2026-08-04: X-126's implementation audit fixed the provider identity to
+  `exchange.connection-plan.v1`. X-125 must materialize that exact fixture/type before the local
+  release manifest may advertise it; a package version or placeholder is not a protocol id.
 
 ## Notes
 

@@ -5,7 +5,7 @@ status: ready
 priority: 0
 epic: remote-deployment
 areas: [ci, release, supply-chain, exchange-server]
-depends_on: [X-127, X-128]
+depends_on: [X-125, X-127, X-128, X-129]
 design: docs/designs/local-release-v1.md
 note: "Milestone 1 — Flux can manage a separately released, attested Exchange executable on a clean machine without bundling plugins or trusting PATH"
 ---
@@ -36,8 +36,8 @@ implements its manager in C-510.
 
 ## Acceptance
 
-- [ ] After X-127 and X-128 are complete, a tag release builds one Exchange server archive for each
-      platform Flux supports:
+- [ ] After X-125, X-127, X-128 and X-129 are complete, a tag release builds one Exchange server
+      archive for each platform Flux supports:
       `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`,
       `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. The target list is a checked closed
       set matching Flux's `dist-workspace.toml`; changing either list requires one coordinated
@@ -67,18 +67,30 @@ implements its manager in C-510.
       future. Every other field, order, type and bound comes from the one provider contract, not a
       second Flux-owned v1.
 - [ ] Channel selection is deterministic and compatibility-led. From a valid unexpired index, the
-      verifier chooses the highest stable semantic version whose signed manifest declares every
+      verifier chooses the highest stable semantic version whose signed channel entry declares every
       `exchange_api`, `effective_catalogue_response`, `invoke_request`, `invoke_response`,
       `connection_plan` and `supervisor` version Flux requires. Package version never substitutes
-      for protocol compatibility; a newer incompatible release is skipped, while no compatible
-      entry is a named refusal rather than permission to use `latest`, `PATH` or a sibling checkout.
-- [ ] Channel rollback is fail-closed. Flux persists the highest accepted generation for this
-      channel and refuses an older generation, a changed payload at the same generation, an
-      issued-at value unreasonably in the future, an expired index and a selected manifest whose
-      digest or identity differs from the signed index. The exact installed Exchange version,
-      source SHA, trust-metadata version, manifest digest, executable digest and channel generation
-      are retained as lifecycle/audit state; none becomes a compatibility pin that blocks a later
-      valid update.
+      for protocol compatibility; the fetched manifest must then agree exactly. A newer incompatible
+      release is skipped, while no compatible entry is a named refusal rather than permission to use
+      `latest`, `PATH` or a sibling checkout.
+- [ ] Channel rollback is fail-closed and global across trust/signer rotation. The one stable floor
+      never resets per trust version. A root-valid higher trust version is persisted immediately
+      after trust validation; a delegated-valid higher channel generation is persisted before
+      compatibility selection or target fetch. No compatible release, or a later manifest,
+      signature, download, archive or executable failure, retains the prior verified install but
+      never lowers either floor or launches/falls back to an older channel generation or entry.
+      Every state step is an owner-only fsync + atomic replacement with the exact crash outcomes in
+      the design.
+- [ ] Time validity is half-open: equality with `expires_at` or delegated `not_after` is expired.
+      A stopped/new start, import, reinstall and launch after download require current trust/channel
+      metadata. A verified already-healthy child remains healthy after metadata expiry; local status
+      reports the update-metadata expiry, repeated start returns that same child, and stop still
+      works. Once stopped it cannot restart from expired metadata. Tests inject the boundary clock
+      and cover expiry during target download without lowering floors or exposing staging.
+- [ ] Lifecycle/audit state retains the accepted trust version/hash, global channel generation/hash,
+      exact Exchange version/source SHA/manifest digest and installed executable digest. Those values
+      prove cache/process ownership and failure transactions; none becomes a compiled compatibility
+      pin that prevents a later valid compatible update.
 - [ ] Every asset entry names one target, exact archive filename, archive byte size and SHA-256,
       exact executable member path, executable byte size and independent SHA-256, archive format and
       permitted documentation/licence members. The executable digest is over the extracted bytes,
@@ -91,6 +103,12 @@ implements its manager in C-510.
       240 UTF-8 bytes. Staged and live verification apply the bounds before allocation/extraction and
       refuse integer overflow, size disagreement, trailing data or decompression past a declared
       bound.
+- [ ] Every JSON integer is within `0..=9007199254740991` as the RFC 8785 interoperable ceiling or
+      uses the design's canonical bounded decimal-string encoding. Key ids, protocol ids, stable
+      SemVer/tag and every derived basename satisfy the exact ASCII grammars/bounds in the design.
+      Minisign keys are canonical 56-character base64 42-byte `Ed` packets; malformed/noncanonical
+      packets, embedded key-id disagreement, or reused Ed25519 material within/across roles or the
+      offline-root policy refuses.
 - [ ] Minisign authentication has a dedicated Exchange-release trust domain with a long-lived
       offline root. Flux pins that independently reviewed root public key and a closed trust policy,
       never an online CI key. Canonical root-signed `exchange.release-trust.v1` metadata delegates
@@ -114,8 +132,9 @@ implements its manager in C-510.
       exceptional: a Flux release trusts the successor root before it is required, transition trust
       metadata satisfies both root policies, and only a later Flux release may remove the retired
       root. An unannounced key id, role confusion, substituted signature or key-id/signature
-      disagreement refuses. Repository/workflow provenance remains bound to the immutable tag and
-      source SHA; it complements and never replaces minisign.
+      disagreement refuses. Repository/workflow provenance remains CI/post-publication evidence
+      bound to the immutable tag/source SHA; it is not a manifest field, client trust mechanism,
+      Flux download or offline-import input.
 - [ ] Neither manifest nor channel entry contains an arbitrary download URL. Verifiers construct
       only the three exact `github.com/codewandler/flux-exchange/releases/download/...` request
       shapes in the provider contract. GitHub's real asset transport may return exactly one HTTP 302
@@ -126,17 +145,22 @@ implements its manager in C-510.
       and bounds still decide acceptance. A different repository/host, mutable latest/API endpoint,
       unvalidated redirect or proxy-selected replacement refuses.
 - [ ] Offline import supplies current root-signed trust metadata, a signed channel snapshot and the
-      same selected signed manifest, one-platform archive and provenance to the identical bounded
+      same selected signed manifest and one-platform archive to the identical bounded
       trust, channel-selection and release verifier. Being offline bypasses only the closed GitHub
       transport, not freshness, rollback, thresholds, authenticity, newest-compatible selection or
-      compatibility.
+      compatibility. It contains no provenance input.
 - [ ] The released executable answers a side-effect-free compatibility command with JSON only (for
       example `flux-exchange compatibility --json`) without binding a listener, opening a store or
       requiring identity configuration. It reports the exact binary/release identity and supported
-      versions under exactly six protocol keys: `exchange_api`, `effective_catalogue_response`,
-      `invoke_request`, `invoke_response`, `connection_plan` and `supervisor`; the exact
-      `exchange.compatibility.v1` shape comes from the provider design. The same values and field
-      names occur in the channel, signed manifest and X-128 readiness record.
+      versions under exactly six protocol keys and values:
+      `exchange_api=exchange.api.v1`,
+      `effective_catalogue_response=exchange.effective-catalogue-response.v1`,
+      `invoke_request=exchange.invoke-request.v1`,
+      `invoke_response=exchange.invoke-response.v1`,
+      `connection_plan=exchange.connection-plan.v1` and
+      `supervisor=exchange.supervisor-ready.v1`. X-129 binds the four delivered HTTP ids to their
+      actual routes/types; X-125 binds the plan. The same values occur in channel, manifest,
+      compatibility and X-128 readiness fixtures.
 - [ ] Compatibility identities are versioned protocols, not the workspace package version used as
       a guess. A release check executes every platform artifact it can run directly or under the
       declared cross-platform harness and proves its JSON agrees with the manifest; a missing,
@@ -158,23 +182,31 @@ implements its manager in C-510.
       Trust/channel fixtures fail first for expired or rolled-back delegation, role confusion,
       expired index, rollback generation, equivocation at one generation, manifest-digest
       substitution, foreign origin, unsupported protocol set and a higher but incompatible release;
-      the positive selection fixture chooses the newest compatible release. The self-test
-      demonstrates each failure against fixtures rather than asserting only the happy path. The
-      staged verifier is the same program and policy used for live and offline release verification.
+      a higher channel with no compatible release and higher trust/channel followed by every target
+      failure also prove floors advance globally and the prior install is retained but not selected
+      for a new start. Boundary fixtures prove
+      `now == expires_at` refuses. The positive selection fixture chooses the newest compatible
+      release. The self-test demonstrates each failure against fixtures rather than asserting only
+      the happy path. The staged verifier is the same program and policy used for live and offline
+      release verification.
 - [ ] X-126 materializes the provider conformance set named by the design under
       `tests/fixtures/exchange-release-v1/`: canonical positive trust, channel, manifest,
       compatibility and readiness bytes with test-only threshold signatures and bounded
-      archive/provenance, plus the machine-readable adversarial mutation inventory. A checked
+      archives, plus the machine-readable adversarial mutation inventory. It includes all three
+      process-start tags, Unix FD/Windows HANDLE ABI fixtures, supervisor-death liveness fixtures,
+      integer/decimal/grammar/key-material limits, global rollback transactions, expiry while
+      stopped/live and every provenance-free offline input. A checked
       fixture-set manifest records every relative filename and SHA-256. Exchange's staged verifier
       and Flux C-510's vendored byte-identical copy run the same expected outcome for every case;
       either repository changing a v1 byte, bound or verdict alone fails its contract gate.
 - [ ] A post-publication verifier downloads the release by immutable tag, requires the exact closed
-      asset set, recomputes every digest, verifies the manifest signature and provenance, checks
-      archive contents and runs the host-platform compatibility command. It then reads the signed
-      trust metadata and stable channel from their pinned origin and proves that a client with the
-      declared protocol set selects this release without an exact-version input. Missing provenance,
-      a substituted signature/key, an extra public asset or any staged/live shape difference leaves
-      the release visibly failed.
+      client asset set, recomputes every digest, verifies manifest signatures, checks archive
+      contents and runs the host-platform compatibility command. Separately, CI verifies its bounded
+      repository/workflow provenance as publication evidence tied to tag and source SHA; provenance
+      is absent from the manifest/client/offline fixture. The verifier then reads signed trust/channel
+      metadata and proves that a client with the declared protocol set selects this release without
+      an exact-version input. Missing CI evidence, a substituted signature/key, an undeclared client
+      asset or staged/live shape difference leaves the release visibly failed.
 - [ ] X-126 is not marked `done` when workflow code, fixtures or uploaded draft assets are green. Its
       first real immutable `vX.Y.Z` production tag must complete the post-publication verifier over
       the public five-target release with the exact production trust/delegation policy, the one
@@ -207,6 +239,10 @@ implements its manager in C-510.
   competing v1 names, fields, a 64-release bound and impossible no-redirect GitHub URLs. The linked
   design is now the single Exchange-owned trust/channel/manifest/compatibility/readiness contract;
   it keeps X-126's 128-release bound and describes GitHub's actual one-hop asset transport.
+- 2026-08-04: A second implementation audit closed the remaining placeholders and OS ambiguity:
+  actual provider wire ids, JCS-safe integers, exact process identity/inherited-handle/liveness ABI,
+  global transactional rollback floors, closed grammars/key decoding, provenance-free client trust
+  and live-child expiry behavior now precede implementation.
 
 ## Notes
 
@@ -220,9 +256,9 @@ implements its manager in C-510.
   digest, but may not restate a different schema, bound or transport as another v1.
 - X-127 owns native five-target persistence and owner-only Windows DACLs. X-128 owns Exchange's
   supervised launch/readiness record. Neither is satisfied by adding an archive to this workflow.
-- X-125 owns the connection-plan protocol that the compatibility output identifies. X-113 owns the
-  effective catalogue and invoke contracts. Version reporting binds those contracts; it does not
-  redefine them in release automation.
+- X-125 owns the exact connection-plan protocol that compatibility identifies. X-113 delivered the
+  effective catalogue/invoke routes; X-129 gives those actual wire types the exact four ids required
+  here. Version reporting binds those contracts; release automation does not invent them.
 - This is distinct from X-119. X-126 releases the Exchange host process; X-119 later installs
   connector-declared rich-runtime artifacts inside Exchange. Neither permits a plugin executable in
   the Flux core release.
