@@ -1,12 +1,11 @@
 ---
 id: X-84
 title: "A container, one machine, and the operator's first five minutes"
-status: in-progress
-priority: 2
+status: blocked
 epic: remote-deployment
 design: docs/designs/remote-deployment.md
 areas: [ci, exchange-server]
-note: "the first deployment any flux-family repository has made, so it sets the precedent the siblings copy. One machine deliberately — the credential store fsyncs the whole file under one mutex and a fly volume is per-machine, so two machines is two divergent stores with no reconciliation"
+note: "BLOCKED on a human Google OIDC sign-in and public connect → grant → invoke walkthrough; deployment and storage artifacts are already live"
 ---
 
 # A container, one machine, and the operator's first five minutes
@@ -114,6 +113,10 @@ belongs in that walkthrough.
 - **OIDC is registered and the service is deployed.** `/api/signin` redirects to Google with PKCE,
   but the authenticated browser and sign-in → connect → grant → invoke walkthrough remain unverified;
   those require completing the provider interaction as a real account, not another code change.
+- **2026-08-03 — status reconciled.** The same external verification remains: a human must complete
+  Google OIDC and walk the public flow, then redeploy and confirm persistence/session invalidation.
+  No repository implementation is active while that evidence is unavailable, so this is blocked
+  rather than in progress.
 
 ## Notes
 - Blocked on [[X-83]]: nothing to serve at `/` until it lands.

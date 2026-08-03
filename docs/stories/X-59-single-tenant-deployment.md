@@ -1,12 +1,12 @@
 ---
 id: X-59
 title: "A deployment can hold one tenant and stop asking which"
-status: in-progress
+status: ready
 priority: 2
 epic: local-identity
 design: docs/designs/local-identity.md
 areas: [exchange-server, exchange-host]
-note: "the tenancy axis, orthogonal to authentication: Deployment::SingleTenant already exists for the runtime gate and this extends it rather than inventing it"
+note: "the --dev slice shipped; ready for the remaining provider-independent single-tenant startup declaration"
 ---
 
 # A deployment can hold one tenant and stop asking which
@@ -82,3 +82,6 @@ So: one tenant, **named once at startup**, and every principal is of it. The add
 - **2026-08-02 — the browser dead end is closed in v0.14.1.** The sign-in page used to explain a
   bearer request a browser link could not make. `--dev` now offers a POST button for its sole implied
   principal; explicit rosters remain manual so a form cannot choose between local identities.
+- **2026-08-03 — status reconciled.** No implementation is currently in flight. The delivered
+  `--dev` slice remains released, while the unchecked provider-independent startup declaration is a
+  concrete ready follow-up rather than a permanently active lane.
