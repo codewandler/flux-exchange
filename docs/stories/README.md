@@ -42,6 +42,9 @@ lockfile and compile-time tests.
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-125 — Generate one complete labelled connection plan for browser and CLI](X-125-generate-a-complete-labelled-connection-plan.md) · Milestone 1 — one declaration-driven contract asks for the label, every secret and setting, and exposes incomplete or partial state honestly to browser and Flux CLI
 
+### a deployment a stranger can reach
+- [X-126 — Publish verified local Exchange binaries for every Flux platform](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — Flux can manage a separately released, attested Exchange executable on a clean machine without bundling plugins or trusting PATH
+
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
