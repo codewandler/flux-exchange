@@ -140,10 +140,11 @@ calling the connection complete.
 The field's `authority` object is closed: `state` is `unset`, `proposed`, `approved` or `revoked`;
 `revision` is `null` only for `unset`; and value-bearing states publish the same approve and revoke
 targets. A revision is a canonical decimal string rather than a JSON number, so a JavaScript client
-cannot silently round the store's `u64`. Both action bodies are exactly the plan `version` plus that
-revision. A success response repeats only version, connector, label, service, field, state and
-revision. A stale revision or ineligible declaration is a value-free refusal and does not mutate
-anything.
+cannot silently round the store's `u64`: it starts at `"1"`, contains ASCII digits only, has no sign
+or leading zero, and must parse within `u64`. Both action bodies are exactly the plan `version` plus
+that revision. A success response repeats only version, connector, label, service and field plus
+`authority: { state, revision }`. A stale revision or ineligible declaration is a value-free refusal
+and does not mutate anything.
 
 The existing settings file is a legacy unversioned map of plain strings. Binding accepts that exact
 shape without rewriting it. The first explicit mutation persists
@@ -160,8 +161,9 @@ indistinguishable from missing configuration at the runtime port, so request con
 permission subjects observe the same snapshot; a policy change never demotes a tagged record into an
 executable ordinary string. Proposal, approval, revocation and clear each restart the tenant's
 generated channels for that connector, cancelling before a replacement plan can read settings. A
-long-lived channel therefore cannot retain revoked authority. Already-dispatched one-shot work may
-complete; revocation governs later projections.
+successful response waits for that cancellation/restart transition, so a long-lived channel cannot
+retain revoked authority after success. Already-dispatched one-shot work may complete; revocation
+governs later projections.
 
 `exchange.connection-plan.v1` remains the only accepted request version. `GET` defaults an omitted
 version to v1 and refuses an explicitly unsupported one. Composite and authority writes naming
