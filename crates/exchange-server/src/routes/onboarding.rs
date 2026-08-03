@@ -494,6 +494,10 @@ mod tests {
         // supply. The same vocabulary `/api/catalogue/connectors` already publishes anonymously,
         // so it discloses nothing this surface was keeping.
         "operation",
+        // An opaque tenant-installed resource name. The public descriptor discloses only the slot,
+        // never an occupied value; the route resolves it exclusively beneath the authenticated
+        // principal's tenant and cross-tenant disagreement is a not-found refusal.
+        "app",
     ];
 
     /// Every endpoint this document names is a route this host actually publishes, and none of them
@@ -572,9 +576,8 @@ mod tests {
         ("workflows", Some("/api/workflows")),
         // Workflow runs are durable and tenant-scoped; the collection is the capability's entry.
         ("read-what-happened", Some("/api/workflow-runs")),
-        // These are part of the intended surface, but no route serves either one yet. The
-        // descriptor's withheld reason points at the story that would make each row live.
-        ("agents", None),
+        ("agents", Some("/api/apps/{app}/chat")),
+        // This remains part of the intended surface, but no route serves it yet.
         ("leases", None),
     ];
 
@@ -717,6 +720,39 @@ mod tests {
         (
             "/api/channels/{id}",
             "the item half of the same operator-owned channel lifecycle, not an agent capability.",
+        ),
+        (
+            "/api/app-packages",
+            "the curated package listing beneath the Managed Agents capability; installation is operator work.",
+        ),
+        (
+            "/api/model-profiles",
+            "operator-owned model bindings beneath installed Apps, not authority handed to an agent.",
+        ),
+        (
+            "/api/datasources",
+            "operator-owned datasource bindings beneath installed Apps, not an agent capability by itself.",
+        ),
+        (
+            "/api/apps",
+            "operator-owned installation lifecycle beneath the Managed Agents capability.",
+        ),
+        ("/api/apps/{app}", "the item view of that operator-owned lifecycle."),
+        (
+            "/api/apps/{app}/events/{event}",
+            "operator delivery of a declared Event Type; chat is the capability entry agents receive.",
+        ),
+        (
+            "/api/apps/{app}/activity",
+            "the value-free inspection view beneath the Managed Agents capability.",
+        ),
+        (
+            "/api/apps/{app}/sessions",
+            "the Flux session projection beneath the Managed Agents capability.",
+        ),
+        (
+            "/api/app-deliveries/{delivery}/retry",
+            "operator recovery of a failed safe delivery, not a new agent capability.",
         ),
         (
             "/api/onboarding",

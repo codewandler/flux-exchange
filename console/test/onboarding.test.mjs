@@ -369,7 +369,9 @@ test('nothing_tenant_specific_can_reach_this_page', async () => {
   //    appear is a tenant, a principal, a credential or an address, so the parameters that may
   //    appear are written out — `/api/connections/{connector}` on this page would still be a
   //    tenant's contents, because `connector` is not on this list.
-  const CATALOGUE_KEYS = ['operation']
+  // `app` names an opaque installed-resource slot. Its value is supplied only by an authenticated
+  // caller and remains resolved beneath that caller's tenant.
+  const CATALOGUE_KEYS = ['operation', 'app']
   for (const entry of STEPS) {
     if (!entry.call) continue
     assert.match(

@@ -35,12 +35,15 @@ import {
   loadChannels,
   loadConnections,
   loadActivity,
+  loadApps,
+  loadAppActivity,
   loadEditorCatalog,
   loadDeclaration,
   loadGrants,
   loadSession,
   loadSignInAvailability,
   loadWorkflows,
+  installApp,
   publishWorkflow,
   previewGrant,
   replaceGrants,
@@ -49,11 +52,16 @@ import {
   saveWorkflow,
   saveWorkflowGraph,
   signOut,
+  sendAppMessage,
   startWorkflowRun,
   validateWorkflowEdit,
   validateWorkflowGraph,
   updateChannel,
   type ActivityState,
+  type AppActivity,
+  type AppMutation,
+  type AppsState,
+  type InstallAppChoice,
   type CatalogueState,
   type ChannelDeclarationsState,
   type ChannelMutation,
@@ -81,6 +89,7 @@ import { isDark, toggleTheme } from './theme'
 
 import AgentOnboarding from './AgentOnboarding.mts'
 import Activity from './Activity.vue'
+import Apps from './Apps.vue'
 import Agents from './Agents.mts'
 import CatalogueFinder from './CatalogueFinder.mts'
 import CatalogueFailure from './CatalogueFailure.mts'
@@ -103,6 +112,10 @@ const connections = shallowRef<ConnectionsState>({ status: 'loading' })
 const workflows = shallowRef<WorkflowsState>({ status: 'loading' })
 const editorCatalog = shallowRef<EditorCatalogState>({ status: 'loading' })
 const activity = shallowRef<ActivityState>({ status: 'loading' })
+const apps = shallowRef<AppsState>({ status: 'loading' })
+const appActivity = shallowRef<AppActivity[]>([])
+const appOutcome = shallowRef<AppMutation | null>(null)
+const appBusy = shallowRef(false)
 const channels = shallowRef<ChannelsState>({ status: 'loading' })
 const channelDeclarations = shallowRef<ChannelDeclarationsState>({ status: 'loading' })
 const channelOutcome = shallowRef<ChannelMutation | null>(null)
@@ -152,6 +165,34 @@ async function reloadActivity() {
   activity.value = await loadActivity()
 }
 
+async function reloadApps() {
+  apps.value = { status: 'loading' }
+  apps.value = await loadApps()
+}
+
+async function inspectApp(app: string) {
+  appActivity.value = app ? await loadAppActivity(app) : []
+}
+
+async function installManagedApp(choice: InstallAppChoice) {
+  if (appBusy.value) return
+  appBusy.value = true
+  appOutcome.value = await installApp(choice)
+  appBusy.value = false
+  if (appOutcome.value.status === 'installed') {
+    await reloadApps()
+    await inspectApp(choice.id)
+  }
+}
+
+async function chatWithApp(app: string, message: string, session: string | null) {
+  if (appBusy.value) return
+  appBusy.value = true
+  appOutcome.value = await sendAppMessage(app, message, session)
+  appBusy.value = false
+  await inspectApp(app)
+}
+
 async function reloadChannels() {
   channels.value = { status: 'loading' }
   channels.value = await loadChannels()
@@ -181,7 +222,7 @@ onMounted(async () => {
 watch(signedIn, async (resolved) => {
   if (resolved) {
     await reloadConnections()
-    if (principal.value?.kind === 'user') await Promise.all([reloadWorkflowSurface(), reloadChannels()])
+    if (principal.value?.kind === 'user') await Promise.all([reloadWorkflowSurface(), reloadChannels(), reloadApps()])
   }
 })
 
@@ -459,7 +500,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
 </script>
 
 <template>
-  <div class="console" :class="{ 'console--wide': route.name === 'workflows' || route.name === 'activity' || route.name === 'channels' }">
+  <div class="console" :class="{ 'console--wide': route.name === 'workflows' || route.name === 'activity' || route.name === 'channels' || route.name === 'apps' }">
     <ConsoleShell :session="session" :sign-in-availability="signInAvailability" :active="active" @sign-out="endSession" @retry-session="reloadSession">
       <template #theme>
         <button type="button" :aria-pressed="isDark" @click="toggleTheme()">
@@ -667,6 +708,26 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         <section v-else class="gate">
           <h1>Sign in as a user to manage channels</h1>
           <p>Persistent channels belong to the tenant on the resolved user principal.</p>
+          <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
+        </section>
+      </template>
+
+      <template v-else-if="route.name === 'apps'">
+        <Apps
+          v-if="principal?.kind === 'user'"
+          :state="apps"
+          :connections="readyConnections"
+          :activity="appActivity"
+          :outcome="appOutcome"
+          :busy="appBusy"
+          @retry="reloadApps"
+          @install="installManagedApp"
+          @chat="chatWithApp"
+          @inspect="inspectApp"
+        />
+        <section v-else class="gate">
+          <h1>Sign in as a user to install Apps</h1>
+          <p>App bindings and Managed Agent runs belong to the tenant on the resolved principal.</p>
           <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
         </section>
       </template>

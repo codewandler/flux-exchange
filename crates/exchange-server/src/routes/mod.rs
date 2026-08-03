@@ -14,6 +14,7 @@
 //! routes as data and its `Router` is *derived* from them, so [`published`] is the whole surface by
 //! construction. The seam is the same; only the direction of the dependency changed.
 
+mod apps;
 mod catalogue;
 mod channels;
 mod connections;
@@ -53,6 +54,7 @@ const MODULES: &[Module] = &[
     health::MODULE,
     metrics::MODULE,
     catalogue::MODULE,
+    apps::MODULE,
     identity::MODULE,
     signin::MODULE,
     connections::MODULE,
@@ -1638,6 +1640,20 @@ mod tests {
         /// Every route that requires deployment operator authority. Adding a line is the decision;
         /// assertion below is only the enforcement.
         const OPERATOR_GATED: &[(&str, &str)] = &[
+            // Package inventory and every tenant-owned App binding are deployment policy. A
+            // Managed Agent may use the one chat route admitted to ordinary principals, but it
+            // cannot install or widen itself, select a model/connection/datasource, inject an
+            // event, inspect another run, or decide that an unsafe delivery should be attempted
+            // again. Those decisions remain with the operator who reviewed the frozen authority.
+            ("apps", "/api/app-packages"),
+            ("apps", "/api/model-profiles"),
+            ("apps", "/api/datasources"),
+            ("apps", "/api/apps"),
+            ("apps", "/api/apps/{app}"),
+            ("apps", "/api/apps/{app}/events/{event}"),
+            ("apps", "/api/apps/{app}/activity"),
+            ("apps", "/api/apps/{app}/sessions"),
+            ("apps", "/api/app-deliveries/{delivery}/retry"),
             // X-91 makes connection inventory administrative too: knowing which vendor accounts
             // are held is operator state, not ordinary-member catalogue access.
             ("connections", "/api/connections"),

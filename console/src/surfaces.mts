@@ -176,6 +176,15 @@ export const SURFACES: readonly Surface[] = [
     absent: '',
   },
   {
+    id: 'managed-agents',
+    label: 'Apps',
+    summary: 'Install immutable Flux Apps, supervise their Managed Agents and inspect activation.',
+    path: '/apps',
+    built: true,
+    served: true,
+    absent: '',
+  },
+  {
     id: 'catalogue',
     label: 'Catalogue',
     summary: 'Every operation this build could run, what each one costs, and what it declares.',
@@ -223,6 +232,8 @@ export function surfaceOfRoute(name: string): string | null {
       return 'activity'
     case 'channels':
       return 'subscribe'
+    case 'apps':
+      return 'managed-agents'
     case 'explorer':
     case 'operation':
     case 'core':

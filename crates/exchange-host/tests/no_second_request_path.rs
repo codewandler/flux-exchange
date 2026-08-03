@@ -145,6 +145,10 @@ const ALLOWED: &[(&str, &str)] = &[
     ("schemars", "derives the versioned editor JSON Schema. No IO."),
     ("serde", "derives. No IO."),
     ("serde_json", "a parser. No IO."),
+    (
+        "sha2",
+        "package integrity and frozen-authority fingerprints. No IO.",
+    ),
     ("thiserror", "a proc macro. No IO."),
 ];
 

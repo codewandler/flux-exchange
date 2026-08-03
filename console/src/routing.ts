@@ -58,6 +58,7 @@ export type Route =
   | { name: 'workflows'; anchor?: string }
   | { name: 'activity'; anchor?: string }
   | { name: 'channels'; anchor?: string }
+  | { name: 'apps'; anchor?: string }
   | { name: 'invoke'; operation: string; anchor?: string }
   | { name: 'explorer'; view: SearchView; anchor?: string }
   | { name: 'operation'; id: string; returnView?: SearchView; anchor?: string }
@@ -116,6 +117,7 @@ export function parseRoute(hash: string): Route {
   if (path === '/workflows') return { name: 'workflows', ...at }
   if (path === '/activity') return { name: 'activity', ...at }
   if (path === '/channels') return { name: 'channels', ...at }
+  if (path === '/apps') return { name: 'apps', ...at }
 
   // How to connect an agent. Deliberately not a surface of the platform — it is a reference an agent
   // author reaches for once rather than a place an operator works, so it is reached from the footer

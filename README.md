@@ -3,8 +3,8 @@
 The platform layer of the [flux](https://github.com/codewandler/flux) family: a service that holds
 credentials, terminates channels, runs operations for many callers, and records what happened.
 
-Its primary caller is a **Service Account** today, and a hosted **Managed Agent** in the target
-architecture—not a human at the console. People sign in to wire things up and to see what happened;
+Its primary caller is a **Service Account** or hosted **Managed Agent**—not a human at the console.
+People sign in to wire things up and to see what happened;
 non-human callers invoke operations all day. That inverts the usual assumption and shapes everything
 below.
 
@@ -50,6 +50,11 @@ live versus target architecture.
 > admits. `FLUX_EXCHANGE_CHANNELS` names the durable channel declarations; the built-in binary runs
 > sockets locally only under the single-tenant `--dev` composition and refuses to invent a local
 > placement for a multi-tenant deployment.
+> With `FLUX_EXCHANGE_APPS` bound, an operator can install the curated immutable Slack-bot-style
+> App Package against a labelled Slack Connection, freeze its reviewed operation/model/risk/scope
+> authority, and chat with its Managed Agent. Declared events enter a durable inbox before Flux
+> executes them; Sessions, Runs and value-free Activity are folded from tenant/App-isolated Flux
+> event logs, and retry refuses whenever frozen effects cannot prove it safe.
 >
 > Authentication acquisition is also **fail-closed**. A connector declaring a hazardous way to
 > obtain a credential is refused unless the deployment explicitly names that hazard in
@@ -137,15 +142,15 @@ boot. No released connector declares a hazard yet; upstream C-440 will make the 
 
 | | |
 |---|---|
-| `crates/exchange-host` | Principal-derived tenancy, grants, connection-instance naming, runtime admission, credential/settings/channel stores, ordinary invocation, zero-I/O generated channel planning, and tenant-scoped workflow drafts plus immutable published versions. Workflow and channel execution still end in Flux and `connector_pack`; this crate holds no transport of its own. |
-| `crates/exchange-server` | Health, public and authenticated effective catalogues, complete OIDC sign-in, per-tenant labelled connection instances and grants, Service Account lifecycle and bearer authentication, ordinary invocation, workflow authoring/publication, durable SQLite run records and typed 30-day audit evidence, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
-| `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows, Activity and Channels. The workflow editor uses the upstream Flux graph contract, protects unsaved drafts, retains exact source, and paints durable value-free run events back onto nodes. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
+| `crates/exchange-host` | Principal-derived tenancy, grants, connection-instance naming, runtime admission, credential/settings/channel stores, ordinary invocation, immutable App Packages, atomic installed-App bindings and durable Event Deliveries, plus tenant-scoped workflow drafts and versions. Execution still ends in Flux and `connector_pack`; this crate holds no transport of its own. |
+| `crates/exchange-server` | Health, catalogues, identity, connections/grants, Service Accounts, invocation, workflows, channel supervision, and installed Flux App supervision over tenant/App-isolated durable Flux event logs. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
+| `console/` | A Vue 3 **admin surface**: Connect → Grant → Invoke plus Workflows, Activity, Channels and Apps. The Apps surface installs the Slack-bot-style template, freezes Connection/access/model/risk/scope choices, chats with its Managed Agent and inspects activation Activity. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
 **Not built, despite being described in the design:** rich outbound runtime-plan dispatch, webhook
-channels, durable event replay/inboxes,
+channels, general channel replay,
 general operation streams, isolated per-tenant workers, leases-in-anger, and runtime artifact
 installation/attestation. Stored workflows,
-workflow execution records and generated WebSocket channels moved off this list in X-98 and X-101.
+workflow execution records, generated WebSocket channels and installed App inboxes moved off this list in X-98, X-101 and X-108.
 The credential store has moved off this
 list and is described below, and X-47 moved
 per-connection configuration off it too — but the honest replacement claim is narrower than "done":

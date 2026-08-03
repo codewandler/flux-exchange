@@ -434,9 +434,15 @@ export const STEPS: readonly Step[] = [
     summary:
       'Run a model, authored loop and bounded operation and datasource capabilities as a Managed ' +
       'Agent inside an installed Flux App.',
-    surface: null,
-    call: null,
-    pending: 'Planned in X-108, “Host installed Flux Apps and Managed Agents.”',
+    surface: 'managed-agents',
+    call: {
+      method: 'POST',
+      endpoint: '/api/apps/{app}/chat',
+      caller: 'A resolved principal. The App and all of its frozen bindings come from that principal’s tenant.',
+      note: 'The message wakes the App Package’s declared Managed Agent through a durable Event Delivery and Flux event log.',
+      warn: 'The Managed Agent can spend only its installed opaque authority; it cannot read or address a credential.',
+    },
+    pending: '',
   },
   {
     id: 'leases',

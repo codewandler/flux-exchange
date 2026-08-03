@@ -39,9 +39,6 @@ lockfile and compile-time tests.
 
 ## Next (ready — take the top one unless the user named a story)
 
-### Apps
-- [X-108 — Host installed Flux Apps and Managed Agents](X-108-host-installed-flux-apps.md) · Flux App/channel contracts are published on the connector-compatible line; design Exchange-owned package installation and tenant bindings before implementation
-
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-125 — Generate one complete labelled connection plan for browser and CLI](X-125-generate-a-complete-labelled-connection-plan.md) · Milestone 1 — one declaration-driven contract asks for the label, every secret and setting, and exposes incomplete or partial state honestly to browser and Flux CLI
 
@@ -163,6 +160,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-105 — Publish the live subscribe surface](X-105-publish-live-subscribe-surface.md)
 - [X-106 — Adopt the released Flux and connector domain lines](X-106-adopt-the-released-domain-lines.md) · Release gate opened 2026-08-03: connector-pack 0.16 requires Flux 0.52; audit the shipped contracts before Exchange builds on them
 - [X-107 — Service Accounts are not Flux Agents](X-107-service-accounts-are-not-flux-agents.md) · migrate the legacy agent-token API without invalidating existing callers; reserve Agent for the managed Flux runtime
+- [X-108 — Host installed Flux Apps and Managed Agents](X-108-host-installed-flux-apps.md) · Immutable packages, atomic frozen authority, durable deliveries, Flux-event projections and the Slack-bot-style console path are live
 - [X-109 — Refine flow editor feedback and navigation](X-109-refine-flow-editor-feedback-and-navigation.md)
 - [X-110 — Edit inbound channel grants in the console](X-110-edit-inbound-grants-in-the-console.md) · channel creation without an inbound grant editor leaves the operator unable to complete create → grant → subscribe
 - [X-112 — Align the Exchange roadmap with rich connector runtimes](X-112-align-the-exchange-roadmap-with-rich-runtimes.md) · state explicitly that Docker/Kubernetes/SQL/observability remain connectors and are hosted through declared runtimes; replace stale 'not yet filed' text with the complete program

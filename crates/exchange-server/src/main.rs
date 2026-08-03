@@ -23,6 +23,7 @@ mod dev_identity;
 mod entropy;
 mod execution;
 mod local_identity;
+mod managed_apps;
 mod oidc;
 mod operator;
 mod routes;
@@ -55,6 +56,7 @@ use crate::execution::{channel_execution_system, invoker};
 use crate::local_identity::{
     generate as generate_local_user, LocalUserRefusal, LocalUsers, LOCAL_USERS_SETTING,
 };
+use crate::managed_apps::ManagedAppSupervisor;
 use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
 use crate::oidc::Oidc;
@@ -526,8 +528,51 @@ fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefus
     if let Some((workflows, pure, runs)) = workflow_store()? {
         state = state.with_workflows(workflows, pure, runs);
     }
+    if let Some(apps) = app_store(state.invoker().cloned())? {
+        state = state.with_apps(apps);
+    }
 
     Ok(state)
+}
+
+/// Bind installed App declarations and the per-App durable Flux event logs, or bind neither.
+#[cfg(unix)]
+fn app_store(
+    invoker: Option<Arc<exchange_host::Invoker>>,
+) -> Result<Option<Arc<ManagedAppSupervisor>>, StartupRefusal> {
+    let Ok(configured) = std::env::var(exchange_host::APP_STORE_SETTING) else {
+        warn!(
+            "no installed App store is bound ({} is unset), so App installation and chat refuse",
+            exchange_host::APP_STORE_SETTING
+        );
+        return Ok(None);
+    };
+    let store = exchange_host::AppStore::bind_configured(
+        Some(&configured),
+        exchange_host::PackageRegistry::curated(),
+    )
+    .map_err(|error| StartupRefusal::AppStore {
+        reason: error.to_string(),
+    })?;
+    let event_root = store
+        .path()
+        .and_then(std::path::Path::parent)
+        .expect("a bound App file has a parent")
+        .join("flux-events");
+    let supervisor = ManagedAppSupervisor::new(Arc::new(store), invoker, Some(event_root.clone()))
+        .map_err(|error| StartupRefusal::AppStore {
+            reason: error.to_string(),
+        })?;
+    info!(path = %configured, "installed Apps: owner-only atomic bindings");
+    info!(path = %event_root.display(), "installed App activity: tenant-isolated Flux event logs");
+    Ok(Some(Arc::new(supervisor)))
+}
+
+#[cfg(not(unix))]
+fn app_store(
+    _invoker: Option<Arc<exchange_host::Invoker>>,
+) -> Result<Option<Arc<ManagedAppSupervisor>>, StartupRefusal> {
+    Ok(None)
 }
 
 /// Bind the durable application audit journal, or bind none for a loopback composition.

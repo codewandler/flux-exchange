@@ -716,6 +716,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror",
  "tokio",
 ]
@@ -1661,12 +1662,19 @@ name = "flux-exchange"
 version = "0.17.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "codewandler-connector-catalog",
  "codewandler-flux-app",
  "codewandler-flux-channels",
+ "codewandler-flux-core",
+ "codewandler-flux-events",
  "codewandler-flux-exchange-host",
+ "codewandler-flux-lang",
+ "codewandler-flux-provider",
  "codewandler-flux-runtime",
+ "codewandler-flux-secret",
+ "codewandler-flux-spec",
  "codewandler-flux-system",
  "codewandler-flux-tools",
  "codewandler-flux-web",

@@ -43,6 +43,7 @@ flux-spec.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 # Not checked by the allow-list, and that is the point of the split: a dev-dependency is absent from
