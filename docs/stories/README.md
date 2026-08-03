@@ -48,6 +48,7 @@ _Everything this platform does can only be seen on `127.0.0.1`. The getting-star
 - [X-126 — Publish verified local Exchange binaries for every Flux platform](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — Flux can manage a separately released, attested Exchange executable on a clean machine without bundling plugins or trusting PATH
 - [X-127 — Persist local Exchange state safely on every Flux platform](X-127-persist-local-state-on-every-flux-platform.md) · Milestone 1 — a five-target binary is support only when every credential-bearing local workflow persists safely and survives restart on that target
 - [X-128 — Emit one trusted readiness record for a supervised Exchange](X-128-emit-one-supervisor-readiness-record.md) · Milestone 1 — Flux owns a child only after that exact process reports its bound address and compiled identity over a dedicated one-shot channel
+
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
