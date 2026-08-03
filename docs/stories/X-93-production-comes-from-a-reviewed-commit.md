@@ -49,4 +49,7 @@ evidence of what was built, scanned and deployed.
   no circular required reviewer for the repository's sole maintainer, and an app-scoped 90-day Fly
   deploy token stored only as its environment `FLY_API_TOKEN`. Pull requests and forks do not run
   either production workflow and cannot receive the environment secret.
+- 2026-08-03 — the first protected-main production run failed closed before deployment because its
+  fresh Ubuntu runner did not carry `rg`. The production contract checker now uses portable POSIX
+  `grep -E`; its failing run is the release-path test that exposed the undeclared local dependency.
 - Remaining live work: merge the workflow and retain the first green production artifact.
