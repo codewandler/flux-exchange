@@ -28,7 +28,10 @@ live versus target architecture.
 > `?connection=<label>` and refuses ambiguity rather than choosing an account. A signed-in human
 > can create, list and revoke
 > **Service Accounts**, whose `fxsa_…` bearer tokens authenticate at the same guarded API boundary
-> as browser sessions. **`invoke` runs**: `POST /api/operations/{operation}/invoke` executes one
+> as browser sessions. An authenticated `GET /api/catalogue/effective` returns exactly the
+> connected and granted operation bindings that Service Account can use, with a stable generation
+> identity for turn-boundary refresh. **`invoke` runs**:
+> `POST /api/operations/{operation}/invoke` executes one
 > catalogue operation for the caller's tenant, with the request built by `connector_pack` from the
 > operation's own compiled Flux — **gated by a grant** since X-13, and limited to the forty
 > connectors whose base URL needs no per-tenant configuration. An operation runs only if one of the
@@ -135,11 +138,11 @@ boot. No released connector declares a hazard yet; upstream C-440 will make the 
 | | |
 |---|---|
 | `crates/exchange-host` | Principal-derived tenancy, grants, connection-instance naming, runtime admission, credential/settings/channel stores, ordinary invocation, zero-I/O generated channel planning, and tenant-scoped workflow drafts plus immutable published versions. Workflow and channel execution still end in Flux and `connector_pack`; this crate holds no transport of its own. |
-| `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant labelled connection instances and grants, Service Account lifecycle and bearer authentication, ordinary invocation, workflow authoring/publication, durable SQLite run records and typed 30-day audit evidence, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
+| `crates/exchange-server` | Health, public and authenticated effective catalogues, complete OIDC sign-in, per-tenant labelled connection instances and grants, Service Account lifecycle and bearer authentication, ordinary invocation, workflow authoring/publication, durable SQLite run records and typed 30-day audit evidence, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
 | `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows, Activity and Channels. The workflow editor uses the upstream Flux graph contract, protects unsaved drafts, retains exact source, and paints durable value-free run events back onto nodes. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
-**Not built, despite being described in the design:** the authenticated effective Service Account
-catalogue, rich outbound runtime-plan dispatch, webhook channels, durable event replay/inboxes,
+**Not built, despite being described in the design:** rich outbound runtime-plan dispatch, webhook
+channels, durable event replay/inboxes,
 general operation streams, isolated per-tenant workers, leases-in-anger, and runtime artifact
 installation/attestation. Stored workflows,
 workflow execution records and generated WebSocket channels moved off this list in X-98 and X-101.
@@ -191,6 +194,15 @@ spellings are removed in v0.17. Existing unprefixed tokens keep resolving from t
 verifier-keyed store without rewriting stored material. The
 [migration design](docs/designs/service-accounts.md) records the completed checkpoint.
 
+An authenticated `GET /api/catalogue/effective` is the non-human discovery surface. It returns only
+operations for connectors this tenant has connected, whose required non-secret settings are
+present, and that one of this tenant's grants admits.
+Each operation carries its declared input schema and the existing tenant-local connection label to
+bind when invoking; it carries no tenant, credential address, endpoint, runtime or instance UUID.
+The top-level `generation` is a SHA-256 content identity over that complete projection: identical
+content is stable across requests and restarts, while a relevant declaration, connection or grant
+change produces a new value.
+
 ### The credential store, and what does not protect it
 
 `exchange_host::CredentialStore` binds the file-backed store from `connector-secrets` rather than
@@ -231,8 +243,9 @@ A signed-in human labels an existing sole connection with
 `POST /api/connections/{connector}/instances/{label}`. Management, settings and credential rotation
 have matching label-scoped resources. Invocation uses
 `POST /api/operations/{operation}/invoke?connection={label}`; the JSON body remains exactly the
-operation's parameter object. Omitting the label is valid only when the tenant holds zero or one
-connection for that connector.
+operation's parameter object. Omitting the label is valid only when the tenant holds exactly one
+connection; zero is `disconnected`, and several are `ambiguous_connection` rather than a guessed
+default.
 
 Existence comes from credential addresses, not from this registry. The file store can enumerate a
 tenant/authority scope and apply the first-to-second address migration as one checked atomic batch.

@@ -158,16 +158,24 @@ async fn run(
         Err(refusal) => return rate_limited(refusal),
     };
 
+    // Preserve the host's gate order before connection discovery: a principal without a grant
+    // learns no tenant connection state. Execution repeats this admission at the dispatch seam so
+    // the witness consumed there can never be manufactured by this adapter.
+    if let Err(refusal) = invoker.admit_operation(&principal, &operation) {
+        return refuse(refusal);
+    }
+
     let selected =
         match connector_catalog::operation(connector_catalog::OperationKey::id(&operation))
             .and_then(|entry| {
                 connector_catalog::provider(connector_catalog::ProviderKey::id(entry.provider))
             }) {
-            Some(provider) => match super::connections::invocation_instance(
+            Some(provider) => match super::connections::invocation_instance_using(
                 &state,
                 &principal,
                 provider,
                 query.connection.as_deref(),
+                invoker.credentials(),
             )
             .await
             {
@@ -282,7 +290,7 @@ fn supply_at(refusal: &InvokeRefusal) -> Option<String> {
 /// that an absent grant store admits everything, is the exposure that story closed. Both settings
 /// are named because this host does not say which one is missing: that is a fact about the
 /// composition, and a caller who is not the operator learns nothing useful from it.
-fn no_invoker() -> Response {
+pub(super) fn no_invoker() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(json!({
@@ -639,14 +647,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// A tenant this host serves has connected nothing, so the operation refuses **by address** —
-    /// terminally, with nothing sent.
+    /// A tenant this host serves has connected nothing, so the operation refuses as disconnected
+    /// — terminally, with nothing sent and without collapsing into a composition refusal.
     ///
-    /// This is the route-level twin of `exchange-host`'s
-    /// `a_missing_credential_refuses_by_address_and_is_terminal`, and it is here because the status
-    /// and the two fields are this module's decision rather than the host's.
+    /// Unlike the host-level missing-address refusal, this route can consult the exact credential
+    /// inventory before constructing a pack. The bounded status and fields are therefore this
+    /// adapter's decision.
     #[tokio::test]
-    async fn a_missing_credential_is_a_422_that_names_the_address_and_is_terminal() {
+    async fn a_missing_credential_is_a_distinct_disconnected_response() {
         // Granted, so what this observes is the credential refusal rather than the grant gate one
         // step earlier — the order is the design's, and this test is about the later step.
         let state = identified().with_invoker(invoker_holding(all_of_github()));
@@ -658,17 +666,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["refusal"], "refused");
-        assert_eq!(body["sent"], "no");
-        assert_eq!(body["retryable"], false);
-        assert!(
-            body["message"]
-                .as_str()
-                .expect("a refusal carries a message")
-                .contains("tenants/acme/com.github.api/token"),
-            "the refusal must name the address an operator has to go and put a value at: {body}",
-        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "disconnected");
+        assert_eq!(body["connector"], "github");
     }
 
     /// **X-13, at the route.** A principal whose tenant holds no grant is refused with `403`, and
@@ -729,10 +729,10 @@ mod tests {
         .await;
         assert_eq!(
             status,
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "the read is admitted and refuses one step later, for want of a credential: {body}",
+            StatusCode::CONFLICT,
+            "the read is admitted and refuses one step later, because it is disconnected: {body}",
         );
-        assert_eq!(body["refusal"], "refused");
+        assert_eq!(body["code"], "disconnected");
 
         let (status, body) = post_json(
             identified().with_invoker(invoker_holding(read_only())),

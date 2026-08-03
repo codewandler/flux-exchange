@@ -56,6 +56,20 @@
       "withheld": ""
     },
     {
+      "id": "discover-effective-catalogue",
+      "title": "Discover usable operations",
+      "summary": "Read exactly the connected and granted operation bindings available to this resolved Service Account, with a stable generation for turn-boundary refresh.",
+      "live": true,
+      "call": {
+        "method": "GET",
+        "endpoint": "/api/catalogue/effective",
+        "caller": "A Service Account presenting its bearer token.",
+        "note": "The response contains only operation declarations and existing tenant-local connection labels that this principal can invoke. Its generation is content-addressed: retain the tool projection while it is unchanged and refresh only between turns when it changes.",
+        "warn": "This is not the anonymous full catalogue or a connection-management surface. It accepts no tenant, credential, endpoint, runtime or authority selector."
+      },
+      "withheld": ""
+    },
+    {
       "id": "connections",
       "title": "Manage connections and credentials",
       "summary": "Inspect and wire this tenant’s connector instances while credential values remain write-only and every address is derived from the resolved principal’s tenant.",

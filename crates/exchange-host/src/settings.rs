@@ -338,11 +338,9 @@ pub fn declared_settings(
             });
         }
 
-        // The user half of a Basic credential is declared at *connector* level, and the pack asks
-        // for it under the service of whichever operation is being projected — so a connector with
-        // two services that both authenticate this way needs it supplied under each. Following the
-        // pack rather than the credential address, which elides the service, is what keeps a value
-        // supplied here visible to the operation that reads it.
+        // The management surface offers every provider-declared Basic user half under every
+        // service, because another operation on that service may select that auth mechanism. The
+        // operation-granular projection below narrows this to the mechanism one operation names.
         for credential in provider.auth {
             if matches!(
                 credential.acquire,
@@ -360,6 +358,62 @@ pub fn declared_settings(
     for field in provider.config.iter().filter(|field| !field.secret) {
         if let Some(declared) = DeclaredSetting::parse(field.service, field.binds) {
             found.insert(declared);
+        }
+    }
+
+    Ok(found.into_iter().collect())
+}
+
+/// Every non-secret setting one operation needs before it can be projected for invocation.
+///
+/// This is the operation-granular half of [`declared_settings`]. Effective discovery uses it so a
+/// connector with one configured service does not advertise an operation from an unconfigured
+/// sibling service. Generated channel query settings are deliberately absent: they configure a
+/// persistent channel, not a one-shot operation.
+///
+/// # Errors
+///
+/// [`SettingsRefusal::Unreadable`] when the operation's emitted Flux cannot be rehearsed.
+pub fn operation_settings(
+    provider: &'static connector_catalog::Provider,
+    entry: &'static connector_catalog::Operation,
+) -> Result<Vec<DeclaredSetting>, SettingsRefusal> {
+    let rehearsal = connector_pack::Rehearsal::of(entry.id, provider.id, entry.service, entry.flux)
+        .map_err(|error| SettingsRefusal::Unreadable {
+            connector: provider.id.to_owned(),
+            operation: entry.id.to_owned(),
+            reason: error.to_string(),
+        })?;
+    let mut found = BTreeSet::new();
+
+    for variable in rehearsal.endpoint_variables() {
+        found.insert(DeclaredSetting {
+            service: entry.service.to_owned(),
+            kind: SettingKind::Endpoint,
+            name: variable.clone(),
+        });
+    }
+
+    // The user half of Basic auth is needed only when this operation names that mechanism. Keeping
+    // the operation's credential declaration in the predicate prevents an unrelated Basic option
+    // on the provider from hiding a bearer-authenticated operation.
+    for credential in provider.auth {
+        let used = entry
+            .credentials
+            .iter()
+            .flat_map(|mechanism| mechanism.iter())
+            .any(|name| *name == credential.name);
+        if used
+            && matches!(
+                credential.acquire,
+                connector_catalog::Acquisition::BasicJoin { .. }
+            )
+        {
+            found.insert(DeclaredSetting {
+                service: entry.service.to_owned(),
+                kind: SettingKind::Username,
+                name: credential.name.to_owned(),
+            });
         }
     }
 

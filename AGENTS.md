@@ -47,8 +47,11 @@ authentication, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
 `GET /api/onboarding`, an anonymous machine-readable descriptor of what this build can and cannot
-do. Since X-98 it also stores tenant workflow drafts, publishes immutable versions, runs them
-through Flux with dual grant gates, and records value-free node activity. Since X-101 it persists
+do. Since X-113 an authenticated `GET /api/catalogue/effective` returns the connected-and-granted
+operation bindings for the resolved Service Account with a stable content generation, beside the
+existing one-shot invoke contract. Since X-98 it also stores tenant workflow drafts, publishes
+immutable versions, runs them through Flux with dual grant gates, and records value-free node
+activity. Since X-101 it persists
 and supervises generated connector WebSocket channels, gates closed declared event sets, and fans
 them out through authenticated `/api/subscribe`. Since X-14 a tenant may hold several labelled
 connections to one connector; invocation selects one explicitly and the first-to-second credential

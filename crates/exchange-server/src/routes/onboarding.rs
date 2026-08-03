@@ -561,6 +561,10 @@ mod tests {
         // Resolving the bearer is exercised through the session route: it is the smallest call
         // that both runs authentication and returns the principal it resolved.
         ("authenticate", Some("/api/session")),
+        (
+            "discover-effective-catalogue",
+            Some("/api/catalogue/effective"),
+        ),
         ("connections", Some("/api/connections")),
         ("grants", Some("/api/grants")),
         ("invoke", Some("/api/operations/{operation}/invoke")),

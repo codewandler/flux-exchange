@@ -283,6 +283,68 @@ impl Invoker {
         &self.grants
     }
 
+    /// **The credential port this invoker will actually execute against.**
+    ///
+    /// Effective discovery intersects grants with connection existence. Returning this exact port
+    /// keeps discovery and invocation on one source of truth instead of letting a composition
+    /// advertise from one store and execute against another. It remains an address-only
+    /// [`SecretStore`] port; no credential value is resolved or exposed by this method.
+    pub fn credentials(&self) -> &Arc<dyn SecretStore> {
+        &self.credentials
+    }
+
+    /// **The non-secret configuration port this invoker will actually execute against.**
+    ///
+    /// Effective discovery checks only whether each declared setting is present, discards the
+    /// returned value immediately, and never serialises it. Returning this exact port keeps a
+    /// composition from advertising an operation whose execution is bound to a different store.
+    pub fn settings(&self) -> &Arc<dyn ConfigStore> {
+        &self.settings
+    }
+
+    /// Decide whether this principal may invoke one catalogue operation before any credential is
+    /// resolved.
+    ///
+    /// The authenticated effective catalogue uses this admission prefix. It runs the same
+    /// catalogue, deployment and tenant-grant gates, in the same order, as
+    /// [`invoke`](Self::invoke), and stops before constructing either tenant-bound port. Execution
+    /// keeps its gate chain inline because `tests/runtime_gate.rs` structurally enforces its order;
+    /// the effective-catalogue wire tests hold the two projections to the same outcomes.
+    ///
+    /// # Errors
+    ///
+    /// [`InvokeRefusal::UnknownOperation`], [`InvokeRefusal::Runtime`] or
+    /// [`InvokeRefusal::NotGranted`]. No later refusal is reachable because this method performs no
+    /// projection or dispatch.
+    pub fn admit_operation(
+        &self,
+        principal: &Principal,
+        operation: &str,
+    ) -> Result<(), InvokeRefusal> {
+        let entry = connector_catalog::operation(connector_catalog::OperationKey::id(operation))
+            .ok_or_else(|| InvokeRefusal::UnknownOperation {
+                operation: operation.to_owned(),
+            })?;
+        let provider =
+            connector_catalog::provider(connector_catalog::ProviderKey::id(entry.provider))
+                .ok_or_else(|| InvokeRefusal::UnknownOperation {
+                    operation: operation.to_owned(),
+                })?;
+        let admitted = admit_runtime(self.deployment, &ConnectorSurface::of(provider))?;
+        admit_grant(
+            admitted,
+            principal,
+            provider.id,
+            &OperationFacts::of(entry),
+            &self.grants.held(principal.tenant()),
+        )
+        .map(|_| ())
+        .map_err(|refusal| InvokeRefusal::NotGranted {
+            refusal,
+            operation: entry.id.to_owned(),
+        })
+    }
+
     /// **Run one catalogue operation for `principal`'s tenant.**
     ///
     /// `params` is the operation's own declared parameter object, verbatim — there is no envelope,
