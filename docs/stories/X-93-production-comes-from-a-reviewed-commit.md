@@ -52,4 +52,12 @@ evidence of what was built, scanned and deployed.
 - 2026-08-03 — the first protected-main production run failed closed before deployment because its
   fresh Ubuntu runner did not carry `rg`. The production contract checker now uses portable POSIX
   `grep -E`; its failing run is the release-path test that exposed the undeclared local dependency.
+- 2026-08-03 — the next run built the immutable image and failed closed before push because Grype
+  identified its Debian 12 runtime as end-of-life, making vulnerability data incomplete. A local
+  rebuild on supported Debian 13 still found more than a hundred distro findings in userland the
+  service never invokes. Rather than waive them broadly, the runtime is now a static musl binary in
+  `scratch` with only its CA bundle and console. A refused scan retains its JSON/SBOM and prints only
+  vulnerability/package coordinates so the next diagnosis does not depend on runner disk. The exact
+  rebuilt image ran as uid/gid 10001, served health 0.16.1 and the secured console, and passed Grype
+  0.110.0 at the `negligible` threshold with no exception.
 - Remaining live work: merge the workflow and retain the first green production artifact.

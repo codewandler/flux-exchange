@@ -12,16 +12,18 @@ check_root() {
   local fly_config="$root/fly.toml"
   local deploy_workflow="$root/.github/workflows/production.yml"
   local snapshot_workflow="$root/.github/workflows/snapshot-watch.yml"
-  local base_count digest_count build_count locked_count
+  local base_count immutable_count build_count locked_count
 
   for required in "$dockerfile" "$fly_config" "$deploy_workflow" "$snapshot_workflow"; do
     [ -f "$required" ] || { fail "missing ${required#"$root"/}"; return 1; }
   done
 
   base_count="$(sed -nE '/^[[:space:]]*FROM[[:space:]]+/p' "$dockerfile" | wc -l | tr -d ' ')"
-  digest_count="$(sed -nE '/^[[:space:]]*FROM[[:space:]]+[^[:space:]]+@sha256:[0-9a-f]{64}([[:space:]]+AS[[:space:]]+[^[:space:]]+)?[[:space:]]*$/p' "$dockerfile" | wc -l | tr -d ' ')"
+  # Docker's built-in empty `scratch` root has no registry object to digest-pin. It is the only
+  # digest-free base admitted here; every fetched base remains an immutable sha256 reference.
+  immutable_count="$(sed -nE '/^[[:space:]]*FROM[[:space:]]+(scratch|[^[:space:]]+@sha256:[0-9a-f]{64})([[:space:]]+AS[[:space:]]+[^[:space:]]+)?[[:space:]]*$/p' "$dockerfile" | wc -l | tr -d ' ')"
   [ "$base_count" -gt 0 ] || { fail 'Dockerfile has no base stages'; return 1; }
-  [ "$base_count" = "$digest_count" ] || { fail 'every Dockerfile base must use an immutable sha256 digest'; return 1; }
+  [ "$base_count" = "$immutable_count" ] || { fail 'every fetched Dockerfile base must use an immutable sha256 digest'; return 1; }
 
   build_count="$(sed -nE '/^[[:space:]]*(RUN[[:space:]]+|&&[[:space:]]+)?cargo build/p' "$dockerfile" | wc -l | tr -d ' ')"
   locked_count="$(sed -nE '/^[[:space:]]*(RUN[[:space:]]+|&&[[:space:]]+)?cargo build .*--locked/p' "$dockerfile" | wc -l | tr -d ' ')"
@@ -59,7 +61,7 @@ self_test() {
   trap 'rm -rf "$fixture_dir"' RETURN
   mkdir -p "$fixture_dir/.github/workflows"
   printf '%s\n' 'FROM base@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa AS build' \
-    'RUN cargo build --locked' >"$fixture_dir/Dockerfile"
+    'RUN cargo build --locked' 'FROM scratch AS runtime' >"$fixture_dir/Dockerfile"
   printf '%s\n' '[mounts]' 'snapshot_retention = 14' 'scheduled_snapshots = true' >"$fixture_dir/fly.toml"
   printf '%s\n' 'environment:' '  name: production' \
     'uses: anchore/scan-action@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
