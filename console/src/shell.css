@@ -390,8 +390,8 @@
 /* ---------------------------------------------------------------------------------------------
  * The connect form.
  *
- * Deliberately plain. Every input here is a secret, and a field that looks like a search box is a
- * field somebody types a production token into without noticing which page they are on.
+ * Deliberately plain. Secret and non-secret controls share one declared-field layout, while secret
+ * targets remain unmistakable password controls.
  * ------------------------------------------------------------------------------------------- */
 
 .connect {
@@ -434,11 +434,47 @@
 .connect__field {
   display: grid;
   gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 7px;
+}
+
+.connect__field-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: baseline;
 }
 
 .connect__label {
+  margin-right: auto;
+  font-weight: 600;
   font-size: 13px;
+  color: var(--vp-c-text-1);
+}
+
+.connect__requirement,
+.connect__service,
+.connect__set {
+  font-size: 11px;
+  color: var(--vp-c-text-3);
+}
+
+.connect__help,
+.connect__shared,
+.connect__unroutable {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
   color: var(--vp-c-text-2);
+}
+
+.connect__field--unroutable {
+  border-color: var(--vp-c-danger-1);
+}
+
+.connect__unroutable {
+  color: var(--vp-c-danger-1);
 }
 
 .connect__select,
@@ -455,6 +491,33 @@
 .connect__field input {
   font-family: var(--vp-font-family-mono);
 }
+
+.connect__state {
+  width: fit-content;
+  margin: 0 0 12px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--vp-c-default-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.connect__state--complete { color: var(--vp-c-success-1); }
+.connect__state--incomplete { color: var(--vp-c-warning-1); }
+
+.connect__result {
+  margin-top: 20px;
+  padding: 14px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 7px;
+}
+
+.connect__result h3 { margin: 0; }
+.connect__result--complete { border-color: var(--vp-c-success-1); }
+.connect__result--incomplete,
+.connect__result--partial { border-color: var(--vp-c-warning-1); }
+.connect__result--refused { border-color: var(--vp-c-danger-1); }
+.connect__steps { margin-bottom: 0; }
 
 .connect__submit {
   justify-self: start;

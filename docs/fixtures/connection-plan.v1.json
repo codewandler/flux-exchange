@@ -1,0 +1,119 @@
+{
+  "version": "exchange.connection-plan.v1",
+  "connector": "example-helpdesk",
+  "vendor": "Example Helpdesk",
+  "labels": ["production", "sandbox"],
+  "selection": "production",
+  "state": "incomplete",
+  "fields": [
+    {
+      "identity": "connection.name",
+      "name": "name",
+      "service": null,
+      "label": "Connection name",
+      "help": "A tenant-scoped label such as production or sandbox.",
+      "required": true,
+      "secret": false,
+      "input": "text",
+      "binds": null,
+      "routable": true,
+      "set": true,
+      "target": {
+        "id": "connection.name"
+      }
+    },
+    {
+      "identity": "config.default.region",
+      "name": "region",
+      "service": "default",
+      "label": "Region",
+      "help": "The region declared for this connection.",
+      "required": true,
+      "secret": false,
+      "input": "text",
+      "binds": "endpoint.region",
+      "routable": true,
+      "set": true,
+      "target": {
+        "id": "setting.default.endpoint.region"
+      },
+      "choices": [
+        { "value": "global", "label": "Global" },
+        { "value": "europe", "label": "Europe" }
+      ]
+    },
+    {
+      "identity": "config.default.account_email",
+      "name": "account_email",
+      "service": "default",
+      "label": "Account email",
+      "help": "The account identity paired with the token.",
+      "required": true,
+      "secret": false,
+      "input": "email",
+      "binds": "username.example_helpdesk.api_token",
+      "also_binds": ["header.X-Example-Account"],
+      "routable": true,
+      "set": true,
+      "target": {
+        "id": "setting.default.username.example_helpdesk.api_token"
+      }
+    },
+    {
+      "identity": "config.default.api_token",
+      "name": "api_token",
+      "service": "default",
+      "label": "API token",
+      "help": "A token issued by the provider.",
+      "required": true,
+      "secret": true,
+      "input": "secret",
+      "binds": "credential.example_helpdesk.api_token",
+      "routable": true,
+      "set": false,
+      "target": {
+        "id": "credential.example_helpdesk.api_token"
+      }
+    },
+    {
+      "identity": "config.audit.api_token",
+      "name": "api_token",
+      "service": "audit",
+      "label": "Audit API token",
+      "help": "The same provider token is used by the audit service.",
+      "required": true,
+      "secret": true,
+      "input": "secret",
+      "binds": "credential.example_helpdesk.api_token",
+      "routable": true,
+      "set": false,
+      "target": {
+        "id": "credential.example_helpdesk.api_token"
+      }
+    },
+    {
+      "identity": "config.events.callback",
+      "name": "callback",
+      "service": "events",
+      "label": "Callback",
+      "help": "This build cannot route the declared callback binding.",
+      "required": true,
+      "secret": false,
+      "input": "url",
+      "binds": "callback.url",
+      "routable": false,
+      "set": false,
+      "target": null,
+      "reason": "binding `callback.url` is not admitted by this build"
+    }
+  ],
+  "apply": {
+    "method": "POST",
+    "target": "/api/connections/example-helpdesk/plan",
+    "retry": "Retry the same selected label; only submitted targets are replaced.",
+    "compensation": [
+      "Unset an applied setting through its published target.",
+      "Remove the labelled connection through the existing connection route."
+    ]
+  }
+}

@@ -92,6 +92,11 @@ export function connectionEndpoint(connector: string): string {
   return `${CONNECTIONS_ENDPOINT}/${encodeURIComponent(connector)}`
 }
 
+/** The one versioned read/write surface for a complete labelled connection. */
+export function connectionPlanEndpoint(connector: string): string {
+  return `${connectionEndpoint(connector)}/plan`
+}
+
 /**
  * Where one credential of one connection is **replaced**.
  *
@@ -297,11 +302,11 @@ export interface ServiceRefusal {
 
 /** A body that was read, or the failure that reading it was. */
 type Read =
-  | { ok: true; body: unknown }
+  | { ok: true; status: number; body: unknown }
   // The body is carried on the failure too, because a refusal's body is where the service says what
   // would have worked — the declared credential names on a `422`, the address on a `409` — and a
   // caller that only ever saw the summarised sentence could not read either.
-  | { ok: false; failure: ServiceFailure; body: unknown }
+  | { ok: false; status: number | null; failure: ServiceFailure; body: unknown }
 
 /** What went wrong, in the transport's own words — never a sentence invented here. */
 function describe(error: unknown): string {
@@ -359,13 +364,14 @@ async function read(endpoint: string, options: LoadOptions, init?: RequestInit):
     return {
       ok: false,
       body: undefined,
+      status: null,
       failure: { kind: 'unreachable', endpoint, status: null, detail: describe(error) },
     }
   }
 
   // A successful DELETE has deliberately no representation. Treating its empty body as malformed
   // would turn a completed revocation into an indeterminate failure in the console.
-  if (response.ok && response.status === 204) return { ok: true, body: null }
+  if (response.ok && response.status === 204) return { ok: true, status: response.status, body: null }
 
   // The body is read before the status is judged, because a refusal's body is where the reason is —
   // and a refusal with an unreadable body is still a refusal, never an unreadable success.
@@ -380,6 +386,7 @@ async function read(endpoint: string, options: LoadOptions, init?: RequestInit):
   if (!response.ok) {
     return {
       ok: false,
+      status: response.status,
       body,
       failure: {
         kind: 'refused',
@@ -393,12 +400,13 @@ async function read(endpoint: string, options: LoadOptions, init?: RequestInit):
   if (unreadable !== null) {
     return {
       ok: false,
+      status: response.status,
       body,
       failure: { kind: 'unreadable', endpoint, status: response.status, detail: unreadable },
     }
   }
 
-  return { ok: true, body }
+  return { ok: true, status: response.status, body }
 }
 
 /** Whether a value is a JSON object, which is the only shape either route may answer with. */
@@ -781,183 +789,324 @@ export async function loadConnections(options: LoadOptions = {}): Promise<Connec
 }
 
 // ---------------------------------------------------------------------------------------------
-// Connecting: the write, and the one question that has to be asked before it.
-//
-// A connect form needs to know **what a connector declares**, and this console must not be the
-// thing that knows. A list kept here goes stale the day a connector gains a credential, and the
-// operator who then cannot enter it has no way to tell that the console is the one that is wrong.
-// So the declaration is read from the service, every time, and the inputs are whatever it said.
-//
-// Since X-46 that question is a `GET` on the catalogue rather than a `POST` the service refuses:
-// **rendering a form costs no write.** `loadDeclaration` carries the history.
+// Connecting: one versioned declaration-driven projection and its composite write.
 // ---------------------------------------------------------------------------------------------
 
-/** What a connector declares — the names a connection may carry values for. */
-export interface Declaration {
-  /** The connector these belong to, echoed so the value stands on its own. */
+/** The connection-plan version understood by this console. */
+export const CONNECTION_PLAN_VERSION = 'exchange.connection-plan.v1'
+
+export interface ConnectionPlanChoice {
+  value: string
+  label: string
+}
+
+/** A stable identity accepted in the composite plan's `values` object. */
+export interface ConnectionPlanTarget {
+  id: string
+}
+
+/** One descriptor, retained even when another descriptor shares its submission target. */
+export interface ConnectionPlanField {
+  identity: string
+  name: string
+  service: string | null
+  label: string
+  help: string
+  required: boolean
+  secret: boolean
+  input: string
+  binds: string | null
+  also_binds?: string[]
+  routable: boolean
+  set: boolean
+  target: ConnectionPlanTarget | null
+  choices?: ConnectionPlanChoice[]
+  reason?: string
+}
+
+export interface ConnectionPlanApply {
+  method: 'POST'
+  target: string
+  retry: string
+  compensation: string[]
+}
+
+/** A value-free projection of every field the connector declares and how complete one label is. */
+export interface ConnectionPlan {
+  version: typeof CONNECTION_PLAN_VERSION
   connector: string
-  /**
-   * The flat-namespace names the catalogue publishes, in the order the service published them.
-   *
-   * Unreordered and unfiltered on purpose: the order is the connector's own, and a console that
-   * sorted them would be presenting its own opinion of a declaration as the declaration.
-   */
-  credentials: string[]
+  vendor: string
+  labels: string[]
+  selection: string | null
+  state: 'complete' | 'incomplete'
+  fields: ConnectionPlanField[]
+  apply: ConnectionPlanApply
 }
 
-/**
- * What this console knows about one connector's declaration.
- *
- * Four states rather than the three the reads above use, and the fourth earns its place. `refused`
- * is the service answering the question — the catalogue does not carry this connector at all — in a
- * sentence the operator acts on, and folding it into `failed` would put that sentence through the
- * summariser that truncates. `failed` stays what it is everywhere else in this file: nothing was
- * read, and the console cannot tell you anything.
- *
- * A connector that declares **no** credential is none of those: it is `ready` with an empty
- * `credentials`, because "nothing to store for this one" is an answer and not an absence of one.
- * Before X-46 it arrived as a `refused`, since the workaround could only learn it from a refusal.
- */
-export type DeclarationState =
+export type ConnectionPlanState =
   | { status: 'loading' }
-  | { status: 'ready'; declaration: Declaration }
+  | { status: 'ready'; plan: ConnectionPlan }
   | { status: 'refused'; refusal: ServiceRefusal }
   | { status: 'failed'; failure: ServiceFailure }
 
-/**
- * The declared names in a catalogue declaration, or `null` when it carries none this can read.
- *
- * All-or-nothing, for the reason `readConnectors` gives: one entry that fails the shape check fails
- * the whole read. A declaration silently missing a credential is a form silently missing an input,
- * and an operator who fills in the boxes they were given has no way to tell that a box is absent.
- */
-function readDeclared(body: unknown): string[] | null {
-  if (!isObject(body) || !Array.isArray(body.credentials)) return null
-  const declared = body.credentials
-    .map((credential) =>
-      isObject(credential) && typeof credential.name === 'string' ? credential.name : null
-    )
-    .filter((name): name is string => name !== null)
-  return declared.length === body.credentials.length ? declared : null
+function strings(value: unknown, field: string): string[] | string {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    return `\`${field}\` is not an array of strings`
+  }
+  return [...value]
+}
+
+function readTarget(value: unknown, context: string): ConnectionPlanTarget | null | string {
+  if (value === null) return null
+  if (!isObject(value) || typeof value.id !== 'string' || value.id === '') {
+    return `${context} has no target identity`
+  }
+  return { id: value.id }
+}
+
+function readChoices(value: unknown, context: string): ConnectionPlanChoice[] | string {
+  if (!Array.isArray(value)) return `${context} choices are not an array`
+  if (value.length === 0) return `${context} publishes empty choices instead of omitting them`
+  const choices: ConnectionPlanChoice[] = []
+  const values = new Set<string>()
+  for (const choice of value) {
+    if (!isObject(choice) || typeof choice.value !== 'string' || typeof choice.label !== 'string') {
+      return `${context} has a choice without string value and label`
+    }
+    if (values.has(choice.value)) return `${context} repeats choice value \`${choice.value}\``
+    values.add(choice.value)
+    choices.push({ value: choice.value, label: choice.label })
+  }
+  return choices
+}
+
+function readPlanField(value: unknown, at: number): ConnectionPlanField | string {
+  const context = `field ${at + 1}`
+  if (!isObject(value)) return `${context} is not an object`
+  for (const key of ['identity', 'name', 'label', 'help', 'input'] as const) {
+    if (typeof value[key] !== 'string') return `${context} has no string \`${key}\``
+  }
+  if (value.service !== null && typeof value.service !== 'string') return `${context} has an invalid \`service\``
+  if (value.binds !== null && typeof value.binds !== 'string') return `${context} has invalid \`binds\``
+  for (const key of ['required', 'secret', 'routable', 'set'] as const) {
+    if (typeof value[key] !== 'boolean') return `${context} has no boolean \`${key}\``
+  }
+  if (value.secret !== (value.input === 'secret')) return `${context} has inconsistent secret input metadata`
+
+  const target = readTarget(value.target, context)
+  if (typeof target === 'string') return target
+  if (value.routable && target === null) return `${context} is routable but has no target`
+  if (!value.routable && target !== null) return `${context} is unroutable but has a target`
+  if (!value.routable && typeof value.reason !== 'string') return `${context} is unroutable but has no reason`
+
+  let alsoBinds: string[] | undefined
+  if ('also_binds' in value) {
+    const parsed = strings(value.also_binds, `${context}.also_binds`)
+    if (typeof parsed === 'string') return parsed
+    if (parsed.length === 0) return `${context} publishes empty also_binds instead of omitting it`
+    alsoBinds = parsed
+  }
+
+  let choices: ConnectionPlanChoice[] | undefined
+  if ('choices' in value) {
+    const parsed = readChoices(value.choices, context)
+    if (typeof parsed === 'string') return parsed
+    choices = parsed
+  }
+
+  // Credential target identities are the generic routing fact. Reject an inconsistent descriptor
+  // rather than ever letting a credential-shaped target degrade into an ordinary text control.
+  if (target?.id.startsWith('credential.') && value.secret !== true) {
+    return `${context} routes to a credential target but is not secret`
+  }
+
+  return {
+    identity: value.identity as string,
+    name: value.name as string,
+    service: value.service as string | null,
+    label: value.label as string,
+    help: value.help as string,
+    required: value.required as boolean,
+    secret: value.secret as boolean,
+    input: value.input as string,
+    binds: value.binds as string | null,
+    ...(alsoBinds === undefined ? {} : { also_binds: alsoBinds }),
+    routable: value.routable as boolean,
+    set: value.set as boolean,
+    target,
+    ...(choices === undefined ? {} : { choices }),
+    ...(!value.routable ? { reason: value.reason as string } : {}),
+  }
+}
+
+function readConnectionPlan(body: unknown, expectedConnector: string): ConnectionPlan | string {
+  if (!isObject(body)) return 'the plan is not an object'
+  if (body.version !== CONNECTION_PLAN_VERSION) return `unsupported or missing plan version`
+  if (typeof body.connector !== 'string') return 'the plan has no connector'
+  if (body.connector !== expectedConnector) {
+    return `the plan names connector \`${body.connector}\` instead of \`${expectedConnector}\``
+  }
+  if (typeof body.vendor !== 'string') return 'the plan has no vendor'
+  const labels = strings(body.labels, 'labels')
+  if (typeof labels === 'string') return labels
+  if (new Set(labels).size !== labels.length) return 'the plan repeats an existing label'
+  if (body.selection !== null && typeof body.selection !== 'string') return 'the plan has an invalid selection'
+  if (typeof body.selection === 'string' && !labels.includes(body.selection)) {
+    return 'the selected label is not present in labels'
+  }
+  if (body.state !== 'complete' && body.state !== 'incomplete') return 'the plan has no valid state'
+  if (!Array.isArray(body.fields) || body.fields.length === 0) return 'the plan has no fields'
+
+  const fields: ConnectionPlanField[] = []
+  const identities = new Set<string>()
+  for (const [at, value] of body.fields.entries()) {
+    const field = readPlanField(value, at)
+    if (typeof field === 'string') return field
+    if (identities.has(field.identity)) return `field identity \`${field.identity}\` appears more than once`
+    identities.add(field.identity)
+    fields.push(field)
+  }
+  const name = fields[0]
+  if (name.identity !== 'connection.name' || name.name !== 'name' || name.service !== null ||
+      name.binds !== null || name.target?.id !== 'connection.name' || !name.required || name.secret ||
+      name.input !== 'text' || !name.routable) {
+    return 'the first field is not `connection.name`'
+  }
+
+  if (!isObject(body.apply) || body.apply.method !== 'POST' || typeof body.apply.target !== 'string' ||
+      typeof body.apply.retry !== 'string') return 'the plan has invalid apply metadata'
+  const compensation = strings(body.apply.compensation, 'apply.compensation')
+  if (typeof compensation === 'string') return compensation
+
+  return {
+    version: CONNECTION_PLAN_VERSION,
+    connector: body.connector,
+    vendor: body.vendor,
+    labels,
+    selection: body.selection as string | null,
+    state: body.state,
+    fields,
+    apply: { method: 'POST', target: body.apply.target, retry: body.apply.retry, compensation },
+  }
 }
 
 /**
- * What a connector declares, read from the catalogue.
- *
- * ```text
- * GET /api/catalogue/connectors/slack/credentials
- * 200 {"connector":"slack","authority":"com.slack.api","credentials":[{"name":"slack.bot_token",…}]}
- * ```
- *
- * **A read, and only a read.** X-44 had no route to ask this of: the served catalogue published an
- * operation's metadata and no credentials, so the only place the service stated a declaration was
- * the `422` it gives a `POST /api/connections/{connector}` carrying `{"credentials": {}}`. That
- * workaround wrote nothing and carried no value — both were verified, and the `422` still says
- * exactly what it said — but it made a capability fact something this console inferred from an
- * error body, so rewording the refusal would have rendered every connector unreadable. X-46 made it
- * a field, one layer up from where X-43 made the same call for sign-in availability, and this
- * function is the whole of the console's half of it.
- *
- * Three properties survive the change, and they are the ones worth keeping. The names still come
- * from `connector_catalog`, so a connector that gains a credential gains an input with nobody
- * editing this console. Nothing is sent, so there is no value to leak and nothing an audit of the
- * traffic has to be told to disregard. And the endpoint is anonymous, so a form renders before a
- * principal resolves rather than after.
+ * Read a plan, selecting an existing operator-owned label only in the query. Values have no query
+ * representation and this API deliberately accepts no other selection input.
  */
-export async function loadDeclaration(
+export async function loadConnectionPlan(
   connector: string,
+  selection: string | null,
   options: LoadOptions = {}
-): Promise<DeclarationState> {
-  const endpoint = declarationEndpoint(connector)
-  const answered = await read(endpoint, options)
-
-  if (answered.ok) {
-    const declared = readDeclared(answered.body)
-    if (declared) return { status: 'ready', declaration: { connector, credentials: declared } }
-
-    // A `200` whose body this console cannot read is not a connector that declares nothing. An
-    // empty `credentials` array is that, and it arrives through the branch above as an empty
-    // declaration — which `Connect.mts` renders as "declares no credential", the true sentence.
-    return {
-      status: 'failed',
-      failure: {
-        kind: 'unreadable',
-        endpoint,
-        status: 200,
-        detail: 'the catalogue answered with no `credentials` array this console could read',
-      },
-    }
-  }
-
-  const error = serviceError(answered.body)
-  if (error !== null && answered.failure.status !== null) {
-    // The catalogue naming the id it does not carry — a `404` on a connector this console listed
-    // is the service and this bundle disagreeing about what exists, and that sentence is the one
-    // an operator acts on. Kept whole rather than summarised, for the reason `serviceError` gives.
-    return {
-      status: 'refused',
-      refusal: { endpoint, status: answered.failure.status, error },
-    }
-  }
-
-  return { status: 'failed', failure: answered.failure }
-}
-
-/**
- * What became of a connect.
- *
- * Three outcomes for the same reason every read here has three states: a refusal and an outage are
- * different events, and a caller must not be able to confuse either with success. There is no
- * `loading` — a write is awaited by whoever started it, and the busy flag belongs to the view.
- */
-export type ConnectOutcome =
-  | { status: 'connected'; connection: Connection }
-  | { status: 'refused'; refusal: ServiceRefusal }
-  | { status: 'failed'; failure: ServiceFailure }
-
-/**
- * Connect a connector, with the values an operator typed.
- *
- * **The values go in the body and nowhere else.** Not in the path, not in a query string — a value
- * in a query string is a value in an access log, and in a browser's history and in every referrer
- * header the page then sends. This function is the only place in the console a credential value is
- * ever handled, it holds none after it returns, and what it returns is the service's own view of
- * the connection: addresses and `held`, never a value.
- *
- * A refusal is carried whole. `409` — the connector is already connected — is not special-cased
- * here; it is a refusal like any other, and the *view* is what knows to point an operator at
- * rotation. This function will not delete anything, and there is deliberately no sibling that
- * would: `DELETE` then `POST` is the window X-39 exists to remove.
- */
-export async function connect(
-  connector: string,
-  values: Record<string, string>,
-  options: LoadOptions = {}
-): Promise<ConnectOutcome> {
-  const endpoint = connectionEndpoint(connector)
-  const answered = await read(endpoint, options, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ credentials: values }),
-  })
+): Promise<ConnectionPlanState> {
+  const endpoint = connectionPlanEndpoint(connector)
+  const selectedEndpoint = selection === null ? endpoint : `${endpoint}?name=${encodeURIComponent(selection)}`
+  const answered = await read(selectedEndpoint, options)
 
   if (!answered.ok) {
     const error = serviceError(answered.body)
     if (error !== null && answered.failure.status !== null) {
-      return { status: 'refused', refusal: { endpoint, status: answered.failure.status, error } }
+      return { status: 'refused', refusal: { endpoint: selectedEndpoint, status: answered.failure.status, error } }
     }
     return { status: 'failed', failure: answered.failure }
   }
 
-  const connection = readConnection(answered.body)
-  if (typeof connection === 'string') {
+  const plan = readConnectionPlan(answered.body, connector)
+  if (typeof plan === 'string') {
     return {
       status: 'failed',
-      failure: { kind: 'unreadable', endpoint, status: 201, detail: connection },
+      failure: { kind: 'unreadable', endpoint: selectedEndpoint, status: answered.status, detail: plan },
+    }
+  }
+  return { status: 'ready', plan }
+}
+
+export interface ConnectionPlanSubmission {
+  version: typeof CONNECTION_PLAN_VERSION
+  name: string
+  current_name?: string
+  values: Record<string, string>
+}
+
+export interface ConnectionPlanStep {
+  target: string
+  outcome: 'applied' | 'unchanged' | 'refused' | 'skipped'
+  reason?: string
+}
+
+export interface ConnectionPlanResult {
+  outcome: 'complete' | 'incomplete' | 'refused' | 'partial'
+  steps: ConnectionPlanStep[]
+  plan: ConnectionPlan
+}
+
+export type ConnectionPlanOutcome =
+  | { status: 'answered'; result: ConnectionPlanResult }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+function readConnectionPlanResult(body: unknown, expectedConnector: string): ConnectionPlanResult | string {
+  if (!isObject(body)) return 'the apply response is not an object'
+  if (!['complete', 'incomplete', 'refused', 'partial'].includes(String(body.outcome))) {
+    return 'the apply response has no valid outcome'
+  }
+  if (!Array.isArray(body.steps)) return 'the apply response has no steps array'
+  const steps: ConnectionPlanStep[] = []
+  for (const [at, value] of body.steps.entries()) {
+    if (!isObject(value) || typeof value.target !== 'string' ||
+        !['applied', 'unchanged', 'refused', 'skipped'].includes(String(value.outcome))) {
+      return `apply step ${at + 1} is malformed`
+    }
+    if ('reason' in value && typeof value.reason !== 'string') return `apply step ${at + 1} has an invalid reason`
+    steps.push({
+      target: value.target,
+      outcome: value.outcome as ConnectionPlanStep['outcome'],
+      ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+    })
+  }
+  const plan = readConnectionPlan(body.plan, expectedConnector)
+  if (typeof plan === 'string') return `the returned plan is unreadable: ${plan}`
+  return { outcome: body.outcome as ConnectionPlanResult['outcome'], steps, plan }
+}
+
+/** Apply values once through the composite endpoint; only the body can contain a submitted value. */
+export async function applyConnectionPlan(
+  connector: string,
+  submission: ConnectionPlanSubmission,
+  options: LoadOptions = {}
+): Promise<ConnectionPlanOutcome> {
+  const endpoint = connectionPlanEndpoint(connector)
+  const answered = await read(endpoint, options, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(submission),
+  })
+
+  const result = readConnectionPlanResult(answered.body, connector)
+  if (typeof result !== 'string') {
+    const matches = result.outcome === 'partial'
+      ? answered.status === 207
+      : result.outcome === 'refused'
+        ? answered.status !== null && (answered.status < 200 || answered.status >= 300)
+        : answered.status === 200
+    if (matches) return { status: 'answered', result }
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable', endpoint, status: answered.status,
+        detail: `HTTP ${answered.status ?? 'failure'} cannot carry outcome \`${result.outcome}\``,
+      },
     }
   }
 
-  return { status: 'connected', connection }
+  if (!answered.ok && answered.status === null) {
+    return { status: 'failed', failure: answered.failure }
+  }
+
+  // The v1 composite route returns the same value-free result shape for its refusals. Do not fall
+  // back to rendering an arbitrary error body here: a malformed server response must not become a
+  // path by which an echoed submitted value reaches the page.
+  return { status: 'failed', failure: { kind: 'unreadable', endpoint, status: answered.status, detail: result } }
 }
 
 /** What became of an atomic credential replacement. */
@@ -1822,7 +1971,7 @@ export async function cancelWorkflowRun(run: string, options: LoadOptions = {}):
 /**
  * What the console knows about a grant that does not exist yet.
  *
- * Four states, and `refused` earns its place for [`DeclarationState`]'s reason: a connector this
+ * Four states, and `refused` earns its place for [`ConnectionPlanState`]'s reason: a connector this
  * build does not carry, or a body naming an operation, is the service answering the question in a
  * sentence an operator acts on, and folding it into `failed` would put that sentence through the
  * summariser that truncates.

@@ -26,7 +26,7 @@ import {
   CONNECTORS_ENDPOINT,
   SIGNIN_ENDPOINT,
   channelConnectionLabels,
-  connect,
+  applyConnectionPlan,
   createChannel,
   cancelWorkflowRun,
   createWorkflow,
@@ -38,7 +38,7 @@ import {
   loadApps,
   loadAppActivity,
   loadEditorCatalog,
-  loadDeclaration,
+  loadConnectionPlan,
   loadGrants,
   loadSession,
   loadSignInAvailability,
@@ -67,8 +67,9 @@ import {
   type ChannelMutation,
   type ChannelsState,
   type ConnectionsState,
-  type ConnectOutcome,
-  type DeclarationState,
+  type ConnectionPlanOutcome,
+  type ConnectionPlanState,
+  type ConnectionPlanSubmission,
   type EditorCatalogState,
   type GrantOutcome,
   type GrantsState,
@@ -84,6 +85,7 @@ import {
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { SERVICE_ACCOUNTS_PATH } from './minting.mts'
 import { mayGrant } from './granting.mts'
+import { LatestConnectionRequest } from './connection-plan-state.mts'
 import { surfaceOfRoute } from './surfaces.mts'
 import { isDark, toggleTheme } from './theme'
 
@@ -329,45 +331,94 @@ onUnmounted(() => window.clearInterval(activityPoll))
 // ---------------------------------------------------------------------------------------------
 // Wiring a connector up. The console's other job, and until X-44 the one it could not do.
 //
-// Three pieces of state and no fourth: which connector is being connected, what the service says it
-// declares, and what the last attempt did. **What the operator typed is not among them.** A value
+// The selected connector and label, the value-free plan, and the last value-free result are all
+// safe to retain. **What the operator typed is not among them.** A value
 // lives in the input element it was typed into and in the request body, and this component holds
 // none of it — see `Connect.mts`, which is where that is enforced rather than merely intended.
 // ---------------------------------------------------------------------------------------------
 
 const chosen = shallowRef<string | null>(null)
-const declaration = shallowRef<DeclarationState | null>(null)
-const outcome = shallowRef<ConnectOutcome | null>(null)
+const selectedConnectionLabel = shallowRef<string | null>(null)
+const connectionPlan = shallowRef<ConnectionPlanState | null>(null)
+const outcome = shallowRef<ConnectionPlanOutcome | null>(null)
 const connecting = shallowRef(false)
+const connectionPlanRequests = new LatestConnectionRequest()
+const connectionApplyRequests = new LatestConnectionRequest()
 
-/** A connector was chosen: ask the service what it declares, and forget the last attempt. */
+/** A connector was chosen: ask for its complete plan, and forget the last attempt. */
 async function chooseConnector(connector: string) {
+  if (connecting.value) return
   const id = connector || null
+  connectionApplyRequests.invalidate()
   chosen.value = id
+  selectedConnectionLabel.value = null
   outcome.value = null
 
   if (id === null) {
-    declaration.value = null
+    connectionPlanRequests.invalidate()
+    connectionPlan.value = null
     return
   }
 
-  declaration.value = { status: 'loading' }
-  const state = await loadDeclaration(id)
-  // The reader may have moved on while that was in flight; a declaration for a connector nobody is
+  const ticket = connectionPlanRequests.begin(id, null)
+  connectionPlan.value = { status: 'loading' }
+  const state = await loadConnectionPlan(id, null)
+  // The reader may have moved on while that was in flight; a plan for a connector nobody is
   // looking at any more would render under the wrong heading.
-  if (chosen.value === id) declaration.value = state
+  if (connectionPlanRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) {
+    connectionPlan.value = state
+  }
 }
 
-/** Connect, then re-read the listing — which is where the result is shown, as addresses. */
-async function connectChosen(values: Record<string, string>) {
+/** Select only an operator-owned label; no field value has a URL representation. */
+async function selectConnectionLabel(label: string) {
+  if (connecting.value) return
   const connector = chosen.value
-  if (connector === null || connecting.value) return
+  if (connector === null) return
+  const selection = label || null
+  const ticket = connectionPlanRequests.begin(connector, selection)
+  connectionApplyRequests.invalidate()
+  selectedConnectionLabel.value = selection
+  outcome.value = null
+  connectionPlan.value = { status: 'loading' }
+  const state = await loadConnectionPlan(connector, selection)
+  if (connectionPlanRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) {
+    connectionPlan.value = state
+  }
+}
+
+async function retryConnectionPlan() {
+  const connector = chosen.value
+  if (connector === null) return
+  const selection = selectedConnectionLabel.value
+  const ticket = connectionPlanRequests.begin(connector, selection)
+  connectionPlan.value = { status: 'loading' }
+  const state = await loadConnectionPlan(connector, selection)
+  if (connectionPlanRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) {
+    connectionPlan.value = state
+  }
+}
+
+/** Apply the complete plan and retain only its value-free result and fresh projection. */
+async function connectChosen(
+  connector: string,
+  selection: string | null,
+  submission: ConnectionPlanSubmission
+) {
+  if (chosen.value !== connector || selectedConnectionLabel.value !== selection || connecting.value) return
+  const ticket = connectionApplyRequests.begin(connector, selection)
 
   connecting.value = true
-  outcome.value = await connect(connector, values)
+  const answered = await applyConnectionPlan(connector, submission)
+  if (!connectionApplyRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) return
+  outcome.value = answered
   connecting.value = false
 
-  if (outcome.value.status === 'connected') await reloadConnections()
+  if (outcome.value.status === 'answered') {
+    connectionPlan.value = { status: 'ready', plan: outcome.value.result.plan }
+    selectedConnectionLabel.value = outcome.value.result.plan.selection
+    await reloadConnections()
+  }
 }
 
 const rotating = shallowRef('')
@@ -574,12 +625,13 @@ const active = computed(() => surfaceOfRoute(route.value.name))
             :catalog-connectors="catalogConnectors"
             :connected="connected"
             :chosen="chosen"
-            :declaration="declaration"
+            :plan="connectionPlan"
             :outcome="outcome"
             :busy="connecting"
             @choose="chooseConnector"
+            @select-label="selectConnectionLabel"
             @submit="connectChosen"
-            @retry="chooseConnector(chosen ?? '')"
+            @retry="retryConnectionPlan"
           />
         </template>
 
