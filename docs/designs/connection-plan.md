@@ -23,9 +23,12 @@ vendor field list participates.
 Catalogue 0.18 still carries some credentials only in `Provider::auth`, with no `ConfigField` form
 metadata. Dropping them would make Slack, OpenAI, Intercom and other connectors look complete while
 their declared credential address is empty. The projection therefore synthesizes a conservative
-secret row for every auth target no config row binds. Its label falls back to the declared credential
-name, it is required for completion, and its provenance states that richer form metadata was absent.
-This is generic over `Provider::auth`, not a list of affected connectors. A catalogue census keeps
+secret row for every auth target no routable config row binds. Its label falls back to the declared
+credential name and its provenance states that richer form metadata was absent. Requiredness is
+derived generically from operation authentication alternatives: a credential is required when at
+least one declared operation has no mechanism that omits it. This keeps a lone OpenAI token required
+without making Slack's inbound-only signing secret a prerequisite for bot operations. This is
+generic over connector declarations, not a list of affected connectors. A catalogue census keeps
 every auth target represented if upstream adds another metadata-poor credential.
 
 The declaration's `binds` value decides the target generically:
@@ -45,10 +48,9 @@ one submission target. The rows retain their declaration identities and point at
 the composite request accepts the target identity once, so a shared Zendesk token is never requested
 or written several times merely because several services use it.
 
-`also_binds` remains ordered declaration metadata on its one row. It creates neither another input
-nor another submitted value. If the existing settings vocabulary cannot route all of those bindings,
-the row says so and remains incomplete; the projection never drops the extra binding to make a field
-look routable.
+`also_binds` remains ordered declaration metadata on its one row. It creates neither another input,
+another submitted value nor another settings-store address: the connector applies those additional
+bindings internally from the value stored for the primary `binds` target.
 
 ## Selecting and naming a connection
 
