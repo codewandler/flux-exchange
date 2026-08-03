@@ -2,6 +2,13 @@
 
 Guidance for coding agents (and humans) working in this repository.
 
+## Cross-repository scheduling authority
+
+For work named by `../flux-roadmap/programs/`, `../flux-roadmap` is the cross-repository scheduling
+authority. Run its checks and follow its active tranche before selecting local backlog work. This
+repository's story Goal and Acceptance still define done; if they conflict with a cross-repository
+decision, amend or supersede the story before implementation.
+
 <!-- BEGIN track:agents -->
 ## Start here (every session) — track backlog
 
