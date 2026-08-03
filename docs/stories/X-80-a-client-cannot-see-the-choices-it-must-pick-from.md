@@ -1,7 +1,7 @@
 ---
 id: X-80
 title: "A client learns a connector's permitted values only by being refused"
-status: ready
+status: done
 priority: 0
 epic: connections
 areas: [exchange-server, console]
@@ -30,13 +30,24 @@ provoking a refusal to learn a fact the server already knows is the same thing a
 surface that just shipped.
 
 ## Acceptance
-- [ ] The settings surface publishes the declared choices for a `ChosenFrom` field.
-- [ ] **Failing-first test** — a client can build the permitted-value list from one `GET`, with no
+- [x] The settings surface publishes the declared choices for a `ChosenFrom` field.
+- [x] **Failing-first test** — a client can build the permitted-value list from one `GET`, with no
       refused request. Assert it against the response, not against the catalogue.
-- [ ] The console renders a choice control rather than a free-text box for such a field, or a story
+- [x] The console renders a choice control rather than a free-text box for such a field, or a story
       says why it does not yet.
-- [ ] A field that is not `ChosenFrom` publishes no choices — absence must mean *free within the
+- [x] A field that is not `ChosenFrom` publishes no choices — absence must mean *free within the
       other rules*, not *no data*.
+
+## Progress
+
+- 2026-08-03: The successful settings read now publishes a `choices` array only for
+  `HostPinning::ChosenFrom`, on both sole and labelled-instance paths. The route test builds
+  Intercom's region list from that response alone; a companion test holds unrestricted Zendesk
+  fields to omitting the property.
+- 2026-08-03: [[X-125]] owns the console half. The current console has no settings form, and X-125's
+  complete labelled plan must provide field identity, instance selection and submission target
+  before a dropdown can actually write the chosen value. Its Progress records why a partial picker
+  here would still leave the first-run connection incomplete.
 
 ## Notes
 - X-70 named this and deferred it as C-87-shaped; its independent review confirmed it independently.
