@@ -107,18 +107,20 @@ The settings port persists an authority lifecycle beside the value, under the sa
 connector, instance, service and declared field address:
 
 - `unset` has no proposed value;
-- `proposed` has a value and a monotonically changing proposal revision, but the runtime cannot
+- `proposed` has a value and a non-reusable store-wide proposal revision, but the runtime cannot
   read it;
 - `approved` records that an operator explicitly approved that exact revision, so the runtime may
   read it; and
 - `revoked` keeps the proposed value for repair but makes it unreadable to the runtime again.
 
 Changing a proposed value creates a new revision in `proposed`; it never carries approval forward.
-Clearing the setting removes both value and authority state. Approval is a checked transition over
-the revision published by the plan, so an operator cannot approve one proposal after a concurrent
-write replaced it. Revocation is checked the same way. Both transitions are persisted through the
-same owner-only settings binding and survive restart; a persistence failure refuses without
-changing the in-memory answer.
+Clearing the setting removes the value and visible authority state but retains the store's durable
+revision high-water mark. Recreating a setting or label therefore cannot reuse an old revision and
+turn a delayed approval request into authority for a different origin. Approval is a
+compare-and-set transition inside the settings store's existing write lock: it revalidates that the
+current typed declaration requires approval and that the current proposal has the expected
+revision, changes the state, persists, and rolls memory back if persistence fails. Revocation is
+checked the same way. Both transitions survive restart.
 
 The plan marks these fields generically and publishes their value-free state, revision, and
 operator-only approve/revoke actions. On
@@ -129,16 +131,36 @@ only the plan version and proposal revision. The route remains under the deploym
 declared field only as catalogue/registry keys. It accepts no origin value. Audit records name that
 derived setting address and the transition, never the proposed value.
 
-`exchange.connection-plan.v1` remains the only accepted request version. Composite and authority
-writes naming another version refuse explicitly before any value is collected or any step runs. A
-consumer receiving another response version refuses it before rendering or submitting; the console
-tests that closed-version check.
+The field's `authority` object is closed: `state` is `unset`, `proposed`, `approved` or `revoked`;
+`revision` is absent only for `unset`; and value-bearing states publish the same approve and revoke
+targets. Both action bodies are exactly the plan `version` plus that `revision`. A success response
+repeats only version, connector, label, service, field, state and revision. A stale revision or
+ineligible declaration is a value-free refusal and does not mutate anything.
 
-Catalogue 0.18 does not yet publish the typed custom-origin policy delivered by upstream C-87. The
-generic projection can conservatively exercise the lifecycle against the existing declaration
-analysis, but the released integration consumes the typed policy only after connector 0.19.0 is
-published. No connector id, vendor field, path dependency or git dependency substitutes for that
-release seam.
+The existing settings file is a legacy unversioned map of plain strings. Binding accepts that exact
+shape, but never treats a legacy custom-origin value as approved. The first explicit proposal or
+authority mutation rewrites a versioned state containing values, authority records and the revision
+high-water mark. Unknown root versions, record shapes and authority states refuse startup rather
+than being dropped or repaired.
+
+Invocation reads a custom-origin value only in `approved`. Proposed, revoked and legacy values are
+indistinguishable from missing configuration at the runtime port, so request construction and
+permission subjects observe the same snapshot. A proposal change or revocation also restarts the
+tenant's generated channels for that connector: cancellation happens before a replacement plan can
+read settings, so a long-lived channel cannot retain authority that its store has revoked.
+
+`exchange.connection-plan.v1` remains the only accepted request version. `GET` defaults an omitted
+version to v1 and refuses an explicitly unsupported one. Composite and authority writes naming
+another version refuse before any value is collected or any step runs, with a dedicated `422`
+carrying `unsupported_connection_plan_version`, `requested` and `supported` — never an embedded v1
+plan that could be mistaken for the requested contract. A consumer receiving another response
+version refuses it before rendering or submitting; the console tests that closed-version check.
+
+Catalogue 0.18 does not yet publish the typed custom-origin policy delivered by upstream C-87. It
+can carry and test the generic lifecycle behind a fail-closed policy seam, but it does not activate
+today's inferred whole-authority connectors as a substitute. The released projection activates the
+lifecycle only after connector 0.19.0 publishes and Exchange consumes that typed declaration. No
+connector id, vendor field, path dependency or git dependency substitutes for that release seam.
 
 ## Consumers
 
