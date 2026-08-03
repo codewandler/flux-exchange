@@ -8,6 +8,7 @@
   "fields": [
     {
       "identity": "connection.name",
+      "provenance": "exchange",
       "name": "name",
       "service": null,
       "label": "Connection name",
@@ -24,6 +25,7 @@
     },
     {
       "identity": "config.default.region",
+      "provenance": "provider.config",
       "name": "region",
       "service": "default",
       "label": "Region",
@@ -44,6 +46,7 @@
     },
     {
       "identity": "config.default.account_email",
+      "provenance": "provider.config",
       "name": "account_email",
       "service": "default",
       "label": "Account email",
@@ -60,27 +63,46 @@
       }
     },
     {
-      "identity": "config.default.api_token",
-      "name": "api_token",
+      "identity": "config.default.service_token",
+      "provenance": "provider.config",
+      "name": "service_token",
       "service": "default",
-      "label": "API token",
+      "label": "Service token",
       "help": "A token issued by the provider.",
       "required": true,
       "secret": true,
       "input": "secret",
-      "binds": "credential.example_helpdesk.api_token",
+      "binds": "credential.example_helpdesk.service_token",
       "routable": true,
       "set": false,
       "target": {
-        "id": "credential.example_helpdesk.api_token"
+        "id": "credential.example_helpdesk.service_token"
       }
     },
     {
-      "identity": "config.audit.api_token",
-      "name": "api_token",
+      "identity": "config.audit.service_token",
+      "provenance": "provider.config",
+      "name": "service_token",
       "service": "audit",
-      "label": "Audit API token",
+      "label": "Audit service token",
       "help": "The same provider token is used by the audit service.",
+      "required": true,
+      "secret": true,
+      "input": "secret",
+      "binds": "credential.example_helpdesk.service_token",
+      "routable": true,
+      "set": false,
+      "target": {
+        "id": "credential.example_helpdesk.service_token"
+      }
+    },
+    {
+      "identity": "credential.example_helpdesk.api_token",
+      "provenance": "provider.auth",
+      "name": "api_token",
+      "service": null,
+      "label": "example_helpdesk.api_token",
+      "help": "The credential declared by provider authentication.",
       "required": true,
       "secret": true,
       "input": "secret",
@@ -93,6 +115,7 @@
     },
     {
       "identity": "config.events.callback",
+      "provenance": "provider.config",
       "name": "callback",
       "service": "events",
       "label": "Callback",

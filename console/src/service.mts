@@ -808,6 +808,7 @@ export interface ConnectionPlanTarget {
 /** One descriptor, retained even when another descriptor shares its submission target. */
 export interface ConnectionPlanField {
   identity: string
+  provenance: 'exchange' | 'provider.config' | 'provider.auth'
   name: string
   service: string | null
   label: string
@@ -886,6 +887,9 @@ function readPlanField(value: unknown, at: number): ConnectionPlanField | string
   for (const key of ['identity', 'name', 'label', 'help', 'input'] as const) {
     if (typeof value[key] !== 'string') return `${context} has no string \`${key}\``
   }
+  if (!['exchange', 'provider.config', 'provider.auth'].includes(String(value.provenance))) {
+    return `${context} has no valid \`provenance\``
+  }
   if (value.service !== null && typeof value.service !== 'string') return `${context} has an invalid \`service\``
   if (value.binds !== null && typeof value.binds !== 'string') return `${context} has invalid \`binds\``
   for (const key of ['required', 'secret', 'routable', 'set'] as const) {
@@ -919,9 +923,14 @@ function readPlanField(value: unknown, at: number): ConnectionPlanField | string
   if (target?.id.startsWith('credential.') && value.secret !== true) {
     return `${context} routes to a credential target but is not secret`
   }
+  if (value.provenance === 'provider.auth' &&
+      (value.service !== null || value.identity !== value.binds || value.identity !== target?.id || !value.secret)) {
+    return `${context} is not a complete synthesized provider.auth credential descriptor`
+  }
 
   return {
     identity: value.identity as string,
+    provenance: value.provenance as ConnectionPlanField['provenance'],
     name: value.name as string,
     service: value.service as string | null,
     label: value.label as string,
@@ -967,7 +976,7 @@ function readConnectionPlan(body: unknown, expectedConnector: string): Connectio
     fields.push(field)
   }
   const name = fields[0]
-  if (name.identity !== 'connection.name' || name.name !== 'name' || name.service !== null ||
+  if (name.identity !== 'connection.name' || name.provenance !== 'exchange' || name.name !== 'name' || name.service !== null ||
       name.binds !== null || name.target?.id !== 'connection.name' || !name.required || name.secret ||
       name.input !== 'text' || !name.routable) {
     return 'the first field is not `connection.name`'

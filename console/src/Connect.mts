@@ -103,6 +103,7 @@ function planFields(plan: ConnectionPlan): VNode {
     const status = field.required ? 'Required' : 'Optional'
     const metadata = [
       h('span', { class: 'connect__requirement' }, status),
+      h('span', { class: 'connect__provenance', 'data-provenance': field.provenance }, field.provenance),
       field.service === null ? null : h('code', { class: 'connect__service' }, field.service),
       h('span', { class: 'connect__set' }, field.set ? 'Set' : 'Missing'),
     ]

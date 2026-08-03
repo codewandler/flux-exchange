@@ -72,6 +72,14 @@ test('the_shared_v1_contract_is_read_whole_and_a_malformed_declared_row_fails_th
   })
   assert.equal(openClaimedClosed.status, 'failed')
   assert.match(openClaimedClosed.failure.detail, /empty choices/)
+
+  const missingProvenance = structuredClone(contract)
+  delete missingProvenance.fields[3].provenance
+  const provenanceDropped = await loadConnectionPlan(contract.connector, null, {
+    fetch: answer(200, missingProvenance).fetch,
+  })
+  assert.equal(provenanceDropped.status, 'failed')
+  assert.match(provenanceDropped.failure.detail, /provenance/)
 })
 
 test('the_generic_consumer_renders_every_shared_contract_descriptor_without_vendor_logic', async () => {
@@ -103,7 +111,8 @@ test('the_form_renders_labels_rename_choices_secrets_optional_status_and_unrouta
   for (const choice of contract.fields[1].choices) {
     assert.match(html, new RegExp(`value="${choice.value}"[^>]*>${choice.label}<`))
   }
-  assert.match(html, /data-plan-field="config.default.api_token"[\s\S]*?type="password"/)
+  assert.match(html, /data-plan-field="credential.example_helpdesk.api_token"[\s\S]*?data-provenance="provider.auth"/)
+  assert.match(html, /data-plan-field="credential.example_helpdesk.api_token"[\s\S]*?type="password"/)
   assert.equal([...html.matchAll(/<input[^>]*\srequired(?:\s|>)/g)].length, 1, 'only the name blocks submission')
   assert.match(html, /data-required="false"/)
   assert.match(html, /Optional/)
@@ -115,14 +124,14 @@ test('the_form_renders_labels_rename_choices_secrets_optional_status_and_unrouta
 test('one_control_and_one_submission_key_represent_rows_that_share_a_target', async () => {
   const html = await form()
   assert.equal(
-    [...html.matchAll(/name="credential\.example_helpdesk\.api_token"/g)].length,
+    [...html.matchAll(/name="credential\.example_helpdesk\.service_token"/g)].length,
     1,
     'two descriptors sharing one target must ask for the value only once',
   )
 
   const data = new FormData()
   data.set('name', 'renamed-support')
-  data.set('credential.example_helpdesk.api_token', 'one-token')
+  data.set('credential.example_helpdesk.service_token', 'one-token')
   data.set('setting.default.endpoint.region', 'europe')
   data.set('not-a-published-target', 'must-not-be-sent')
 
@@ -132,7 +141,7 @@ test('one_control_and_one_submission_key_represent_rows_that_share_a_target', as
     name: 'renamed-support',
     current_name: 'production',
     values: {
-      'credential.example_helpdesk.api_token': 'one-token',
+      'credential.example_helpdesk.service_token': 'one-token',
       'setting.default.endpoint.region': 'europe',
     },
   })
