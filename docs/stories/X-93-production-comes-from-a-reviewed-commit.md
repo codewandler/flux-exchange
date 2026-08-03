@@ -60,4 +60,8 @@ evidence of what was built, scanned and deployed.
   vulnerability/package coordinates so the next diagnosis does not depend on runner disk. The exact
   rebuilt image ran as uid/gid 10001, served health 0.16.1 and the secured console, and passed Grype
   0.110.0 at the `negligible` threshold with no exception.
+- 2026-08-03 — the scan-clean image deployed and Fly marked the machine healthy, but the post-deploy
+  verifier found the same undeclared `rg` dependency before it could record header evidence. The
+  visible rollback restored health 0.16.0. Both workflow-invoked verifiers now use portable
+  `grep -E`; a repository-wide operational-script search found no remaining `rg` invocation.
 - Remaining live work: merge the workflow and retain the first green production artifact.

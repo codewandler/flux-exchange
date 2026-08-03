@@ -17,7 +17,7 @@ require_header() {
   local file="$1"
   local name="$2"
   local expected="$3"
-  tr -d '\r' <"$file" | rg -qi "^${name}:[[:space:]]*${expected}([[:space:]]*|;.*)$" ||
+  tr -d '\r' <"$file" | grep -Eqi "^${name}:[[:space:]]*${expected}([[:space:]]*|;.*)$" ||
     fail "$name is absent or weaker than expected"
 }
 
