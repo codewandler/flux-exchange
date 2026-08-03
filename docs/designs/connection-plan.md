@@ -94,6 +94,52 @@ Unknown target identities, duplicate aliases for one target, and malformed selec
 before the first write. Missing inputs are omissions, not empty values, and keep required fields
 visibly incomplete.
 
+## A custom origin is proposed before it is authority
+
+Most endpoint settings fill a path, select from a connector-declared closed set, or remain below a
+literal vendor suffix. A custom-origin field is different: its value becomes the destination
+authority that receives this connection's credential. Supplying a credential or setting proves
+only that a human controlled an input. It does not prove that an operator reviewed the resulting
+authority, so neither the composite write nor the ordinary setting write may approve one as a side
+effect.
+
+The settings port persists an authority lifecycle beside the value, under the same tenant,
+connector, instance, service and declared field address:
+
+- `unset` has no proposed value;
+- `proposed` has a value and a monotonically changing proposal revision, but the runtime cannot
+  read it;
+- `approved` records that an operator explicitly approved that exact revision, so the runtime may
+  read it; and
+- `revoked` keeps the proposed value for repair but makes it unreadable to the runtime again.
+
+Changing a proposed value creates a new revision in `proposed`; it never carries approval forward.
+Clearing the setting removes both value and authority state. Approval is a checked transition over
+the revision published by the plan, so an operator cannot approve one proposal after a concurrent
+write replaced it. Revocation is checked the same way. Both transitions are persisted through the
+same owner-only settings binding and survive restart; a persistence failure refuses without
+changing the in-memory answer.
+
+The plan marks these fields generically and publishes their value-free state, revision, and
+operator-only approve/revoke actions. On
+`/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority`, `PUT`
+approves and `DELETE` revokes the selected label's current matching proposal. Each action carries
+only the plan version and proposal revision. The route remains under the deployment's existing
+`OperatorPolicy`, derives the tenant from the principal, and treats connector, label, service and
+declared field only as catalogue/registry keys. It accepts no origin value. Audit records name that
+derived setting address and the transition, never the proposed value.
+
+`exchange.connection-plan.v1` remains the only accepted request version. Composite and authority
+writes naming another version refuse explicitly before any value is collected or any step runs. A
+consumer receiving another response version refuses it before rendering or submitting; the console
+tests that closed-version check.
+
+Catalogue 0.18 does not yet publish the typed custom-origin policy delivered by upstream C-87. The
+generic projection can conservatively exercise the lifecycle against the existing declaration
+analysis, but the released integration consumes the typed policy only after connector 0.19.0 is
+published. No connector id, vendor field, path dependency or git dependency substitutes for that
+release seam.
+
 ## Consumers
 
 The console renders only the versioned rows and targets the service returns. It keeps entered values
@@ -101,10 +147,10 @@ in DOM controls until submission and holds only the value-free result afterwards
 password controls, closed rows are selects, and all other rows are text-like inputs derived from
 `input`. Existing labels are selectable and the selected `name` remains editable.
 
-Flux consumes the same JSON contract and target identities. Scriptable aliases such as `--site`,
+Flux can consume the same JSON contract and target identities. Scriptable aliases such as `--site`,
 `--domain`, or `--endpoint` may resolve to a published field identity, but are not schema. A vendor
 secret has no argv representation: a non-interactive client must use secure stdin/prompt or an
-Exchange-owned browser handoff. The committed contract fixture is intentionally vendor-neutral. The
-server projection and browser client exercise it here. X-125 is not complete until the actual Flux
-CLI consumer also exercises that same artifact; a future consumer is not evidence that the present
-acceptance passed.
+Exchange-owned browser handoff. The committed contract fixture is intentionally vendor-neutral and
+is exercised by the production server projection and browser client here. The cross-repository Flux
+CLI proof is scheduled under its own consumer story so neither repository claims a future client as
+evidence for its current completion.
