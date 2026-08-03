@@ -11,8 +11,10 @@ import { LatestConnectionRequest } from '../src/connection-plan-state.mts'
 import {
   CONNECTION_PLAN_VERSION,
   applyConnectionPlan,
+  connectionAuthorityEndpoint,
   connectionPlanEndpoint,
   loadConnectionPlan,
+  transitionConnectionAuthority,
 } from '../src/service.mts'
 
 const consoleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -96,6 +98,166 @@ test('the_generic_consumer_renders_every_shared_contract_descriptor_without_vend
   for (const vendorWord of ['jira', 'zendesk', 'site', 'subdomain', 'domain', 'api_token']) {
     assert.doesNotMatch(source, new RegExp(vendorWord, 'i'), `Connect.mts carries vendor/schema logic for ${vendorWord}`)
   }
+})
+
+test('custom_origin_authority_is_strict_value_free_and_not_a_vendor_schema', async () => {
+  const field = contract.fields.find(({ authority }) => authority !== undefined)
+  assert.ok(field, 'the shared fixture has no authority-bearing field')
+
+  const html = await form()
+  assert.match(html, new RegExp(`data-plan-field="${field.identity}"[\\s\\S]*?data-authority-state="proposed"`))
+  assert.match(html, /Approve proposed authority/)
+  assert.match(html, /Revoke proposal/)
+  assert.match(html, /cannot use it until an operator approves this revision/i)
+  assert.doesNotMatch(JSON.stringify(field), /https?:\/\//, 'the fixture disclosed the proposed origin')
+  assert.equal(field.set, false, 'a proposal was reported as runtime-effective before approval')
+
+  const malformed = [
+    { ...field.authority, state: 'unset', revision: '1', actions: null },
+    { ...field.authority, revision: null },
+    { ...field.authority, revision: '0' },
+    { ...field.authority, revision: '01' },
+    { ...field.authority, revision: '18446744073709551616' },
+    { ...field.authority, actions: { ...field.authority.actions, approve: { ...field.authority.actions.approve, method: 'POST' } } },
+    { ...field.authority, actions: { ...field.authority.actions, revoke: { ...field.authority.actions.revoke, target: 'https://example.invalid/authority' } } },
+    { ...field.authority, state: 'unknown' },
+    { ...field.authority, value: 'must-never-be-accepted' },
+  ]
+  for (const authority of malformed) {
+    const body = structuredClone(contract)
+    body.fields.find(({ identity }) => identity === field.identity).authority = authority
+    const state = await loadConnectionPlan(contract.connector, contract.selection, { fetch: answer(200, body).fetch })
+    assert.equal(state.status, 'failed', `accepted malformed authority ${JSON.stringify(authority)}`)
+    assert.match(state.failure.detail, /authority/i)
+  }
+
+  const effectiveProposal = structuredClone(contract)
+  effectiveProposal.fields.find(({ identity }) => identity === field.identity).set = true
+  const inconsistent = await loadConnectionPlan(contract.connector, contract.selection, {
+    fetch: answer(200, effectiveProposal).fetch,
+  })
+  assert.equal(inconsistent.status, 'failed')
+  assert.match(inconsistent.failure.detail, /runtime-effective/i)
+
+  const approvedPlan = structuredClone(contract)
+  const approvedField = approvedPlan.fields.find(({ identity }) => identity === field.identity)
+  approvedField.authority.state = 'approved'
+  approvedField.set = true
+  const approvedHtml = await form({ plan: { status: 'ready', plan: approvedPlan } })
+  assert.match(approvedHtml, /data-authority-state="approved"/)
+  assert.match(approvedHtml, /Revoke authority/)
+
+  const revokedPlan = structuredClone(contract)
+  revokedPlan.fields.find(({ identity }) => identity === field.identity).authority.state = 'revoked'
+  const revokedHtml = await form({ plan: { status: 'ready', plan: revokedPlan } })
+  assert.match(revokedHtml, /data-authority-state="revoked"/)
+  assert.match(revokedHtml, /Approve proposed authority/)
+
+  const unsetPlan = structuredClone(contract)
+  const unsetField = unsetPlan.fields.find(({ identity }) => identity === field.identity)
+  unsetField.authority = { state: 'unset', revision: null, actions: null }
+  const unsetHtml = await form({ plan: { status: 'ready', plan: unsetPlan } })
+  assert.match(unsetHtml, /data-authority-state="unset"/)
+  assert.match(unsetHtml, /No proposal/)
+
+  const unrelatedTarget = structuredClone(contract)
+  const actions = unrelatedTarget.fields.find(({ identity }) => identity === field.identity).authority.actions
+  actions.approve.target = '/api/grants'
+  actions.revoke.target = '/api/grants'
+  const unrelated = await loadConnectionPlan(contract.connector, contract.selection, {
+    fetch: answer(200, unrelatedTarget).fetch,
+  })
+  assert.equal(unrelated.status, 'failed')
+  assert.match(unrelated.failure.detail, /declared setting/i)
+
+  assert.equal(
+    connectionAuthorityEndpoint('connector/name', 'production west', 'service/name', 'endpoint.custom/origin'),
+    '/api/connections/connector%2Fname/instances/production%20west/settings/service%2Fname/endpoint.custom%2Forigin/authority',
+  )
+})
+
+test('authority_actions_send_only_version_and_revision_and_accept_only_the_matching_transition', async () => {
+  const field = contract.fields.find(({ authority }) => authority?.state === 'proposed')
+  const revision = field.authority.revision
+  const approved = {
+    version: CONNECTION_PLAN_VERSION,
+    connector: contract.connector,
+    label: contract.selection,
+    service: field.service,
+    field: field.binds,
+    authority: { state: 'approved', revision },
+  }
+  const served = answer(200, approved)
+  const outcome = await transitionConnectionAuthority({
+    connector: contract.connector,
+    label: contract.selection,
+    service: field.service,
+    field: field.binds,
+    revision,
+    action: field.authority.actions.approve,
+  }, { fetch: served.fetch })
+
+  assert.equal(outcome.status, 'answered')
+  assert.deepEqual(outcome.result, approved)
+  const [{ url, init }] = served.asked
+  assert.equal(url, field.authority.actions.approve.target)
+  assert.equal(init.method, 'PUT')
+  assert.deepEqual(JSON.parse(init.body), { version: CONNECTION_PLAN_VERSION, revision })
+
+  const wrongState = await transitionConnectionAuthority({
+    connector: contract.connector, label: contract.selection, service: field.service, field: field.binds,
+    revision, action: field.authority.actions.approve,
+  }, { fetch: answer(200, { ...approved, authority: { state: 'revoked', revision } }).fetch })
+  assert.equal(wrongState.status, 'failed')
+  assert.match(wrongState.failure.detail, /approve|approved/i)
+
+  const wrongVersion = await transitionConnectionAuthority({
+    connector: contract.connector, label: contract.selection, service: field.service, field: field.binds,
+    revision, action: field.authority.actions.approve,
+  }, { fetch: answer(200, { ...approved, version: 'exchange.connection-plan.v2' }).fetch })
+  assert.equal(wrongVersion.status, 'failed')
+  assert.match(wrongVersion.failure.detail, /version/i)
+
+  const disclosed = await transitionConnectionAuthority({
+    connector: contract.connector, label: contract.selection, service: field.service, field: field.binds,
+    revision, action: field.authority.actions.approve,
+  }, { fetch: answer(200, { ...approved, authority: { ...approved.authority, value: 'not-a-response-field' } }).fetch })
+  assert.equal(disclosed.status, 'failed')
+  assert.match(disclosed.failure.detail, /unexpected|value-free|closed/i)
+
+  const wrongStatus = await transitionConnectionAuthority({
+    connector: contract.connector, label: contract.selection, service: field.service, field: field.binds,
+    revision, action: field.authority.actions.approve,
+  }, { fetch: answer(201, approved).fetch })
+  assert.equal(wrongStatus.status, 'failed')
+  assert.match(wrongStatus.failure.detail, /HTTP 201/i)
+})
+
+test('revocation_uses_delete_with_the_same_revision_and_returns_no_origin', async () => {
+  const field = contract.fields.find(({ authority }) => authority?.state === 'proposed')
+  const revision = field.authority.revision
+  const body = {
+    version: CONNECTION_PLAN_VERSION, connector: contract.connector, label: contract.selection,
+    service: field.service, field: field.binds, authority: { state: 'revoked', revision },
+  }
+  const served = answer(200, body)
+  const outcome = await transitionConnectionAuthority({
+    connector: contract.connector, label: contract.selection, service: field.service, field: field.binds,
+    revision, action: field.authority.actions.revoke,
+  }, { fetch: served.fetch })
+  assert.equal(outcome.status, 'answered')
+  assert.equal(served.asked[0].init.method, 'DELETE')
+  assert.deepEqual(JSON.parse(served.asked[0].init.body), { version: CONNECTION_PLAN_VERSION, revision })
+  assert.doesNotMatch(JSON.stringify(outcome), /https?:\/\//)
+})
+
+test('unsupported_plan_versions_are_refused_before_render_or_submit', async () => {
+  const state = await loadConnectionPlan(contract.connector, contract.selection, {
+    fetch: answer(200, { ...contract, version: 'exchange.connection-plan.v2' }).fetch,
+  })
+  assert.equal(state.status, 'failed')
+  assert.match(state.failure.detail, /version/i)
+  assert.equal(state.plan, undefined)
 })
 
 test('the_form_renders_labels_rename_choices_secrets_optional_status_and_unroutable_rows', async () => {
@@ -227,6 +389,7 @@ test('secret_values_have_no_reactive_or_persistent_mirror', () => {
   assert.match(connectSource, /new FormData\(event\.currentTarget/)
   assert.match(appSource, /connectionPlanRequests\.admits/)
   assert.match(appSource, /connectionApplyRequests\.admits/)
+  assert.match(appSource, /authorityRequests\.admits/)
 })
 
 test('a_late_plan_for_an_old_connector_or_label_cannot_replace_the_current_one', () => {

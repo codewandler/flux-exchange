@@ -6,6 +6,9 @@ import ConnectorPicker from './ConnectorPicker.mts'
 import type { Connector } from './catalog.mts'
 import {
   CONNECTION_PLAN_VERSION,
+  type ConnectionAuthorityAction,
+  type ConnectionAuthorityOutcome,
+  type ConnectionAuthorityTransition,
   type ConnectionPlan,
   type ConnectionPlanField,
   type ConnectionPlanOutcome,
@@ -92,8 +95,72 @@ function fieldControl(field: ConnectionPlanField): VNode {
   })
 }
 
+/** Render the value-free review state and only the actions advertised for this exact revision. */
+function authorityBody(
+  plan: ConnectionPlan,
+  field: ConnectionPlanField,
+  busy: string,
+  transition: (identity: string, request: ConnectionAuthorityTransition) => void,
+): VNode | null {
+  const authority = field.authority
+  if (authority === undefined) return null
+
+  const explanation = {
+    unset: 'No authority has been proposed, so the runtime has no origin to use.',
+    proposed: 'The runtime cannot use it until an operator approves this revision.',
+    approved: 'This revision is approved, so the runtime may use it without disclosing its value here.',
+    revoked: 'This proposal is revoked, so the runtime cannot use it.',
+  }[authority.state]
+  const labels = {
+    unset: 'No proposal', proposed: 'Approval required', approved: 'Approved', revoked: 'Revoked',
+  }[authority.state]
+  const action = (choice: ConnectionAuthorityAction): void => {
+    if (plan.selection === null || field.service === null || field.binds === null || authority.revision === null) return
+    transition(field.identity, {
+      connector: plan.connector,
+      label: plan.selection,
+      service: field.service,
+      field: field.binds,
+      revision: authority.revision,
+      action: choice,
+    })
+  }
+  const working = busy === field.identity
+
+  return h('aside', {
+    class: ['connect__authority', `connect__authority--${authority.state}`],
+    'data-authority-state': authority.state,
+  }, [
+    h('div', { class: 'connect__authority-head' }, [
+      h('strong', { class: 'connect__authority-badge' }, labels),
+      authority.revision === null
+        ? null
+        : h('span', { class: 'connect__authority-revision' }, `Revision ${authority.revision}`),
+    ]),
+    h('p', { class: 'connect__authority-help' }, explanation),
+    authority.actions === null ? null : h('div', { class: 'connect__authority-actions' }, [
+      authority.state === 'proposed' || authority.state === 'revoked'
+        ? h('button', {
+          type: 'button', disabled: working,
+          onClick: () => action(authority.actions!.approve),
+        }, working ? 'Changing authority…' : 'Approve proposed authority')
+        : null,
+      authority.state === 'proposed' || authority.state === 'approved'
+        ? h('button', {
+          type: 'button', disabled: working,
+          onClick: () => action(authority.actions!.revoke),
+        }, working ? 'Changing authority…' : authority.state === 'proposed' ? 'Revoke proposal' : 'Revoke authority')
+        : null,
+    ]),
+  ])
+}
+
 /** Render every descriptor, while asking once for a target that several descriptors share. */
-function planFields(plan: ConnectionPlan): VNode {
+function planFields(
+  plan: ConnectionPlan,
+  authorityBusy: string,
+  transition: (identity: string, request: ConnectionAuthorityTransition) => void,
+): VNode {
   const controls = new Map<string, ConnectionPlanField>()
   return h('div', { class: 'connect__fields' }, plan.fields.map((field) => {
     const target = field.target?.id ?? null
@@ -137,11 +204,19 @@ function planFields(plan: ConnectionPlan): VNode {
       ]),
       h('p', { class: 'connect__help' }, field.help),
       control,
+      authorityBody(plan, field, authorityBusy, transition),
     ])
   }))
 }
 
-function planBody(state: ConnectionPlanState, connector: string, retry: () => void, select: (label: string) => void): VNode {
+function planBody(
+  state: ConnectionPlanState,
+  connector: string,
+  retry: () => void,
+  select: (label: string) => void,
+  authorityBusy: string,
+  transition: (identity: string, request: ConnectionAuthorityTransition) => void,
+): VNode {
   switch (state.status) {
     case 'loading':
       return h('div', { class: 'connections__skeleton', 'aria-label': `Reading ${connector}'s connection plan` }, [
@@ -172,10 +247,26 @@ function planBody(state: ConnectionPlanState, connector: string, retry: () => vo
             ...plan.labels.map((label) => h('option', { key: label, value: label }, label)),
           ]),
         ]),
-        planFields(plan),
+        planFields(plan, authorityBusy, transition),
       ])
     }
   }
+}
+
+function authorityOutcomeBody(outcome: ConnectionAuthorityOutcome): VNode {
+  if (outcome.status === 'refused') return refusalNotice(outcome.refusal)
+  if (outcome.status === 'failed') {
+    return h('section', { class: 'failure', role: 'alert', 'data-authority-outcome': 'failed' }, [
+      h('h3', { class: 'failure__title' }, 'The authority change could not be read'),
+      h('p', { class: 'failure__message' }, failureSentence(outcome.failure)),
+    ])
+  }
+  return h('p', {
+    class: 'connect__authority-result', role: 'status',
+    'data-authority-outcome': outcome.result.authority.state,
+  }, outcome.result.authority.state === 'approved'
+    ? `Revision ${outcome.result.authority.revision} is approved.`
+    : `Revision ${outcome.result.authority.revision} is revoked.`)
 }
 
 function resultBody(outcome: ConnectionPlanOutcome): VNode {
@@ -218,9 +309,11 @@ export default defineComponent({
     chosen: { type: String as PropType<string | null>, default: null },
     plan: { type: Object as PropType<ConnectionPlanState | null>, default: null },
     outcome: { type: Object as PropType<ConnectionPlanOutcome | null>, default: null },
+    authorityOutcome: { type: Object as PropType<ConnectionAuthorityOutcome | null>, default: null },
+    authorityBusy: { type: String, default: '' },
     busy: { type: Boolean, default: false },
   },
-  emits: ['choose', 'select-label', 'submit', 'retry'],
+  emits: ['choose', 'select-label', 'submit', 'retry', 'authority'],
   setup(props, { emit }) {
     const element = ref<HTMLFormElement | null>(null)
     watch(() => props.outcome, (outcome) => {
@@ -259,13 +352,21 @@ export default defineComponent({
             'onChoose': (id: string) => emit('choose', id),
           }),
           props.chosen !== null && props.plan !== null
-            ? planBody(props.plan, props.chosen, () => emit('retry'), (label) => emit('select-label', label))
+            ? planBody(
+              props.plan,
+              props.chosen,
+              () => emit('retry'),
+              (label) => emit('select-label', label),
+              props.authorityBusy,
+              (identity, request) => emit('authority', identity, request),
+            )
             : null,
           h('button', {
             type: 'submit', class: 'connect__submit', 'data-connect': 'submit',
             disabled: props.busy || !ready,
           }, props.busy ? 'Applying…' : 'Apply connection plan'),
         ]),
+        props.authorityOutcome === null ? null : authorityOutcomeBody(props.authorityOutcome),
         props.outcome === null ? null : resultBody(props.outcome),
       ])
     }

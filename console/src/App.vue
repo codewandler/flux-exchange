@@ -52,6 +52,7 @@ import {
   saveWorkflow,
   saveWorkflowGraph,
   signOut,
+  transitionConnectionAuthority,
   sendAppMessage,
   startWorkflowRun,
   validateWorkflowEdit,
@@ -70,6 +71,8 @@ import {
   type ConnectionPlanOutcome,
   type ConnectionPlanState,
   type ConnectionPlanSubmission,
+  type ConnectionAuthorityOutcome,
+  type ConnectionAuthorityTransition,
   type EditorCatalogState,
   type GrantOutcome,
   type GrantsState,
@@ -341,15 +344,25 @@ const chosen = shallowRef<string | null>(null)
 const selectedConnectionLabel = shallowRef<string | null>(null)
 const connectionPlan = shallowRef<ConnectionPlanState | null>(null)
 const outcome = shallowRef<ConnectionPlanOutcome | null>(null)
+const authorityOutcome = shallowRef<ConnectionAuthorityOutcome | null>(null)
+const authorityBusy = shallowRef('')
 const connecting = shallowRef(false)
 const connectionPlanRequests = new LatestConnectionRequest()
 const connectionApplyRequests = new LatestConnectionRequest()
+const authorityRequests = new LatestConnectionRequest()
+
+function invalidateAuthority(): void {
+  authorityRequests.invalidate()
+  authorityBusy.value = ''
+  authorityOutcome.value = null
+}
 
 /** A connector was chosen: ask for its complete plan, and forget the last attempt. */
 async function chooseConnector(connector: string) {
   if (connecting.value) return
   const id = connector || null
   connectionApplyRequests.invalidate()
+  invalidateAuthority()
   chosen.value = id
   selectedConnectionLabel.value = null
   outcome.value = null
@@ -378,6 +391,7 @@ async function selectConnectionLabel(label: string) {
   const selection = label || null
   const ticket = connectionPlanRequests.begin(connector, selection)
   connectionApplyRequests.invalidate()
+  invalidateAuthority()
   selectedConnectionLabel.value = selection
   outcome.value = null
   connectionPlan.value = { status: 'loading' }
@@ -407,6 +421,7 @@ async function connectChosen(
 ) {
   if (chosen.value !== connector || selectedConnectionLabel.value !== selection || connecting.value) return
   const ticket = connectionApplyRequests.begin(connector, selection)
+  invalidateAuthority()
 
   connecting.value = true
   const answered = await applyConnectionPlan(connector, submission)
@@ -418,6 +433,39 @@ async function connectChosen(
     connectionPlan.value = { status: 'ready', plan: outcome.value.result.plan }
     selectedConnectionLabel.value = outcome.value.result.plan.selection
     await reloadConnections()
+  }
+}
+
+/** Change only the exact value-free revision and action the current plan advertised. */
+async function changeConnectionAuthority(identity: string, transition: ConnectionAuthorityTransition) {
+  if (connecting.value || authorityBusy.value !== '') return
+  const current = connectionPlan.value
+  if (current?.status !== 'ready' || current.plan.connector !== chosen.value ||
+      current.plan.selection !== selectedConnectionLabel.value || transition.connector !== chosen.value ||
+      transition.label !== selectedConnectionLabel.value) return
+
+  const field = current.plan.fields.find((candidate) => candidate.identity === identity)
+  const authority = field?.authority
+  const advertised = transition.action.method === 'PUT' ? authority?.actions?.approve : authority?.actions?.revoke
+  if (field?.service === null || field?.service !== transition.service || field.binds !== transition.field ||
+      authority?.revision !== transition.revision || advertised?.method !== transition.action.method ||
+      advertised.target !== transition.action.target) return
+
+  const ticket = authorityRequests.begin(transition.connector, transition.label)
+  authorityBusy.value = identity
+  authorityOutcome.value = null
+  const answered = await transitionConnectionAuthority(transition)
+  if (!authorityRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) return
+  authorityBusy.value = ''
+  authorityOutcome.value = answered
+
+  if (answered.status === 'answered') {
+    const planTicket = connectionPlanRequests.begin(transition.connector, transition.label)
+    connectionPlan.value = { status: 'loading' }
+    const state = await loadConnectionPlan(transition.connector, transition.label)
+    if (connectionPlanRequests.admits(planTicket, chosen.value, selectedConnectionLabel.value)) {
+      connectionPlan.value = state
+    }
   }
 }
 
@@ -627,11 +675,14 @@ const active = computed(() => surfaceOfRoute(route.value.name))
             :chosen="chosen"
             :plan="connectionPlan"
             :outcome="outcome"
+            :authority-outcome="authorityOutcome"
+            :authority-busy="authorityBusy"
             :busy="connecting"
             @choose="chooseConnector"
             @select-label="selectConnectionLabel"
             @submit="connectChosen"
             @retry="retryConnectionPlan"
+            @authority="changeConnectionAuthority"
           />
         </template>
 

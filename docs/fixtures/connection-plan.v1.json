@@ -63,6 +63,37 @@
       }
     },
     {
+      "identity": "config.default.custom_origin",
+      "provenance": "provider.config",
+      "name": "custom_origin",
+      "service": "default",
+      "label": "Custom origin",
+      "help": "A proposed authority must be approved before the runtime can use it.",
+      "required": true,
+      "secret": false,
+      "input": "url",
+      "binds": "endpoint.custom_origin",
+      "routable": true,
+      "set": false,
+      "target": {
+        "id": "setting.default.endpoint.custom_origin"
+      },
+      "authority": {
+        "state": "proposed",
+        "revision": "42",
+        "actions": {
+          "approve": {
+            "method": "PUT",
+            "target": "/api/connections/example-helpdesk/instances/production/settings/default/endpoint.custom_origin/authority"
+          },
+          "revoke": {
+            "method": "DELETE",
+            "target": "/api/connections/example-helpdesk/instances/production/settings/default/endpoint.custom_origin/authority"
+          }
+        }
+      }
+    },
+    {
       "identity": "config.default.service_token",
       "provenance": "provider.config",
       "name": "service_token",

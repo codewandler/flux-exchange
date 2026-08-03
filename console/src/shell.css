@@ -493,6 +493,65 @@
   font-family: var(--vp-font-family-mono);
 }
 
+.connect__authority {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 10px;
+  border-left: 3px solid var(--vp-c-warning-1);
+  background-color: var(--vp-c-default-soft);
+}
+
+.connect__authority--approved { border-left-color: var(--vp-c-success-1); }
+.connect__authority--revoked { border-left-color: var(--vp-c-danger-1); }
+.connect__authority--unset { border-left-color: var(--vp-c-divider); }
+
+.connect__authority-head,
+.connect__authority-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.connect__authority-badge {
+  color: var(--vp-c-text-1);
+  font-size: 12px;
+}
+
+.connect__authority-revision {
+  color: var(--vp-c-text-3);
+  font-family: var(--vp-font-family-mono);
+  font-size: 11px;
+}
+
+.connect__authority-help {
+  margin: 0;
+  color: var(--vp-c-text-2);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.connect__authority-actions button {
+  padding: 6px 10px;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 6px;
+  background-color: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  cursor: pointer;
+}
+
+.connect__authority-actions button[disabled] {
+  color: var(--vp-c-text-3);
+  cursor: not-allowed;
+}
+
+.connect__authority-result {
+  margin: 14px 0 0;
+  color: var(--vp-c-success-1);
+  font-size: 13px;
+}
+
 .connect__state {
   width: fit-content;
   margin: 0 0 12px;
