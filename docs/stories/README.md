@@ -42,6 +42,9 @@ lockfile and compile-time tests.
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-125 — Generate one complete labelled connection plan for browser and CLI](X-125-generate-a-complete-labelled-connection-plan.md) · Milestone 1 — one declaration-driven contract asks for the label, every secret and setting, and exposes incomplete or partial state honestly to browser and Flux CLI
 
+### rich connector runtimes through Exchange
+- [X-129 — Bind local-release protocol identities to the delivered HTTP wire](X-129-bind-release-protocol-ids-to-the-http-wire.md) · Milestone 1 — compatibility advertises exact tested HTTP wire identities, never placeholders or a package-version guess
+
 ### a deployment a stranger can reach
 _Everything this platform does can only be seen on `127.0.0.1`. The getting-started page walks a_
 - [X-126 — Publish verified local Exchange binaries for every Flux platform](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — Flux can manage a separately released, attested Exchange executable on a clean machine without bundling plugins or trusting PATH
