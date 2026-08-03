@@ -1821,6 +1821,141 @@ mod tests {
         }
     }
 
+    /// The browser fixture and the production serializer are one v1 contract, not two similar
+    /// documents maintained in different trees. Values deliberately differ; the wire vocabulary,
+    /// optional-member coverage and generic shared-target shape may not.
+    #[tokio::test]
+    async fn shared_browser_fixture_matches_the_production_plan_wire_shape() {
+        fn keys(value: &Value) -> BTreeSet<String> {
+            value
+                .as_object()
+                .expect("a JSON object")
+                .keys()
+                .cloned()
+                .collect()
+        }
+
+        fn key_union(values: &[Value]) -> BTreeSet<String> {
+            values.iter().flat_map(keys).collect()
+        }
+
+        fn key_intersection(values: &[Value]) -> BTreeSet<String> {
+            let mut values = values.iter();
+            let mut intersection = values.next().map(keys).expect("at least one value");
+            for value in values {
+                intersection.retain(|key| keys(value).contains(key));
+            }
+            intersection
+        }
+
+        let fixture: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/fixtures/connection-plan.v1.json"
+        )))
+        .expect("the committed browser fixture is JSON");
+        assert_eq!(fixture["version"], VERSION);
+        let fixture_fields = fixture["fields"]
+            .as_array()
+            .expect("fixture fields")
+            .clone();
+
+        let harness = harness(usize::MAX);
+        let mut live_plans = Vec::new();
+        let mut live_fields = Vec::new();
+        for provider in connector_catalog::providers() {
+            let (status, plan) = call(
+                &harness.app,
+                "alice",
+                Method::GET,
+                &format!("/api/connections/{}/plan", provider.id),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{}: {plan}", provider.id);
+            live_fields.extend(
+                plan["fields"]
+                    .as_array()
+                    .expect("served fields")
+                    .iter()
+                    .cloned(),
+            );
+            live_plans.push(plan);
+        }
+
+        assert_eq!(keys(&fixture), keys(&live_plans[0]));
+        assert_eq!(keys(&fixture["apply"]), keys(&live_plans[0]["apply"]));
+        assert_eq!(key_union(&fixture_fields), key_union(&live_fields));
+        assert_eq!(
+            key_intersection(&fixture_fields),
+            key_intersection(&live_fields)
+        );
+
+        let fixture_targets: Vec<Value> = fixture_fields
+            .iter()
+            .filter_map(|field| field.get("target"))
+            .filter(|target| !target.is_null())
+            .cloned()
+            .collect();
+        let live_targets: Vec<Value> = live_fields
+            .iter()
+            .filter_map(|field| field.get("target"))
+            .filter(|target| !target.is_null())
+            .cloned()
+            .collect();
+        assert!(fixture_targets
+            .iter()
+            .all(|target| keys(target) == keys(&live_targets[0])));
+
+        let fixture_choices: Vec<Value> = fixture_fields
+            .iter()
+            .filter_map(|field| field.get("choices").and_then(Value::as_array))
+            .flatten()
+            .cloned()
+            .collect();
+        let live_choices: Vec<Value> = live_fields
+            .iter()
+            .filter_map(|field| field.get("choices").and_then(Value::as_array))
+            .flatten()
+            .cloned()
+            .collect();
+        assert!(!fixture_choices.is_empty());
+        assert!(!live_choices.is_empty());
+        assert!(
+            fixture_choices
+                .iter()
+                .chain(&live_choices)
+                .all(|choice| keys(choice)
+                    == BTreeSet::from(["label".to_owned(), "value".to_owned()]))
+        );
+
+        let provenance = |fields: &[Value]| -> BTreeSet<String> {
+            fields
+                .iter()
+                .filter_map(|field| field["provenance"].as_str().map(str::to_owned))
+                .collect()
+        };
+        let expected = BTreeSet::from([
+            "exchange".to_owned(),
+            "provider.auth".to_owned(),
+            "provider.config".to_owned(),
+        ]);
+        assert_eq!(provenance(&fixture_fields), expected);
+        assert_eq!(provenance(&live_fields), expected);
+
+        let has_shared_target = |fields: &[Value]| {
+            let mut seen = BTreeSet::new();
+            fields.iter().any(|field| {
+                field["target"]["id"]
+                    .as_str()
+                    .is_some_and(|target| !seen.insert(target))
+            })
+        };
+        assert!(has_shared_target(&fixture_fields));
+        assert!(live_plans
+            .iter()
+            .any(|plan| has_shared_target(plan["fields"].as_array().expect("served fields"))));
+    }
+
     #[tokio::test]
     async fn operator_plan_reports_partial_persistence_and_retry_resumes_the_same_instance() {
         let harness = harness(2);
