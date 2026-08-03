@@ -1,11 +1,11 @@
 ---
 id: X-94
 title: "Persistent state has a tested recovery path"
-status: in-progress
+status: done
 priority: 1
 epic: remote-deployment
 areas: [deployment, operations]
-note: "Wave #1 declares and monitors daily 14-day snapshots and specifies the isolated quarterly drill plus independent encrypted backup; the existing volume update and timed live drill remain protected operations."
+note: "The encrypted production volume has daily 14-day snapshots, automated freshness monitoring and a completed isolated 597-second recovery drill; the v0.16.1 post-release snapshot is inside the 24-hour RPO."
 ---
 
 # Persistent state has a tested recovery path
@@ -30,7 +30,7 @@ in isolation before an incident asks the procedure to work for the first time.
 - [x] Define an independent recovery measure for important single-volume data, following Fly's
       warning that daily snapshots are not a complete backup plan:
       <https://fly.io/docs/volumes/snapshots/>.
-- [ ] Record dated restore evidence without recording store contents. Produce a versioned Fly
+- [x] Record dated restore evidence without recording store contents. Produce a versioned Fly
       release and live-verify the retention and newest snapshot after rollout.
 
 ## Evidence
@@ -57,4 +57,7 @@ in isolation before an incident asks the procedure to work for the first time.
   was destroyed before production restarted. Elapsed recovery/decommission time was 597 seconds,
   well below the 60-minute RTO. Public health and the one-machine/one-encrypted-volume topology
   passed after restart. No machine, volume, snapshot or store identifier was retained.
-- Remaining live work: verify the newest snapshot again after the versioned workflow release.
+- 2026-08-03 — after the v0.16.1 workflow release, the verifier again found exactly one encrypted
+  production volume with scheduled snapshots and 14-day retention. The newest completed snapshot
+  was about 15.8 hours old, inside the 24-hour RPO. The retained evidence names only timestamps,
+  age, policy and topology counts; no volume, snapshot or store identifier or content was recorded.

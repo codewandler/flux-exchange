@@ -32,3 +32,11 @@ consuming the service's entire useful budget without visibility.
       bodies.
 - [ ] Produce a versioned Fly release and live-verify edge refusal, per-principal fairness, metrics
       and the unchanged process ceiling.
+
+## Evidence
+
+- 2026-08-03 — v0.16.1 served 40 concurrent anonymous sign-in requests without following the
+  provider redirects: 30 were admitted and 10 refused immediately with `429`; every refusal carried
+  `Retry-After`. Health remained `200` after saturation. `/metrics` then exposed exactly the seven
+  fixed series, recording 30 admitted and 10 globally refused sign-ins with no caller-derived label.
+  An authenticated two-principal live comparison remains before the release acceptance is complete.
