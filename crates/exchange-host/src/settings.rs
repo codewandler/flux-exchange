@@ -169,6 +169,57 @@ pub const MAX_SETTING_VALUE_BYTES: usize = 1024;
 /// configuration lives here in the first place — see this module's documentation.
 pub const MAX_TENANT_SETTINGS_BYTES: usize = 16 * 1024;
 
+/// Dormant policy seam for catalogue-declared custom origins.
+///
+/// Connector catalogue 0.18 has no typed custom-origin declaration, so the production binding
+/// installs no policy and every whole-authority field keeps refusing. A future composition may
+/// supply an implementation only from the released typed declaration; tests use an explicit
+/// fixture policy without turning a connector id or field name into production policy.
+trait CustomOriginPolicy: Send + Sync {
+    /// Whether this exact declared setting carries the typed custom-origin policy.
+    fn admits(&self, connector: &str, declared: &DeclaredSetting) -> bool;
+}
+
+#[derive(Debug)]
+struct DormantCustomOriginPolicy;
+
+impl CustomOriginPolicy for DormantCustomOriginPolicy {
+    fn admits(&self, _: &str, _: &DeclaredSetting) -> bool {
+        false
+    }
+}
+
+/// Value-free lifecycle state for one custom-origin setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthorityState {
+    /// No value is stored.
+    Unset,
+    /// A value awaits explicit review.
+    Proposed,
+    /// The exact proposal revision is admitted to the runtime.
+    Approved,
+    /// The proposal remains stored but is not admitted to the runtime.
+    Revoked,
+}
+
+/// Value-free authority status published to operator surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthorityStatus {
+    /// Current lifecycle state.
+    pub state: AuthorityState,
+    /// Durable proposal revision, absent only while unset.
+    pub revision: Option<u64>,
+}
+
+impl AuthorityStatus {
+    fn unset() -> Self {
+        Self {
+            state: AuthorityState::Unset,
+            revision: None,
+        }
+    }
+}
+
 // The two bounds answer different questions, and the second is only worth having while it is the
 // tighter one. Asserted at compile time rather than in a test, for
 // `crate::connections`' reason: a tenant allowance below one whole value refuses every real
@@ -786,6 +837,52 @@ pub trait ConnectionSettings: ConfigStore {
         }
     }
 
+    /// Whether a released typed policy marks this exact declaration as a custom origin.
+    fn is_custom_origin(&self, _connector: &str, _declared: &DeclaredSetting) -> bool {
+        false
+    }
+
+    /// Read the value-free authority lifecycle for one selected connection.
+    fn authority_status_for_instance(
+        &self,
+        _tenant: &Tenant,
+        _connector: &str,
+        _instance: Option<&InstanceId>,
+        _declared: &DeclaredSetting,
+    ) -> Result<AuthorityStatus, SettingsRefusal> {
+        Ok(AuthorityStatus::unset())
+    }
+
+    /// Approve one exact proposal revision.
+    fn approve_authority_for_instance(
+        &self,
+        _tenant: &Tenant,
+        connector: &str,
+        _instance: Option<&InstanceId>,
+        declared: &DeclaredSetting,
+        _revision: u64,
+    ) -> Result<AuthorityStatus, SettingsRefusal> {
+        Err(SettingsRefusal::AuthorityUnsupported {
+            connector: connector.to_owned(),
+            setting: declared.binds(),
+        })
+    }
+
+    /// Revoke one exact proposal revision.
+    fn revoke_authority_for_instance(
+        &self,
+        _tenant: &Tenant,
+        connector: &str,
+        _instance: Option<&InstanceId>,
+        declared: &DeclaredSetting,
+        _revision: u64,
+    ) -> Result<AuthorityStatus, SettingsRefusal> {
+        Err(SettingsRefusal::AuthorityUnsupported {
+            connector: connector.to_owned(),
+            setting: declared.binds(),
+        })
+    }
+
     /// Move the sole legacy settings namespace under its newly minted UUID.
     fn qualify_instance(
         &self,
@@ -837,6 +934,38 @@ pub trait ConnectionSettings: ConfigStore {
 /// third kind, and are about this host rather than about the request.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettingsRefusal {
+    /// The field has no released typed custom-origin policy.
+    #[error(
+        "connector `{connector}` setting `{setting}` has no released custom-origin authority policy"
+    )]
+    AuthorityUnsupported {
+        /// Connector named by the route.
+        connector: String,
+        /// Declared binds target.
+        setting: String,
+    },
+    /// No proposal exists at the derived setting address.
+    #[error("connector `{connector}` setting `{setting}` has no authority proposal to transition")]
+    AuthorityUnset {
+        /// Connector named by the route.
+        connector: String,
+        /// Declared binds target.
+        setting: String,
+    },
+    /// Optimistic authority transition named a stale proposal.
+    #[error(
+        "connector `{connector}` setting `{setting}` authority revision conflict: expected {expected}, current {current}"
+    )]
+    AuthorityRevisionConflict {
+        /// Connector named by the route.
+        connector: String,
+        /// Declared binds target.
+        setting: String,
+        /// Revision supplied by the operator.
+        expected: u64,
+        /// Current durable proposal revision.
+        current: u64,
+    },
     /// The bound settings port has not implemented instance-aware addressing.
     #[error(
         "connector `{connector}` instance `{instance}` needs instance-aware connection settings, but the bound settings store does not provide them"
@@ -1096,13 +1225,15 @@ mod file {
     use std::io::Write as _;
     use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
     use std::path::{Path, PathBuf};
-    use std::sync::RwLock;
+    use std::sync::{Arc, RwLock};
 
     use connector_pack::{ConfigStore, Field};
+    use serde::{Deserialize, Serialize};
 
     use super::{
-        admit_tenant_settings, ConnectionSettings, DeclaredSetting, InstanceId, SettingsRefusal,
-        MAX_SETTING_VALUE_BYTES,
+        admit_tenant_settings, AuthorityState, AuthorityStatus, ConnectionSettings,
+        CustomOriginPolicy, DeclaredSetting, DormantCustomOriginPolicy, InstanceId,
+        SettingsRefusal, MAX_SETTING_VALUE_BYTES,
     };
     use crate::paths::{enclosing_working_tree, resolve};
     use crate::Tenant;
@@ -1127,7 +1258,73 @@ mod file {
     /// `binds` targets under it, not a list of rendered keys. It is also structurally unlike the
     /// credential store's layout, which is the point — the two files should not be mistakable for
     /// each other.
-    type Values = BTreeMap<String, BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>>;
+    type Values =
+        BTreeMap<String, BTreeMap<String, BTreeMap<String, BTreeMap<String, StoredValue>>>>;
+
+    const STORE_SCHEMA: &str = "exchange.connection-settings.v2";
+
+    #[derive(Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Document {
+        schema: String,
+        next_origin_revision: u64,
+        values: Values,
+    }
+
+    impl Default for Document {
+        fn default() -> Self {
+            Self {
+                schema: STORE_SCHEMA.to_owned(),
+                next_origin_revision: 1,
+                values: Values::new(),
+            }
+        }
+    }
+
+    #[derive(Clone, Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum StoredValue {
+        Ordinary(String),
+        Origin(StoredOrigin),
+    }
+
+    impl StoredValue {
+        fn value(&self) -> &str {
+            match self {
+                Self::Ordinary(value) => value,
+                Self::Origin(origin) => &origin.value,
+            }
+        }
+    }
+
+    #[derive(Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StoredOrigin {
+        kind: OriginKind,
+        value: String,
+        state: StoredAuthorityState,
+        revision: u64,
+    }
+
+    #[derive(Clone, Copy, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum OriginKind {
+        CustomOrigin,
+    }
+
+    #[derive(Clone, Copy, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum StoredAuthorityState {
+        Proposed,
+        Approved,
+        Revoked,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AuthorityTransition {
+        Approve,
+        Revoke,
+    }
 
     /// **A tenant's non-secret connection settings, in one file.**
     ///
@@ -1153,10 +1350,19 @@ mod file {
     /// read later is additive where removing one is not.
     ///
     /// [`is_set`]: ConnectionSettings::is_set
-    #[derive(Debug)]
     pub struct SettingsStore {
         path: PathBuf,
-        values: RwLock<Values>,
+        document: RwLock<Document>,
+        custom_origins: Arc<dyn CustomOriginPolicy>,
+    }
+
+    impl std::fmt::Debug for SettingsStore {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("SettingsStore")
+                .field("path", &self.path)
+                .finish_non_exhaustive()
+        }
     }
 
     impl SettingsStore {
@@ -1194,6 +1400,15 @@ mod file {
         /// [`SettingsStoreError::Unresolvable`] when the path cannot be made absolute at all; and
         /// [`SettingsStoreError::Unusable`] when the file cannot be created or parsed.
         pub fn bind(path: impl AsRef<Path>) -> Result<Self, SettingsStoreError> {
+            Self::bind_with_custom_origin_policy(path, Arc::new(DormantCustomOriginPolicy))
+        }
+
+        /// Internal construction seam. Catalogue 0.18 production calls this only with the dormant
+        /// policy; unit tests exercise lifecycle storage with a synthetic policy in this module.
+        fn bind_with_custom_origin_policy(
+            path: impl AsRef<Path>,
+            custom_origins: Arc<dyn CustomOriginPolicy>,
+        ) -> Result<Self, SettingsStoreError> {
             let requested = path.as_ref();
             if requested.as_os_str().is_empty() {
                 return Err(SettingsStoreError::Unconfigured {
@@ -1238,11 +1453,13 @@ mod file {
                     reason: error.to_string(),
                 })?;
 
-            let values = read(&resolved)?;
+            let document = read(&resolved)?;
+            refuse_untyped_custom_origins(&resolved, &document, custom_origins.as_ref())?;
 
             Ok(Self {
                 path: resolved,
-                values: RwLock::new(values),
+                document: RwLock::new(document),
+                custom_origins,
             })
         }
 
@@ -1289,13 +1506,97 @@ mod file {
             ]
         }
 
+        fn transition_authority(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            expected: u64,
+            transition: AuthorityTransition,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            let mut document = self
+                .document
+                .write()
+                .map_err(|_| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            if !custom_origin(self.custom_origins.as_ref(), connector, declared) {
+                return Err(SettingsRefusal::AuthorityUnsupported {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                });
+            }
+            let [t, c, s, b] = Self::at(
+                tenant.as_str(),
+                connector,
+                instance,
+                &declared.service,
+                &declared.binds(),
+            );
+            let Some(StoredValue::Origin(current)) = document
+                .values
+                .get(&t)
+                .and_then(|connectors| connectors.get(&c))
+                .and_then(|services| services.get(&s))
+                .and_then(|settings| settings.get(&b))
+            else {
+                return Err(SettingsRefusal::AuthorityUnset {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                });
+            };
+            if current.revision != expected {
+                return Err(SettingsRefusal::AuthorityRevisionConflict {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                    expected,
+                    current: current.revision,
+                });
+            }
+            let desired = match transition {
+                AuthorityTransition::Approve => StoredAuthorityState::Approved,
+                AuthorityTransition::Revoke => StoredAuthorityState::Revoked,
+            };
+            let already = matches!(
+                (current.state, desired),
+                (
+                    StoredAuthorityState::Approved,
+                    StoredAuthorityState::Approved
+                ) | (StoredAuthorityState::Revoked, StoredAuthorityState::Revoked)
+            );
+            if already {
+                return Ok(authority_status(current));
+            }
+            let previous = document.clone();
+            let current = document
+                .values
+                .get_mut(&t)
+                .and_then(|connectors| connectors.get_mut(&c))
+                .and_then(|services| services.get_mut(&s))
+                .and_then(|settings| settings.get_mut(&b))
+                .and_then(|stored| match stored {
+                    StoredValue::Origin(origin) => Some(origin),
+                    StoredValue::Ordinary(_) => None,
+                })
+                .expect("the origin record was resolved under the same write lock");
+            current.state = desired;
+            let status = authority_status(current);
+            if let Err(refusal) = self.persist(&document) {
+                *document = previous;
+                return Err(refusal);
+            }
+            Ok(status)
+        }
+
         /// Persist the current map, or say why it could not be.
         ///
         /// Whole-file, through a sibling temporary and a `rename(2)`, so a reader never sees a
         /// half-written store and an interrupted write leaves the previous one intact. The same
         /// shape `connector_secrets::FileStore` uses, and for the same reason: this file is small
         /// and rewriting it is cheaper than being able to corrupt it.
-        fn persist(&self, values: &Values) -> Result<(), SettingsRefusal> {
+        fn persist(&self, document: &Document) -> Result<(), SettingsRefusal> {
             let unwritable = |reason: String| SettingsRefusal::Unwritable {
                 path: self.path.display().to_string(),
                 reason,
@@ -1311,8 +1612,8 @@ mod file {
                 .create(directory)
                 .map_err(|error| unwritable(error.to_string()))?;
 
-            let encoded =
-                serde_json::to_vec_pretty(values).map_err(|error| unwritable(error.to_string()))?;
+            let encoded = serde_json::to_vec_pretty(document)
+                .map_err(|error| unwritable(error.to_string()))?;
 
             let temporary = self.path.with_extension("tmp");
             let mut file = fs::OpenOptions::new()
@@ -1337,6 +1638,7 @@ mod file {
         /// wrong: the connector's declared surface decides whether there is an address at all, and
         /// the bound decides whether what is going in it is a setting.
         fn admit(
+            &self,
             connector: &str,
             declared: &DeclaredSetting,
             value: &str,
@@ -1392,11 +1694,13 @@ mod file {
             // `HostPinning`. Raised before the membership check below so that "nobody may supply
             // this" is never reported as "you picked the wrong one from a list".
             if let super::HostPinning::WholeAuthority(template) = &pinning {
-                return Err(SettingsRefusal::WouldNameTheHost {
-                    connector: connector.to_owned(),
-                    setting: declared.binds(),
-                    template: template.clone(),
-                });
+                if !self.custom_origins.admits(connector, declared) {
+                    return Err(SettingsRefusal::WouldNameTheHost {
+                        connector: connector.to_owned(),
+                        setting: declared.binds(),
+                        template: template.clone(),
+                    });
+                }
             }
 
             // And the one place a *value* is decided about: it has to be one the catalogue
@@ -1431,10 +1735,12 @@ mod file {
     /// one whose values are about to be silently absent, which reads to an operator as thirteen
     /// connectors that stopped working for no reason. **Refuse; never repair** — there is no arm
     /// here that starts empty because parsing failed.
-    fn read(path: &Path) -> Result<Values, SettingsStoreError> {
+    fn read(path: &Path) -> Result<Document, SettingsStoreError> {
         let raw = match fs::read(path) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Values::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Document::default())
+            }
             Err(error) => {
                 return Err(SettingsStoreError::Unusable {
                     path: path.display().to_string(),
@@ -1444,13 +1750,139 @@ mod file {
         };
 
         if raw.is_empty() {
-            return Ok(Values::new());
+            return Ok(Document::default());
         }
 
-        serde_json::from_slice(&raw).map_err(|error| SettingsStoreError::Unusable {
-            path: path.display().to_string(),
-            reason: error.to_string(),
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&raw).map_err(|error| SettingsStoreError::Unusable {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?;
+        if let Some(schema) = decoded.get("schema") {
+            if schema.as_str() != Some(STORE_SCHEMA) {
+                return Err(SettingsStoreError::Unusable {
+                    path: path.display().to_string(),
+                    reason: format!(
+                        "unsupported settings schema `{}`; supported schema is `{STORE_SCHEMA}`",
+                        schema.as_str().unwrap_or("non-string")
+                    ),
+                });
+            }
+            let document: Document =
+                serde_json::from_value(decoded).map_err(|error| SettingsStoreError::Unusable {
+                    path: path.display().to_string(),
+                    reason: error.to_string(),
+                })?;
+            if document.next_origin_revision == 0
+                || document.values.values().any(|connectors| {
+                    connectors.values().any(|services| {
+                        services.values().any(|settings| {
+                            settings.values().any(|stored| {
+                                matches!(stored, StoredValue::Origin(origin) if origin.revision == 0 || origin.revision >= document.next_origin_revision)
+                            })
+                        })
+                    })
+                })
+            {
+                return Err(SettingsStoreError::Unusable {
+                    path: path.display().to_string(),
+                    reason: "origin revisions are outside the durable store high-water mark"
+                        .to_owned(),
+                });
+            }
+            return Ok(document);
+        }
+
+        type LegacyValues =
+            BTreeMap<String, BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>>;
+        let legacy: LegacyValues =
+            serde_json::from_value(decoded).map_err(|error| SettingsStoreError::Unusable {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?;
+        Ok(Document {
+            values: legacy
+                .into_iter()
+                .map(|(tenant, connectors)| {
+                    (
+                        tenant,
+                        connectors
+                            .into_iter()
+                            .map(|(connector, services)| {
+                                (
+                                    connector,
+                                    services
+                                        .into_iter()
+                                        .map(|(service, settings)| {
+                                            (
+                                                service,
+                                                settings
+                                                    .into_iter()
+                                                    .map(|(binds, value)| {
+                                                        (binds, StoredValue::Ordinary(value))
+                                                    })
+                                                    .collect(),
+                                            )
+                                        })
+                                        .collect(),
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+            ..Document::default()
         })
+    }
+
+    fn custom_origin(
+        policy: &dyn CustomOriginPolicy,
+        connector: &str,
+        declared: &DeclaredSetting,
+    ) -> bool {
+        policy.admits(connector, declared)
+    }
+
+    fn authority_status(origin: &StoredOrigin) -> AuthorityStatus {
+        AuthorityStatus {
+            state: match origin.state {
+                StoredAuthorityState::Proposed => AuthorityState::Proposed,
+                StoredAuthorityState::Approved => AuthorityState::Approved,
+                StoredAuthorityState::Revoked => AuthorityState::Revoked,
+            },
+            revision: Some(origin.revision),
+        }
+    }
+
+    fn refuse_untyped_custom_origins(
+        path: &Path,
+        document: &Document,
+        policy: &dyn CustomOriginPolicy,
+    ) -> Result<(), SettingsStoreError> {
+        for connectors in document.values.values() {
+            for (connector_key, services) in connectors {
+                let connector = connector_key
+                    .split_once('@')
+                    .map_or(connector_key.as_str(), |(connector, _)| connector);
+                for (service, settings) in services {
+                    for (binds, stored) in settings {
+                        let Some(declared) = DeclaredSetting::parse(service, binds) else {
+                            continue;
+                        };
+                        if custom_origin(policy, connector, &declared)
+                            && matches!(stored, StoredValue::Ordinary(_))
+                        {
+                            return Err(SettingsStoreError::MigrationRequired {
+                                path: path.display().to_string(),
+                                connector: connector.to_owned(),
+                                setting: binds.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     impl ConfigStore for SettingsStore {
@@ -1514,10 +1946,11 @@ mod file {
                 connector_catalog::provider(connector_catalog::ProviderKey::id(provider))
                     .map(|catalogued| (catalogued, DeclaredSetting::parse(service, &binds)));
 
-            let value = self
-                .values
+            let stored = self
+                .document
                 .read()
                 .ok()?
+                .values
                 .get(tenant)?
                 .get(&connector_key)?
                 .get(service)?
@@ -1528,12 +1961,31 @@ mod file {
                 // A `binds` target the pack asked for that this host cannot parse is not one it
                 // can decide about, and an undecided value is not one it hands over.
                 let declared = declared?;
+                if custom_origin(self.custom_origins.as_ref(), provider, &declared) {
+                    return match stored {
+                        StoredValue::Origin(origin)
+                            if matches!(origin.state, StoredAuthorityState::Approved) =>
+                        {
+                            Some(origin.value)
+                        }
+                        StoredValue::Origin(_) | StoredValue::Ordinary(_) => None,
+                    };
+                }
+                // An origin record never degrades into an ordinary executable setting when typed
+                // policy disappears or changes beneath a persisted approval.
+                let StoredValue::Ordinary(value) = stored else {
+                    return None;
+                };
                 if !super::host_pinning(catalogued, &declared).admits(&value) {
                     return None;
                 }
+                return Some(value);
             }
 
-            Some(value)
+            match stored {
+                StoredValue::Ordinary(value) => Some(value),
+                StoredValue::Origin(_) => None,
+            }
         }
     }
 
@@ -1571,15 +2023,20 @@ mod file {
             declared: &DeclaredSetting,
             value: &str,
         ) -> Result<(), SettingsRefusal> {
-            SettingsStore::admit(connector, declared, value)?;
+            self.admit(connector, declared, value)?;
 
-            let mut values = self
-                .values
+            let mut document = self
+                .document
                 .write()
                 .map_err(|_| SettingsRefusal::Unwritable {
                     path: self.path.display().to_string(),
                     reason: "the store lock is poisoned".to_owned(),
                 })?;
+            // Policy is re-evaluated while the write lock is held. The current policy object is
+            // immutable, but keeping this decision inside the CAS boundary makes the 0.19 typed
+            // implementation replaceable without moving the safety check.
+            self.admit(connector, declared, value)?;
+            let custom_origin = custom_origin(self.custom_origins.as_ref(), connector, declared);
 
             // The allowance is decided against what this write *replaces*, not against the whole
             // new value on top of an occupancy that already includes the old one — the same reading
@@ -1592,39 +2049,51 @@ mod file {
                 &declared.service,
                 &declared.binds(),
             );
-            let replacing = values
+            let replacing = document
+                .values
                 .get(&t)
                 .and_then(|connectors| connectors.get(&c))
                 .and_then(|services| services.get(&s))
                 .and_then(|settings| settings.get(&b))
-                .map_or(0, String::len);
-            let held = occupied(&values, tenant.as_str());
+                .map_or(0, |stored| stored.value().len());
+            let held = occupied(&document.values, tenant.as_str());
             admit_tenant_settings(held.saturating_sub(replacing), value.len())?;
 
-            let previous = values
+            let previous = document.clone();
+            let stored = if custom_origin {
+                let revision = document.next_origin_revision;
+                document.next_origin_revision =
+                    revision
+                        .checked_add(1)
+                        .ok_or_else(|| SettingsRefusal::Unwritable {
+                            path: self.path.display().to_string(),
+                            reason: "the custom-origin revision space is exhausted".to_owned(),
+                        })?;
+                StoredValue::Origin(StoredOrigin {
+                    kind: OriginKind::CustomOrigin,
+                    value: value.to_owned(),
+                    state: StoredAuthorityState::Proposed,
+                    revision,
+                })
+            } else {
+                StoredValue::Ordinary(value.to_owned())
+            };
+            document
+                .values
                 .entry(t)
                 .or_default()
                 .entry(c.clone())
                 .or_default()
                 .entry(s)
                 .or_default()
-                .insert(b.clone(), value.to_owned());
+                .insert(b, stored);
 
             // Persisted under the same lock the map was changed under, and rolled back if the file
             // will not take it: a store whose memory and file disagree would answer the invoker
             // with a value that vanishes at the next restart, which is the failure this whole
             // module's durability argument is about.
-            if let Err(refusal) = self.persist(&values) {
-                let settings = values
-                    .get_mut(tenant.as_str())
-                    .and_then(|connectors| connectors.get_mut(&c))
-                    .and_then(|services| services.get_mut(&declared.service));
-                if let Some(settings) = settings {
-                    match previous {
-                        Some(previous) => settings.insert(b, previous),
-                        None => settings.remove(&b),
-                    };
-                }
+            if let Err(refusal) = self.persist(&document) {
+                *document = previous;
                 return Err(refusal);
             }
 
@@ -1647,8 +2116,8 @@ mod file {
             instance: Option<&InstanceId>,
             declared: &DeclaredSetting,
         ) -> Result<bool, SettingsRefusal> {
-            let mut values = self
-                .values
+            let mut document = self
+                .document
                 .write()
                 .map_err(|_| SettingsRefusal::Unwritable {
                     path: self.path.display().to_string(),
@@ -1662,7 +2131,9 @@ mod file {
                 &declared.service,
                 &declared.binds(),
             );
-            let Some(previous) = values
+            let previous_document = document.clone();
+            let Some(_previous) = document
+                .values
                 .get_mut(&t)
                 .and_then(|connectors| connectors.get_mut(&c))
                 .and_then(|services| services.get_mut(&s))
@@ -1671,15 +2142,8 @@ mod file {
                 return Ok(false);
             };
 
-            if let Err(refusal) = self.persist(&values) {
-                values
-                    .entry(t)
-                    .or_default()
-                    .entry(c)
-                    .or_default()
-                    .entry(s)
-                    .or_default()
-                    .insert(b, previous);
+            if let Err(refusal) = self.persist(&document) {
+                *document = previous_document;
                 return Err(refusal);
             }
 
@@ -1713,20 +2177,100 @@ mod file {
             .is_some()
         }
 
+        fn is_custom_origin(&self, connector: &str, declared: &DeclaredSetting) -> bool {
+            custom_origin(self.custom_origins.as_ref(), connector, declared)
+        }
+
+        fn authority_status_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            let document = self
+                .document
+                .read()
+                .map_err(|_| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            if !custom_origin(self.custom_origins.as_ref(), connector, declared) {
+                return Err(SettingsRefusal::AuthorityUnsupported {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                });
+            }
+            let [t, c, s, b] = Self::at(
+                tenant.as_str(),
+                connector,
+                instance,
+                &declared.service,
+                &declared.binds(),
+            );
+            Ok(document
+                .values
+                .get(&t)
+                .and_then(|connectors| connectors.get(&c))
+                .and_then(|services| services.get(&s))
+                .and_then(|settings| settings.get(&b))
+                .and_then(|stored| match stored {
+                    StoredValue::Origin(origin) => Some(authority_status(origin)),
+                    StoredValue::Ordinary(_) => None,
+                })
+                .unwrap_or_else(AuthorityStatus::unset))
+        }
+
+        fn approve_authority_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            revision: u64,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            self.transition_authority(
+                tenant,
+                connector,
+                instance,
+                declared,
+                revision,
+                AuthorityTransition::Approve,
+            )
+        }
+
+        fn revoke_authority_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            revision: u64,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            self.transition_authority(
+                tenant,
+                connector,
+                instance,
+                declared,
+                revision,
+                AuthorityTransition::Revoke,
+            )
+        }
+
         fn qualify_instance(
             &self,
             tenant: &Tenant,
             connector: &str,
             instance: &InstanceId,
         ) -> Result<(), SettingsRefusal> {
-            let mut values = self
-                .values
+            let mut document = self
+                .document
                 .write()
                 .map_err(|_| SettingsRefusal::Unwritable {
                     path: self.path.display().to_string(),
                     reason: "the store lock is poisoned".to_owned(),
                 })?;
-            let Some(connectors) = values.get(tenant.as_str()) else {
+            let Some(connectors) = document.values.get(tenant.as_str()) else {
                 return Ok(());
             };
             let qualified = format!("{connector}@{}", instance.as_str());
@@ -1739,16 +2283,17 @@ mod file {
             if !connectors.contains_key(connector) {
                 return Ok(());
             }
-            let previous = values.clone();
-            let connectors = values
+            let previous = document.clone();
+            let connectors = document
+                .values
                 .get_mut(tenant.as_str())
                 .expect("the tenant existed above");
             let legacy = connectors
                 .remove(connector)
                 .expect("the legacy namespace existed above");
             connectors.insert(qualified, legacy);
-            if let Err(refusal) = self.persist(&values) {
-                *values = previous;
+            if let Err(refusal) = self.persist(&document) {
+                *document = previous;
                 return Err(refusal);
             }
             Ok(())
@@ -1761,14 +2306,14 @@ mod file {
             removed: &InstanceId,
             remaining: &InstanceId,
         ) -> Result<(), SettingsRefusal> {
-            let mut values = self
-                .values
+            let mut document = self
+                .document
                 .write()
                 .map_err(|_| SettingsRefusal::Unwritable {
                     path: self.path.display().to_string(),
                     reason: "the store lock is poisoned".to_owned(),
                 })?;
-            let Some(connectors) = values.get_mut(tenant.as_str()) else {
+            let Some(connectors) = document.values.get_mut(tenant.as_str()) else {
                 return Ok(());
             };
             if connectors.contains_key(connector) {
@@ -1777,8 +2322,9 @@ mod file {
                     reason: "the legacy destination namespace is already occupied".to_owned(),
                 });
             }
-            let previous = values.clone();
-            let connectors = values
+            let previous = document.clone();
+            let connectors = document
+                .values
                 .get_mut(tenant.as_str())
                 .expect("the tenant existed above");
             connectors.remove(&format!("{connector}@{}", removed.as_str()));
@@ -1787,8 +2333,8 @@ mod file {
             {
                 connectors.insert(connector.to_owned(), survivor);
             }
-            if let Err(refusal) = self.persist(&values) {
-                *values = previous;
+            if let Err(refusal) = self.persist(&document) {
+                *document = previous;
                 return Err(refusal);
             }
             Ok(())
@@ -1800,23 +2346,24 @@ mod file {
             connector: &str,
             instance: &InstanceId,
         ) -> Result<(), SettingsRefusal> {
-            let mut values = self
-                .values
+            let mut document = self
+                .document
                 .write()
                 .map_err(|_| SettingsRefusal::Unwritable {
                     path: self.path.display().to_string(),
                     reason: "the store lock is poisoned".to_owned(),
                 })?;
-            let previous = values.clone();
-            let removed = values
+            let previous = document.clone();
+            let removed = document
+                .values
                 .get_mut(tenant.as_str())
                 .and_then(|connectors| {
                     connectors.remove(&format!("{connector}@{}", instance.as_str()))
                 })
                 .is_some();
             if removed {
-                if let Err(refusal) = self.persist(&values) {
-                    *values = previous;
+                if let Err(refusal) = self.persist(&document) {
+                    *document = previous;
                     return Err(refusal);
                 }
             }
@@ -1824,9 +2371,9 @@ mod file {
         }
 
         fn held_bytes(&self, tenant: &Tenant) -> usize {
-            self.values
+            self.document
                 .read()
-                .map_or(0, |values| occupied(&values, tenant.as_str()))
+                .map_or(0, |document| occupied(&document.values, tenant.as_str()))
         }
     }
 
@@ -1841,7 +2388,7 @@ mod file {
                 .values()
                 .flat_map(|services| services.values())
                 .flat_map(|settings| settings.values())
-                .map(String::len)
+                .map(|stored| stored.value().len())
                 .sum()
         })
     }
@@ -1849,6 +2396,18 @@ mod file {
     /// Why a settings store could not be bound. Every variant refuses; none falls back.
     #[derive(Debug, thiserror::Error)]
     pub enum SettingsStoreError {
+        /// A legacy ordinary value now has typed custom-origin policy and cannot be guessed safe.
+        #[error(
+            "the connection-settings store at `{path}` needs an explicit migration: connector `{connector}` setting `{setting}` is an ordinary legacy value but is now a custom origin; it was not auto-approved"
+        )]
+        MigrationRequired {
+            /// Bound settings file.
+            path: String,
+            /// Connector owning the value.
+            connector: String,
+            /// Declared setting address.
+            setting: String,
+        },
         /// No store was named, and there is no default worth choosing on an operator's behalf.
         #[error(
             "no connection-settings store is configured: set `{setting}` to a path outside every \
@@ -1901,6 +2460,301 @@ mod file {
             /// What the reader said.
             reason: String,
         },
+    }
+
+    #[cfg(test)]
+    mod authority_tests {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        struct TestPolicy;
+
+        impl CustomOriginPolicy for TestPolicy {
+            fn admits(&self, connector: &str, declared: &DeclaredSetting) -> bool {
+                connector == "okta" && declared.binds() == "endpoint.domain"
+            }
+        }
+
+        struct Scratch(PathBuf);
+
+        impl Scratch {
+            fn new(label: &str) -> Self {
+                static NEXT: AtomicU64 = AtomicU64::new(0);
+                let path = std::env::temp_dir().join(format!(
+                    "exchange-origin-{label}-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
+                fs::create_dir_all(&path).expect("scratch");
+                Self(path)
+            }
+        }
+
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn setting() -> DeclaredSetting {
+            let provider = connector_catalog::provider(connector_catalog::ProviderKey::id("okta"))
+                .expect("okta");
+            super::super::declared_settings(provider)
+                .expect("settings")
+                .into_iter()
+                .find(|setting| setting.binds() == "endpoint.domain")
+                .expect("okta domain")
+        }
+
+        fn instance() -> InstanceId {
+            InstanceId::parse("11111111-1111-4111-8111-111111111111").expect("instance")
+        }
+
+        fn bind(path: &Path) -> SettingsStore {
+            SettingsStore::bind_with_custom_origin_policy(path, Arc::new(TestPolicy))
+                .expect("test policy store")
+        }
+
+        #[test]
+        fn origin_lifecycle_survives_restart_and_clear_cannot_reuse_a_revision() {
+            let scratch = Scratch::new("lifecycle");
+            let path = scratch.0.join("settings");
+            let tenant = Tenant::new("acme").expect("tenant");
+            let declared = setting();
+            let instance = instance();
+            let store = bind(&path);
+
+            store
+                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "one.example")
+                .expect("proposal");
+            let first = store
+                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .expect("status");
+            assert_eq!(first.state, AuthorityState::Proposed);
+            let first_revision = first.revision.expect("revision");
+            assert_eq!(
+                store.get_for_instance(
+                    tenant.as_str(),
+                    "okta",
+                    Some(&instance),
+                    "default",
+                    declared.field(),
+                ),
+                None
+            );
+
+            // Even byte-identical writes are new proposals and cannot inherit approval.
+            store
+                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "one.example")
+                .expect("new proposal");
+            let second = store
+                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .expect("status");
+            let second_revision = second.revision.expect("revision");
+            assert!(second_revision > first_revision);
+            let before_stale = fs::read(&path).expect("store bytes");
+            assert!(matches!(
+                store.approve_authority_for_instance(
+                    &tenant,
+                    "okta",
+                    Some(&instance),
+                    &declared,
+                    first_revision
+                ),
+                Err(SettingsRefusal::AuthorityRevisionConflict { .. })
+            ));
+            assert_eq!(fs::read(&path).expect("store bytes"), before_stale);
+
+            store
+                .approve_authority_for_instance(
+                    &tenant,
+                    "okta",
+                    Some(&instance),
+                    &declared,
+                    second_revision,
+                )
+                .expect("approve");
+            drop(store);
+            let store = bind(&path);
+            assert_eq!(
+                store
+                    .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                    .expect("status")
+                    .state,
+                AuthorityState::Approved
+            );
+            assert_eq!(
+                store.get_for_instance(
+                    tenant.as_str(),
+                    "okta",
+                    Some(&instance),
+                    "default",
+                    declared.field(),
+                ),
+                Some("one.example".to_owned())
+            );
+            store
+                .revoke_authority_for_instance(
+                    &tenant,
+                    "okta",
+                    Some(&instance),
+                    &declared,
+                    second_revision,
+                )
+                .expect("revoke");
+            drop(store);
+            let store = bind(&path);
+            assert_eq!(
+                store
+                    .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                    .expect("status")
+                    .state,
+                AuthorityState::Revoked
+            );
+            assert_eq!(
+                store.get_for_instance(
+                    tenant.as_str(),
+                    "okta",
+                    Some(&instance),
+                    "default",
+                    declared.field(),
+                ),
+                None
+            );
+            store
+                .clear_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .expect("clear");
+            store
+                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "one.example")
+                .expect("recreate");
+            let recreated = store
+                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .expect("status");
+            assert!(recreated.revision.expect("revision") > second_revision);
+        }
+
+        #[test]
+        fn concurrent_set_and_approval_never_approve_the_replacement() {
+            let scratch = Scratch::new("cas");
+            let path = scratch.0.join("settings");
+            let tenant = Tenant::new("acme").expect("tenant");
+            let declared = setting();
+            let instance = instance();
+            let store = Arc::new(bind(&path));
+            store
+                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "first.example")
+                .expect("proposal");
+            let revision = store
+                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .expect("status")
+                .revision
+                .expect("revision");
+            let barrier = Arc::new(Barrier::new(3));
+            let writer = {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                let tenant = tenant.clone();
+                let declared = declared.clone();
+                let instance = instance.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.set_for_instance(
+                        &tenant,
+                        "okta",
+                        Some(&instance),
+                        &declared,
+                        "replacement.example",
+                    )
+                })
+            };
+            let approver = {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                let tenant = tenant.clone();
+                let declared = declared.clone();
+                let instance = instance.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.approve_authority_for_instance(
+                        &tenant,
+                        "okta",
+                        Some(&instance),
+                        &declared,
+                        revision,
+                    )
+                })
+            };
+            barrier.wait();
+            writer.join().expect("writer").expect("write");
+            let _ = approver.join().expect("approver");
+            let status = store
+                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .expect("status");
+            assert_eq!(status.state, AuthorityState::Proposed);
+            assert!(status.revision.expect("revision") > revision);
+        }
+
+        #[test]
+        fn legacy_custom_origin_and_unknown_schema_refuse_binding() {
+            let scratch = Scratch::new("schema");
+            let path = scratch.0.join("settings");
+            fs::write(
+                &path,
+                br#"{"schema":"exchange.connection-settings.v999","next_origin_revision":1,"values":{}}"#,
+            )
+            .expect("unknown schema fixture");
+            assert!(SettingsStore::bind(&path).is_err());
+
+            fs::write(
+                &path,
+                br#"{"acme":{"okta":{"default":{"endpoint.domain":"legacy.example"}}}}"#,
+            )
+            .expect("legacy fixture");
+            SettingsStore::bind(&path)
+                .expect("dormant production policy accepts ordinary legacy data");
+            assert!(matches!(
+                SettingsStore::bind_with_custom_origin_policy(&path, Arc::new(TestPolicy)),
+                Err(SettingsStoreError::MigrationRequired { .. })
+            ));
+        }
+
+        #[test]
+        fn persistence_refusal_rolls_back_proposal_and_revision() {
+            let scratch = Scratch::new("rollback");
+            let path = scratch.0.join("state").join("settings");
+            let tenant = Tenant::new("acme").expect("tenant");
+            let declared = setting();
+            let instance = instance();
+            let store = bind(&path);
+            store
+                .set_for_instance(&tenant, "okta", Some(&instance), &declared, "first.example")
+                .expect("proposal");
+            let before = store
+                .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                .expect("status");
+            let directory = path.parent().expect("directory");
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o500))
+                .expect("make unwritable");
+            let refused = store.set_for_instance(
+                &tenant,
+                "okta",
+                Some(&instance),
+                &declared,
+                "second.example",
+            );
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+                .expect("restore directory");
+            assert!(refused.is_err());
+            assert_eq!(
+                store
+                    .authority_status_for_instance(&tenant, "okta", Some(&instance), &declared)
+                    .expect("status"),
+                before
+            );
+        }
     }
 }
 
