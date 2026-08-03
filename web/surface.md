@@ -41,6 +41,9 @@ principal and from nothing a caller controls, which is the invariant the whole
 
 ### Connectors, connections and credentials
 
+[The standalone page](/capabilities/connections) carries the derived status for connection and
+credential management.
+
 A **Connector** is the compiled declaration of what one vendor can do: operations, services,
 credential requirements, settings, event types and channel bindings. It is not a running
 integration. The historical Rust catalogue type is still named `Provider`; in product vocabulary,
@@ -62,6 +65,9 @@ connection; ambiguity is refused rather than defaulted.
 A credential is addressed, never handed out. Nothing that reads a connection returns a secret value.
 
 ### Apps and Agents
+
+[The Agents page](/capabilities/agents) carries the derived status and names the story that owns the
+hosted runtime.
 
 An **App Package** is an immutable versioned Flux Program plus provenance and installation
 requirements. An **App** is one tenant's installed package revision with reviewed, frozen bindings:
@@ -106,8 +112,12 @@ lifetimes above exist to keep.
 The authority a tenant hands an agent, expressed as a selection over declared operation metadata
 rather than a list of names, with an explicit deny beating an explicit allow. See
 [authority is granted by property, not by name](/boundary#authority-is-granted-by-property-not-by-name).
+[Its own page](/capabilities/grants) carries the derived status.
 
 ### Workflows
+
+[The workflow page](/capabilities/workflows) carries the derived status and explains which semantics
+belong to the stored Flux Program rather than to Exchange.
 
 What an operator calls a workflow — triggers, conditions, schedules, a flow of operations — is **a
 stored, versioned, per-tenant flux-app Program**. It is not a second execution model living here, and
@@ -119,6 +129,12 @@ vendor one** — same catalogue entry, same gating, same address — so an agent
 operation came from an OpenAPI document or from somebody dragging boxes on a canvas. A visual editor
 emits IR; the IR lowers to Flux. The simplified schema an editor wants is a *projection*, never a
 second model.
+
+### Leases
+
+A **Lease** is the pull-oriented, caller-grant-scoped lifetime in the table above. [Its own
+page](/capabilities/leases) carries the derived status and names the story that owns rich runtime
+resources.
 
 ### Execution records
 

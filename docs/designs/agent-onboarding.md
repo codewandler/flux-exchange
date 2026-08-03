@@ -2,6 +2,12 @@
 
 **Status:** accepted · **Epic:** `agent-onboarding` · **Stories:** X-41, X-42, X-52
 
+> **Vocabulary note, 2026-08-03.** This design predates X-107 and uses “agent” for the non-human
+> bearer caller now named a **Service Account**. Its anonymous descriptor and human onboarding
+> decisions remain delivered; current references to a hosted **Managed Agent** mean Flux's model +
+> authored loop + bounded capabilities. Historical wording below is retained to preserve the design
+> record, not as a live principal spelling.
+
 ## Why
 
 `docs/vision.md` says the thing this epic exists to act on:
@@ -115,8 +121,9 @@ the argument for the control.
 
 The third finding has no test and should not pretend to. The `authenticate` withholding ended *"The
 only principals a deployment resolves today are humans who signed in through its identity
-provider"*, which is false on a development-identity deployment — the roster resolves `agent:` and
-`service:` handles, and `dev_identity::tests::a_handle_resolves_to_the_principal_the_roster_armed`
+provider"*, which is false on a development-identity deployment — the roster resolves
+`service_account:` and `service:` handles, and
+`dev_identity::tests::a_handle_resolves_to_the_principal_the_roster_armed`
 drives one. The operative claim was true and the sentence around it was not. **A wrong argument in a
 withholding, or in a `NOT_A_CAPABILITY` line, is invisible to a test**; the only thing holding those
 is that they are written next to the code they describe and read when it changes.

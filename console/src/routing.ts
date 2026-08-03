@@ -2,7 +2,7 @@
 
 import { decodeSearchView, encodeSearchView, type SearchView } from './catalog.mts'
 import { GRANTS_PATH } from './granting.mts'
-import { LEGACY_AGENTS_PATH, SERVICE_ACCOUNTS_PATH } from './minting.mts'
+import { SERVICE_ACCOUNTS_PATH } from './minting.mts'
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { nextTick, ref, type Ref } from 'vue'
 
@@ -100,7 +100,7 @@ export function parseRoute(hash: string): Route {
   if (path === '/' || path === '/connections') return { name: 'connections', ...at }
 
   // What this tenant may run. A surface of the platform rather than a footer reference, so unlike
-  // `/connect` and `/agents` it maps to one in `surfaceOfRoute` and lights the rail — an operator
+  // `/connect` and `/service-accounts` it maps to one in `surfaceOfRoute` and lights the rail — an operator
   // editing a grant is working, and needs to see where they are. A bare path with no segment: the
   // tenant comes from the resolved principal, and a grant is addressed by the connector *inside*
   // the body, which is the same shape `/api/grants` has for the same reason.
@@ -127,8 +127,8 @@ export function parseRoute(hash: string): Route {
   // segment is a value in the address bar and in every history entry after it. Like `/connect` it
   // is not a surface of the platform — `surfaceOfRoute` maps it to nothing — because it is
   // something an operator does with the identity they already have rather than a seventh place to
-  // go. See `minting.mts` for why the name is `/agents`.
-  if (path === SERVICE_ACCOUNTS_PATH || path === LEGACY_AGENTS_PATH) {
+  // go. See `minting.mts` for why the name is `/service-accounts`.
+  if (path === SERVICE_ACCOUNTS_PATH) {
     return { name: 'service-accounts', ...at }
   }
 
@@ -174,9 +174,6 @@ export function migrateLegacySearch(route: Route, search: string): Route {
  */
 export function useRoute(): Ref<Route> {
   const initial = migrateLegacySearch(parseRoute(window.location.hash), window.location.search)
-  if (decodeURIComponent(window.location.hash.replace(/^#/, '')).split(/[?#]/, 1)[0] === LEGACY_AGENTS_PATH) {
-    window.history.replaceState(window.history.state, '', fragmentPath(SERVICE_ACCOUNTS_PATH))
-  }
   if (initial.name === 'explorer' && window.location.search) replaceExplorerView(initial.view)
   const route = ref<Route>(initial)
   window.addEventListener('hashchange', () => {

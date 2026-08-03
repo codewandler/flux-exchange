@@ -6,6 +6,42 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-08-03
+
+### Added
+
+- **Credential acquisition has one fail-closed host seam ahead of its first released declaration**
+  (X-75). The reusable host defines acquisition without a transport; the server performs password
+  redemption and refresh through the existing HTTP composition, registers supplied secrets before
+  fallible work, and atomically stores only access/refresh/expiry records. The deployment posture
+  refuses the path before a request unless its declared hazard is opted in. No released connector
+  activates this path yet, so X-75 remains open for upstream metadata and live vendor proof.
+
+- **Generated channels now bind to one immutable connection instance** (X-122). Operators choose a
+  tenant-local connection label when creating or rebinding a channel; Exchange resolves and stores
+  the host-minted UUID. Renaming a connection changes only its management label, deletion refuses
+  while a channel still binds the instance, and restored channels select the same credential and
+  configuration addresses instead of silently choosing the first account.
+
+- **The public site covers the intended Exchange surface and explains its credential boundary**
+  (X-65, X-66). Live and planned capability status remains derived from the agent descriptor, while
+  the boundary page now explains principal-derived tenancy, declared execution, grants, runtime
+  placement, supplier evidence, and the distinction between Service Accounts and Managed Agents.
+
+### Removed
+
+- **The v0.16 Agent-named Service Account compatibility spellings are gone** (X-121).
+  `POST /api/agents`, `FLUX_EXCHANGE_AGENTS`, the serialized `agent` principal kind, and the
+  `#/agents` console fragment are no longer accepted. Existing unprefixed bearer tokens continue to
+  resolve from the unchanged verifier-keyed store until expiry or revocation.
+
+### Changed
+
+- **The historical Agent-access backlog is reconciled to the canonical Service Account resource**
+  (X-35, X-37, X-38). The delivered bearer authentication, listing, revocation, tenant isolation,
+  and grant boundary are now recorded as completed work; Agent remains reserved for Flux's model,
+  authored loop, and bounded capabilities.
+
 ### Operations
 
 - **Production refuses an absent operator policy before it builds an image** (X-123). The workflow

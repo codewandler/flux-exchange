@@ -436,7 +436,7 @@ impl ChannelSupervisor {
     /// Restart after credential or connection-setting rotation.
     pub fn restart(self: &Arc<Self>, tenant: &Tenant, connector: &str) {
         for record in self.store.held(tenant) {
-            if record.connector() == connector || record.connection() == connector {
+            if record.connector() == connector {
                 self.start(record);
             }
         }
@@ -576,7 +576,8 @@ mod tests {
     use std::collections::VecDeque;
 
     use exchange_host::{
-        CredentialRef, MemoryChannels, MemoryConfig, Secret, SecretStore, StoreError,
+        CredentialRef, CredentialScope, MemoryChannels, MemoryConfig, Secret, SecretStore,
+        StoreError,
     };
 
     use super::*;
@@ -597,6 +598,19 @@ mod tests {
 
         async fn delete(&self, _: &CredentialRef) -> Result<(), StoreError> {
             Ok(())
+        }
+
+        async fn references(
+            &self,
+            scope: &CredentialScope,
+        ) -> Result<Vec<CredentialRef>, StoreError> {
+            Ok(vec![CredentialRef::new(
+                scope.tenant(),
+                scope.authority(),
+                "default",
+                "password",
+            )
+            .expect("declared Asterisk reference")])
         }
     }
 
@@ -673,7 +687,8 @@ mod tests {
             ChannelId::new(id).expect("id"),
             Tenant::new("alpha").expect("tenant"),
             "asterisk",
-            "asterisk",
+            exchange_host::InstanceId::parse("11111111-1111-4111-8111-111111111111")
+                .expect("instance"),
             "ari-events",
             ["channel-created".to_owned()].into_iter().collect(),
         )

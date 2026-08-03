@@ -3,14 +3,15 @@
 use std::sync::Arc;
 
 use exchange_host::{
-    ConnectionRegistry, ConnectionSettings, Identity, Invoker, Principal, PureEditorTools,
-    SecretStore, WorkflowStore,
+    AuthPosture, ConnectionRegistry, ConnectionSettings, Identity, Invoker, Principal,
+    PureEditorTools, SecretStore, WorkflowStore,
 };
 
 use crate::audit::AuditJournal;
 use crate::bind::IdentityBinding;
 use crate::channel::ChannelSupervisor;
 use crate::connection_guard::ConnectionGuard;
+use crate::credential_acquisition::AcquisitionBindings;
 use crate::dev_identity::DevIdentity;
 use crate::local_identity::LocalUsers;
 use crate::oidc::Oidc;
@@ -40,6 +41,10 @@ pub struct AppState {
     /// route that would reach for one refuses rather than pretending — see
     /// [`crate::routes::connections`].
     credentials: Option<Arc<dyn SecretStore>>,
+    /// Startup-selected policy over connector-declared credential-acquisition hazards.
+    auth_posture: AuthPosture,
+    /// Explicit server bindings for released connector acquisition declarations.
+    acquisitions: Arc<AcquisitionBindings>,
     /// Where a tenant's **non-secret** connection values are kept, as the port.
     ///
     /// A separate binding from [`credentials`](Self::credentials) and a separate store behind it,
@@ -239,6 +244,8 @@ impl AppState {
             identity: BoundIdentity::None,
             sign_in: SignIn::Unconfigured,
             credentials: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -269,6 +276,8 @@ impl AppState {
             identity: BoundIdentity::Real(identity),
             sign_in: SignIn::Unconfigured,
             credentials: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -296,6 +305,8 @@ impl AppState {
             identity: BoundIdentity::Development(identity),
             sign_in: SignIn::Development { automatic: false },
             credentials: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -325,6 +336,8 @@ impl AppState {
             identity: BoundIdentity::LocalUsers(identity),
             sign_in: SignIn::LocalUsers,
             credentials: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -355,6 +368,8 @@ impl AppState {
             identity: BoundIdentity::Real(oidc.clone()),
             sign_in: SignIn::Oidc(oidc),
             credentials: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -382,6 +397,8 @@ impl AppState {
             identity: BoundIdentity::None,
             sign_in: SignIn::NoTokenExchange,
             credentials: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -458,6 +475,31 @@ impl AppState {
     /// caller supplied.
     pub fn credentials(&self) -> Option<&Arc<dyn SecretStore>> {
         self.credentials.as_ref()
+    }
+
+    /// Bind deployment policy and explicit connector acquisition performers together.
+    ///
+    /// The production registry remains empty until released connector metadata supplies the
+    /// declaration. Tests use this seam to exercise the complete orchestration without pretending
+    /// unreleased C-440 metadata is present in the catalogue.
+    pub fn with_credential_acquisition(
+        mut self,
+        posture: AuthPosture,
+        acquisitions: Arc<AcquisitionBindings>,
+    ) -> Self {
+        self.auth_posture = posture;
+        self.acquisitions = acquisitions;
+        self
+    }
+
+    /// The startup-selected acquisition posture.
+    pub fn auth_posture(&self) -> &AuthPosture {
+        &self.auth_posture
+    }
+
+    /// Explicit connector acquisition bindings available to this composition.
+    pub fn acquisitions(&self) -> &Arc<AcquisitionBindings> {
+        &self.acquisitions
     }
 
     /// Bind the connection-settings store this composition holds.

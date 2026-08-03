@@ -563,10 +563,10 @@ test('minting_is_offered_only_to_a_principal_this_host_would_admit', async () =>
   assert.ok(user.form, 'a signed-in user is offered no way to mint, which is the whole story')
   assert.equal(user.gate, 'may-mint')
 
-  // An agent and a service: refused by this host, so never offered here. X-40's argument is that
+  // A Service Account and a service: refused by this host, so never offered here. X-40's argument is that
   // revocation must stay a remedy, and a console that offered the button would teach an operator
   // that it is available and let them discover the `403` themselves.
-  for (const kind of ['agent', 'service']) {
+  for (const kind of ['service_account', 'service']) {
     const other = await form(signedIn({ kind }))
     assert.ok(
       !other.form,
@@ -886,8 +886,8 @@ test('the_clipboard_write_reports_what_actually_happened', async () => {
 // 7. Where it hangs, and what it is not.
 // ---------------------------------------------------------------------------------------------
 
-test('the_service_account_screen_is_canonical_and_the_retired_fragment_redirects', async () => {
-  const { LEGACY_AGENTS_PATH, SERVICE_ACCOUNTS_PATH } = await minting()
+test('the_service_account_screen_is_canonical_and_the_retired_fragment_is_unknown', async () => {
+  const { SERVICE_ACCOUNTS_PATH } = await minting()
 
   assert.equal(
     parseRoute(`#${SERVICE_ACCOUNTS_PATH}`).name,
@@ -895,12 +895,8 @@ test('the_service_account_screen_is_canonical_and_the_retired_fragment_redirects
     'no fragment resolves to the mint screen, so nothing can reach it'
   )
   assert.notEqual(SERVICE_ACCOUNTS_PATH, ONBOARDING_PATH, 'the mint screen and the onboarding page are one page')
-  assert.equal(parseRoute(`#${LEGACY_AGENTS_PATH}`).name, 'service-accounts')
-  assert.match(
-    source('routing.ts'),
-    /replaceState[\s\S]*SERVICE_ACCOUNTS_PATH/,
-    'the retired fragment resolves in memory but remains visible in browser history'
-  )
+  assert.equal(parseRoute('#/agents').name, 'unknown')
+  assert.doesNotMatch(source('routing.ts'), /LEGACY_AGENTS_PATH/)
 
   // Reachable from the footer, beside the page that sends an agent author here. Not from the rail:
   // `surfaces.mts` states what this platform *is*, and minting is something an operator does on the

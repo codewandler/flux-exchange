@@ -109,10 +109,8 @@ export default defineConfig({
     // do. The `Capabilities` group is where a status *is* the point: every page in it takes its
     // "is this built" from the agent descriptor rather than from its author (X-64).
     //
-    // Two of them, and that is the mechanism's floor rather than the intended set — `invoke` and
-    // `subscribe`, the two verbs of one binding, one served by this build and one not, so both
-    // answers the badge can give are rendered by a real page. X-65 writes the rest of the surface on
-    // top of this, which is why the epic is ordered the way it is.
+    // X-65 completes the intended set. The status of each is still descriptor-derived: this list
+    // decides navigation only and makes no availability claim.
     sidebar: [
       {
         text: 'flux-exchange',
@@ -127,8 +125,13 @@ export default defineConfig({
         text: 'Capabilities',
         items: [
           { text: 'Service Accounts', link: '/capabilities/create-service-account' },
+          { text: 'Connections and credentials', link: '/capabilities/connections' },
+          { text: 'Grants', link: '/capabilities/grants' },
           { text: 'invoke', link: '/capabilities/invoke' },
           { text: 'subscribe', link: '/capabilities/subscribe' },
+          { text: 'Workflows', link: '/capabilities/workflows' },
+          { text: 'Agents', link: '/capabilities/agents' },
+          { text: 'Leases', link: '/capabilities/leases' },
         ],
       },
     ],

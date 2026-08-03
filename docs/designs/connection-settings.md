@@ -187,9 +187,10 @@ newrelic endpoint.host="evil.example"  stored_ok=true  outcome=OK
   urls=["https://evil.example/v2/applications.json"]  X-Api-Key on the wire
 ```
 
-The writer needed no special standing: the settings route is `Access::Principal`, which
-`require_principal` admits for any kind, and an agent token resolves to `PrincipalKind::Agent`. That
-is `AGENTS.md`'s *"an agent's token grants access to an operation, never to a credential"*, broken
+The writer needed no special standing: the settings route was `Access::Principal`, which
+`require_principal` admitted for any kind, and a Service Account token resolves to
+`PrincipalKind::ServiceAccount`. That is `AGENTS.md`'s *"a Service Account token grants access to an
+operation, never to a credential"*, broken
 through a configuration field — and it was **new reachability**, because before the diff
 `execution::invoker` bound `MemoryConfig::new()` and both connectors refused before dispatch.
 
@@ -379,14 +380,15 @@ one that section already records and is not a new one.
 
 ### Who may supply a value, and why that is the fix rather than a value rule
 
-**Decision: `PUT` and `DELETE` on `/api/connections/{connector}/settings/{service}/{field}` are
-`Access::PrincipalOfKind(&[PrincipalKind::User])`. The `GET` collection stays open to every kind.**
+**Decision at X-47: `PUT` and `DELETE` on
+`/api/connections/{connector}/settings/{service}/{field}` admitted users only. X-91 later narrowed
+that to the deployment-owned operator policy. The `GET` collection stays open to every kind.**
 
-The route was `Access::Principal`, which `require_principal` admits for *any* kind, and an agent
-token resolves to `PrincipalKind::Agent`. So an agent holding nothing but an operation grant could
-name the origin its tenant's credential is delivered to — `AGENTS.md` § Invariants, verbatim: *"An
-agent's token grants access to an operation, never to a credential."* `Access::PrincipalOfKind` is
-the mechanism `/api/agents` already uses; nothing new was invented for this.
+The route was `Access::Principal`, which `require_principal` admitted for *any* kind, and a Service
+Account token resolves to `PrincipalKind::ServiceAccount`. So a Service Account holding nothing but
+an operation grant could name the origin its tenant's credential is delivered to — `AGENTS.md`
+§ Invariants, verbatim: *"A Service Account token grants access to an operation, never to a
+credential."*
 
 **The gate is the whole write surface, not only the fields whose `host_pinning` is `PinnedTo`.** The
 narrower rule was available and is not taken:

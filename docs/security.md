@@ -150,7 +150,8 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
 - **Enforced in code.** Service Account tokens resolve through the same principal boundary as human
   identity, remain tenant-bound, and can be listed and revoked only by a signed-in human. A token
   authenticates; grants independently decide what that tenant may invoke or subscribe to. The
-  former Agent spelling is a v0.16 compatibility alias, not a second principal kind.
+  former Agent spelling was a v0.16 compatibility alias and is no longer accepted in v0.17; Agent
+  names the hosted model-and-loop runtime, not a bearer principal.
 
 ## Credentials and persistent state
 

@@ -18,6 +18,7 @@ mod auth_posture;
 mod bind;
 pub mod channel;
 mod connection_guard;
+pub mod credential_acquisition;
 mod dev_identity;
 mod entropy;
 mod execution;
@@ -58,9 +59,7 @@ use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
 use crate::oidc::Oidc;
 use crate::operator::{OperatorPolicy, OPERATOR_SUBJECTS_ENV};
-use crate::service_account::{
-    ServiceAccountStore, LEGACY_AGENT_STORE_SETTING, SERVICE_ACCOUNT_STORE_SETTING,
-};
+use crate::service_account::{ServiceAccountStore, SERVICE_ACCOUNT_STORE_SETTING};
 use crate::state::AppState;
 use crate::tenancy::{Tenancy, TENANT_SETTING};
 
@@ -403,11 +402,16 @@ fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefus
     // connector declares a hazard yet; X-75 hands this posture to the acquisition binding when the
     // first one does. Parsing it now makes an unknown opt-in a startup refusal instead of a policy
     // that silently lost an entry.
-    let _auth_posture =
+    let auth_posture =
         auth_posture::configured().map_err(|source| StartupRefusal::AuthPosture {
             reason: source.to_string(),
         })?;
-    let mut state = compose_identity(startup)?.with_tenancy(startup.tenancy().clone());
+    let mut state = compose_identity(startup)?
+        .with_tenancy(startup.tenancy().clone())
+        .with_credential_acquisition(
+            auth_posture,
+            Arc::new(credential_acquisition::AcquisitionBindings::default()),
+        );
     let operators = startup
         .development_operator()
         .map_or_else(OperatorPolicy::from_env, |subject| {
@@ -642,8 +646,7 @@ fn workflow_store() -> Result<Option<WorkflowBinding>, StartupRefusal> {
 /// states plainly what is lost where it cannot be checked.
 fn service_account_store() -> Result<Option<Arc<ServiceAccountStore>>, StartupRefusal> {
     let canonical = std::env::var(SERVICE_ACCOUNT_STORE_SETTING).ok();
-    let legacy = std::env::var(LEGACY_AGENT_STORE_SETTING).ok();
-    let configured = match service_account_store_path(canonical.as_deref(), legacy.as_deref())? {
+    let configured = match service_account_store_path(canonical.as_deref())? {
         Some(configured) => configured,
         None => {
             warn!(
@@ -652,12 +655,6 @@ fn service_account_store() -> Result<Option<Arc<ServiceAccountStore>>, StartupRe
             return Ok(None);
         }
     };
-
-    if canonical.is_none() && legacy.is_some() {
-        warn!(
-            "{LEGACY_AGENT_STORE_SETTING} is deprecated; use {SERVICE_ACCOUNT_STORE_SETTING} before v0.17"
-        );
-    }
 
     let store = ServiceAccountStore::open(&configured).map_err(|source| {
         StartupRefusal::ServiceAccountStore {
@@ -669,25 +666,13 @@ fn service_account_store() -> Result<Option<Arc<ServiceAccountStore>>, StartupRe
     Ok(Some(Arc::new(store)))
 }
 
-/// Resolve the canonical and one-release compatibility settings without reading global state.
-fn service_account_store_path(
-    canonical: Option<&str>,
-    legacy: Option<&str>,
-) -> Result<Option<String>, StartupRefusal> {
-    let configured = match (canonical, legacy) {
-        (None, None) => {
+/// Resolve the canonical setting without reading global state.
+fn service_account_store_path(canonical: Option<&str>) -> Result<Option<String>, StartupRefusal> {
+    let configured = match canonical {
+        None => {
             return Ok(None);
         }
-        (Some(canonical), None) => canonical.trim(),
-        (None, Some(legacy)) => legacy.trim(),
-        (Some(canonical), Some(legacy)) if canonical.trim() == legacy.trim() => canonical.trim(),
-        (Some(_), Some(_)) => {
-            return Err(StartupRefusal::ServiceAccountStore {
-                reason: format!(
-                    "`{SERVICE_ACCOUNT_STORE_SETTING}` and deprecated `{LEGACY_AGENT_STORE_SETTING}` name different paths; set only the canonical setting"
-                ),
-            })
-        }
+        Some(canonical) => canonical.trim(),
     };
     Ok(Some(configured.to_owned()))
 }
@@ -1074,28 +1059,16 @@ mod tests {
     }
 
     #[test]
-    fn service_account_store_setting_has_one_bounded_legacy_alias() {
+    fn service_account_store_setting_has_no_legacy_alias() {
         assert_eq!(
-            service_account_store_path(Some(" /srv/accounts.json "), None)
+            service_account_store_path(Some(" /srv/accounts.json "))
                 .expect("the canonical setting is valid"),
             Some("/srv/accounts.json".to_owned()),
         );
         assert_eq!(
-            service_account_store_path(None, Some(" /srv/accounts.json "))
-                .expect("the compatibility setting is valid"),
-            Some("/srv/accounts.json".to_owned()),
+            service_account_store_path(None).expect("an unset canonical setting is valid"),
+            None,
         );
-        assert_eq!(
-            service_account_store_path(Some(" /srv/accounts.json "), Some("/srv/accounts.json"),)
-                .expect("the two spellings may agree"),
-            Some("/srv/accounts.json".to_owned()),
-        );
-
-        let refusal = service_account_store_path(Some("one"), Some("two"))
-            .expect_err("two paths are ambiguous")
-            .to_string();
-        assert!(refusal.contains(SERVICE_ACCOUNT_STORE_SETTING), "{refusal}");
-        assert!(refusal.contains(LEGACY_AGENT_STORE_SETTING), "{refusal}");
     }
 
     /// **X-59's failing-first test.** The flag is one declaration carrying both axes of the local

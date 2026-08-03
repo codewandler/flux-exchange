@@ -123,7 +123,7 @@ primary_region = 'fra'
   # start, and the refusal will read like a bug in the store.
   FLUX_EXCHANGE_CREDENTIALS = '/data/credentials/store.json'
   FLUX_EXCHANGE_CONNECTIONS = '/data/connections/store.json'
-  FLUX_EXCHANGE_AGENTS = '/data/agents/store.json'
+  FLUX_EXCHANGE_SERVICE_ACCOUNTS = '/data/agents/store.json'
   FLUX_EXCHANGE_SETTINGS = '/data/settings/store.json'
   FLUX_EXCHANGE_GRANTS = '/data/grants/store.json'
   FLUX_EXCHANGE_WORKFLOWS = '/data/workflows'

@@ -5,7 +5,7 @@ status: in-progress
 priority: 1
 epic: remote-deployment
 areas: [exchange-server, observability, operations]
-note: "The process-wide X-87 limiter bounds memory and concurrency but lets one caller spend the shared invocation budget and supplies no saturation metric."
+note: "Fair budgets, bounded metrics and edge occupancy controls are ready; live release verification remains."
 ---
 
 # Traffic controls are fair as well as bounded

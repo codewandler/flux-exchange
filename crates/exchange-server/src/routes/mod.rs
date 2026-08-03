@@ -570,6 +570,7 @@ fn audited_action(
 
     let method = request.method();
     let path = request.uri().path();
+    let acquisition = decoded_query_value(request.uri().query(), "acquire");
     if path == "/api/session" {
         return match *method {
             Method::POST => Some((AuditAction::SessionOpened, AuditTarget::Session)),
@@ -577,7 +578,7 @@ fn audited_action(
             _ => None,
         };
     }
-    if (path == "/api/service-accounts" || path == "/api/agents") && *method == Method::POST {
+    if path == "/api/service-accounts" && *method == Method::POST {
         return Some((
             AuditAction::ServiceAccountMinted,
             AuditTarget::ServiceAccounts,
@@ -616,7 +617,11 @@ fn audited_action(
     let segments: Vec<&str> = rest.split('/').collect();
     match (method, segments.as_slice()) {
         (&Method::POST, [connector]) if !connector.is_empty() => Some((
-            AuditAction::ConnectionCreated,
+            if acquisition.as_deref() == Some("password") {
+                AuditAction::CredentialAcquired
+            } else {
+                AuditAction::ConnectionCreated
+            },
             AuditTarget::Connection {
                 connector: (*connector).to_owned(),
             },
@@ -637,7 +642,11 @@ fn audited_action(
             if !connector.is_empty() && !label.is_empty() =>
         {
             Some((
-                AuditAction::ConnectionCreated,
+                if acquisition.as_deref() == Some("password") {
+                    AuditAction::CredentialAcquired
+                } else {
+                    AuditAction::ConnectionCreated
+                },
                 AuditTarget::ConnectionInstance {
                     connector: (*connector).to_owned(),
                     label: (*label).to_owned(),
@@ -670,7 +679,11 @@ fn audited_action(
             ))
         }
         (&Method::PUT, [connector, "credentials", credential]) => Some((
-            AuditAction::CredentialRotated,
+            if acquisition.as_deref() == Some("refresh") {
+                AuditAction::CredentialRefreshed
+            } else {
+                AuditAction::CredentialRotated
+            },
             AuditTarget::Credential {
                 connector: (*connector).to_owned(),
                 credential: (*credential).to_owned(),
@@ -693,7 +706,11 @@ fn audited_action(
             },
         )),
         (&Method::PUT, [connector, "instances", label, "credentials", credential]) => Some((
-            AuditAction::CredentialRotated,
+            if acquisition.as_deref() == Some("refresh") {
+                AuditAction::CredentialRefreshed
+            } else {
+                AuditAction::CredentialRotated
+            },
             AuditTarget::InstanceCredential {
                 connector: (*connector).to_owned(),
                 label: (*label).to_owned(),
@@ -720,6 +737,18 @@ fn audited_action(
         )),
         _ => None,
     }
+}
+
+fn decoded_query_value(query: Option<&str>, name: &str) -> Option<String> {
+    let query = query?;
+    let Ok(mut parsed) = reqwest::Url::parse("http://localhost/") else {
+        return None;
+    };
+    parsed.set_query(Some(query));
+    parsed
+        .query_pairs()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
 }
 
 pub(super) fn record_audit(
@@ -1401,6 +1430,29 @@ mod tests {
         assert_eq!(audited_action(&read, &principal), None);
     }
 
+    #[test]
+    fn acquisition_audit_modes_use_normal_percent_decoded_query_parsing() {
+        let principal = Principal::new(
+            PrincipalKind::User,
+            "alice",
+            Tenant::new("acme").expect("a usable tenant"),
+        );
+        let request = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/api/connections/babelforce?ignored=x&acquire=pass%77ord")
+            .body(Body::empty())
+            .expect("a request");
+        assert_eq!(
+            audited_action(&request, &principal),
+            Some((
+                AuditAction::CredentialAcquired,
+                AuditTarget::Connection {
+                    connector: "babelforce".to_owned(),
+                },
+            )),
+        );
+    }
+
     /// The tenant comes from the resolved principal and from **nothing a caller controls** — so no
     /// published route may take a tenant in its path. Stated over the whole surface rather than
     /// over the routes that exist today, so a module added by a later story is covered on the day
@@ -1450,9 +1502,8 @@ mod tests {
             vec![
                 ("/api/service-accounts", Access::Operator),
                 ("/api/service-accounts/{id}", Access::Operator),
-                ("/api/agents", Access::Operator),
             ],
-            "the canonical resource and its one-release compatibility alias must stay published",
+            "only the canonical Service Account resource may be published",
         );
 
         let (status, body) =
@@ -1648,7 +1699,6 @@ mod tests {
             // host mints, verifies and revokes nothing for a service.
             ("service-accounts", "/api/service-accounts"),
             ("service-accounts", "/api/service-accounts/{id}"),
-            ("service-accounts", "/api/agents"),
             // Reading and editing what a tenant may run (X-62). Only a signed-in human, and this
             // is the entry that makes the four above worth having: whoever may edit a grant
             // decides which operations run at all, for every principal of the tenant and across
@@ -1878,7 +1928,7 @@ mod tests {
 
     /// The development roster the three tests below sign in through: one human, one agent, one
     /// tenant. Both kinds are needed — the claim is that the *kind* is what decides the answer.
-    const EDITORS: &str = "user:alice@acme,agent:bot@acme";
+    const EDITORS: &str = "user:alice@acme,service_account:bot@acme";
 
     /// A grant store that lives in the test, and that really stores.
     ///

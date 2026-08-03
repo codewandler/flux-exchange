@@ -825,7 +825,7 @@ mod tests {
 
     /// Two tenants and two kinds, so nothing below can pass by answering the same thing to
     /// everyone.
-    const ROSTER: &str = "user:alice@acme,user:bob@globex,agent:bot@acme";
+    const ROSTER: &str = "user:alice@acme,user:bob@globex,service_account:bot@acme";
 
     /// A grant store that lives in the test, keyed by tenant.
     ///
@@ -1582,8 +1582,11 @@ mod tests {
                  host holds rather than what this build is",
             );
 
-            // And spelled out, for the fields a reader would look for first.
-            for forbidden in ["acme", "globex", "alice", "bob", "max_risk", "\"grants\""] {
+            // And spelled out, for the tenant values and policy fields a reader would look for
+            // first. The anonymous descriptor may name the static `grants` capability; the
+            // byte-for-byte comparison above proves that build fact does not change with either
+            // tenant's held policy.
+            for forbidden in ["acme", "globex", "alice", "bob", "max_risk"] {
                 assert!(
                     !after.contains(forbidden),
                     "`{path}` names `{forbidden}`, which belongs to a tenant and not to this \

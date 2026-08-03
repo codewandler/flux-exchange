@@ -42,7 +42,8 @@ integration: it owns tenant authority, runtime admission, isolation, streams, an
 **Its primary caller is non-human, not a human.** People sign in to wire things up and to see what
 happened; Service Accounts and hosted Managed Agents call operations all day. A **Service Account**
 is the non-human bearer principal; an **Agent** remains model + authored loop + bounded capabilities.
-The deprecated v0.16 `/api/agents` create alias is compatibility surface, not a second definition.
+The v0.16 `/api/agents` create alias was compatibility surface, not a second definition, and is
+removed in v0.17.
 This inverts the usual assumption for a
 credential-holding web service and it shapes everything: the API is the product and the console is
 the admin surface, not the other way round.

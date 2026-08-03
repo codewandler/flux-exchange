@@ -3,9 +3,10 @@
 The platform layer of the [flux](https://github.com/codewandler/flux) family: a service that holds
 credentials, terminates channels, runs operations for many callers, and records what happened.
 
-Its primary caller is an **agent**, not a human. People sign in to wire things up and to see what
-happened; agents are what call operations all day. That inverts the usual assumption and shapes
-everything below.
+Its primary caller is a **Service Account** today, and a hosted **Managed Agent** in the target
+architecture—not a human at the console. People sign in to wire things up and to see what happened;
+non-human callers invoke operations all day. That inverts the usual assumption and shapes everything
+below.
 
 The contributor and operator [security posture](docs/security.md) maps the threat model, enforced
 controls, deployment assumptions, known limitations, security roadmap and incident checklist.
@@ -14,7 +15,7 @@ Managed Agent and Service Account one meaning across the Flux family and labels 
 live versus target architecture.
 
 > [!WARNING]
-> **Status: v0.16.2 — Wave #1: safer identity, fair traffic, attributable deploys, and tested recovery.**
+> **Status: v0.17.0 — Wave #2: canonical callers, complete public boundaries, and instance-bound channels.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
 > connector catalogue and a session without OIDC setup. The ordinary composition supports both a
@@ -51,9 +52,10 @@ live versus target architecture.
 > obtain a credential is refused unless the deployment explicitly names that hazard in
 > `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` (currently
 > `resource_owner_secret_shared`). Unset permits none; an unknown name refuses startup rather than
-> being skipped. When hazardous acquisition lands in X-75, forgetting this opt-in will look like a
-> connection outage: the host answers `403` and names the connector and hazard before contacting
-> the vendor. A vendor rejecting supplied credentials remains a different failure.
+> being skipped. X-75's injectable acquisition seam exists, but no released connector declares it
+> until upstream C-440 lands, so production binds no live acquisition performer today. Once one is
+> bound, forgetting the opt-in looks like a connection outage: the host answers `403` and names the
+> connector and hazard before contacting the vendor. A vendor rejection remains a different failure.
 >
 > See [What exists today](#what-exists-today) for the honest inventory before planning around any
 > of this.
@@ -133,8 +135,7 @@ boot. No released connector declares a hazard yet; upstream C-440 will make the 
 | `crates/exchange-server` | Health, catalogue, complete OIDC sign-in, per-tenant labelled connection instances and grants, Service Account lifecycle and bearer authentication, ordinary invocation, workflow authoring/publication, durable SQLite run records and typed 30-day audit evidence, channel supervision and authenticated live event fan-out. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
 | `console/` | A Vue 3 **admin surface**, not a catalogue browser: Connect → Grant → Invoke plus Workflows, Activity and Channels. The workflow editor uses the upstream Flux graph contract, protects unsaved drafts, retains exact source, and paints durable value-free run events back onto nodes. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
-**Not built, despite being described in the design:** rich outbound runtime-plan dispatch, generated
-channel binding to a selected connection instance (X-122), webhook channels,
+**Not built, despite being described in the design:** rich outbound runtime-plan dispatch, webhook channels,
 durable event replay/inboxes, general operation streams, isolated per-tenant workers,
 leases-in-anger, runtime artifact installation/attestation, and the catalogue loader. Stored workflows,
 workflow execution records and generated WebSocket channels moved off this list in X-98 and X-101.
@@ -151,9 +152,12 @@ on purpose; the gap is stated here so nobody has to discover it.
 
 `FLUX_EXCHANGE_CHANNELS` names the owner-only persistent channel file. With that store, the
 credential store and the grant store bound, a signed-in human can create, edit and remove a channel
-from the console. The mutation names only a catalogue connector, one of its generated socket
-bindings and a closed event subset. Tenant, connection, endpoint, credential and placement are all
-derived or operator-owned; none is accepted from the request body.
+from the console. The mutation names only a catalogue connector, an operator connection label, one
+of its generated socket bindings and a closed event subset. The host resolves that mutable label to
+the held instance's immutable id inside the principal's tenant; no tenant, UUID, endpoint,
+credential address or placement is accepted from the request body. Renaming the connection changes
+what the channel displays without retargeting it, and deleting a connection is refused while a
+durable channel still binds it.
 
 The vendor socket is supervised independently of subscribers and restored after restart. An
 authenticated `GET /api/subscribe` WebSocket multiplexes opaque channel ids and returns
@@ -178,10 +182,10 @@ original tenant until expiry or revocation. Authentication grants nothing by its
 metadata-selected grants bound invocation and inbound subscriptions, and a Service Account cannot
 edit connections, settings or grants, create another principal, or read a credential.
 
-For v0.16 only, `POST /api/agents` and `FLUX_EXCHANGE_AGENTS` remain compatibility spellings. The
-route emits deprecation, successor and v0.17-removal headers; differing canonical and legacy store
-paths refuse startup. Existing unprefixed tokens keep resolving without rewriting stored material.
-The [migration design](docs/designs/service-accounts.md) owns the removal checkpoint.
+The v0.16 `POST /api/agents`, `FLUX_EXCHANGE_AGENTS`, `agent` principal and `#/agents` compatibility
+spellings are removed in v0.17. Existing unprefixed tokens keep resolving from the unchanged
+verifier-keyed store without rewriting stored material. The
+[migration design](docs/designs/service-accounts.md) records the completed checkpoint.
 
 ### The credential store, and what does not protect it
 

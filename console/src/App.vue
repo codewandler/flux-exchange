@@ -25,6 +25,7 @@ import { fragmentPath, useRoute } from './routing'
 import {
   CONNECTORS_ENDPOINT,
   SIGNIN_ENDPOINT,
+  channelConnectionLabels,
   connect,
   createChannel,
   cancelWorkflowRun,
@@ -114,6 +115,7 @@ const route = useRoute()
 /** Whether a principal is resolved. `null` while the session is still unknown either way. */
 const principal = computed(() => (session.value.status === 'ready' ? session.value.principal : null))
 const signedIn = computed(() => principal.value !== null)
+const channelConnections = computed(() => channelConnectionLabels(connections.value))
 
 async function reloadCatalogue() {
   catalogue.value = { status: 'loading' }
@@ -187,18 +189,18 @@ watch(() => catalogue.value.status, async (status) => {
   if (status === 'ready') await reloadChannelDeclarations()
 })
 
-async function createHeldChannel(connector: string, binding: string, events: string[]) {
+async function createHeldChannel(connector: string, connection: string, binding: string, events: string[]) {
   if (channelBusy.value) return
   channelBusy.value = true
-  channelOutcome.value = await createChannel(connector, binding, events)
+  channelOutcome.value = await createChannel(connector, connection, binding, events)
   channelBusy.value = false
   if (channelOutcome.value.status === 'saved') await reloadChannels()
 }
 
-async function updateHeldChannel(channel: Parameters<typeof updateChannel>[0], events: string[]) {
+async function updateHeldChannel(channel: Parameters<typeof updateChannel>[0], connection: string, events: string[]) {
   if (channelBusy.value) return
   channelBusy.value = true
-  channelOutcome.value = await updateChannel(channel, events)
+  channelOutcome.value = await updateChannel(channel, connection, events)
   channelBusy.value = false
   if (channelOutcome.value.status === 'saved') await reloadChannels()
 }
@@ -654,6 +656,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
           v-if="principal?.kind === 'user'"
           :state="channels"
           :declarations="channelDeclarations"
+          :connections="channelConnections"
           :busy="channelBusy"
           :outcome="channelOutcome"
           @retry="reloadChannels"
