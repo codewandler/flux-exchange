@@ -113,7 +113,8 @@ connector, instance, service and declared field address:
   read it; and
 - `revoked` keeps the proposed value for repair but makes it unreadable to the runtime again.
 
-Changing a proposed value creates a new revision in `proposed`; it never carries approval forward.
+Every custom-origin setting write creates a new revision in `proposed`, even when the submitted bytes
+match the prior value; a write never carries approval forward.
 Clearing the setting removes the value and visible authority state but retains the store's durable
 revision high-water mark. Recreating a setting or label therefore cannot reuse an old revision and
 turn a delayed approval request into authority for a different origin. Approval is a
@@ -131,27 +132,40 @@ only the plan version and proposal revision. The route remains under the deploym
 declared field only as catalogue/registry keys. It accepts no origin value. Audit records name that
 derived setting address and the transition, never the proposed value.
 
+For a custom origin, the field's existing `set` flag means runtime-effective and is true only in
+`approved`. A required proposed or revoked field therefore keeps the overall plan incomplete. The
+composite apply step reports that the proposal persisted and explicit approval remains, rather than
+calling the connection complete.
+
 The field's `authority` object is closed: `state` is `unset`, `proposed`, `approved` or `revoked`;
-`revision` is absent only for `unset`; and value-bearing states publish the same approve and revoke
-targets. Both action bodies are exactly the plan `version` plus that `revision`. A success response
-repeats only version, connector, label, service, field, state and revision. A stale revision or
-ineligible declaration is a value-free refusal and does not mutate anything.
+`revision` is `null` only for `unset`; and value-bearing states publish the same approve and revoke
+targets. A revision is a canonical decimal string rather than a JSON number, so a JavaScript client
+cannot silently round the store's `u64`. Both action bodies are exactly the plan `version` plus that
+revision. A success response repeats only version, connector, label, service, field, state and
+revision. A stale revision or ineligible declaration is a value-free refusal and does not mutate
+anything.
 
 The existing settings file is a legacy unversioned map of plain strings. Binding accepts that exact
-shape, but never treats a legacy custom-origin value as approved. The first explicit proposal or
-authority mutation rewrites a versioned state containing values, authority records and the revision
-high-water mark. Unknown root versions, record shapes and authority states refuse startup rather
-than being dropped or repaired.
+shape without rewriting it. The first explicit mutation persists
+`exchange.connection-settings.v2`, its next origin revision and its values; ordinary leaves remain
+strings while custom origins are strictly tagged records. A legacy string at an address the current
+typed catalogue marks as custom-origin refuses startup and names the derived address, never the
+value: an old value is not inferred approved, and explicit cleanup/resubmission is safer than a
+silent migration. Unknown root versions, record shapes, record fields and authority states refuse
+startup rather than falling back to legacy, being dropped or being repaired.
 
-Invocation reads a custom-origin value only in `approved`. Proposed, revoked and legacy values are
+Invocation reads a custom-origin value only in `approved`, after revalidating that the current typed
+declaration still classifies that address as a custom origin. Proposed and revoked values are
 indistinguishable from missing configuration at the runtime port, so request construction and
-permission subjects observe the same snapshot. A proposal change or revocation also restarts the
-tenant's generated channels for that connector: cancellation happens before a replacement plan can
-read settings, so a long-lived channel cannot retain authority that its store has revoked.
+permission subjects observe the same snapshot; a policy change never demotes a tagged record into an
+executable ordinary string. Proposal, approval, revocation and clear each restart the tenant's
+generated channels for that connector, cancelling before a replacement plan can read settings. A
+long-lived channel therefore cannot retain revoked authority. Already-dispatched one-shot work may
+complete; revocation governs later projections.
 
 `exchange.connection-plan.v1` remains the only accepted request version. `GET` defaults an omitted
 version to v1 and refuses an explicitly unsupported one. Composite and authority writes naming
-another version refuse before any value is collected or any step runs, with a dedicated `422`
+another version refuse before semantic processing or any write, with a dedicated `422`
 carrying `unsupported_connection_plan_version`, `requested` and `supported` — never an embedded v1
 plan that could be mistaken for the requested contract. A consumer receiving another response
 version refuses it before rendering or submitting; the console tests that closed-version check.
@@ -161,6 +175,9 @@ can carry and test the generic lifecycle behind a fail-closed policy seam, but i
 today's inferred whole-authority connectors as a substitute. The released projection activates the
 lifecycle only after connector 0.19.0 publishes and Exchange consumes that typed declaration. No
 connector id, vendor field, path dependency or git dependency substitutes for that release seam.
+The declaration owns value grammar, API-path composition and HTTPS requirements. Exchange persists
+and approves the exact submitted bytes; it invents no URL normalization or host allow-list, and the
+egress private-network/DNS guard remains a separate dispatch control.
 
 ## Consumers
 

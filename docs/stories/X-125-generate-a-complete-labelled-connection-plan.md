@@ -67,13 +67,14 @@ label from X-14, not a host, authority, credential address, instance UUID or run
       fall back to a different origin.
 - [ ] A closed declared set carries its permitted choices in the plan and both clients render it as
       a choice/dropdown rather than unrestricted text. [[X-80]] is a prerequisite and retains its
-      complete acceptance: clients learn choices from one successful read, while fields without a
-      closed set publish no choices.
+      complete acceptance: consumers learn choices from one successful read, while fields without
+      a closed set publish no choices.
 - [ ] Secret field descriptors may be returned, but secret **values** travel directly from the
       human-controlled input to an Exchange-owned write surface. They never appear in the plan, any
       response, URL/query, Flux argument or configuration, application log, activity record, or
-      browser navigation/history. Non-interactive Flux CLI use does not accept a vendor secret on
-      argv; secure stdin/prompt or an Exchange-owned browser handoff is required.
+      browser navigation/history. The contract gives a future non-interactive client no
+      vendor-secret argv or configuration representation; secure stdin/prompt or an Exchange-owned
+      browser handoff remains the consumer requirement.
 - [ ] Non-secret settings use the existing tenant-, connector-, service- and label-scoped settings
       route and persistence from X-47/X-14. Reloading the plan reports whether each required field is
       set without returning the stored value, and a missing setting keeps the connection visibly
