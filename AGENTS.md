@@ -209,7 +209,9 @@ Each is stated in `docs/vision.md` and several are already enforced by tests in
   this from the manifest. Do not add an override.
 - **Grants select by declared metadata, not by name**, and an explicit `deny` beats an explicit
   `allow`.
-- **An agent's token grants access to an operation, never to a credential.**
+- **A Service Account token grants access to an operation, never to a credential.** The current
+  `/api/agents` name is legacy migration debt; **Agent** is reserved for Flux's model + loop + bounded
+  capabilities and becomes a Managed Agent when Exchange hosts it.
 - **Refuse; never repair.** A missing credential, a widened file mode, an unbound config value: each
   refuses and names the address, never the value. A store that falls back to memory, or a mode that
   is quietly tightened, hides the thing you needed to know.

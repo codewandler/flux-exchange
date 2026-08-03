@@ -16,6 +16,7 @@
 
 mod agents;
 mod catalogue;
+mod channels;
 mod connections;
 mod grants;
 mod health;
@@ -24,6 +25,7 @@ mod invoke;
 mod onboarding;
 mod signin;
 mod workflows;
+mod subscribe;
 
 use std::path::Path;
 
@@ -54,6 +56,8 @@ const MODULES: &[Module] = &[
     grants::MODULE,
     onboarding::MODULE,
     workflows::MODULE,
+    channels::MODULE,
+    subscribe::MODULE,
 ];
 
 /// A feature module's contribution to the surface.
@@ -1222,6 +1226,11 @@ mod tests {
                 "/api/workflow-runs/{run}/cancel",
                 workflows::MAY_AUTHOR,
             ),
+            // Creating, changing and deleting a persistent vendor channel selects an independently
+            // running connection for the whole tenant. An agent may consume specifically granted
+            // events, but may not widen the event set or create another credential-spending loop.
+            ("channels", "/api/channels", channels::OPERATORS),
+            ("channels", "/api/channels/{id}", channels::OPERATORS),
         ];
 
         let gated: Vec<_> = published()

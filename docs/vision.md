@@ -25,15 +25,19 @@ states why: *a boundary that requires taste is a boundary that erodes.*
 | **flux-exchange** | **Does it require holding a credential or knowing a tenant?** |
 | a downstream product | Is it true only of one company's customers? |
 
-Our row owns: **principals, connections, credentials, channels, leases, stored programs and
-execution records.** Anything that fails our test belongs upstream or downstream — and
+Our row owns: **principals, connections, credentials, channels, installed apps, datasource and
+trigger bindings, event deliveries, model profiles, leases, stored programs and execution
+records.** Anything that fails our test belongs upstream or downstream — and
 **no flux-family repository names a downstream company**, which is the fourth row applied to the
 documentation itself.
 
 ## Who it is for
 
-**Its primary caller is an agent, not a human.** People sign in to wire things up and to see what
-happened; agents are what call operations all day. That inverts the usual assumption for a
+**Its primary caller is non-human, not a human.** People sign in to wire things up and to see what
+happened; Service Accounts and hosted Managed Agents call operations all day. In this repository's
+legacy API a Service Account is still called an “agent principal”; that name is migration debt, not
+a second meaning of Flux's **Agent** (model + loop + bounded capabilities). This inverts the usual
+assumption for a
 credential-holding web service and it shapes everything: the API is the product and the console is
 the admin surface, not the other way round.
 
@@ -88,8 +92,10 @@ about one can never be misread as a sentence about the other.
    is a list somebody maintains, and it stops covering a connector the moment that connector gains
    an operation. `risk <= low` covers the new one correctly on the day it lands.
 
-4. **An agent's token grants access to an operation, never to a credential.** A stolen agent token
-   yields a bounded operation set against one tenant's connections — never a vendor secret.
+4. **A Service Account token grants access to an operation, never to a credential.** A stolen token
+   yields a bounded operation set against one tenant's connections — never a vendor secret. A
+   Managed Agent receives the same bounded authority through its installed App revision without
+   receiving the credential value.
 
 5. **Refuse; never repair.** A missing credential, an unbound config value, an unknown runtime: each
    refuses by name. A partial substitution is a request to a *different* host, which that host
@@ -102,9 +108,10 @@ about one can never be misread as a sentence about the other.
 7. **Say what is not built.** A page or a type that implies a working service costs more than an
    honest gap. The README carries an itemized inventory and it is expected to stay accurate.
 
-8. **A workflow is a stored program, not a second execution model.** What an operator calls a
-   workflow — triggers, conditions, schedules, flows of operations — is a stored, versioned,
-   per-tenant `flux-app` Program. A visual editor emits IR; the IR lowers to Flux. The simplified
+8. **A workflow is a stored Program, not a second execution model or a formal domain type.** What an
+   operator informally calls a workflow — triggers, conditions, schedules, flows of operations — is
+   a stored, versioned, per-tenant Flux Program installed as an App. A visual editor emits IR; the IR
+   lowers to Flux. The simplified
    schema an editor wants is a *projection*, never a second model.
 
    That buys determinism, replay, fork/diff, approval gates, typing and risk derivation for free, and

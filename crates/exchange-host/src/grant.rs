@@ -105,18 +105,19 @@ impl OperationFacts {
     /// # `effects` is **derived**, and that is a measured gap rather than a detail
     ///
     /// `connector_catalog::Operation` publishes `risk`, `idempotency`, `credentials`, `hosts` and
-    /// the operation's Flux — and **no effects field** (re-checked against 0.13.0 in X-85; the one
-    /// field that release did add to `Operation` is `credential_requirement`), even though the
-    /// operation's own Flux source carries an `effects` declaration. So the rule here is the most
+    /// the operation's Flux — and **no effects field** (re-checked against 0.16.0 in X-104), even
+    /// though the operation's own Flux source carries an `effects` declaration. So the rule here is
+    /// the most
     /// the *readable* data supports and not one step further: **an operation the catalogue gives a
     /// host to reach touches the network.** [`Effect::WorkspaceWrite`] and [`Effect::Process`] are
     /// never emitted, because nothing this crate can read speaks to either.
     ///
     /// The consequence for a grant, stated plainly because it is the direction that costs: a
     /// selector written `with_effects_within([Effect::Network])` is exact for every connector this
-    /// build carries — all **54** declare `http`, re-measured on catalogue 0.13 in X-85 rather than
-    /// carried over from 0.9 — and would silently admit an operation with an *unreported* effect
-    /// the day one ships. What keeps that from being live today is the same fact that makes
+    /// build carries — all declare `http`, re-measured on catalogue 0.16 in X-104 rather than
+    /// carried over from an older catalogue — and would silently admit an operation with an
+    /// *unreported* effect the day one ships. What keeps that from being live today is the same fact
+    /// that makes
     /// the runtime refusal undrivable through `invoke`, and it is asserted rather than assumed:
     /// `the_whole_catalogue_declares_http` in [`crate::invoke`], and
     /// `effects_are_derived_from_hosts_and_never_claim_more_than_that` here. When upstream declares
@@ -233,6 +234,10 @@ pub struct Grant {
     pub connector: String,
     /// Which of its operations.
     pub selector: Selector,
+    /// Explicit inbound connector bindings and declared event subsets. Absent in old documents and
+    /// therefore defaulting to no inbound access.
+    #[serde(default)]
+    pub inbound: Vec<InboundGrant>,
 }
 
 impl Grant {
@@ -241,6 +246,7 @@ impl Grant {
         Self {
             connector: connector.into(),
             selector,
+            inbound: Vec::new(),
         }
     }
 
@@ -248,6 +254,73 @@ impl Grant {
     pub fn admits(&self, connector: &str, op: &OperationFacts) -> bool {
         self.connector == connector && self.selector.admits(op)
     }
+}
+
+/// One explicit inbound grant. Unlike outbound selectors, an inbound grant is a closed event set:
+/// a vendor-created discriminator value can never become a trigger label through a wildcard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundGrant {
+    /// Connector catalogue id.
+    pub connector: String,
+    /// Declared binding name.
+    pub binding: String,
+    /// Declared events this grant admits.
+    pub events: BTreeSet<String>,
+}
+
+/// Proof that a tenant grant admits the selected inbound events.
+#[derive(Debug)]
+pub struct InboundGranted {
+    connector: String,
+    binding: String,
+    events: BTreeSet<String>,
+}
+
+impl InboundGranted {
+    /// Connector admitted by the proof.
+    pub fn connector(&self) -> &str {
+        &self.connector
+    }
+
+    /// Binding admitted by the proof.
+    pub fn binding(&self) -> &str {
+        &self.binding
+    }
+
+    /// Selected event subset admitted by the proof.
+    pub fn events(&self) -> &BTreeSet<String> {
+        &self.events
+    }
+}
+
+/// Admit a selected declared event subset. An empty selection and any event outside one explicit
+/// matching entry are refused. The principal supplies the tenant whose grants the caller loaded;
+/// it is used only in the non-enumerating refusal.
+pub fn admit_inbound(
+    principal: &Principal,
+    connector: &str,
+    binding: &str,
+    events: &BTreeSet<String>,
+    grants: &[Grant],
+) -> Result<InboundGranted, Error> {
+    let admitted = !events.is_empty()
+        && grants.iter().flat_map(|grant| &grant.inbound).any(|grant| {
+            grant.connector == connector
+                && grant.binding == binding
+                && events.is_subset(&grant.events)
+        });
+    if !admitted {
+        return Err(Error::InboundNotGranted {
+            principal: principal.to_string(),
+            connector: connector.to_owned(),
+            binding: binding.to_owned(),
+        });
+    }
+    Ok(InboundGranted {
+        connector: connector.to_owned(),
+        binding: binding.to_owned(),
+        events: events.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -754,6 +827,55 @@ mod file {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_grants_deserialize_with_no_inbound_authority() {
+        let grant: Grant = serde_json::from_value(serde_json::json!({
+            "connector": "asterisk",
+            "selector": {
+                "max_risk": null,
+                "effects_within": null,
+                "idempotency": null,
+                "allow_ids": [],
+                "deny_ids": []
+            }
+        }))
+        .expect("old grant document");
+        assert!(grant.inbound.is_empty());
+    }
+
+    #[test]
+    fn inbound_grants_admit_only_their_declared_event_subset() {
+        let principal = Principal::new(
+            crate::PrincipalKind::Agent,
+            "agent-1",
+            Tenant::new("alpha").expect("tenant"),
+        );
+        let mut grant = Grant::for_connector("asterisk", Selector::default());
+        grant.inbound.push(InboundGrant {
+            connector: "asterisk".into(),
+            binding: "ari-events".into(),
+            events: [
+                "channel-created".to_string(),
+                "channel-destroyed".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        let selected = ["channel-created".to_string()].into_iter().collect();
+        assert!(admit_inbound(
+            &principal,
+            "asterisk",
+            "ari-events",
+            &selected,
+            &[grant.clone()]
+        )
+        .is_ok());
+        let undeclared = ["vendor-invented".to_string()].into_iter().collect();
+        assert!(
+            admit_inbound(&principal, "asterisk", "ari-events", &undeclared, &[grant]).is_err()
+        );
+    }
 
     fn facts(id: &str, risk: Risk) -> OperationFacts {
         OperationFacts {

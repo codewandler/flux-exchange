@@ -16,6 +16,7 @@
 mod agent;
 mod audit;
 mod bind;
+pub mod channel;
 mod connection_guard;
 mod dev_identity;
 mod entropy;
@@ -23,7 +24,7 @@ mod execution;
 mod oidc;
 mod routes;
 mod session;
-mod state;
+pub mod state;
 mod traffic;
 mod workflow_runs;
 

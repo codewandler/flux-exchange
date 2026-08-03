@@ -658,6 +658,22 @@ mod tests {
             "a signed-in human's control over a live run, not authority handed to an agent.",
         ),
         (
+            "/api/channels",
+            "operator-owned lifecycle for persistent vendor channels. It is staged until a released \
+             connector catalogue and guarded runtime can be bound; agents consume selected events \
+             through subscribe and never create or widen the underlying connection.",
+        ),
+        (
+            "/api/channels/{id}",
+            "the item half of the same operator-owned channel lifecycle, not an agent capability.",
+        ),
+        (
+            "/api/subscribe",
+            "the authenticated transport is staged but no released compatible connector-channel \
+              runner is bound by this build. The subscribe capability remains unavailable until \
+              that end-to-end composition ships.",
+        ),
+        (
             "/api/onboarding",
             "this document itself. It names its own endpoint in `endpoint`, which is where a \
              caller looks for it, rather than as something an agent is told to go and do.",

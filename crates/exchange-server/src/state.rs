@@ -8,6 +8,7 @@ use exchange_host::{
 
 use crate::agent::AgentStore;
 use crate::bind::IdentityBinding;
+use crate::channel::ChannelSupervisor;
 use crate::connection_guard::ConnectionGuard;
 use crate::dev_identity::DevIdentity;
 use crate::oidc::Oidc;
@@ -72,6 +73,8 @@ pub struct AppState {
     pure_editor_tools: Option<Arc<PureEditorTools>>,
     /// Durable redacted workflow activity and in-flight cancellation handles.
     workflow_runs: Option<Arc<WorkflowRunStore>>,
+    /// Persistent connector-channel supervisor, if this composition bound the released runtime.
+    channels: Option<Arc<ChannelSupervisor>>,
     /// Process-wide bounds around anonymous sign-in allocation and operation execution.
     traffic: Traffic,
 }
@@ -205,6 +208,7 @@ impl AppState {
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
+            channels: None,
             traffic: Traffic::default(),
         }
     }
@@ -230,6 +234,7 @@ impl AppState {
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
+            channels: None,
             traffic: Traffic::default(),
         }
     }
@@ -252,6 +257,7 @@ impl AppState {
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
+            channels: None,
             traffic: Traffic::default(),
         }
     }
@@ -284,6 +290,7 @@ impl AppState {
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
+            channels: None,
             traffic: Traffic::default(),
         }
     }
@@ -306,6 +313,7 @@ impl AppState {
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
+            channels: None,
             traffic: Traffic::default(),
         }
     }
@@ -432,6 +440,17 @@ impl AppState {
     /// Durable workflow activity and cancellation coordinator.
     pub fn workflow_runs(&self) -> Option<&Arc<WorkflowRunStore>> {
         self.workflow_runs.as_ref()
+    }
+
+    /// Bind persistent connector-channel supervision. This does not affect identity admission.
+    pub fn with_channels(mut self, channels: Arc<ChannelSupervisor>) -> Self {
+        self.channels = Some(channels);
+        self
+    }
+
+    /// Bound channel supervisor, if the composition can run generated channels.
+    pub fn channels(&self) -> Option<&Arc<ChannelSupervisor>> {
+        self.channels.as_ref()
     }
 
     /// The claims on connection changes in flight.

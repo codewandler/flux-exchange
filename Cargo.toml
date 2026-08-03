@@ -16,7 +16,7 @@ authors = ["codewandler"]
 exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exchange-host", version = "0.14.3" }
 
 async-trait = "0.1"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 # `fs` is X-83's: the console is served by the host it talks to, because the session cookie is
 # `SameSite=Strict` and a browser never attaches one cross-origin. See `routes::app_with_console`.
@@ -50,7 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # ENGINE_LINE = "0.52"
 #
 # flux's vocabulary crate: the `Error` and `Result` every `Tool::execute` answers with. Its own
-# dependencies are `serde`, `serde_json` and `thiserror` and nothing else, which is why it is the one
+# dependencies remain pure data/error dependencies, which is why it is the one
 # engine crate `exchange-host` may name without weakening lock 1 — telling a refusal that precedes
 # dispatch from a transport failure means matching on that enum, and matching on it means naming it.
 flux-core = { package = "codewandler-flux-core", version = "0.52" }
@@ -120,4 +120,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = "0.7"

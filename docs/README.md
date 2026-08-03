@@ -8,6 +8,7 @@ roadmap, story status, design records, and notes. Work is tracked with the **tra
 
 | If you want… | Read |
 |---|---|
+| **The shared domain vocabulary** — Connector, App, Agent, Datasource, Trigger and Event Delivery | [concepts.md](concepts.md) |
 | Why the project exists; the principles | [vision.md](vision.md) |
 | Threat model, security controls, limitations and incident response | [security.md](security.md) |
 | Status + what's next; the epics | [roadmap.md](roadmap.md) |

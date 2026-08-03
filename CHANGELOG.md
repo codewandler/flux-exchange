@@ -6,6 +6,20 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- **Flux Exchange adopts connector 0.16 and Flux 0.52 as one dependency graph** (X-104). The
+  engine-line seam, manifest and lockfile checks prove one Flux runtime line. Catalogue-expansion
+  guards now account for Asterisk's refused whole-authority host setting and Zendesk's default, Help
+  Center and Messaging settings.
+
+  The new canonical domain glossary reserves Agent for Flux's model + loop + bounded capabilities,
+  names the existing bearer principal Service Account, and defines Connection, Datasource, Event
+  Delivery, Trigger, App, Managed Agent, Model Profile, Run and Activity with honest live/target
+  status. The release audit records that Program declarations shipped through `flux-lang`, while
+  the `flux-app` and `flux-channels` host crates were omitted from the crates.io release; Exchange
+  does not replace either runtime locally.
+
 ### Fixed
 
 - **The documented development command is now an end-to-end release contract** (X-100). CI and the

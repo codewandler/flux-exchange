@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 // only, and deliberately separate from `connections`: that module answers *where* a credential
 // lives, this one answers *how it got there*.
 mod acquisition;
+mod channel;
 mod connections;
 // Unix only, and for the reason `connector_secrets::file` is: the whole of what protects a value in
 // the file store is `0600` and `0700`, and a platform that cannot spell those would get a store that
@@ -123,6 +124,9 @@ pub use flux_lang::editor::{EditorTraceEvent, EditorTraceObserver};
 pub use flux_runtime::{ToolContext, ToolRegistry};
 
 pub use acquisition::AuthHazard;
+pub use channel::{ChannelId, ChannelRecord, ChannelRefusal, Channels, MemoryChannels};
+#[cfg(unix)]
+pub use channel::{ChannelStore, ChannelStoreError, CHANNEL_STORE_SETTING};
 pub use connections::{
     address_path, admit_tenant_occupancy, stored_bytes, ConnectionRefusal, ConnectorDeclaration,
     DeclaredCredential, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES,
@@ -130,8 +134,8 @@ pub use connections::{
 #[cfg(unix)]
 pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
 pub use grant::{
-    admit_grant, Effect, Grant, GrantRefusal, Granted, Grants, Idempotency, OperationFacts, Risk,
-    Selector,
+    admit_grant, admit_inbound, Effect, Grant, GrantRefusal, Granted, Grants, Idempotency,
+    InboundGrant, InboundGranted, OperationFacts, Risk, Selector,
 };
 #[cfg(unix)]
 pub use grant::{GrantStore, GrantStoreError, GRANT_STORE_SETTING};
@@ -179,6 +183,19 @@ pub enum Error {
         principal: String,
         /// The operation it asked for.
         operation: String,
+    },
+
+    /// No explicit inbound grant admits the requested binding/event subset.
+    #[error(
+        "principal `{principal}` holds no inbound grant admitting connector `{connector}` binding `{binding}`"
+    )]
+    InboundNotGranted {
+        /// The principal that asked.
+        principal: String,
+        /// Connector named by stored channel state.
+        connector: String,
+        /// Binding named by stored channel state.
+        binding: String,
     },
 
     /// The lease named is not open, or is not this caller's.

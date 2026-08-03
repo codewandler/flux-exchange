@@ -9,6 +9,9 @@ everything below.
 
 The contributor and operator [security posture](docs/security.md) maps the threat model, enforced
 controls, deployment assumptions, known limitations, security roadmap and incident checklist.
+The [domain vocabulary](docs/concepts.md) gives Connector, Connection, Datasource, Trigger, App,
+Managed Agent and Service Account one meaning across the Flux family and labels which bindings are
+live versus target architecture.
 
 > [!WARNING]
 > **Status: v0.14.3 — credentials, gated operations, and versioned tenant workflows.**

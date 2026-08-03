@@ -861,6 +861,9 @@ async fn rotate(
         return rotation_failed(provider, &credential, &reference, &error);
     }
     crate::audit::credential_rotated(&principal, provider.id, &credential);
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
 
     // `200` and not `201`: nothing was created, and the connection is the one that was already
     // there. The answer is the same view every other route gives — addresses, and which
@@ -1096,6 +1099,9 @@ async fn set_setting(
     }
 
     crate::audit::setting_set(&principal, provider.id, &setting.service, &setting.binds());
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
     Json(setting_view(provider, &setting, true)).into_response()
 }
 
@@ -1132,6 +1138,9 @@ async fn clear_setting(
                 &setting.service,
                 &setting.binds(),
             );
+            if let Some(channels) = state.channels() {
+                channels.restart(principal.tenant(), provider.id);
+            }
             StatusCode::NO_CONTENT.into_response()
         }
     }
@@ -3431,7 +3440,7 @@ mod tests {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
         assert_eq!(
             refusal["declared"],
-            json!(["zendesk.api_token", "zendesk.messaging_key"])
+            json!(["zendesk.api_token", "zendesk.messaging_key"]),
         );
         assert!(store.addresses().is_empty());
     }
