@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **Service Accounts can now discover their exact remote connector surface** (X-113).
+  Authenticated `GET /api/catalogue/effective` intersects the invoker's credential and non-secret
+  settings ports with the resolved principal's tenant grants, returns only usable
+  operation/connection bindings, and carries a stable content generation for Flux to refresh
+  between turns. The existing one-shot
+  invoke path remains the execution contract; disconnected connections now have their own bounded
+  refusal instead of collapsing into a missing-credential projection failure.
+
 ### Changed
 
 - **The rich-runtime program now has one official integration execution placement** (X-124).

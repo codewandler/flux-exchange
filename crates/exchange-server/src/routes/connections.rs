@@ -1664,6 +1664,112 @@ async fn connection_views(
     Ok(views)
 }
 
+/// One connection projected for authenticated operation discovery.
+///
+/// The immutable instance UUID and every credential address stay inside this module. The caller
+/// receives only the optional operator label already accepted by `invoke` and the declared
+/// credential names used here to decide whether an operation has one complete mechanism.
+pub(super) struct EffectiveConnection {
+    pub(super) label: Option<String>,
+    pub(super) held_credentials: Vec<String>,
+    pub(super) instance: Option<InstanceId>,
+}
+
+/// Enumerate connections from the exact store invocation is bound to.
+///
+/// This is deliberately narrower than [`connection_views`]: no credential address, supplier
+/// evidence or instance UUID can reach the effective catalogue. A qualified instance without a
+/// live label is refused rather than advertised, because the HTTP invocation contract has no safe
+/// selector for it.
+pub(super) async fn effective_connections(
+    state: &AppState,
+    principal: &Principal,
+    provider: &'static Provider,
+    store: &Arc<dyn SecretStore>,
+) -> Result<Vec<EffectiveConnection>, Response> {
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+
+    // Connection existence is credential-backed today. A provider with no addressable credential
+    // has no connection lifecycle to intersect, even when one of its operations needs no
+    // credential. X-50 owns making that connector class connectable; advertising it before then
+    // would turn "compiled in" into "connected".
+    if declaration.authority.is_none() || declaration.credentials.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let Some(registry) = state.connection_registry() else {
+        let addresses = declaration
+            .addresses(principal.tenant())
+            .map_err(|refusal| connection_refused(&refusal))?;
+        let held_credentials = held(store, &addresses)
+            .await
+            .map_err(|error| store_failed(&error))?;
+        return Ok((!held_credentials.is_empty())
+            .then_some(EffectiveConnection {
+                label: None,
+                held_credentials,
+                instance: None,
+            })
+            .into_iter()
+            .collect());
+    };
+
+    let inventory = inventory(store, principal.tenant(), &declaration).await?;
+    let labels = registry
+        .entries(principal.tenant(), provider.id)
+        .map_err(|refusal| registry_refused(&refusal))?;
+    let mut connections = Vec::new();
+
+    if !inventory.legacy.is_empty() {
+        let label = match labels.as_slice() {
+            [] => None,
+            [named] => Some(named.label.to_string()),
+            _ => {
+                return Err(refuse(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "connector `{}` has one legacy connection but several labels; refusing to advertise an ambiguous invocation selector",
+                        provider.id
+                    ),
+                    json!({ "connector": provider.id, "code": "ambiguous_connection" }),
+                ));
+            }
+        };
+        connections.push(EffectiveConnection {
+            // The label is an invocation selector even while the sole credential address retains
+            // its legacy layout. `invocation_instance` resolves exactly this overlay case back to
+            // the elided address; no UUID crosses the surface.
+            label,
+            held_credentials: held_names(&declaration, &inventory.legacy),
+            instance: None,
+        });
+    }
+
+    for (instance, references) in &inventory.instances {
+        let Some(named) = labels.iter().find(|entry| entry.instance == *instance) else {
+            return Err(refuse(
+                StatusCode::CONFLICT,
+                format!(
+                    "connector `{}` has a connection instance with no usable label; refusing to advertise an invocation selector",
+                    provider.id
+                ),
+                json!({ "connector": provider.id, "code": "unlabelled_connection" }),
+            ));
+        };
+        connections.push(EffectiveConnection {
+            label: Some(named.label.to_string()),
+            held_credentials: held_names(&declaration, references),
+            instance: Some(instance.clone()),
+        });
+    }
+
+    // Registry storage is label-sorted today, while inventory is UUID-sorted. State the wire order
+    // independently so a backend change cannot churn a generation whose effective set is equal.
+    connections.sort_by(|left, right| left.label.cmp(&right.label));
+    Ok(connections)
+}
+
 /// Add current supplier evidence to a connection projection without making it existence state.
 ///
 /// Only held credentials are queried. A historical record beside an empty address must not make a
@@ -1730,18 +1836,44 @@ pub(super) async fn invocation_instance(
     provider: &'static Provider,
     supplied: Option<&str>,
 ) -> Result<Option<InstanceId>, Response> {
-    let Some(registry) = state.connection_registry() else {
-        return match supplied {
-            Some(_) => Err(no_registry()),
-            None => Ok(None),
-        };
-    };
     let Some(store) = state.credentials() else {
         return Err(no_store());
+    };
+    invocation_instance_using(state, principal, provider, supplied, store).await
+}
+
+/// Resolve an invocation selector against the exact credential port execution will use.
+pub(super) async fn invocation_instance_using(
+    state: &AppState,
+    principal: &Principal,
+    provider: &'static Provider,
+    supplied: Option<&str>,
+    store: &Arc<dyn SecretStore>,
+) -> Result<Option<InstanceId>, Response> {
+    let Some(registry) = state.connection_registry() else {
+        if supplied.is_some() {
+            return Err(no_registry());
+        }
+        let declared = declared_credentials(provider);
+        let declaration = declaration(provider, &declared);
+        let addresses = declaration
+            .addresses(principal.tenant())
+            .map_err(|refusal| connection_refused(&refusal))?;
+        let held = held(store, &addresses)
+            .await
+            .map_err(|error| store_failed(&error))?;
+        return if held.is_empty() {
+            Err(disconnected(provider))
+        } else {
+            Ok(None)
+        };
     };
     let declared = declared_credentials(provider);
     let declaration = declaration(provider, &declared);
     let inventory = inventory(store, principal.tenant(), &declaration).await?;
+    if inventory.count() == 0 {
+        return Err(disconnected(provider));
+    }
     let Some(supplied) = supplied else {
         return if inventory.count() > 1 {
             Err(refuse(
@@ -1779,6 +1911,17 @@ pub(super) async fn invocation_instance(
         };
     }
     Err(unknown_label(provider, &label))
+}
+
+fn disconnected(provider: &'static Provider) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        format!(
+            "this tenant has no connection to `{}`; connect it before invoking an operation",
+            provider.id
+        ),
+        json!({ "connector": provider.id, "code": "disconnected" }),
+    )
 }
 
 /// Resolve a management label to the immutable connection identity a channel persists.

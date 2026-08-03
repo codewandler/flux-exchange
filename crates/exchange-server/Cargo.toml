@@ -51,4 +51,5 @@ time.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
+flux-runtime.workspace = true
 tokio-tungstenite.workspace = true

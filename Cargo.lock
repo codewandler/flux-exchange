@@ -1666,6 +1666,7 @@ dependencies = [
  "codewandler-flux-app",
  "codewandler-flux-channels",
  "codewandler-flux-exchange-host",
+ "codewandler-flux-runtime",
  "codewandler-flux-system",
  "codewandler-flux-tools",
  "codewandler-flux-web",

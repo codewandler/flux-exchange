@@ -1,7 +1,7 @@
 ---
 id: X-113
 title: "Publish the effective Service Account catalogue and HTTP invoke contract"
-status: ready
+status: done
 priority: 0
 epic: rich-connector-runtimes
 design: docs/designs/rich-connector-runtimes.md
@@ -22,17 +22,17 @@ one-shot invoke route.
 
 ## Acceptance
 
-- [ ] An authenticated HTTP catalogue returns exactly the connected and granted operations effective
+- [x] An authenticated HTTP catalogue returns exactly the connected and granted operations effective
       for the resolved Service Account; it is neither the anonymous full catalogue nor an
       operator-management surface.
-- [ ] The projection carries a stable generation identity: unchanged effective operations and
+- [x] The projection carries a stable generation identity: unchanged effective operations and
       declarations retain it, while a relevant connector, connection or grant change replaces it.
-- [ ] The existing one-shot HTTP invocation accepts only an operation id, operation arguments and
+- [x] The existing one-shot HTTP invocation accepts only an operation id, operation arguments and
       the existing tenant-local connection label; tenant and grants come from the resolved Service
       Account, with no credential or caller-selected authority.
-- [ ] Unknown, disconnected, not-granted, ambiguous-connection, refused, unreachable and
+- [x] Unknown, disconnected, not-granted, ambiguous-connection, refused, unreachable and
       runtime-failed outcomes remain distinct, bounded HTTP responses.
-- [ ] Contract tests consumable by Flux C-503 prove authenticated discovery, generation changes,
+- [x] Contract tests consumable by Flux C-503 prove authenticated discovery, generation changes,
       read invocation, approved-write invocation and malformed or unauthorized requests failing
       closed. Streams, cancellation and terminal outcomes remain X-117; leases remain X-118.
 
@@ -40,6 +40,11 @@ one-shot invoke route.
 
 - 2026-08-03: X-124 reduced this story to the first useful HTTP milestone. Long-lived protocol work
   moved back to X-117 and X-118 instead of blocking effective discovery and one-shot invocation.
+- 2026-08-03: Added canonical Service Account discovery at `GET /api/catalogue/effective`, a stable
+  content generation over usable operation/connection bindings, exact credential/configuration and
+  grant intersection, and a distinct disconnected refusal on the existing invoke path. The
+  assembled HTTP contract suite covers discovery, refresh, read/write invocation and fail-closed
+  malformed and unauthorized calls; all Cargo, console and public-site gates pass.
 
 ## Notes
 

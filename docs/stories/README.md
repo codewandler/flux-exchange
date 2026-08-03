@@ -42,9 +42,6 @@ lockfile and compile-time tests.
 ### Apps
 - [X-108 — Host installed Flux Apps and Managed Agents](X-108-host-installed-flux-apps.md) · Flux App/channel contracts are published on the connector-compatible line; design Exchange-owned package installation and tenant bindings before implementation
 
-### rich connector runtimes through Exchange
-- [X-113 — Publish the effective Service Account catalogue and HTTP invoke contract](X-113-publish-the-remote-connector-protocol.md) · Milestone 1 — authenticated connected-and-granted operation projection with stable generation identity beside the existing one-shot HTTP invoke; lifecycle remains X-117/X-118
-
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
@@ -166,6 +163,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-109 — Refine flow editor feedback and navigation](X-109-refine-flow-editor-feedback-and-navigation.md)
 - [X-110 — Edit inbound channel grants in the console](X-110-edit-inbound-grants-in-the-console.md) · channel creation without an inbound grant editor leaves the operator unable to complete create → grant → subscribe
 - [X-112 — Align the Exchange roadmap with rich connector runtimes](X-112-align-the-exchange-roadmap-with-rich-runtimes.md) · state explicitly that Docker/Kubernetes/SQL/observability remain connectors and are hosted through declared runtimes; replace stale 'not yet filed' text with the complete program
+- [X-113 — Publish the effective Service Account catalogue and HTTP invoke contract](X-113-publish-the-remote-connector-protocol.md) · Milestone 1 — authenticated connected-and-granted operation projection with stable generation identity beside the existing one-shot HTTP invoke; lifecycle remains X-117/X-118
 - [X-121 — Remove the legacy Agent principal spellings](X-121-remove-the-legacy-agent-principal-spellings.md) · v0.17 compatibility checkpoint; existing verifier-keyed bearer tokens remain valid
 - [X-122 — Bind a generated channel to one immutable connection instance](X-122-bind-channels-to-connection-instances.md) · Generated channels now resolve operator labels to rename-safe host-minted instance UUIDs and refuse stale deletion.
 - [X-123 — Production refuses an operatorless deployment](X-123-production-refuses-an-operatorless-deployment.md) · The deploy checks Fly's value-free secret metadata before building and after rollout, so an absent operator policy cannot ship silently.
