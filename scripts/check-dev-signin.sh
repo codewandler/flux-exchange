@@ -21,6 +21,19 @@ trap cleanup EXIT
 
 cd "$repo_root"
 
+# Build once, then own the actual server process on both Unix and Windows. `cargo run` can replace
+# itself on Unix, but on Windows Cargo remains the parent waiting for the `.exe`; killing `$!` there
+# would stop Cargo without proving the Exchange child released its listener and store handles.
+cargo build --locked --bin flux-exchange
+server_binary="$repo_root/target/debug/flux-exchange"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) server_binary="$server_binary.exe" ;;
+esac
+test -x "$server_binary" || {
+  echo "development server binary was not built at $server_binary" >&2
+  exit 1
+}
+
 # Unset every competing identity choice. This test is specifically the zero-configuration shorthand,
 # not the explicit development roster or a federated composition. The CI gate forces Cargo colour
 # globally; this log is a machine-readable process boundary, and ANSI between a structured field
@@ -55,7 +68,7 @@ env \
   USERPROFILE="$run_dir/home" \
   FLUX_EXCHANGE_BIND=127.0.0.1:0 \
   USER=flux-dev-e2e \
-  cargo run --locked -- --dev >"$server_log" 2>&1 &
+  "$server_binary" --dev >"$server_log" 2>&1 &
 server_pid=$!
 
 port=""
@@ -206,7 +219,7 @@ env \
   USERPROFILE="$run_dir/home" \
   FLUX_EXCHANGE_BIND=127.0.0.1:0 \
   USER=flux-dev-e2e \
-  cargo run --locked -- --dev >"$server_log" 2>&1 &
+  "$server_binary" --dev >"$server_log" 2>&1 &
 server_pid=$!
 
 port=""
