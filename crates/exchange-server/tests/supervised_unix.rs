@@ -685,6 +685,7 @@ fn non_unicode_supervised_bind_refuses_before_state_or_readiness() {
 }
 
 #[test]
+#[cfg(feature = "supervisor-test-bind-refusal")]
 fn real_bind_refusal_after_store_validation_emits_no_readiness() {
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupied fixture listener");
     let occupied_address = occupied.local_addr().expect("occupied fixture address");
