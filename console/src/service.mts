@@ -108,19 +108,6 @@ export function connectionAuthorityEndpoint(
     `/settings/${encodeURIComponent(service)}/${encodeURIComponent(field)}/authority`
 }
 
-/**
- * Where one credential of one connection is **replaced**.
- *
- * X-39's route, and the reason this console never offers a delete. Replacing a leaked secret by
- * `DELETE` then `POST` has a window in it where the tenant has no connection at all and everything
- * relying on it fails; a rotation is a single atomic write with no such moment. Nothing here calls
- * it yet — the console names it, so an operator meeting the `409` is sent to the operation that
- * works rather than to the one that breaks their tenant for a few seconds.
- */
-export function credentialEndpoint(connector: string, credential: string): string {
-  return `${connectionEndpoint(connector)}/credentials/${encodeURIComponent(credential)}`
-}
-
 /** Where one catalogue operation is invoked with its declared parameter object. */
 export function invocationEndpoint(operation: string): string {
   return `/api/operations/${encodeURIComponent(operation)}/invoke`
@@ -1681,38 +1668,6 @@ export async function applyConnectionPlan(
   })
 }
 
-/** What became of an atomic credential replacement. */
-export type RotationOutcome =
-  | { status: 'rotated'; connection: Connection }
-  | { status: 'refused'; refusal: ServiceRefusal }
-  | { status: 'failed'; failure: ServiceFailure }
-
-/** Replace one held credential without ever removing the connection around it. */
-export async function rotateCredential(
-  connector: string,
-  credential: string,
-  value: string,
-  options: LoadOptions = {}
-): Promise<RotationOutcome> {
-  const endpoint = credentialEndpoint(connector, credential)
-  const answered = await read(endpoint, options, {
-    method: 'PUT',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ value }),
-  })
-  if (!answered.ok) {
-    const error = serviceError(answered.body)
-    if (error !== null && answered.failure.status !== null) {
-      return { status: 'refused', refusal: { endpoint, status: answered.failure.status, error } }
-    }
-    return { status: 'failed', failure: answered.failure }
-  }
-  const connection = readConnection(answered.body)
-  return typeof connection === 'string'
-    ? { status: 'failed', failure: { kind: 'unreadable', endpoint, status: 200, detail: connection } }
-    : { status: 'rotated', connection }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Invocation: the body is the operation's parameter object and nothing else.
 // ---------------------------------------------------------------------------------------------
@@ -2836,18 +2791,11 @@ export async function replaceGrants(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Service Accounts: the one answer in this console that is readable, valuable and unrepeatable.
+// Service Accounts: browser-readable metadata only.
 //
-// `POST /api/service-accounts` mints a Service Account principal for the caller's tenant and hands back its token
-// **once**. That is not a convention this console could relax — the server stores a verifier,
-// so the host is genuinely unable to say it a second time — and it is why this section is shaped
-// differently from everything above it. Every other call here returns something the console may
-// keep and re-render: addresses, counts, ids, `held`. A minted token is the one value in this file
-// that must not outlive the view that shows it.
-//
-// There is deliberately no function that reads a token back and no cache of the last mint. Listing
-// exposes ids and expiry only; a second way to reach the token would be a second place it could be
-// shown twice. `Agents.mts` holds the result in the view's own state and nothing above it sees one.
+// Creation now answers with the binary one-shot FXSA handoff. That capability belongs to the
+// verified owner-local helper, so this browser client deliberately has no create method and never
+// receives a token. Listing and revocation remain ordinary value-free management JSON.
 // ---------------------------------------------------------------------------------------------
 
 /**
@@ -2926,123 +2874,6 @@ export async function revokeServiceAccount(
     }
   }
   return { status: 'failed', failure: answered.failure }
-}
-
-/** What an operator states when minting. Two fields, and there is no third. */
-export interface NewServiceAccount {
-  /** What to call the Service Account within this tenant. A name, never an address or tenant. */
-  id: string
-  /**
-   * When its token stops resolving, as seconds since the Unix epoch.
-   *
-   * **Never defaulted, at either end.** `routes::service_accounts` refuses an omitted value rather than
-   * choosing a lifetime for the caller, and a console that quietly filled one in would undo that
-   * decision on every mint an operator makes from a browser — which, after this story, is all of
-   * them. `Agents.mts` therefore ships an empty box rather than a sensible number.
-   */
-  expiresAt: number
-}
-
-/**
- * A Service Account this host has just minted, as `POST /api/service-accounts` answers with one.
- *
- * `shown` is in the body and is deliberately **not** read. The service says `"shown": "once"`, and a
- * page that only stated the one-shot property when the service remembered to say so would fall
- * silent exactly when the service changed — which is the moment an operator most needs telling.
- * Being shown once is a consequence of what the store holds, so the screen states it from that.
- */
-export interface MintedServiceAccount {
-  /** The principal that now exists: a Service Account in the minting caller's tenant. */
-  principal: Principal
-  /** When its token stops resolving, echoed by the service. Seconds since the Unix epoch. */
-  expiresAt: number
-  /**
-   * The bearer token, readable exactly once.
-   *
-   * The only credential value this console ever receives. It is not written to any store, does not
-   * reach a URL, and is held by the view that renders it and by nothing else — see `Agents.mts`,
-   * where that is enforced rather than intended, and `test/agents.test.mjs`, which drives it.
-   */
-  token: string
-}
-
-/**
- * What became of a mint.
- *
- * The same three outcomes a connect has, for the same reason: a refusal and an outage are different
- * events, and neither may be confused with success. The `403` matters more here than anywhere else
- * in this file — X-40 admits only a `User`, so it is the answer an agent or a service gets, and it
- * is the service's own sentence that says so.
- */
-export type MintOutcome =
-  | { status: 'minted'; minted: MintedServiceAccount }
-  | { status: 'refused'; refusal: ServiceRefusal }
-  | { status: 'failed'; failure: ServiceFailure }
-
-/** A minted Service Account in a `201` body, or the reason the body is not one. */
-function readMinted(body: unknown): MintedServiceAccount | string {
-  if (!isObject(body)) return 'the body is not an object'
-  const principal = readPrincipal(body)
-  if (!principal) return 'no `principal` with an `id` and a `tenant` in the body'
-  if (typeof body.token !== 'string' || body.token === '') {
-    // Not a mint that produced no token: a `201` this console could not read. Rendering it as a
-    // successful mint with an empty token would leave a Service Account existing on this host that the
-    // operator has no credential for and no way to discover.
-    return 'no `token` in the body'
-  }
-  if (typeof body.expires_at !== 'number') return 'no `expires_at` in the body'
-  return { principal, expiresAt: body.expires_at, token: body.token }
-}
-
-/**
- * Mint a Service Account principal for the caller's tenant, and hand back its token once.
- *
- * ```text
- * POST /api/service-accounts   {"id":"ci-runner","expires_at":1793491200}
- * 201                {"principal":{…},"expires_at":1793491200,"token":"…","shown":"once"}
- * ```
- *
- * **The body carries two fields and there is nowhere to put a third.** No tenant — the tenant comes
- * from the principal this host resolved, and `routes::service_accounts` ignores rather than refuses one in
- * the body precisely so that nobody can believe it was honoured. No name for the token, no scope,
- * no grant: none of those exist yet, and inventing a field the service would drop is how a console
- * starts describing a service that is not there.
- *
- * **What this function does not do is the interesting half.** It does not log the token, does not
- * put it in a URL, does not keep it, and has no counterpart that could fetch it later. What it
- * returns is the only copy the console will ever have, and its caller is a view that dies when the
- * reader navigates away.
- */
-export async function mintServiceAccount(
-  account: NewServiceAccount,
-  options: LoadOptions = {}
-): Promise<MintOutcome> {
-  const answered = await read(SERVICE_ACCOUNTS_ENDPOINT, options, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ id: account.id, expires_at: account.expiresAt }),
-  })
-
-  if (!answered.ok) {
-    const error = serviceError(answered.body)
-    if (error !== null && answered.failure.status !== null) {
-      return {
-        status: 'refused',
-        refusal: { endpoint: SERVICE_ACCOUNTS_ENDPOINT, status: answered.failure.status, error },
-      }
-    }
-    return { status: 'failed', failure: answered.failure }
-  }
-
-  const minted = readMinted(answered.body)
-  if (typeof minted === 'string') {
-    return {
-      status: 'failed',
-      failure: { kind: 'unreadable', endpoint: SERVICE_ACCOUNTS_ENDPOINT, status: 201, detail: minted },
-    }
-  }
-
-  return { status: 'minted', minted }
 }
 
 // ---------------------------------------------------------------------------------------------

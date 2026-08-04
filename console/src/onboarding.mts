@@ -25,7 +25,7 @@
 // route table rather than to whoever last edited it.
 //
 // The guard is still deliberately one-directional. A served surface is not proof that a *particular*
-// route exists — `identity` being served does not by itself mean `POST /api/service-accounts` does. What the
+// route exists — `identity` being served does not by itself mean the Service Account handoff does. What the
 // rule buys is the direction that matters: it can only ever take a claim *off* the page, never put
 // one on. A surface regressing to unserved silently withdraws every step standing on it, and a step
 // no surface backs at all cannot be claimed however confidently it is written.
@@ -210,14 +210,15 @@ export const STEPS: readonly Step[] = [
     title: 'Create a Service Account',
     summary:
       'A Service Account is a non-human principal of exactly one tenant. A signed-in human creates ' +
-      'it and hands its one-time token to an App, Agent or automation.',
+      'it through the authenticated owner-local helper, which transfers its one-time credential ' +
+      'directly to the waiting App, Agent or automation.',
     surface: 'identity',
     call: {
       method: 'POST',
       endpoint: '/api/service-accounts',
       caller:
-        'A signed-in human, from this console. Not the App or Agent that will use it — creating ' +
-        'non-human identities is an operator action.',
+        'The verified owner-local helper, acting for the authenticated OS owner. Not this browser ' +
+        'and not an arbitrary remote App or Agent.',
       note:
         'Send id, what to call the Service Account within the tenant, and expires_at, seconds since the Unix ' +
         'epoch. The expiry is never defaulted: a body without one is refused rather than given a ' +
@@ -225,8 +226,9 @@ export const STEPS: readonly Step[] = [
         'put — the tenant is read from the caller this host resolved, and a tenant in the body is ' +
         'ignored rather than honoured.',
       warn:
-        'The response carries the token, and it is shown once. This host keeps a verifier rather ' +
-        'than the token, so nothing here can show it to you again. Lose it and mint another.',
+        'The response is the one-shot binary FXSA handoff, written through a closed native ' +
+        'capability. It is never token JSON and never enters the browser, argv, environment, ' +
+        'standard streams or diagnostics.',
     },
     pending: '',
   },

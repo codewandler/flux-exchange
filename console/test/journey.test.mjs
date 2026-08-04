@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import ConnectorPicker from '../src/ConnectorPicker.mts'
 import { grantPreset, groupAdmitted, previewChange, setupJourney } from '../src/journey-model.mts'
 import { bodyFromSchema, validateBody } from '../src/invoking.mts'
-import { invokeOperation, rotateCredential } from '../src/service.mts'
+import { invokeOperation } from '../src/service.mts'
 import { mount, nodes, text } from './mount.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -95,38 +95,27 @@ test('invoke_body_starts_from_and_validates_the_published_schema', () => {
   ])
 })
 
-test('rotation_is_one_atomic_put_and_invocation_sends_the_parameter_object_verbatim', async () => {
+test('invocation_sends_the_parameter_object_verbatim_without_a_credential_write', async () => {
   const asked = []
   const fetch = async (url, init) => {
     asked.push({ url, method: init.method, body: JSON.parse(init.body) })
-    if (url.includes('/credentials/')) return {
-      ok: true, status: 200, json: async () => ({
-        connector: 'github', vendor: 'GitHub', authority: 'github.com',
-        credentials: [{ name: 'github.token', address: 'tenants/acme/github/token', held: true }],
-      }),
-    }
     return { ok: true, status: 200, json: async () => ({ operation: 'github-get', content: '{"ok":true}', view: null, is_error: false }) }
   }
-  const rotated = await rotateCredential('github', 'github.token', 'replacement', { fetch })
   const invoked = await invokeOperation('github-get', { owner: 'acme', issue: 42 }, { fetch })
-  assert.equal(rotated.status, 'rotated')
   assert.equal(invoked.status, 'invoked')
   assert.deepEqual(asked.map(({ method, body }) => ({ method, body })), [
-    { method: 'PUT', body: { value: 'replacement' } },
     { method: 'POST', body: { owner: 'acme', issue: 42 } },
   ])
-  assert.ok(!JSON.stringify(rotated).includes('replacement'))
 })
 
 test('the_ten_findings_have_live_ui_seams', () => {
-  assert.match(source('Connections.mts'), /details/)
-  assert.match(source('Connections.mts'), /rotate/)
+  assert.match(source('Connections.mts'), /owner-local management/)
   assert.match(source('Grants.mts'), /preset/)
   assert.match(source('Invoke.mts'), /elapsed/)
   assert.match(source('CatalogueFinder.mts'), /mark/)
   assert.match(source('CatalogueFinder.mts'), /keydown/)
   assert.match(source('ConsoleShell.mts'), /rail__future/)
-  assert.match(source('service.mts'), /rotateCredential/)
+  assert.doesNotMatch(source('service.mts'), /rotateCredential/)
   assert.match(source('service.mts'), /invokeOperation/)
   assert.match(source('shell.css'), /max-width:\s*640px/)
   assert.match(source('app.css'), /prefers-reduced-motion/)

@@ -281,14 +281,12 @@ test('today_a_service_account_can_be_created_authenticate_and_invoke_with_a_gran
   assert.equal(mint.call.method, 'POST')
   assert.equal(mint.call.endpoint, '/api/service-accounts')
   assert.ok(html.includes('/api/service-accounts'), `the page must name the route that mints an agent; got: ${html}`)
-  assert.match(
-    html,
-    /shown\s+(?:<[^>]*>)?once/i,
-    'the page must say the token is shown once — a caller who expects to fetch it again has lost it'
-  )
+  assert.match(html, /owner-local helper/i, 'the page must name the only caller allowed to receive the handoff')
+  assert.match(html, /one-shot binary FXSA handoff/i, 'the page must name the closed binary response')
+  assert.match(html, /never token JSON/i, 'the page must refuse the retired browser JSON contract')
   assert.ok(
     /signed[- ]in/i.test(html),
-    'minting is done by a signed-in human and not by the agent; the page must say whose call it is'
+    'minting is an authenticated owner action and not an arbitrary agent call; the page must say whose call it is'
   )
 })
 
