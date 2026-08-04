@@ -196,6 +196,11 @@ jobs:
       - name: Exercise zero-configuration state selection
         run: cargo test -p flux-exchange --bin flux-exchange --locked local_state
 
+      - name: Refuse unsafe Windows stores through the real startup composition
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-windows-state-refusals.ps1
+
       - name: Restart the real development composition over durable state
         shell: bash
         run: ./scripts/check-dev-signin.sh

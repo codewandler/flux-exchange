@@ -115,10 +115,20 @@ impl LocalStatePaths {
 
 /// Resolve the process configuration once, before opening any store.
 pub fn configured(development: bool) -> Result<Option<LocalStatePaths>, LocalStateRefusal> {
-    let configured = read_explicit()?;
     let root = std::env::var_os(LOCAL_STATE_SETTING)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    select(development, read_explicit(), root)
+}
+
+fn select(
+    development: bool,
+    configured: Result<BTreeMap<&'static str, String>, LocalStateRefusal>,
+    root: Option<PathBuf>,
+) -> Result<Option<LocalStatePaths>, LocalStateRefusal> {
+    // An explicit setting that cannot be represented must refuse before a root is created. Moving
+    // this `?` below development selection would silently replace operator authority with defaults.
+    let configured = configured?;
 
     if development || root.is_some() {
         let root = match root {
@@ -139,9 +149,23 @@ pub fn configured(development: bool) -> Result<Option<LocalStatePaths>, LocalSta
 }
 
 fn read_explicit() -> Result<BTreeMap<&'static str, String>, LocalStateRefusal> {
+    read_explicit_with(std::env::var)
+}
+
+fn read_explicit_with(
+    mut read: impl FnMut(&'static str) -> Result<String, std::env::VarError>,
+) -> Result<BTreeMap<&'static str, String>, LocalStateRefusal> {
     SETTINGS
         .into_iter()
-        .filter_map(|setting| std::env::var(setting).ok().map(|value| (setting, value)))
+        .filter_map(|setting| match read(setting) {
+            Ok(value) => Some(Ok((setting, value))),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Some(Err(LocalStateRefusal::NotUnicode { setting }))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
         .map(|(setting, value)| {
             let value = value.trim();
             if value.is_empty() {
@@ -312,6 +336,9 @@ pub enum LocalStateRefusal {
     Empty {
         setting: &'static str,
     },
+    NotUnicode {
+        setting: &'static str,
+    },
     Incomplete {
         configured: Vec<&'static str>,
         missing: Vec<&'static str>,
@@ -334,6 +361,10 @@ impl std::fmt::Display for LocalStateRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Empty { setting } => write!(formatter, "{setting} is set but empty"),
+            Self::NotUnicode { setting } => write!(
+                formatter,
+                "{setting} is not valid Unicode; refusing rather than treating an explicit store path as unset or replacing it with a development default"
+            ),
             Self::Incomplete {
                 configured,
                 missing,
@@ -414,6 +445,43 @@ mod tests {
 
         assert_eq!(paths.grants, Path::new("/operator-selected/grants.json"));
         assert_eq!(paths.credential, root.join("credentials/store.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_unicode_explicit_path_refuses_before_development_can_create_defaults() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "flux-exchange-x127-non-unicode-default-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let non_unicode = std::ffi::OsString::from_vec(vec![b'/', b't', b'm', b'p', b'/', 0xff]);
+
+        let explicit = read_explicit_with(|setting| {
+            if setting == GRANT_STORE_SETTING {
+                Err(std::env::VarError::NotUnicode(non_unicode.clone()))
+            } else {
+                Err(std::env::VarError::NotPresent)
+            }
+        });
+        let refusal = select(true, explicit, Some(root.clone()))
+            .expect_err("an explicit path must never disappear into the development defaults");
+
+        assert!(matches!(
+            refusal,
+            LocalStateRefusal::NotUnicode {
+                setting: GRANT_STORE_SETTING
+            }
+        ));
+        let message = refusal.to_string();
+        assert!(message.contains(GRANT_STORE_SETTING), "{message}");
+        assert!(
+            !message.contains(non_unicode.to_string_lossy().as_ref()),
+            "{message}"
+        );
+        assert!(!root.exists(), "no conventional default root was created");
     }
 
     #[cfg(unix)]
