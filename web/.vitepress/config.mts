@@ -85,6 +85,7 @@ export default defineConfig({
     // have decided to look.
     nav: [
       { text: 'Run it yourself', link: '/getting-started' },
+      { text: 'Verified releases', link: '/local-releases' },
       { text: 'The boundary', link: '/boundary' },
       { text: 'The surface', link: '/surface' },
       // The family on every page, not only on the overview: a reader who arrives at /surface from a
@@ -117,6 +118,7 @@ export default defineConfig({
         items: [
           { text: 'Overview', link: '/' },
           { text: 'Run it yourself', link: '/getting-started' },
+          { text: 'Verified local releases', link: '/local-releases' },
           { text: 'The credential boundary', link: '/boundary' },
           { text: 'The surface', link: '/surface' },
         ],

@@ -287,7 +287,14 @@ session and returns to the console.
 ### Flux-supervised local launch
 
 `flux-exchange compatibility --json` is the side-effect-free release/protocol query: it opens no
-store and binds no listener. `--supervised` is a separate machine-only launch mode for the Flux
+store and binds no listener. The [verified local binary release runbook](docs/local-binary-releases.md)
+documents its exact JSON identity, five supported targets, fixed signed channel origin, offline-root
+and delegated-signer trust, monotonic rollback/expiry behavior, and equivalent online/offline
+verification paths. The server archives are separate Exchange product artifacts—not crates.io
+artifacts, Flux release artifacts, official integration plugins or connector runtimes—and the
+runbook does not treat a staged workflow as proof that the production channel is live.
+
+`--supervised` is a separate machine-only launch mode for the Flux
 local supervisor. It accepts only an OS-selected loopback port (`FLUX_EXCHANGE_BIND` may be absent
 or exactly `127.0.0.1:0` or `[::1]:0`) and emits one bounded canonical
 `exchange.supervisor-ready.v1` object after every store/safety check and the one listener bind have
