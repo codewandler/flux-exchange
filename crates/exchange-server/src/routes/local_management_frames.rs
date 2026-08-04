@@ -107,7 +107,7 @@ async fn serve(
     _claim: crate::traffic::HostedClaim,
     deadline: tokio::time::Instant,
 ) {
-    let mut active: Option<crate::local_management::ActiveSession> = None;
+    let mut active: Option<Box<crate::local_management::ActiveSession>> = None;
     loop {
         match tokio::time::timeout_at(deadline, socket.recv()).await {
             Err(_) => {

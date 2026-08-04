@@ -430,7 +430,7 @@ async fn dispatch_one(
 
     let mut decoder = StreamDecoder::new(Direction::ClientToServer);
     let mut bytes = [0_u8; 4096];
-    let mut active: Option<ActiveSession> = None;
+    let mut active: Option<Box<ActiveSession>> = None;
     if decoder.push(&prefix).is_err() {
         return Ok(());
     }

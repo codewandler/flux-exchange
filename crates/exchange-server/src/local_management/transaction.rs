@@ -86,6 +86,11 @@ pub enum ProposalState {
     Committed(ReceiptId),
 }
 
+struct AllocationIdentity {
+    nonce: [u8; 24],
+    receipt: ReceiptId,
+}
+
 /// One durable, value-free publication still owed after provider recovery.
 pub struct PendingPublication {
     receipt: ReceiptId,
@@ -175,7 +180,14 @@ impl TransactionCoordinator {
     ) -> Result<Allocation, CoordinatorError> {
         let nonce = nonzero_nonce()?;
         let receipt = nonzero_receipt()?;
-        self.allocate_with(kind, tenant, connector, label, proposal, nonce, receipt)
+        self.allocate_with(
+            kind,
+            tenant,
+            connector,
+            label,
+            proposal,
+            AllocationIdentity { nonce, receipt },
+        )
     }
 
     fn allocate_with(
@@ -185,9 +197,9 @@ impl TransactionCoordinator {
         connector: &str,
         label: &str,
         proposal: SecretProposalDigest,
-        nonce: [u8; 24],
-        receipt: ReceiptId,
+        identity: AllocationIdentity,
     ) -> Result<Allocation, CoordinatorError> {
+        let AllocationIdentity { nonce, receipt } = identity;
         if nonce.iter().all(|byte| *byte == 0) {
             return Err(CoordinatorError::IdentityCollision);
         }
@@ -1219,8 +1231,11 @@ mod tests {
                 "example",
                 "primary",
                 proposal,
-                [nonce; 24],
-                ReceiptId::from_protocol_bytes([receipt; 32]).expect("nonzero receipt"),
+                AllocationIdentity {
+                    nonce: [nonce; 24],
+                    receipt: ReceiptId::from_protocol_bytes([receipt; 32])
+                        .expect("nonzero receipt"),
+                },
             )
             .expect("allocation")
     }
@@ -1444,8 +1459,10 @@ mod tests {
                 "example",
                 "primary",
                 digest(27),
-                [27; 24],
-                ReceiptId::from_protocol_bytes([28; 32]).expect("receipt"),
+                AllocationIdentity {
+                    nonce: [27; 24],
+                    receipt: ReceiptId::from_protocol_bytes([28; 32]).expect("receipt"),
+                },
             )
             .expect("allocation");
         coordinator
@@ -1537,8 +1554,10 @@ mod tests {
                 "example",
                 "zero-nonce",
                 digest(31),
-                [0; 24],
-                ReceiptId::from_protocol_bytes([31; 32]).expect("receipt"),
+                AllocationIdentity {
+                    nonce: [0; 24],
+                    receipt: ReceiptId::from_protocol_bytes([31; 32]).expect("receipt"),
+                },
             ),
             Err(CoordinatorError::IdentityCollision)
         ));

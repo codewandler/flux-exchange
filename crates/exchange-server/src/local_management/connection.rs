@@ -432,7 +432,10 @@ impl Ceremony {
             active.prepared = true;
         }
         let response = need_secrets(active.allocation, &active.expected);
-        BeginOutcome::Active { response, active }
+        BeginOutcome::Active {
+            response,
+            active: Box::new(active),
+        }
     }
 
     async fn query(&self, tenant: &Tenant, request: Frame, opcode: Opcode) -> BeginOutcome {
@@ -636,7 +639,7 @@ pub(super) enum BeginOutcome {
     Terminal(Frame),
     Active {
         response: Frame,
-        active: ActiveCeremony,
+        active: Box<ActiveCeremony>,
     },
 }
 

@@ -647,6 +647,7 @@ pub(crate) fn run_mint<T: MintTransfer>(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // Called by the integration runtime harness through this source module.
 pub(crate) fn run_vendor_at_for_test<C: VendorCeremony>(
     root: &Path,
     ceremony: &mut C,
@@ -663,6 +664,7 @@ pub(crate) fn run_vendor_at_for_test<C: VendorCeremony>(
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // Called by the integration runtime harness through this source module.
 pub(crate) fn run_mint_at_for_test<T: MintTransfer>(
     root: &Path,
     id: &ServiceAccountId,

@@ -408,16 +408,6 @@ impl AuditJournal {
         &self.path
     }
 
-    #[cfg(test)]
-    pub(crate) fn refuse_writes_for_test(&self) {
-        self.inner
-            .lock()
-            .expect("audit journal lock")
-            .connection
-            .execute_batch("PRAGMA query_only = ON")
-            .expect("arm audit write refusal");
-    }
-
     /// Append one final event that does not surround a state-changing action.
     pub fn record(
         &self,

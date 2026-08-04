@@ -495,7 +495,7 @@ async fn dispatch_one(
     let mut decoder = StreamDecoder::new(Direction::ClientToServer);
     let mut bytes = [0_u8; 4096];
     let mut first = Some(initial);
-    let mut active: Option<ActiveSession> = None;
+    let mut active: Option<Box<ActiveSession>> = None;
     loop {
         let received = if let Some(initial) = first.take() {
             if decoder.push(initial).is_err() {

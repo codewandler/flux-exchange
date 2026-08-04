@@ -58,7 +58,7 @@ pub(crate) enum SessionBegin {
     Terminal(HostedReply),
     Active {
         response: Vec<u8>,
-        session: ActiveSession,
+        session: Box<ActiveSession>,
     },
 }
 
@@ -151,22 +151,6 @@ impl Dispatcher {
         &self.state
     }
 
-    /// Decode exactly one complete hosted message and return one complete server frame.
-    pub(crate) async fn dispatch_message(
-        &self,
-        transport: Transport,
-        tenant: &Tenant,
-        bytes: &[u8],
-    ) -> HostedReply {
-        match self.begin_message(transport, tenant, bytes).await {
-            SessionBegin::Terminal(reply) => reply,
-            SessionBegin::Active { response, .. } => HostedReply {
-                bytes: response,
-                close_code: 1000,
-            },
-        }
-    }
-
     pub(crate) async fn begin_message(
         &self,
         transport: Transport,
@@ -218,7 +202,7 @@ impl Dispatcher {
                 ConnectionBegin::Terminal(frame) => SessionBegin::Terminal(hosted_frame(frame)),
                 ConnectionBegin::Active { response, active } => SessionBegin::Active {
                     response: response.encode(),
-                    session: ActiveSession { ceremony: active },
+                    session: Box::new(ActiveSession { ceremony: *active }),
                 },
             };
         }
@@ -230,20 +214,6 @@ impl Dispatcher {
 
     pub(crate) fn recover_publications(&self) -> Result<(), PublicationRefusal> {
         self.connection.recover()
-    }
-
-    pub(super) async fn dispatch_frame(
-        &self,
-        transport: Transport,
-        tenant: &Tenant,
-        request: Frame,
-    ) -> Frame {
-        match self.begin_frame(transport, tenant, request).await {
-            SessionBegin::Terminal(reply) => exact_server_frame(&reply.bytes)
-                .expect("dispatcher terminal replies are exact server frames"),
-            SessionBegin::Active { response, .. } => exact_server_frame(&response)
-                .expect("dispatcher interactive replies are exact server frames"),
-        }
     }
 
     async fn dispatch_terminal(
@@ -318,17 +288,6 @@ impl Dispatcher {
         // transport may substitute a point-write path while one ceremony is unavailable.
         refusal("local_management_unavailable", 503, "operator")
     }
-}
-
-fn exact_server_frame(bytes: &[u8]) -> Result<Frame, DecodeRefusal> {
-    let mut decoder = StreamDecoder::new(Direction::ServerToClient);
-    decoder.push(bytes).map_err(DecodeRefusal::Frame)?;
-    let frame = decoder
-        .next_frame()
-        .map_err(DecodeRefusal::Frame)?
-        .ok_or(DecodeRefusal::Truncated)?;
-    decoder.finish().map_err(DecodeRefusal::Frame)?;
-    Ok(frame)
 }
 
 fn decode_reply(error: DecodeRefusal) -> HostedReply {

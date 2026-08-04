@@ -104,7 +104,7 @@ pub(crate) fn native_snapshot(
         Ok(true) => return Err(native_refusal("connect_busy", 409, "refresh")),
         Err(()) => return Err(native_refusal("store_unavailable", 503, "operator")),
     }
-    if let Some(label) = selection.as_deref() {
+    if let Some(label) = selection {
         let label = ConnectionLabel::new(label)
             .map_err(|_| native_refusal("invalid_label", 422, "never"))?;
         let registry = state
@@ -123,7 +123,7 @@ pub(crate) fn native_snapshot(
         "local-owner",
         tenant.clone(),
     );
-    let plan = project(state, &principal, provider, selection.as_deref())
+    let plan = project(state, &principal, provider, selection)
         .map_err(|_| native_refusal("store_unavailable", 503, "operator"))?;
     let canonical =
         canonical_json(&plan).map_err(|_| native_refusal("internal_refusal", 500, "operator"))?;

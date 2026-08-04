@@ -335,6 +335,7 @@ impl MintPort for RetainedMintPort {
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // Constructed by the integration FXLM suite through this source module.
 struct FixedReceiptId([u8; 32]);
 
 #[cfg(test)]
@@ -365,6 +366,7 @@ impl ServiceAccountCeremony {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // Constructed by the integration FXLM suite through this source module.
     pub(crate) fn with_receipts(port: Arc<dyn MintPort>, receipt: [u8; 32]) -> Self {
         Self {
             port,

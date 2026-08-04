@@ -27,6 +27,7 @@ pub enum HelperPlatform {
     /// Unix fixed-descriptor ABI.
     Unix,
     /// Windows explicit-handle ABI.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Windows,
 }
 
@@ -50,6 +51,7 @@ pub enum VendorSecretCapabilities {
     /// Unix uses only fixed descriptors 6 and 7; descriptor 5 must be closed.
     Unix,
     /// Windows receives exactly two explicit, distinct handles.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Windows {
         /// Readable anonymous request pipe.
         request: WindowsHandle,
@@ -63,6 +65,7 @@ pub enum MintWriterCapability {
     /// The closed Unix ABI always names descriptor 5.
     UnixFd5,
     /// Windows carries one explicit nonzero handle.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Windows(WindowsHandle),
 }
 
@@ -72,6 +75,7 @@ pub struct WindowsHandle(usize);
 
 impl WindowsHandle {
     /// Native value to pass to platform capability validation, never protocol serialization.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub const fn native_value(self) -> usize {
         self.0
     }
@@ -304,6 +308,7 @@ pub struct UnixVendorCapabilityFacts {
 }
 
 /// Complete Windows inheritance-list facts measured on helper entry.
+#[allow(dead_code)] // Exercised by the platform-neutral integration contract on non-Windows hosts.
 pub struct WindowsVendorCapabilityFacts {
     /// Capability named by `--request-handle`.
     pub request: PipeCapabilityFacts,
@@ -347,6 +352,7 @@ pub fn validate_unix_vendor_capabilities(
 }
 
 /// Validate the portable portion of the Windows handle contract before clearing inheritance.
+#[allow(dead_code)] // Exercised by the platform-neutral integration contract on non-Windows hosts.
 pub fn validate_windows_vendor_capabilities(
     facts: &WindowsVendorCapabilityFacts,
 ) -> Result<(), CapabilityRefusal> {
@@ -374,6 +380,7 @@ fn validate_pipe_pair(
 }
 
 /// Refuse a truncated or oversized complete helper frame before any endpoint operation.
+#[allow(dead_code)] // This pure boundary is consumed by the integration grammar contract.
 pub fn validate_complete_frame_size(size: usize) -> Result<(), FrameSizeRefusal> {
     if size < 12 {
         Err(FrameSizeRefusal::Truncated)
@@ -385,6 +392,7 @@ pub fn validate_complete_frame_size(size: usize) -> Result<(), FrameSizeRefusal>
 }
 
 /// Value-free helper frame-bound refusal.
+#[allow(dead_code)] // This pure boundary is consumed by the integration grammar contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameSizeRefusal {
     /// Fewer than the fixed 12-byte FXLM header.
@@ -408,6 +416,7 @@ impl std::error::Error for FrameSizeRefusal {}
 ///
 /// This trait has no byte-valued handle parameter: the writer remains the typed capability in the
 /// parsed invocation and is never invented inside FXLM/FXSA serialization.
+#[allow(dead_code)] // The integration grammar contract supplies a deliberately refusing port.
 pub trait LocalHelperEndpointPort {
     /// Platform-specific, value-free transport refusal.
     type Error;

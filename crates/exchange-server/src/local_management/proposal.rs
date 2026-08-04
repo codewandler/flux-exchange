@@ -73,7 +73,36 @@ hex_identity!(PlanRevision, "plan_revision", false);
 hex_identity!(TargetRevision, "target revision", false);
 hex_identity!(CredentialRevision, "credential_revision", true);
 hex_identity!(ProposalDigest, "proposal_digest", false);
-hex_identity!(ReceiptId, "receipt_id", true);
+// Receipt wire validation is a released codec contract exercised by the integration codec suite.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct ReceiptId(String);
+
+#[allow(dead_code)]
+impl ReceiptId {
+    /// Parse the exact nonzero lowercase-hex wire representation.
+    pub fn parse(value: impl Into<String>) -> Result<Self, ProposalError> {
+        let value = value.into();
+        validate_hex_64(&value, true).map_err(|_| ProposalError::InvalidMember("receipt_id"))?;
+        Ok(Self(value))
+    }
+
+    /// Return the opaque wire identity without parsing or ordering its value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ReceiptId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(D::Error::custom)
+    }
+}
 
 /// One value-free target class from the authoritative plan snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,6 +342,7 @@ pub struct ConnectBegin {
 
 impl ConnectBegin {
     /// Parse and close the target universe in one pre-mutation step.
+    #[allow(dead_code)] // The integration codec suite exercises the combined parse/closure seam.
     pub fn parse_and_validate(
         bytes: &[u8],
         universe: &[TargetFact<'_>],
@@ -434,11 +464,13 @@ impl ConnectBegin {
     }
 
     /// The byte-exact canonical control object.
+    #[allow(dead_code)] // Exposed to the integration codec suite for byte identity evidence.
     pub fn canonical_bytes(&self) -> &[u8] {
         &self.canonical
     }
 
     /// The exact domain, zero separator and RFC 8785 control bytes.
+    #[allow(dead_code)] // Exposed to the integration codec suite for domain-separation evidence.
     pub fn proposal_preimage(&self) -> Vec<u8> {
         proposal_preimage(CONNECT_DOMAIN, &self.canonical)
     }
@@ -479,6 +511,7 @@ pub struct CredentialBegin {
 
 impl CredentialBegin {
     /// Parse and close the complete credential partition in one pre-mutation step.
+    #[allow(dead_code)] // The integration codec suite exercises the combined parse/closure seam.
     pub fn parse_and_validate(
         bytes: &[u8],
         universe: &[TargetFact<'_>],
@@ -544,11 +577,13 @@ impl CredentialBegin {
     }
 
     /// The byte-exact canonical control object.
+    #[allow(dead_code)] // Exposed to the integration codec suite for byte identity evidence.
     pub fn canonical_bytes(&self) -> &[u8] {
         &self.canonical
     }
 
     /// The exact domain, zero separator and RFC 8785 control bytes.
+    #[allow(dead_code)] // Exposed to the integration codec suite for domain-separation evidence.
     pub fn proposal_preimage(&self) -> Vec<u8> {
         proposal_preimage(CREDENTIAL_DOMAIN, &self.canonical)
     }
