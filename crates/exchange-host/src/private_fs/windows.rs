@@ -643,7 +643,11 @@ mod tests {
         (scratch, path)
     }
 
-    fn reopen(path: &Path) -> Result<(), StoreError> {
+    /// Repeat the same parent-then-file inspection every production file-store binder performs.
+    fn rebind(path: &Path) -> Result<(), StoreError> {
+        if let Some(directory) = path.parent() {
+            super::super::ensure_directory(directory)?;
+        }
         let file = open_existing(path)?.ok_or_else(|| StoreError::Unreachable {
             path: path.display().to_string(),
             reason: "the state file disappeared".to_owned(),
@@ -846,7 +850,7 @@ mod tests {
                 apply_sddl(&control, &planted, flags);
                 let planted_equivalent = descriptor_sddl(&control);
 
-                let error = reopen(&path).expect_err("unsafe descriptor must refuse");
+                let error = rebind(&path).expect_err("unsafe descriptor must refuse");
                 let message = error.to_string();
                 if label == "unreadable" {
                     assert!(matches!(error, StoreError::Unreachable { .. }), "{error:?}");
@@ -988,7 +992,7 @@ mod tests {
             .file_attributes();
         let link_control = control_handle(&link, false);
         let link_descriptor = descriptor_sddl(&link_control);
-        let error = reopen(&link).expect_err("reparse point must refuse");
+        let error = rebind(&link).expect_err("reparse point must refuse");
         let message = error.to_string();
         assert!(message.contains(&link.display().to_string()), "{message}");
         assert!(!message.contains("SENTINEL"));
@@ -1011,7 +1015,7 @@ mod tests {
             .file_attributes();
         let wrong_control = control_handle(&wrong, true);
         let wrong_descriptor = descriptor_sddl(&wrong_control);
-        let error = reopen(&wrong).expect_err("wrong kind must refuse");
+        let error = rebind(&wrong).expect_err("wrong kind must refuse");
         let message = error.to_string();
         assert!(message.contains(&wrong.display().to_string()), "{message}");
         assert!(!message.contains("SENTINEL"));
