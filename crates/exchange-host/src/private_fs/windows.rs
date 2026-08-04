@@ -3,7 +3,6 @@
 //! This is the crate's only unsafe-code island. Every block is a direct Win32 call whose pointers
 //! are owned by the adjacent Rust value or by a `LocalFree` guard in this module.
 
-#![allow(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::ffi::c_void;
