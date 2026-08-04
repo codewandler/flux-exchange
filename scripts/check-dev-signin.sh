@@ -123,16 +123,17 @@ for path in settings grants connections channels workflows service-accounts; do
   }
 done
 
-# Exercise a released connector through the real connection, grant and invocation surfaces. Slack
-# documents that its Web API answers HTTP 200 with `ok:false` for invalid authentication, so this
-# deliberately fake credential makes `slack-users-info` a harmless network fixture: the released
-# Flux executes, but no vendor state can change and no real authority is needed.
+# Exercise a released connector through the real connection, setting, grant and invocation
+# surfaces. Intercom's contact read needs both its credential and its declared region setting, and
+# documents non-2xx responses as operation data. This deliberately fake credential therefore makes
+# `intercom-contact-get` a harmless network fixture: the released Flux executes a read, but no
+# vendor state can change and no real authority is needed.
 credential_sentinel="X127-SENTINEL-NOT-A-REAL-SECRET"
 connection_response="$(curl --fail --silent --show-error \
   --cookie "$cookie_jar" \
   --header 'content-type: application/json' \
-  --data "{\"version\":\"exchange.connection-plan.v1\",\"name\":\"restart-proof\",\"values\":{\"credential.slack.bot_token\":\"$credential_sentinel\"}}" \
-  "$origin/api/connections/slack/plan")"
+  --data "{\"version\":\"exchange.connection-plan.v1\",\"name\":\"restart-proof\",\"values\":{\"credential.intercom.access_token\":\"$credential_sentinel\",\"setting.default.endpoint.host\":\"api.intercom.io\"}}" \
+  "$origin/api/connections/intercom/plan")"
 grep -Fq '"outcome":"complete"' <<<"$connection_response"
 grep -Fq '"selection":"restart-proof"' <<<"$connection_response"
 grep -Fq '"state":"complete"' <<<"$connection_response"
@@ -141,16 +142,16 @@ grant_response="$(curl --fail --silent --show-error \
   --request PUT \
   --cookie "$cookie_jar" \
   --header 'content-type: application/json' \
-  --data '{"grants":[{"connector":"slack","selector":{"max_risk":"medium"}}]}' \
+  --data '{"grants":[{"connector":"intercom","selector":{"max_risk":"low"}}]}' \
   "$origin/api/grants")"
-grep -Fq '"id":"slack-users-info"' <<<"$grant_response"
+grep -Fq '"id":"intercom-contact-get"' <<<"$grant_response"
 
 invoke_response="$(curl --fail --silent --show-error \
   --cookie "$cookie_jar" \
   --header 'content-type: application/json' \
-  --data '{"user":"U00000000","include_locale":false}' \
-  "$origin/api/operations/slack-users-info/invoke?connection=restart-proof")"
-grep -Fq '"operation":"slack-users-info"' <<<"$invoke_response"
+  --data '{"contact_id":"X127-HARMLESS-NOT-REAL"}' \
+  "$origin/api/operations/intercom-contact-get/invoke?connection=restart-proof")"
+grep -Fq '"operation":"intercom-contact-get"' <<<"$invoke_response"
 grep -Fq '"is_error":false' <<<"$invoke_response"
 
 for response in "$connection_response" "$grant_response" "$invoke_response"; do
@@ -234,9 +235,9 @@ curl --fail --silent --show-error \
 restarted_invoke_response="$(curl --fail --silent --show-error \
   --header "Authorization: Bearer $service_account_token" \
   --header 'content-type: application/json' \
-  --data '{"user":"U00000000","include_locale":false}' \
-  "http://127.0.0.1:$port/api/operations/slack-users-info/invoke?connection=restart-proof")"
-grep -Fq '"operation":"slack-users-info"' <<<"$restarted_invoke_response"
+  --data '{"contact_id":"X127-HARMLESS-NOT-REAL"}' \
+  "http://127.0.0.1:$port/api/operations/intercom-contact-get/invoke?connection=restart-proof")"
+grep -Fq '"operation":"intercom-contact-get"' <<<"$restarted_invoke_response"
 grep -Fq '"is_error":false' <<<"$restarted_invoke_response"
 if grep -Fq "$credential_sentinel" <<<"$restarted_invoke_response" || \
    grep -Fq "$credential_sentinel" "$first_server_log" "$server_log"; then
