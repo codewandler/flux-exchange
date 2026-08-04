@@ -214,7 +214,7 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
   `../flux-roadmap/decisions/0007-local-onboarding-uses-owner-bound-capabilities.md` at roadmap
   commit `ced7426`.
 - External implementation dependency: connectors C-515 and its released `connector-secrets`
-  prepared-transaction version. X-134 remains ready but no code wave starts from an unmerged or
+  prepared-transaction version. X-134 remains blocked and no code wave starts from an unmerged or
   unpublished provider port.
 - This story owns provider bytes and fixtures. Flux C-509 owns the receiving credential writer,
   owner-only Flux store, opaque resolver, management/runtime client split, CLI projection, concrete
