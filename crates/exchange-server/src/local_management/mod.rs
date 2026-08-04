@@ -4,3 +4,6 @@
 // native transport composition is integrated separately.
 #[allow(dead_code)]
 mod codec;
+
+#[allow(dead_code)]
+mod transaction;
