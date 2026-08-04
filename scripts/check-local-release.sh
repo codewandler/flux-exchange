@@ -8,7 +8,7 @@ targets="$root/release-targets.tsv"
 fail() { printf 'check-local-release: %s\n' "$*" >&2; exit 1; }
 
 check() {
-  local workflow_path="$1" target_path="$2" expected actual
+  local workflow_path="$1" target_path="$2" download_path="$3" expected actual expected_matrix actual_matrix
   expected='aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu'
   actual="$(awk -F '\t' '!/^#/ && NF {print $1}' "$target_path" | LC_ALL=C sort | xargs)"
   [ "$actual" = "$expected" ] || fail "release target set is not the exact five-platform contract: $actual"
@@ -20,6 +20,15 @@ PY
 )"
   [ "$dist_targets" = "$expected" ] || fail "dist-workspace target set differs from the Flux five-platform contract: $dist_targets"
   [ "$(awk -F '\t' '!/^#/ && NF {print $1}' "$target_path" | sort | uniq -d | wc -l)" = 0 ] || fail 'release target set contains duplicates'
+  expected_matrix="$(awk -F '\t' '!/^#/ && NF {print $1 ":" $2}' "$target_path" | LC_ALL=C sort)"
+  actual_matrix="$(sed -n '/^[[:space:]]*matrix:/,/^[[:space:]]*runs-on:/p' "$workflow_path" | awk '
+    /^[[:space:]]*- runner:/ { runner = $3 }
+    /^[[:space:]]*target:/ { print $2 ":" runner; runner = "" }
+  ' | LC_ALL=C sort)"
+  [ "$actual_matrix" = "$expected_matrix" ] || {
+    diff <(printf '%s\n' "$expected_matrix") <(printf '%s\n' "$actual_matrix") >&2 || true
+    fail 'workflow native matrix is not the exact target/runner set'
+  }
   while IFS=$'\t' read -r target runner format executable; do
     case "$target:$runner:$format:$executable" in
       aarch64-apple-darwin:macos-15:tar.zst:flux-exchange|x86_64-apple-darwin:macos-15-intel:tar.zst:flux-exchange|aarch64-unknown-linux-gnu:ubuntu-24.04-arm:tar.zst:flux-exchange|x86_64-unknown-linux-gnu:ubuntu-24.04:tar.zst:flux-exchange|x86_64-pc-windows-msvc:windows-2025:zip:flux-exchange.exe) ;;
@@ -28,7 +37,6 @@ PY
     grep -Fq "target: $target" "$workflow_path" || fail "workflow omits target $target"
     grep -Fq "runner: $runner" "$workflow_path" || fail "workflow omits native runner $runner"
   done < <(awk '!/^#/ && NF' "$target_path")
-  [ "$(grep -Ec '^[[:space:]]+target: (aarch64|x86_64)' "$workflow_path")" = 5 ] || fail 'workflow matrix is not closed at five targets'
   grep -Fq 'cargo run --locked -p flux-exchange-release -- verify-staged' "$workflow_path" || fail 'staged assets do not pass the production verifier'
   grep -Fq 'scripts/release-stage.sh' "$workflow_path" || fail 'staged assets bypass the exact archive-set producer'
   grep -Fq 'cargo run --locked -p flux-exchange-release -- verify-published' "$workflow_path" || fail 'immutable public assets do not pass the production verifier'
@@ -37,6 +45,10 @@ PY
   grep -Fq 'attest-build-provenance@' "$workflow_path" || fail 'provenance is absent before exposure'
   grep -Fq 'group: flux-exchange-stable-channel' "$workflow_path" || fail 'stable-channel writes are not serialized'
   grep -Fq 'scripts/release-download.sh' "$workflow_path" || fail 'post-publication verification bypasses the one-302 transport'
+  grep -Fq '[ "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" ]' "$workflow_path" || fail 'resumable publication is not bound to the immutable tag ref used by provenance'
+  grep -Fq '[ "$GITHUB_SHA" = "$source" ]' "$workflow_path" || fail 'checked-out source is not bound to the workflow provenance SHA'
+  grep -Fq -- '--max-filesize 65536' "$download_path" || fail 'initial redirect response body is unbounded'
+  grep -Fq -- '--max-filesize "$byte_limit"' "$download_path" || fail 'release transport does not bound response bytes while reading'
   if grep -Eq 'releases/(latest|download/latest)|curl[^\n]*(-L|--location)([[:space:]]|$)' "$workflow_path"; then
     fail 'workflow admits mutable latest or automatic redirects'
   fi
@@ -47,24 +59,36 @@ if [ "${1:-}" = --self-test ]; then
   trap 'rm -rf -- "$scratch"' EXIT
   cp "$workflow" "$scratch/workflow.yml"
   cp "$targets" "$scratch/targets.tsv"
-  check "$scratch/workflow.yml" "$scratch/targets.tsv"
+  cp "$root/scripts/release-download.sh" "$scratch/release-download.sh"
+  check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh"
   sed -i.bak '/aarch64-apple-darwin/d' "$scratch/targets.tsv"
-  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" >/dev/null 2>&1); then fail 'self-test accepted a missing platform'; fi
+  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted a missing platform'; fi
   cp "$targets" "$scratch/targets.tsv"
   printf '%s\n' 'riscv64-unknown-linux-gnu ubuntu-24.04 tar.zst flux-exchange' >>"$scratch/targets.tsv"
-  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" >/dev/null 2>&1); then fail 'self-test accepted an undeclared platform'; fi
+  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted an undeclared platform'; fi
+  cp "$targets" "$scratch/targets.tsv"
+  sed -i.bak '/^[[:space:]]*runs-on: \${{ matrix.runner }}/i\
+          - runner: ubuntu-24.04\
+            target: riscv64-unknown-linux-gnu' "$scratch/workflow.yml"
+  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted an extra native build matrix target'; fi
   cp "$workflow" "$scratch/workflow.yml"
   sed -i.bak 's/--max-redirs 0/--location/' "$scratch/workflow.yml"
   # The workflow delegates transport to release-download.sh, so mutating its required call is the
   # static failure that proves this check is wired to the policy boundary.
   sed -i.bak '/scripts\/release-download.sh/d' "$scratch/workflow.yml"
-  if (check "$scratch/workflow.yml" "$targets" >/dev/null 2>&1); then fail 'self-test accepted transport-policy removal'; fi
+  if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted transport-policy removal'; fi
   cp "$workflow" "$scratch/workflow.yml"
   sed -i.bak '/verify-staged/d' "$scratch/workflow.yml"
-  if (check "$scratch/workflow.yml" "$targets" >/dev/null 2>&1); then fail 'self-test accepted staged-verifier removal'; fi
+  if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted staged-verifier removal'; fi
+  cp "$workflow" "$scratch/workflow.yml"
+  sed -i.bak '/GITHUB_REF.*refs\/tags/d' "$scratch/workflow.yml"
+  if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted provenance tag-ref binding removal'; fi
+  cp "$root/scripts/release-download.sh" "$scratch/release-download.sh"
+  sed -i.bak '/--max-filesize/d' "$scratch/release-download.sh"
+  if (check "$workflow" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted receive-time byte-bound removal'; fi
   printf 'PASS check-local-release self-test\n'
   exit 0
 fi
 
-check "$workflow" "$targets"
+check "$workflow" "$targets" "$root/scripts/release-download.sh"
 printf 'PASS local release workflow and five-target contract\n'

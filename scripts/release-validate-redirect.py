@@ -12,7 +12,10 @@ PATH = re.compile(
     r"/github-production-release-asset/[1-9][0-9]{0,19}/"
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
-VALUE = re.compile(r"(?:[^%]|%[0-9A-Fa-f]{2})*")
+# RFC 3986 query-value characters, excluding `&` because it is the pair separator. Rejecting
+# everything else here keeps malformed raw URI bytes from reaching curl even when percent escapes
+# themselves happen to be well formed.
+VALUE = re.compile(r"(?:[A-Za-z0-9._~!$'()*+,;=:@/?-]|%[0-9A-Fa-f]{2})*")
 
 
 def validate(raw: str) -> None:
@@ -71,6 +74,8 @@ def self_test() -> None:
         base.replace("?sig=", "?unknown="),
         base.replace("good%20value", "%ZZ"),
         base.replace("good%20value", "%0a"),
+        base.replace("good%20value", "raw value"),
+        base.replace("good%20value", "raw[value"),
         base + "&sig=again",
         base + "#fragment",
     ]

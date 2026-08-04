@@ -64,6 +64,8 @@ jobs:
           [ "$version" = "$workspace_version" ] || { echo "::error::tag does not match workspace version"; exit 1; }
           source="$(git rev-parse HEAD)"
           [ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$source" ] || { echo "::error::checkout does not match immutable tag"; exit 1; }
+          [ "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" ] || { echo "::error::release dispatch must run from the immutable tag ref so provenance names that tag"; exit 1; }
+          [ "$GITHUB_SHA" = "$source" ] || { echo "::error::workflow provenance SHA does not match the immutable tag commit"; exit 1; }
           [ -s .github/release-root-policy.json ] || { echo "::error::.github/release-root-policy.json is absent; commit independently reviewed offline-root public policy before release"; exit 1; }
           [ -n "$FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64" ] || { echo "::error::FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64 is not configured"; exit 1; }
           [ -n "$FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64" ] || { echo "::error::FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64 is not configured"; exit 1; }
@@ -137,6 +139,7 @@ jobs:
           ./scripts/check-local-release.sh --self-test
           ./scripts/check-local-release.sh
           ./scripts/release-check-assets.sh --self-test
+          ./scripts/release-download.sh --self-test
           ./scripts/release-validate-redirect.py --self-test
           cargo build --workspace --locked
           cargo test --workspace --locked
@@ -201,6 +204,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ./scripts/release-download.sh --self-test
           cargo test -p codewandler-flux-exchange-host --locked private_fs
           cargo test -p flux-exchange --bin flux-exchange --locked local_state
           if [ "$RUNNER_OS" = Windows ]; then

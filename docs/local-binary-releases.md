@@ -70,7 +70,8 @@ Exchange release signing is an independent trust domain:
   GitHub token or provenance record cannot substitute.
 
 X-126 creates or configures no production signing secret. Production requires exactly these two
-delegated signing secrets from CI:
+delegated signing secrets in the GitHub Actions `local-release` environment (not as repository
+variables or general repository secrets):
 
 - `FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64`
 - `FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64`
@@ -80,6 +81,11 @@ complete minisign secret-key file bytes. Preflight decodes the material canonica
 embedded key id and public packet, and proves that it holds the corresponding channel or release
 role and is currently valid under root-signed trust metadata. It refuses before any build or exposed
 file if the secret is missing, malformed, has the wrong role, or disagrees with that metadata.
+
+An authorized operator resumes an existing release only by dispatching the workflow at that same
+immutable tag ref (for example, `gh workflow run local-release.yml --ref vX.Y.Z -f tag=vX.Y.Z`). The
+workflow refuses a branch-ref dispatch even when its input names a tag, because GitHub provenance is
+bound to the dispatch ref and source SHA.
 
 Production also requires the checked `.github/release-root-policy.json` containing the independently
 reviewed root public-key ids and packets. The policy and both delegated secrets are intentionally
