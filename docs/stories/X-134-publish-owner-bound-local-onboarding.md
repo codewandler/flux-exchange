@@ -33,73 +33,130 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
 
 ## Acceptance
 
-- [ ] A supervised single-user Exchange derives its conventional state root from native OS account
-      APIs rather than `HOME`, `XDG_*`, `LOCALAPPDATA` or another inherited environment variable.
-      It creates one owner-only local-management endpoint below that root: a Unix-domain socket with
-      owner-only ancestry on Unix and a current-user-owned, protected-DACL named pipe on Windows.
-      Foreign ownership, group/world access, symlink/reparse traversal, unavailable account data or
-      ambiguous peer identity refuses without changing metadata or recommending changes to a shared
-      ancestor.
-- [ ] The endpoint authenticates the connecting OS account as one local human/operator only for the
-      single-user supervised deployment. Its authority cannot reach the TCP router, hosted mode,
-      another account, a Service Account runtime route or `--dev` roster authentication. Plan reads
-      remain human management; connection, custom-origin approval, grant and Service Account
-      mutations remain operator management. A native adversarial test proves a loopback TCP caller
-      cannot reproduce the OS-owner bootstrap.
-- [ ] Exchange publishes one closed provider-owned local-management protocol and one closed one-shot
-      credential-handoff protocol with exact schema identities, bounds, error vocabulary and
-      positive/adversarial fixtures. X-126's channel, manifest, compatibility and readiness contract
-      advertises them through a reviewed release-schema revision; it does not add an unknown field
-      to the existing exact protocol object, reuse a v1 identity for changed bytes or derive an id
-      from a package version. Flux can consume the fixture inventory byte-for-byte.
-- [ ] The connection-plan JSON submission accepts only plan-published non-secret targets. A secret
-      identity, alias, value or unknown target in JSON refuses before mutation and the refusal never
-      reflects the value. The ordinary hosted console retains a direct Exchange-owned secret path
-      through a bounded non-JSON body; URLs, browser history/navigation, responses and plan documents
-      remain value-free.
-- [ ] The verified `flux-exchange` executable provides the local TTY secret-input mode consumed by
-      Flux C-509. Connector, label, exact plan/target revision and non-secret transaction metadata
-      may be supplied; the vendor secret is read by Exchange itself and sent over only the owner-
-      bound management endpoint immediately before `SecretStore::put`. The parent Flux process
-      cannot inherit, proxy, read, log or render the input, and no caller can redirect the helper to
-      a different endpoint, tenant, credential address or connection instance.
-- [ ] One connect attempt atomically binds the label, canonical non-secret settings, required
-      credentials and approved authority revision. Its bounded value-free receipt can be replayed:
-      repeating the committed proposal succeeds without a second instance or credential write;
-      failure before commit leaves no partial state; failure after commit resumes from the receipt.
-      A different proposal for the same connector/label refuses naming only those two identities.
-      The first-run path exposes no edit-by-retry behavior or secret-derived definition fingerprint.
-- [ ] The local operator can mint a Service Account directly to an inherited one-shot writer without
-      serializing the token into an HTTP/local-management response. The Exchange helper receives
-      only the pipe write end; on Unix it is one explicit close-on-exec descriptor and on Windows it
-      is one explicit inheritable HANDLE in a closed handle list. X-128 readiness FD 3, liveness FD 4
-      and their Windows equivalents remain value-free and unchanged.
-- [ ] The handoff writes exactly one versioned length-bounded binary frame containing the opaque
-      token and then closes. Truncation, surplus bytes, a second frame, wrong direction/version,
-      inherited extra capabilities, sink failure and early close all refuse with only a value-free
-      receipt/diagnostic. The Service Account verifier store continues to persist only the verifier;
-      the raw token and `Bearer ` spelling are absent from it and every Exchange persistence file.
-- [ ] Grant preview and whole-set apply gain an exact revision/ETag and proposal digest. Apply is a
-      compare-and-swap against the previewed revision, preserves unrelated connector grants and is
-      idempotent for the same committed digest; a stale or concurrently changed set refuses before
-      write. Grants remain tenant-and-connector scoped metadata selectors with no connection-label
-      or operation-id authority axis.
-- [ ] Failing-first integration tests scan raw/escaped/percent/base64 vendor and Service Account
-      sentinels across JSON bodies, URLs, argv, environment, local-management diagnostics, stdout,
-      stderr, tracing, audit, readiness, liveness, lifecycle/control state and every persisted file.
-      The only allowlisted locations are the Exchange vendor credential store and the receiving
-      host's test credential sink; captured Flux-facing traffic may contain the Service Account
-      token only in the dedicated handoff frame and later sensitive Authorization transport.
-- [ ] Native CI executes the owner endpoint, TTY input, pipe/HANDLE inheritance, descriptor closure,
-      restart, grant CAS and unsafe-root refusals on every platform advertised by X-126:
-      `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`,
-      `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. Cross-compilation, fixture parsing or
-      one architecture standing in for another is not acceptance evidence.
-- [ ] `docs/designs/local-release-v1.md`, operator/user documentation, the public website and the
-      X-126 fixture/check pipeline describe the final boundary and its honest hard stops. The full
-      repository gate and public-site build pass. X-126 remains active until this story is merged,
-      the final provider fixtures are reverified from the candidate commit and the separately
-      authorized public five-target release verifier succeeds.
+- [ ] Production derives native roots without `HOME`, `XDG_*`, `USERPROFILE`, `LOCALAPPDATA` or an
+      equivalent inherited variable. Linux uses
+      `getpwuid_r(geteuid()).pw_dir/.local/state/flux-exchange`, macOS uses
+      `getpwuid_r(geteuid()).pw_dir/Library/Application Support/Flux/Exchange`, and Windows uses
+      `SHGetKnownFolderPath(FOLDERID_LocalAppData)/Flux/Exchange`. Traversal refuses symlinks/reparse
+      points; the account home/profile boundary belongs to the expected account; shared ancestors
+      are not writable by untrusted accounts; the Exchange root and descendants are owner-only.
+      Unsafe existing metadata refuses without chmod, chown, ACL repair or advice to narrow `/tmp`
+      or another shared ancestor.
+- [ ] Unix creates `<native-root>/run/local-management-v1.sock` below an owner `0700` directory with
+      an owner `0600` socket and authenticates the startup effective UID using `SO_PEERCRED` on Linux
+      or `getpeereid` on macOS. Windows creates
+      `\\.\pipe\flux-exchange-local-management-v1-<first-32-lowerhex-of-SHA256(TokenUser-SID-bytes)>`
+      in the named-pipe namespace using byte mode, overlapped IO, `PIPE_REJECT_REMOTE_CLIENTS`,
+      `FILE_FLAG_FIRST_PIPE_INSTANCE`, current-user ownership and a protected current-user/System
+      DACL. It authenticates through named-pipe impersonation, `TokenUser` comparison and an
+      unconditional `RevertToSelf`.
+- [ ] The authenticated peer maps only inside the local-management dispatcher to tenant `local`,
+      `PrincipalKind::User`, principal id `local-owner` and operator `true`. It is never installed as
+      an HTTP identity provider and cannot authenticate loopback TCP, hosted mode, another account,
+      Service Account runtime routes or `--dev`. Plan reads remain human management; connection,
+      authority, grant and Service Account mutations remain operator management. A native adversary
+      proves loopback TCP cannot reproduce the bootstrap.
+- [ ] The first public release retains `exchange.release-trust.v1` and publishes
+      `exchange.release-channel.v2`, `exchange.release-manifest.v2`,
+      `exchange.compatibility.v2`, `exchange.connection-plan.v2` and
+      `exchange.supervisor-ready.v2`. Its exact protocol object contains eight fields:
+      `exchange_api`, `effective_catalogue_response`, `invoke_request` and `invoke_response` retain
+      their v1 identities; `connection_plan` is v2; `local_management` is
+      `exchange.local-management.v1`; `service_account_handoff` is
+      `exchange.service-account-handoff.v1`; and `supervisor` is v2. Deny-unknown serializers,
+      parsers, signed fixtures and release checks reject the old six-field object, added fields or a
+      changed contract under any existing v1 identity.
+- [ ] `exchange.supervisor-ready.v2` changes only the schema identity and protocol inventory. Unix
+      supervised readiness FD 3/liveness FD 4 and the existing two Windows HANDLE arguments retain
+      their exact X-128 directions and value-free meanings. Local management has no lifecycle opcode
+      and never shares readiness, liveness or C-510 lifecycle control.
+- [ ] `exchange.local-management.v1` uses one operation per connection and a 12-byte header: ASCII
+      `FXLM`, version byte `1`, direction byte (`1` client-to-server or `2` server-to-client),
+      big-endian `u16` opcode and big-endian `u32` payload length. Canonical control JSON is at most
+      65,536 bytes; each secret frame is an ordinal `u16` plus `1..=8192` raw bytes; at most 64 secret
+      frames and 1 MiB total payload are accepted. Compression, nonzero flags, unknown opcodes,
+      duplicate JSON members, trailing bytes and a second operation refuse.
+- [ ] The provider fixture owns the exact `CONNECT_BEGIN -> CONNECT_RECEIPT|ERROR` or
+      `NEED_SECRETS -> SECRET* -> CONNECT_COMMIT -> CONNECT_RECEIPT|ERROR -> EOF` state machine.
+      It publishes `exchange.connect-receipt.v1`, `exchange.grant-apply-receipt.v1`,
+      `exchange.service-account-mint-receipt.v1` and `exchange.local-management-error.v1` with the
+      closed error codes `invalid_frame`, `unsupported_version`, `wrong_direction`,
+      `unexpected_frame`, `frame_too_large`, `truncated_frame`, `surplus_data`, `peer_unverified`,
+      `unsafe_root`, `local_management_unavailable`, `invalid_request`, `unknown_connector`,
+      `invalid_label`, `secret_json_forbidden`, `unknown_target`, `stale_plan`, `proposal_conflict`,
+      `connect_busy`, `grant_stale`, `grant_digest_mismatch`, `service_account_conflict`,
+      `writer_invalid`, `writer_closed`, `store_unavailable`, `audit_unavailable` and
+      `internal_refusal`; retry is one of `never|refresh|same_proposal|operator`, and commit is one of
+      `none|committed|query_receipt`.
+- [ ] Plan, connection-create, credential-rotation/acquisition and Service Account mint JSON reject
+      every secret identity, alias, value and unknown target before mutation without reflecting it.
+      Hosted onboarding remains complete through bounded Exchange-owned binary paths only:
+      `application/vnd.flux-exchange.vendor-secret-v1` for vendor input and
+      `application/vnd.flux-exchange.service-account-handoff-v1` for a minted token, with
+      `Cache-Control: no-store` and no secret in URL, query, header, JSON response or error.
+- [ ] The verified `flux-exchange` executable owns local TTY/browser secret input. Flux may supply
+      connector, label, exact plan/target revision and non-secret transaction metadata, but does not
+      read, proxy, inherit, log or render the bytes and cannot redirect the helper to another
+      endpoint, tenant, credential address or instance. This is a testable software/dataflow
+      invariant, not an OS isolation claim against a malicious same-user debugger.
+- [ ] Supervised local connect uses one new Exchange-server transaction owner, not the current plan
+      handler's separate credential/settings/registry writes and `partial` outcome. A server-owned
+      `<native-root>/local-connections/store.sqlite3` with `synchronous=FULL` implements
+      `SecretStore`, `ConnectionSettings`, `ConnectionRegistry` and local receipts. Credential
+      columns are raw binary/text values, never JSON; SQLite journal files are credential-store
+      sinks. Hosted routes may retain separate composition but may not claim local crash atomicity.
+- [ ] The connect proposal digest is SHA-256 over canonical non-secret connector, label, plan
+      revision, ordered target identities, settings and authority revision. It excludes secret
+      bytes, lengths, hashes, presence facts and fingerprints. Under `BEGIN IMMEDIATE`, one process-
+      wide connection lock rechecks plan/authority/occupancy and one transaction writes label,
+      instance, settings, authority, credentials, a value-free audit outbox entry and receipt before
+      one commit. A pre-commit crash exposes none; response loss or uncertain commit yields
+      `query_receipt`; same-proposal replay returns the receipt before prompting or writing; a
+      changed proposal refuses naming only connector and label. Retry is never edit-by-retry.
+- [ ] For Service Account mint, Unix helper mode receives only write FD 5 and transfers exactly that
+      write-only pipe to the authenticated running server through one `SCM_RIGHTS` message. Exchange
+      rejects `MSG_CTRUNC`, multiple descriptors and the wrong pipe kind/direction and sets
+      `FD_CLOEXEC`. Windows launches the helper with a closed
+      `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, revalidates the helper process token SID, pins the process
+      and transfers the declared write HANDLE with `DuplicateHandle`; a native planted-handle canary
+      proves no unrelated inheritable handle arrived. No receiver claims to enumerate the complete
+      Windows process handle table.
+- [ ] `exchange.service-account-handoff.v1` is exactly one frame followed by EOF: ASCII `FXSA`,
+      version byte `1`, direction byte `1` (Exchange to writer), two zero flag bytes, a big-endian
+      `u32` length of `1..=512`, then opaque token bytes. Truncation, surplus bytes, a second frame,
+      wrong version/direction, wrong capability, sink failure and early close refuse. Receivers do
+      not depend on the current token prefix. Exchange persists only the verifier and its receipt may
+      claim only verifier commit plus `frame_written`; Flux C-509 alone derives `credential_stored`
+      after its receiving store commits. The one-way pipe never implies receiver persistence.
+- [ ] Grant preview accepts one connector-scoped selector change and returns the complete candidate,
+      an exact revision/ETag and a canonical proposal digest. Compare-and-swap apply preserves every
+      unrelated connector, the selected connector's inbound authority and all provider-owned
+      unmodified fields. Same-digest replay returns the committed receipt; a stale revision,
+      mismatched digest or unexpressible stored authority refuses before write. Grants remain tenant-
+      and-connector scoped metadata selectors with no label or operation-id authority axis.
+- [ ] Positive/adversarial provider fixtures and tests cover native root poisoning, unsafe metadata,
+      peer authentication, loopback TCP, every secret JSON path, bounded hosted binary input,
+      connect crash/response-loss/replay/conflict, secret-free digests, handoff framing/capability
+      closure, split receipts, grant CAS/preservation and the unchanged X-128 capability ABI. Raw,
+      JSON-escaped, percent-encoded and base64 sentinels are scanned across JSON, URLs, argv,
+      environment, local-management diagnostics, stdout/stderr, tracing, audit, readiness, liveness,
+      lifecycle/control state and every persisted file. Only the Exchange credential database and
+      journals, the dedicated frame/test sink and later Authorization transport are allowlisted.
+- [ ] Native CI executes the complete evidence on `macos-15` (`aarch64-apple-darwin`),
+      `macos-15-intel` (`x86_64-apple-darwin`), `ubuntu-24.04-arm`
+      (`aarch64-unknown-linux-gnu`), `ubuntu-24.04` (`x86_64-unknown-linux-gnu`) and `windows-2025`
+      (`x86_64-pc-windows-msvc`). Every row runs root poisoning, owner endpoint/TCP adversary, real
+      TTY/console input, handoff closure plus an extra-capability canary, crash injection before and
+      after connect commit, restart receipt replay, concurrent grant CAS, four-form sentinel scans
+      and existing native X-128 tests. Cross-compilation, fixture parsing or another architecture is
+      not evidence.
+- [ ] `docs/designs/local-release-v1.md` is reconciled into the v2 provider contract, operator/user
+      documentation and the public website describe the final boundary, and X-126 release fixtures
+      and checks consume it exactly. The full repository gate and public-site build pass. Any
+      corresponding Flux PR runs Flux's `scripts/build-embedded-docs.sh` before its gate so embedded
+      documentation cannot be stale. X-126 stays active until X-134 is merged, final v2 fixtures are
+      regenerated from the candidate commit, all five native jobs pass and the separately authorized
+      public release verifier succeeds.
 
 ## Notes
 
@@ -107,7 +164,8 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
   `../flux-roadmap/decisions/0007-local-onboarding-uses-owner-bound-capabilities.md`.
 - This story owns provider bytes and fixtures. Flux C-509 owns the receiving credential writer,
   owner-only Flux store, opaque resolver, management/runtime client split, CLI projection, concrete
-  write approval and retry suppression.
+  write approval and retry suppression. Exchange fixtures may use a test sink but never certify
+  Flux's production receiver store.
 - The local-management endpoint is not C-510's lifecycle control channel and never carries start,
   status, stop, readiness or liveness frames. C-510 remains secret-free.
 - Existing hosted authentication stays authoritative for hosted Exchange. OS-owner bootstrap is
