@@ -434,7 +434,7 @@ async function retryConnectionPlan() {
   }
 }
 
-/** Apply the complete plan and retain only its value-free result and fresh projection. */
+/** Run the hosted FXLM ceremony, then read a fresh value-free projection. */
 async function connectChosen(
   connector: string,
   selection: string | null,
@@ -451,8 +451,14 @@ async function connectChosen(
   connecting.value = false
 
   if (outcome.value.status === 'answered') {
-    connectionPlan.value = { status: 'ready', plan: outcome.value.result.plan }
-    selectedConnectionLabel.value = outcome.value.result.plan.selection
+    const label = outcome.value.result.label
+    selectedConnectionLabel.value = label
+    const planTicket = connectionPlanRequests.begin(connector, label)
+    connectionPlan.value = { status: 'loading' }
+    const state = await loadConnectionPlan(connector, label)
+    if (connectionPlanRequests.admits(planTicket, chosen.value, selectedConnectionLabel.value)) {
+      connectionPlan.value = state
+    }
     await reloadConnections()
   }
 }
@@ -467,13 +473,9 @@ async function changeConnectionAuthority(identity: string, transition: Connectio
 
   const field = current.plan.fields.find((candidate) => candidate.identity === identity)
   const authority = field?.authority
-  const advertised = transition.action.method === 'PUT'
-    ? authority?.state === 'proposed' ? authority.actions.approve : undefined
-    : authority?.state === 'proposed' || authority?.state === 'approved' ? authority.actions.revoke : undefined
   if (field?.service === null || field?.service !== transition.service || field.binds !== transition.field ||
-      authority?.revision !== transition.revision || advertised?.method !== transition.action.method ||
-      advertised.target !== transition.action.target) return
-  if (transition.action.method === 'PUT') {
+      authority?.revision !== transition.revision || !authority.actions.includes(transition.action)) return
+  if (transition.action === 'approve') {
     const reviewed = authorityInspection.value
     if (reviewed?.status !== 'answered' || reviewed.result.connector !== transition.connector ||
         reviewed.result.label !== transition.label || reviewed.result.service !== transition.service ||
@@ -514,7 +516,7 @@ async function inspectAuthority(identity: string, request: ConnectionAuthorityIn
   const authority = field?.authority
   if (field?.service === null || field?.service !== request.service || field.binds !== request.field ||
       authority?.state !== request.state || authority.revision !== request.revision ||
-      authority.state !== 'proposed' || authority.actions.approve === undefined) return
+      authority.state !== 'proposed' || !authority.actions.includes('approve')) return
 
   const ticket = authorityInspectionRequests.begin(request.connector, request.label)
   authorityInspecting.value = identity

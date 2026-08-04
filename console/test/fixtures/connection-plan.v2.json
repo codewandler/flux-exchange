@@ -1,0 +1,200 @@
+{
+  "connector": "example-helpdesk",
+  "credential_revision": "1111111111111111111111111111111111111111111111111111111111111111",
+  "fields": [
+    {
+      "aliases": ["--name"],
+      "also_binds": [],
+      "authority": null,
+      "binds": null,
+      "choices": null,
+      "help": "A tenant-scoped label such as production or sandbox.",
+      "identity": "connection.name",
+      "input": "text",
+      "label": "Connection name",
+      "name": "name",
+      "provenance": "exchange",
+      "reason": null,
+      "required": true,
+      "routable": true,
+      "secret": false,
+      "service": null,
+      "set": true,
+      "target": {
+        "id": "connection.name",
+        "revision": "2222222222222222222222222222222222222222222222222222222222222222"
+      }
+    },
+    {
+      "aliases": ["--region"],
+      "also_binds": [],
+      "authority": null,
+      "binds": "endpoint.region",
+      "choices": [
+        { "label": "Global", "value": "global" },
+        { "label": "Europe", "value": "europe" }
+      ],
+      "help": "The region declared for this connection.",
+      "identity": "config.default.region",
+      "input": "text",
+      "label": "Region",
+      "name": "region",
+      "provenance": "provider.config",
+      "reason": null,
+      "required": true,
+      "routable": true,
+      "secret": false,
+      "service": "default",
+      "set": true,
+      "target": {
+        "id": "setting.default.endpoint.region",
+        "revision": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    },
+    {
+      "aliases": ["--account-email"],
+      "also_binds": ["header.X-Example-Account"],
+      "authority": null,
+      "binds": "username.example_helpdesk.api_token",
+      "choices": null,
+      "help": "The account identity paired with the token.",
+      "identity": "config.default.account_email",
+      "input": "email",
+      "label": "Account email",
+      "name": "account_email",
+      "provenance": "provider.config",
+      "reason": null,
+      "required": true,
+      "routable": true,
+      "secret": false,
+      "service": "default",
+      "set": true,
+      "target": {
+        "id": "setting.default.username.example_helpdesk.api_token",
+        "revision": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    },
+    {
+      "aliases": ["--custom-origin"],
+      "also_binds": [],
+      "authority": {
+        "actions": ["approve", "revoke"],
+        "revision": "42",
+        "state": "proposed"
+      },
+      "binds": "endpoint.custom_origin",
+      "choices": null,
+      "help": "A proposed authority must be approved before the runtime can use it.",
+      "identity": "config.default.custom_origin",
+      "input": "url",
+      "label": "Custom origin",
+      "name": "custom_origin",
+      "provenance": "provider.config",
+      "reason": null,
+      "required": true,
+      "routable": true,
+      "secret": false,
+      "service": "default",
+      "set": false,
+      "target": {
+        "id": "setting.default.endpoint.custom_origin",
+        "revision": "5555555555555555555555555555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "aliases": [],
+      "also_binds": [],
+      "authority": null,
+      "binds": "credential.example_helpdesk.service_token",
+      "choices": null,
+      "help": "A token issued by the provider.",
+      "identity": "config.default.service_token",
+      "input": "secret",
+      "label": "Service token",
+      "name": "service_token",
+      "provenance": "provider.config",
+      "reason": null,
+      "required": true,
+      "routable": true,
+      "secret": true,
+      "service": "default",
+      "set": null,
+      "target": {
+        "id": "credential.example_helpdesk.service_token",
+        "revision": "6666666666666666666666666666666666666666666666666666666666666666"
+      }
+    },
+    {
+      "aliases": [],
+      "also_binds": [],
+      "authority": null,
+      "binds": "credential.example_helpdesk.service_token",
+      "choices": null,
+      "help": "The same provider token is used by the audit service.",
+      "identity": "config.audit.service_token",
+      "input": "secret",
+      "label": "Audit service token",
+      "name": "service_token",
+      "provenance": "provider.config",
+      "reason": null,
+      "required": true,
+      "routable": true,
+      "secret": true,
+      "service": "audit",
+      "set": null,
+      "target": {
+        "id": "credential.example_helpdesk.service_token",
+        "revision": "6666666666666666666666666666666666666666666666666666666666666666"
+      }
+    },
+    {
+      "aliases": [],
+      "also_binds": [],
+      "authority": null,
+      "binds": "credential.example_helpdesk.api_token",
+      "choices": null,
+      "help": "The credential declared by provider authentication.",
+      "identity": "credential.example_helpdesk.api_token",
+      "input": "secret",
+      "label": "example_helpdesk.api_token",
+      "name": "api_token",
+      "provenance": "provider.auth",
+      "reason": null,
+      "required": true,
+      "routable": true,
+      "secret": true,
+      "service": null,
+      "set": null,
+      "target": {
+        "id": "credential.example_helpdesk.api_token",
+        "revision": "7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    },
+    {
+      "aliases": ["--callback"],
+      "also_binds": [],
+      "authority": null,
+      "binds": "callback.url",
+      "choices": null,
+      "help": "This build cannot route the declared callback binding.",
+      "identity": "config.events.callback",
+      "input": "url",
+      "label": "Callback",
+      "name": "callback",
+      "provenance": "provider.config",
+      "reason": "binding `callback.url` is not admitted by this build",
+      "required": true,
+      "routable": false,
+      "secret": false,
+      "service": "events",
+      "set": false,
+      "target": null
+    }
+  ],
+  "labels": ["production", "sandbox"],
+  "plan_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "selection": "production",
+  "state": "incomplete",
+  "vendor": "Example Helpdesk",
+  "version": "exchange.connection-plan.v2"
+}

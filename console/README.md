@@ -35,9 +35,11 @@ unbuilt to built, is an edit there and nowhere else.
 What that does and does not mean:
 
 - **Connections is actionable, but still addresses and never values.** A searchable catalogue-backed
-  picker creates a connection, status cards show held addresses under progressive detail, and each
-  held credential can be rotated with the service's atomic `PUT`. Typed values live only in their
-  uncontrolled password input and request.
+  picker reads the value-free `exchange.connection-plan.v2` projection and creates through one
+  `exchange.local-management.v1` WebSocket ceremony. Secret controls become ordered raw `SECRET`
+  frames and never enter JSON. Status cards show held addresses under progressive detail, and each
+  held credential can still be rotated through the older atomic route until that separate consumer
+  moves to the same ceremony.
 - **Connect → Grant → Invoke is one visible journey.** Completion comes from the latest connection
   and grant responses. Grant presets compile to metadata selectors, preview groups the service's
   admitted answer by service and risk, and Invoke starts its JSON body from the runtime pack's exact
