@@ -22,7 +22,8 @@ PY
 }
 
 if [ "${1:-}" = --self-test ]; then
-  expected='production-root-inherited-environment
+  expected='four-form-secret-sentinel-process-scan
+production-root-inherited-environment
 expiry-equality-live
 supervisor-death-normal-responsive-unix
 supervisor-death-normal-wedged-unix
@@ -33,8 +34,8 @@ supervisor-death-terminate-wedged-windows
 unix-inherited-abi
 windows-inherited-abi'
   actual="$(inventory | cut -f1 | LC_ALL=C sort -u)"
-  [ "$actual" = "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ] || fail 'native case inventory is not the exact ten-case set'
-  [ "$(inventory | wc -l | tr -d ' ')" = 15 ] || fail 'native process evidence is not the exact fifteen-test mapping'
+  [ "$actual" = "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ] || fail 'native case inventory is not the exact eleven-case set'
+  [ "$(inventory | wc -l | tr -d ' ')" = 16 ] || fail 'native process evidence is not the exact sixteen-test mapping'
   for target in \
     aarch64-apple-darwin \
     aarch64-unknown-linux-gnu \
@@ -66,6 +67,11 @@ count=0
 while IFS=$'\t' read -r case_id test_target exact_test; do
   [ -n "$case_id" ] || continue
   case "$test_target" in
+    x134_sentinel_evidence)
+      [ "$case_id" = four-form-secret-sentinel-process-scan ] \
+        || fail "native case $case_id cannot use the four-form sentinel test target"
+      test_args=(--test x134_sentinel_evidence)
+      ;;
     local_state_regressions)
       [ "$case_id" = production-root-inherited-environment ] \
         || fail "native case $case_id cannot use the production-root test target"

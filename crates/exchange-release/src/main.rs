@@ -787,6 +787,7 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
 ];
 
 const REQUIRED_NATIVE_CASES: &[&str] = &[
+    "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
     "expiry-equality-live",
     "supervisor-death-normal-responsive-unix",
@@ -815,6 +816,13 @@ const UNIX_RELEASE_TARGETS: &[&str] = &[
 const WINDOWS_RELEASE_TARGETS: &[&str] = &["x86_64-pc-windows-msvc"];
 
 const REQUIRED_NATIVE_BINDINGS: &[RequiredNativeBinding] = &[
+    RequiredNativeBinding {
+        id: "four-form-secret-sentinel-process-scan",
+        targets: release::SUPPORTED_TARGETS,
+        test_target: "x134_sentinel_evidence",
+        exact_test:
+            "transformed_secret_sentinels_never_enter_refusal_abort_crash_or_restart_outputs",
+    },
     RequiredNativeBinding {
         id: "production-root-inherited-environment",
         targets: release::SUPPORTED_TARGETS,
