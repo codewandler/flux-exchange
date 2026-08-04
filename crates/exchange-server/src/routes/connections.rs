@@ -5139,7 +5139,8 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed),
             ));
-            std::fs::create_dir_all(&path).expect("a scratch directory");
+            exchange_host::ensure_private_state_directory(&path)
+                .expect("an owner-only scratch directory");
             Self(path.canonicalize().expect("a resolvable scratch directory"))
         }
 
