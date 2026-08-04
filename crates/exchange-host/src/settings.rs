@@ -250,6 +250,29 @@ impl AuthorityStatus {
     }
 }
 
+/// Opaque, single-use proposal prepared before its audit record begins.
+///
+/// It intentionally has no `Debug`, `Clone`, serialization or value accessor: the submitted origin
+/// remains inside the settings port between read-only validation and the exact checked commit.
+pub struct PreparedAuthorityProposal {
+    store_path: std::path::PathBuf,
+    tenant: Tenant,
+    connector: String,
+    instance: Option<InstanceId>,
+    declared: DeclaredSetting,
+    submitted: String,
+    normalized: NormalizedOrigin,
+    expected_revision: Option<u64>,
+    revision: u64,
+}
+
+impl PreparedAuthorityProposal {
+    /// Store-wide revision an audit begin record may name before durable mutation.
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
 // The two bounds answer different questions, and the second is only worth having while it is the
 // tighter one. Asserted at compile time rather than in a test, for
 // `crate::connections`' reason: a tenant allowance below one whole value refuses every real
@@ -890,16 +913,48 @@ pub trait ConnectionSettings: ConfigStore {
     /// proposal into a blind overwrite.
     fn propose_authority_for_instance(
         &self,
+        tenant: &Tenant,
+        connector: &str,
+        instance: Option<&InstanceId>,
+        declared: &DeclaredSetting,
+        value: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<AuthorityStatus, SettingsRefusal> {
+        let prepared = self.prepare_authority_proposal_for_instance(
+            tenant,
+            connector,
+            instance,
+            declared,
+            value,
+            expected_revision,
+        )?;
+        self.commit_authority_proposal_for_instance(prepared)
+    }
+
+    /// Validate one proposal and reserve no state while exposing its candidate revision to audit.
+    fn prepare_authority_proposal_for_instance(
+        &self,
         _tenant: &Tenant,
         connector: &str,
         _instance: Option<&InstanceId>,
         declared: &DeclaredSetting,
         _value: &str,
         _expected_revision: Option<u64>,
-    ) -> Result<AuthorityStatus, SettingsRefusal> {
+    ) -> Result<PreparedAuthorityProposal, SettingsRefusal> {
         Err(SettingsRefusal::AuthorityUnsupported {
             connector: connector.to_owned(),
             setting: declared.binds(),
+        })
+    }
+
+    /// Commit exactly one prepared proposal, checking address and allocation revisions together.
+    fn commit_authority_proposal_for_instance(
+        &self,
+        prepared: PreparedAuthorityProposal,
+    ) -> Result<AuthorityStatus, SettingsRefusal> {
+        Err(SettingsRefusal::AuthorityUnsupported {
+            connector: prepared.connector,
+            setting: prepared.declared.binds(),
         })
     }
 
@@ -1331,8 +1386,8 @@ mod file {
     use super::{
         admit_tenant_settings, AuthorityState, AuthorityStatus, ConnectionSettings,
         CustomOriginPolicy, CustomOriginRule, DeclaredSetting, DormantCustomOriginPolicy,
-        InstanceId, NormalizedOrigin, OriginPolicyRefusal, SettingsRefusal,
-        MAX_SETTING_VALUE_BYTES,
+        InstanceId, NormalizedOrigin, OriginPolicyRefusal, PreparedAuthorityProposal,
+        SettingsRefusal, MAX_SETTING_VALUE_BYTES,
     };
     use crate::paths::{enclosing_working_tree, resolve};
     use crate::Tenant;
@@ -1559,6 +1614,7 @@ mod file {
 
             let mut document = read(&resolved)?;
             migrate_tagged_custom_origins(&resolved, &mut document, custom_origins.as_ref())?;
+            revalidate_tagged_custom_origins(&resolved, &document, custom_origins.as_ref())?;
             refuse_untyped_custom_origins(&resolved, &document, custom_origins.as_ref())?;
 
             Ok(Self {
@@ -1627,12 +1683,13 @@ mod file {
                     path: self.path.display().to_string(),
                     reason: "the store lock is poisoned".to_owned(),
                 })?;
-            if custom_origin_rule(self.custom_origins.as_ref(), connector, declared).is_none() {
+            let Some(_rule) = custom_origin_rule(self.custom_origins.as_ref(), connector, declared)
+            else {
                 return Err(SettingsRefusal::AuthorityUnsupported {
                     connector: connector.to_owned(),
                     setting: declared.binds(),
                 });
-            }
+            };
             let [t, c, s, b] = Self::at(
                 tenant.as_str(),
                 connector,
@@ -1652,6 +1709,18 @@ mod file {
                     setting: declared.binds(),
                 });
             };
+            let normalized = self
+                .admit(connector, declared, &current.origin)?
+                .ok_or_else(|| SettingsRefusal::AuthorityUnsupported {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                })?;
+            if normalized.setting_value != current.value || normalized.origin != current.origin {
+                return Err(SettingsRefusal::MalformedOrigin {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                });
+            }
             if current.revision != expected {
                 return Err(SettingsRefusal::AuthorityRevisionConflict {
                     connector: connector.to_owned(),
@@ -1660,31 +1729,31 @@ mod file {
                     current: current.revision,
                 });
             }
-            if matches!(transition, AuthorityTransition::Approve)
-                && !matches!(current.state, StoredAuthorityState::Proposed)
-            {
+            let transition_admitted = match transition {
+                AuthorityTransition::Approve => {
+                    matches!(current.state, StoredAuthorityState::Proposed)
+                }
+                AuthorityTransition::Revoke => matches!(
+                    current.state,
+                    StoredAuthorityState::Proposed | StoredAuthorityState::Approved
+                ),
+            };
+            if !transition_admitted {
                 return Err(SettingsRefusal::AuthorityStateConflict {
                     connector: connector.to_owned(),
                     setting: declared.binds(),
                     revision: current.revision,
                     current: authority_state(current.state),
-                    transition: "approved",
+                    transition: match transition {
+                        AuthorityTransition::Approve => "approved",
+                        AuthorityTransition::Revoke => "revoked",
+                    },
                 });
             }
             let desired = match transition {
                 AuthorityTransition::Approve => StoredAuthorityState::Approved,
                 AuthorityTransition::Revoke => StoredAuthorityState::Revoked,
             };
-            let already = matches!(
-                (current.state, desired),
-                (
-                    StoredAuthorityState::Approved,
-                    StoredAuthorityState::Approved
-                ) | (StoredAuthorityState::Revoked, StoredAuthorityState::Revoked)
-            );
-            if already {
-                return Ok(authority_status(current));
-            }
             let previous = document.clone();
             let current = document
                 .values
@@ -1842,37 +1911,7 @@ mod file {
             }
 
             custom_origin_rule(self.custom_origins.as_ref(), connector, declared)
-                .map(|rule| {
-                    let normalized = rule.normalize(value).map_err(|refusal| match refusal {
-                        OriginPolicyRefusal::UnsupportedScheme => {
-                            SettingsRefusal::OriginSchemeUnsupported {
-                                connector: connector.to_owned(),
-                                setting: declared.binds(),
-                            }
-                        }
-                        OriginPolicyRefusal::Malformed => SettingsRefusal::MalformedOrigin {
-                            connector: connector.to_owned(),
-                            setting: declared.binds(),
-                        },
-                    })?;
-                    if normalized.setting_value.is_empty() || normalized.origin.is_empty() {
-                        return Err(SettingsRefusal::MalformedOrigin {
-                            connector: connector.to_owned(),
-                            setting: declared.binds(),
-                        });
-                    }
-                    let normalized_bytes =
-                        normalized.setting_value.len().max(normalized.origin.len());
-                    if normalized_bytes > MAX_SETTING_VALUE_BYTES {
-                        return Err(SettingsRefusal::SettingTooLarge {
-                            connector: connector.to_owned(),
-                            setting: declared.binds(),
-                            bytes: normalized_bytes,
-                            limit: MAX_SETTING_VALUE_BYTES,
-                        });
-                    }
-                    Ok(normalized)
-                })
+                .map(|rule| normalize_origin(rule, connector, declared, value))
                 .transpose()
         }
     }
@@ -1991,6 +2030,40 @@ mod file {
         policy.rule(connector, declared)
     }
 
+    fn normalize_origin(
+        rule: &dyn CustomOriginRule,
+        connector: &str,
+        declared: &DeclaredSetting,
+        value: &str,
+    ) -> Result<NormalizedOrigin, SettingsRefusal> {
+        let normalized = rule.normalize(value).map_err(|refusal| match refusal {
+            OriginPolicyRefusal::UnsupportedScheme => SettingsRefusal::OriginSchemeUnsupported {
+                connector: connector.to_owned(),
+                setting: declared.binds(),
+            },
+            OriginPolicyRefusal::Malformed => SettingsRefusal::MalformedOrigin {
+                connector: connector.to_owned(),
+                setting: declared.binds(),
+            },
+        })?;
+        if normalized.setting_value.is_empty() || normalized.origin.is_empty() {
+            return Err(SettingsRefusal::MalformedOrigin {
+                connector: connector.to_owned(),
+                setting: declared.binds(),
+            });
+        }
+        let normalized_bytes = normalized.setting_value.len().max(normalized.origin.len());
+        if normalized_bytes > MAX_SETTING_VALUE_BYTES {
+            return Err(SettingsRefusal::SettingTooLarge {
+                connector: connector.to_owned(),
+                setting: declared.binds(),
+                bytes: normalized_bytes,
+                limit: MAX_SETTING_VALUE_BYTES,
+            });
+        }
+        Ok(normalized)
+    }
+
     fn authority_state(state: StoredAuthorityState) -> AuthorityState {
         match state {
             StoredAuthorityState::Proposed => AuthorityState::Proposed,
@@ -2032,6 +2105,19 @@ mod file {
                                     .to_owned(),
                             });
                         };
+                        let declared_now = connector_catalog::provider(
+                            connector_catalog::ProviderKey::id(connector),
+                        )
+                        .and_then(|provider| super::declared_settings(provider).ok())
+                        .is_some_and(|surface| surface.contains(&declared));
+                        if !declared_now {
+                            return Err(SettingsStoreError::Unusable {
+                                path: path.display().to_string(),
+                                reason: format!(
+                                    "a custom-origin record at connector `{connector}` setting `{binds}` has no current declaration"
+                                ),
+                            });
+                        }
                         let Some(rule) = custom_origin_rule(policy, connector, &declared) else {
                             return Err(SettingsStoreError::Unusable {
                                 path: path.display().to_string(),
@@ -2050,6 +2136,54 @@ mod file {
                         })?;
                         origin.value = normalized.setting_value;
                         origin.origin = normalized.origin;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn revalidate_tagged_custom_origins(
+        path: &Path,
+        document: &Document,
+        policy: &dyn CustomOriginPolicy,
+    ) -> Result<(), SettingsStoreError> {
+        for connectors in document.values.values() {
+            for (connector_key, services) in connectors {
+                let connector = connector_key
+                    .split_once('@')
+                    .map_or(connector_key.as_str(), |(connector, _)| connector);
+                for (service, settings) in services {
+                    for (binds, stored) in settings {
+                        let StoredValue::Origin(origin) = stored else {
+                            continue;
+                        };
+                        let Some(declared) = DeclaredSetting::parse(service, binds) else {
+                            return Err(SettingsStoreError::Unusable {
+                                path: path.display().to_string(),
+                                reason: "a tagged custom-origin record has an unreadable setting address"
+                                    .to_owned(),
+                            });
+                        };
+                        let Some(rule) = custom_origin_rule(policy, connector, &declared) else {
+                            continue;
+                        };
+                        let valid = rule.normalize(&origin.origin).is_ok_and(|normalized| {
+                            !normalized.setting_value.is_empty()
+                                && !normalized.origin.is_empty()
+                                && normalized.setting_value == origin.value
+                                && normalized.origin == origin.origin
+                                && normalized.setting_value.len().max(normalized.origin.len())
+                                    <= MAX_SETTING_VALUE_BYTES
+                        });
+                        if !valid {
+                            return Err(SettingsStoreError::Unusable {
+                                path: path.display().to_string(),
+                                reason: format!(
+                                    "a custom-origin record at connector `{connector}` setting `{binds}` does not satisfy the current typed rule"
+                                ),
+                            });
+                        }
                     }
                 }
             }
@@ -2164,12 +2298,26 @@ mod file {
                 // A `binds` target the pack asked for that this host cannot parse is not one it
                 // can decide about, and an undecided value is not one it hands over.
                 let declared = declared?;
-                if custom_origin_rule(self.custom_origins.as_ref(), provider, &declared).is_some() {
+                if !super::declared_settings(catalogued)
+                    .ok()?
+                    .contains(&declared)
+                {
+                    return None;
+                }
+                if let Some(rule) =
+                    custom_origin_rule(self.custom_origins.as_ref(), provider, &declared)
+                {
                     return match stored {
                         StoredValue::Origin(origin)
                             if matches!(origin.state, StoredAuthorityState::Approved) =>
                         {
-                            Some(origin.value)
+                            normalize_origin(rule, provider, &declared, &origin.origin)
+                                .ok()
+                                .filter(|normalized| {
+                                    normalized.origin == origin.origin
+                                        && normalized.setting_value == origin.value
+                                })
+                                .map(|normalized| normalized.setting_value)
                         }
                         StoredValue::Origin(_) | StoredValue::Ordinary(_) => None,
                     };
@@ -2304,7 +2452,7 @@ mod file {
             Ok(())
         }
 
-        fn propose_authority_for_instance(
+        fn prepare_authority_proposal_for_instance(
             &self,
             tenant: &Tenant,
             connector: &str,
@@ -2312,22 +2460,20 @@ mod file {
             declared: &DeclaredSetting,
             value: &str,
             expected_revision: Option<u64>,
-        ) -> Result<AuthorityStatus, SettingsRefusal> {
-            let mut document = self
-                .document
-                .write()
-                .map_err(|_| SettingsRefusal::Unwritable {
-                    path: self.path.display().to_string(),
-                    reason: "the store lock is poisoned".to_owned(),
-                })?;
-            // Validation and normalization occur within the same write lock as the revision CAS.
-            // A future released rule can therefore evolve without opening a check/use interval.
+        ) -> Result<PreparedAuthorityProposal, SettingsRefusal> {
             let normalized = self.admit(connector, declared, value)?.ok_or_else(|| {
                 SettingsRefusal::AuthorityUnsupported {
                     connector: connector.to_owned(),
                     setting: declared.binds(),
                 }
             })?;
+            let document = self
+                .document
+                .read()
+                .map_err(|_| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
             let [t, c, s, b] = SettingsStore::at(
                 tenant.as_str(),
                 connector,
@@ -2391,6 +2537,137 @@ mod file {
                     .saturating_add(normalized.origin.len()),
             )?;
             let revision = document.next_origin_revision;
+            revision
+                .checked_add(1)
+                .ok_or_else(|| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the custom-origin revision space is exhausted".to_owned(),
+                })?;
+            Ok(PreparedAuthorityProposal {
+                store_path: self.path.clone(),
+                tenant: tenant.clone(),
+                connector: connector.to_owned(),
+                instance: instance.cloned(),
+                declared: declared.clone(),
+                submitted: value.to_owned(),
+                normalized,
+                expected_revision,
+                revision,
+            })
+        }
+
+        fn commit_authority_proposal_for_instance(
+            &self,
+            prepared: PreparedAuthorityProposal,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            if prepared.store_path != self.path {
+                return Err(SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the custom-origin proposal was prepared by a different settings store"
+                        .to_owned(),
+                });
+            }
+            let PreparedAuthorityProposal {
+                store_path: _,
+                tenant,
+                connector,
+                instance,
+                declared,
+                submitted,
+                normalized: prepared_normalized,
+                expected_revision,
+                revision,
+            } = prepared;
+            let mut document = self
+                .document
+                .write()
+                .map_err(|_| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            // The current typed rule, declaration, bounds and normalization are checked again under
+            // the same lock as both CAS decisions. Preparation authorizes no later policy snapshot.
+            let normalized = self
+                .admit(&connector, &declared, &submitted)?
+                .ok_or_else(|| SettingsRefusal::AuthorityUnsupported {
+                    connector: connector.clone(),
+                    setting: declared.binds(),
+                })?;
+            if normalized != prepared_normalized {
+                return Err(SettingsRefusal::MalformedOrigin {
+                    connector,
+                    setting: declared.binds(),
+                });
+            }
+            let [t, c, s, b] = SettingsStore::at(
+                tenant.as_str(),
+                &connector,
+                instance.as_ref(),
+                &declared.service,
+                &declared.binds(),
+            );
+            let current = document
+                .values
+                .get(&t)
+                .and_then(|connectors| connectors.get(&c))
+                .and_then(|services| services.get(&s))
+                .and_then(|settings| settings.get(&b));
+            match (expected_revision, current) {
+                (None, None) => {}
+                (None, Some(StoredValue::Origin(current))) => {
+                    return Err(SettingsRefusal::AuthorityRevisionRequired {
+                        connector,
+                        setting: declared.binds(),
+                        current: current.revision,
+                    });
+                }
+                (None, Some(StoredValue::Ordinary(_))) => {
+                    return Err(SettingsRefusal::AuthorityUnsupported {
+                        connector,
+                        setting: declared.binds(),
+                    });
+                }
+                (Some(_), None) => {
+                    return Err(SettingsRefusal::AuthorityUnset {
+                        connector,
+                        setting: declared.binds(),
+                    });
+                }
+                (Some(expected), Some(StoredValue::Origin(current)))
+                    if expected != current.revision =>
+                {
+                    return Err(SettingsRefusal::AuthorityRevisionConflict {
+                        connector,
+                        setting: declared.binds(),
+                        expected,
+                        current: current.revision,
+                    });
+                }
+                (Some(_), Some(StoredValue::Origin(_))) => {}
+                (Some(_), Some(StoredValue::Ordinary(_))) => {
+                    return Err(SettingsRefusal::AuthorityUnsupported {
+                        connector,
+                        setting: declared.binds(),
+                    });
+                }
+            }
+            if document.next_origin_revision != revision {
+                return Err(SettingsRefusal::AuthorityRevisionConflict {
+                    connector,
+                    setting: declared.binds(),
+                    expected: revision,
+                    current: document.next_origin_revision,
+                });
+            }
+            let replacing = current.map_or(0, StoredValue::occupied_bytes);
+            let held = occupied(&document.values, tenant.as_str());
+            admit_tenant_settings(
+                held.saturating_sub(replacing),
+                normalized
+                    .setting_value
+                    .len()
+                    .saturating_add(normalized.origin.len()),
+            )?;
             let next_revision =
                 revision
                     .checked_add(1)
@@ -2797,12 +3074,16 @@ mod file {
         use super::*;
         use crate::HostPinning;
         use std::os::unix::fs::PermissionsExt as _;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::{Arc, Barrier};
 
         struct TestPolicy;
 
         struct TestHttpsOriginRule;
+
+        struct SwitchablePolicy {
+            reject: AtomicBool,
+        }
 
         static TEST_HTTPS_ORIGIN_RULE: TestHttpsOriginRule = TestHttpsOriginRule;
 
@@ -2846,6 +3127,28 @@ mod file {
                     setting_value: authority.clone(),
                     origin: format!("https://{authority}"),
                 })
+            }
+        }
+
+        impl CustomOriginPolicy for SwitchablePolicy {
+            fn rule(
+                &self,
+                connector: &str,
+                declared: &DeclaredSetting,
+            ) -> Option<&dyn CustomOriginRule> {
+                let (candidate_connector, candidate) = candidate();
+                (connector == candidate_connector && declared == &candidate)
+                    .then_some(self as &dyn CustomOriginRule)
+            }
+        }
+
+        impl CustomOriginRule for SwitchablePolicy {
+            fn normalize(&self, value: &str) -> Result<NormalizedOrigin, OriginPolicyRefusal> {
+                if self.reject.load(Ordering::SeqCst) {
+                    Err(OriginPolicyRefusal::Malformed)
+                } else {
+                    TEST_HTTPS_ORIGIN_RULE.normalize(value)
+                }
             }
         }
 
@@ -2900,6 +3203,10 @@ mod file {
 
         fn instance() -> InstanceId {
             InstanceId::parse("11111111-1111-4111-8111-111111111111").expect("instance")
+        }
+
+        fn other_instance() -> InstanceId {
+            InstanceId::parse("22222222-2222-4222-8222-222222222222").expect("instance")
         }
 
         fn bind(path: &Path) -> SettingsStore {
@@ -2997,6 +3304,99 @@ mod file {
                 .expect("checked replacement");
             assert_eq!(replacement.state, AuthorityState::Proposed);
             assert!(replacement.revision.expect("replacement revision") > first_revision);
+        }
+
+        #[test]
+        fn prepared_revision_is_read_only_and_commit_cas_covers_the_high_water_mark() {
+            let scratch = Scratch::new("prepared-revision");
+            let path = scratch.0.join("settings");
+            let tenant = Tenant::new("acme").expect("tenant");
+            let declared = setting();
+            let first_instance = instance();
+            let second_instance = other_instance();
+            let store = bind(&path);
+
+            let first = store
+                .prepare_authority_proposal_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&first_instance),
+                    &declared,
+                    "https://first.example",
+                    None,
+                )
+                .expect("first preparation");
+            let second = store
+                .prepare_authority_proposal_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&second_instance),
+                    &declared,
+                    "https://second.example",
+                    None,
+                )
+                .expect("concurrent preparation");
+            assert_eq!(first.revision(), second.revision());
+            assert!(!path.exists(), "preparation must not persist or allocate");
+            assert_eq!(
+                store
+                    .authority_status_for_instance(
+                        &tenant,
+                        connector(),
+                        Some(&first_instance),
+                        &declared,
+                    )
+                    .expect("first status")
+                    .state,
+                AuthorityState::Unset
+            );
+
+            let committed = store
+                .commit_authority_proposal_for_instance(first)
+                .expect("first exact commit");
+            let committed_revision = committed.revision.expect("committed revision");
+            let before_loser = fs::read(&path).expect("durable first commit");
+            assert!(matches!(
+                store.commit_authority_proposal_for_instance(second),
+                Err(SettingsRefusal::AuthorityRevisionConflict {
+                    expected,
+                    current,
+                    ..
+                }) if expected == committed_revision && current == committed_revision + 1
+            ));
+            assert_eq!(
+                fs::read(&path).expect("unchanged durable state"),
+                before_loser
+            );
+            assert_eq!(
+                store
+                    .authority_status_for_instance(
+                        &tenant,
+                        connector(),
+                        Some(&second_instance),
+                        &declared,
+                    )
+                    .expect("second status")
+                    .state,
+                AuthorityState::Unset,
+                "the losing prepared proposal must not mutate its address"
+            );
+
+            let retried = store
+                .propose_authority_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&second_instance),
+                    &declared,
+                    "https://second.example",
+                    None,
+                )
+                .expect("retry after allocation race");
+            assert_eq!(
+                retried.revision,
+                committed_revision.checked_add(1),
+                "the losing commit must not advance the durable high-water mark"
+            );
         }
 
         #[test]
@@ -3178,6 +3578,20 @@ mod file {
             let before = fs::read(&path).expect("durable revoked bytes");
 
             assert!(matches!(
+                store.revoke_authority_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    revision,
+                ),
+                Err(SettingsRefusal::AuthorityStateConflict {
+                    current: AuthorityState::Revoked,
+                    ..
+                })
+            ));
+
+            assert!(matches!(
                 store.approve_authority_for_instance(
                     &tenant,
                     connector(),
@@ -3341,6 +3755,74 @@ mod file {
                 .authority_status_for_instance(&tenant, connector(), Some(&instance), &declared)
                 .expect("status");
             assert!(recreated.revision.expect("revision") > second_revision);
+        }
+
+        #[test]
+        fn current_policy_revalidates_restart_transition_and_runtime_reads() {
+            let scratch = Scratch::new("policy-revalidation");
+            let path = scratch.0.join("settings");
+            let tenant = Tenant::new("acme").expect("tenant");
+            let declared = setting();
+            let instance = instance();
+            let policy = Arc::new(SwitchablePolicy {
+                reject: AtomicBool::new(false),
+            });
+            let store = SettingsStore::bind_with_custom_origin_policy(&path, policy.clone())
+                .expect("test policy store");
+            let proposed = store
+                .propose_authority_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    "https://previously-valid.example",
+                    None,
+                )
+                .expect("proposal");
+            let revision = proposed.revision.expect("revision");
+            store
+                .approve_authority_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    revision,
+                )
+                .expect("approval under initial policy");
+
+            policy.reject.store(true, Ordering::SeqCst);
+            assert_eq!(
+                store.get_for_instance(
+                    tenant.as_str(),
+                    connector(),
+                    Some(&instance),
+                    &declared.service,
+                    declared.field(),
+                ),
+                None,
+                "an approval must not outlive the typed rule that admitted it"
+            );
+            let transition = store
+                .revoke_authority_for_instance(
+                    &tenant,
+                    connector(),
+                    Some(&instance),
+                    &declared,
+                    revision,
+                )
+                .expect_err("every transition revalidates the current typed rule");
+            assert!(matches!(
+                transition,
+                SettingsRefusal::MalformedOrigin { .. }
+            ));
+            let message = transition.to_string();
+            assert!(!message.contains("previously-valid.example"), "{message}");
+            drop(store);
+
+            let restart = SettingsStore::bind_with_custom_origin_policy(&path, policy)
+                .expect_err("restart refuses a record the current typed rule rejects");
+            let message = restart.to_string();
+            assert!(!message.contains("previously-valid.example"), "{message}");
         }
 
         #[test]
