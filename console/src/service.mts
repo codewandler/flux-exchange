@@ -823,17 +823,23 @@ export interface ConnectionAuthorityAction {
   target: string
 }
 
-export interface ConnectionAuthorityActions {
+export interface ConnectionAuthorityProposalActions {
   approve: ConnectionAuthorityAction & { method: 'PUT' }
   revoke: ConnectionAuthorityAction & { method: 'DELETE' }
 }
 
-/** Value-free authority state for a field whose value can become a request destination. */
-export interface ConnectionFieldAuthority {
-  state: ConnectionAuthorityState
-  revision: string | null
-  actions: ConnectionAuthorityActions | null
+export interface ConnectionAuthorityApprovedActions {
+  revoke: ConnectionAuthorityAction & { method: 'DELETE' }
 }
+
+export type ConnectionAuthorityActions = ConnectionAuthorityProposalActions | ConnectionAuthorityApprovedActions
+
+/** Value-free authority state for a field whose value can become a request destination. */
+export type ConnectionFieldAuthority =
+  | { state: 'unset'; revision: null; actions: null }
+  | { state: 'proposed'; revision: string; actions: ConnectionAuthorityProposalActions }
+  | { state: 'approved'; revision: string; actions: ConnectionAuthorityApprovedActions }
+  | { state: 'revoked'; revision: string; actions: null }
 
 /** One descriptor, retained even when another descriptor shares its submission target. */
 export interface ConnectionPlanField {
@@ -952,26 +958,35 @@ function readFieldAuthority(value: unknown, context: string): ConnectionFieldAut
       ? { state: 'revoked', revision: value.revision, actions: null }
       : `${context} revoked authority still advertises actions`
   }
-  if (!isObject(value.actions) || !isObject(value.actions.approve) || !isObject(value.actions.revoke)) {
-    return `${context} authority has no complete actions`
+  if (!isObject(value.actions)) return `${context} authority has no state-specific actions`
+
+  if (value.state === 'approved') {
+    if (!hasOnlyKeys(value.actions, ['revoke']) || !isObject(value.actions.revoke) ||
+        !hasOnlyKeys(value.actions.revoke, ['method', 'target']) ||
+        value.actions.revoke.method !== 'DELETE' || !relativeAuthorityTarget(value.actions.revoke.target)) {
+      return `${context} approved authority has invalid state-specific actions`
+    }
+    return {
+      state: 'approved', revision: value.revision,
+      actions: { revoke: { method: 'DELETE', target: value.actions.revoke.target } },
+    }
   }
+
   if (!hasOnlyKeys(value.actions, ['approve', 'revoke']) ||
+      !isObject(value.actions.approve) || !isObject(value.actions.revoke) ||
       !hasOnlyKeys(value.actions.approve, ['method', 'target']) ||
       !hasOnlyKeys(value.actions.revoke, ['method', 'target'])) {
-    return `${context} authority actions are not closed method and target objects`
+    return `${context} proposed authority has invalid state-specific actions`
   }
   const approve = value.actions.approve
   const revoke = value.actions.revoke
-  if (approve.method !== 'PUT' || !relativeAuthorityTarget(approve.target)) {
-    return `${context} authority has an invalid approve action`
+  if (approve.method !== 'PUT' || !relativeAuthorityTarget(approve.target) ||
+      revoke.method !== 'DELETE' || !relativeAuthorityTarget(revoke.target) ||
+      approve.target !== revoke.target) {
+    return `${context} proposed authority has invalid state-specific actions`
   }
-  if (revoke.method !== 'DELETE' || !relativeAuthorityTarget(revoke.target)) {
-    return `${context} authority has an invalid revoke action`
-  }
-  if (approve.target !== revoke.target) return `${context} authority actions name different targets`
   return {
-    state: value.state as Exclude<ConnectionAuthorityState, 'unset'>,
-    revision: value.revision,
+    state: 'proposed', revision: value.revision,
     actions: {
       approve: { method: 'PUT', target: approve.target },
       revoke: { method: 'DELETE', target: revoke.target },
@@ -1126,7 +1141,7 @@ function readConnectionPlan(body: unknown, expectedConnector: string): Connectio
       if (field.authority?.actions === null || field.authority?.actions === undefined ||
           field.service === null || field.binds === null) continue
       const expected = connectionAuthorityEndpoint(body.connector, body.selection, field.service, field.binds)
-      if (field.authority.actions.approve.target !== expected || field.authority.actions.revoke.target !== expected) {
+      if (Object.values(field.authority.actions).some((action) => action?.target !== expected)) {
         return `field \`${field.identity}\` authority actions do not name their declared setting`
       }
     }
@@ -1195,13 +1210,25 @@ export interface ConnectionPlanSubmission {
   name: string
   current_name?: string
   values: Record<string, string>
+  expected_revisions: Record<string, string>
 }
 
-export interface ConnectionPlanStep {
+export interface ConnectionPlanOrdinaryStep {
   target: string
   outcome: 'applied' | 'unchanged' | 'refused' | 'skipped'
   reason?: string
 }
+
+export interface ConnectionPlanProposalStep {
+  target: string
+  outcome: 'applied'
+  action: 'proposed'
+  revision: string
+  may_have_happened: true
+  reason?: string
+}
+
+export type ConnectionPlanStep = ConnectionPlanOrdinaryStep | ConnectionPlanProposalStep
 
 export interface ConnectionPlanResult {
   outcome: 'complete' | 'incomplete' | 'refused' | 'partial'
@@ -1229,24 +1256,63 @@ export interface ConnectionAuthorityTransitionResult {
   label: string
   service: string
   field: string
+  action: 'approved' | 'revoked'
   authority: {
     state: 'approved' | 'revoked'
     revision: string
   }
 }
 
+export interface ConnectionAuthorityPartialResult extends ConnectionAuthorityTransitionResult {
+  outcome: 'partial'
+  may_have_happened: true
+}
+
+export type ConnectionAuthorityResult = ConnectionAuthorityTransitionResult | ConnectionAuthorityPartialResult
+
 export type ConnectionAuthorityOutcome =
-  | { status: 'answered'; result: ConnectionAuthorityTransitionResult }
+  | { status: 'answered'; result: ConnectionAuthorityResult }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export interface ConnectionAuthorityInspectionRequest {
+  connector: string
+  label: string
+  service: string
+  field: string
+  state: Exclude<ConnectionAuthorityState, 'unset'>
+  revision: string
+}
+
+export interface ConnectionAuthorityInspectionResult {
+  version: typeof CONNECTION_PLAN_VERSION
+  connector: string
+  label: string
+  service: string
+  field: string
+  authority: {
+    state: Exclude<ConnectionAuthorityState, 'unset'>
+    revision: string
+    origin: string
+  }
+}
+
+export type ConnectionAuthorityInspectionOutcome =
+  | { status: 'answered'; result: ConnectionAuthorityInspectionResult }
   | { status: 'refused'; refusal: ServiceRefusal }
   | { status: 'failed'; failure: ServiceFailure }
 
 function readAuthorityTransition(
   body: unknown,
   transition: ConnectionAuthorityTransition
-): ConnectionAuthorityTransitionResult | string {
+): ConnectionAuthorityResult | string {
   if (!isObject(body)) return 'the authority transition response is not an object'
   if (body.version !== CONNECTION_PLAN_VERSION) return 'unsupported authority transition response version'
-  if (!hasOnlyKeys(body, ['version', 'connector', 'label', 'service', 'field', 'authority'])) {
+  const partial = body.outcome === 'partial' || 'may_have_happened' in body
+  const expectedKeys = partial
+    ? ['version', 'connector', 'label', 'service', 'field', 'action', 'authority', 'outcome', 'may_have_happened']
+    : ['version', 'connector', 'label', 'service', 'field', 'action', 'authority']
+  if (!hasOnlyKeys(body, expectedKeys)) {
     return 'the authority transition response is not a closed value-free object'
   }
   for (const key of ['connector', 'label', 'service', 'field'] as const) {
@@ -1260,17 +1326,91 @@ function readAuthorityTransition(
     return 'the authority transition response carries unexpected authority data'
   }
   const expected = transition.action.method === 'PUT' ? 'approved' : 'revoked'
-  if (body.authority.state !== expected) {
+  if (body.action !== expected || body.authority.state !== expected) {
     return `the ${transition.action.method === 'PUT' ? 'approve' : 'revoke'} action did not return ${expected}`
   }
-  return {
+  const result: ConnectionAuthorityTransitionResult = {
     version: CONNECTION_PLAN_VERSION,
     connector: transition.connector,
     label: transition.label,
     service: transition.service,
     field: transition.field,
+    action: expected,
     authority: { state: expected, revision: transition.revision },
   }
+  if (!partial) return result
+  if (body.outcome !== 'partial' || body.may_have_happened !== true) {
+    return 'the partial authority transition response does not say it may have happened'
+  }
+  return { ...result, outcome: 'partial', may_have_happened: true }
+}
+
+function readAuthorityInspection(
+  body: unknown,
+  request: ConnectionAuthorityInspectionRequest,
+): ConnectionAuthorityInspectionResult | string {
+  if (!isObject(body) || body.version !== CONNECTION_PLAN_VERSION) {
+    return 'unsupported authority inspection response version'
+  }
+  if (!hasOnlyKeys(body, ['version', 'connector', 'label', 'service', 'field', 'authority'])) {
+    return 'the authority inspection response is not a closed object'
+  }
+  for (const key of ['connector', 'label', 'service', 'field'] as const) {
+    if (body[key] !== request[key]) return `the authority inspection response has a mismatched ${key}`
+  }
+  if (!isObject(body.authority) || !hasOnlyKeys(body.authority, ['state', 'revision', 'origin']) ||
+      body.authority.state !== request.state || body.authority.revision !== request.revision ||
+      !canonicalAuthorityRevision(body.authority.revision) ||
+      typeof body.authority.origin !== 'string' || body.authority.origin === '') {
+    return 'the authority inspection response has invalid state, revision or origin'
+  }
+  return {
+    version: CONNECTION_PLAN_VERSION,
+    connector: request.connector,
+    label: request.label,
+    service: request.service,
+    field: request.field,
+    authority: {
+      state: request.state,
+      revision: request.revision,
+      origin: body.authority.origin,
+    },
+  }
+}
+
+/** Inspect the exact normalized proposal through the configured-operator-only same-origin read. */
+export async function inspectConnectionAuthority(
+  request: ConnectionAuthorityInspectionRequest,
+  options: LoadOptions = {},
+): Promise<ConnectionAuthorityInspectionOutcome> {
+  const endpoint = connectionAuthorityEndpoint(
+    request.connector, request.label, request.service, request.field,
+  )
+  if (!canonicalAuthorityRevision(request.revision)) {
+    return {
+      status: 'failed',
+      failure: { kind: 'unreadable', endpoint, status: null, detail: 'invalid authority inspection request' },
+    }
+  }
+  const answered = await read(endpoint, options)
+  if (!answered.ok) {
+    const error = serviceError(answered.body)
+    if (error !== null && answered.status !== null) {
+      return { status: 'refused', refusal: { endpoint, status: answered.status, error } }
+    }
+    return { status: 'failed', failure: answered.failure }
+  }
+  const result = readAuthorityInspection(answered.body, request)
+  if (answered.status !== 200 || typeof result === 'string') {
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable', endpoint, status: answered.status,
+        detail: typeof result === 'string' ? result : `HTTP ${answered.status} cannot carry an authority inspection`,
+      },
+    }
+  }
+  return { status: 'answered', result }
 }
 
 /** Execute one compare-and-set authority action without carrying the proposed origin. */
@@ -1305,7 +1445,8 @@ export async function transitionConnectionAuthority(
     return { status: 'failed', failure: answered.failure }
   }
   const result = readAuthorityTransition(answered.body, transition)
-  if (answered.status !== 200 || typeof result === 'string') {
+  const expectedStatus = typeof result !== 'string' && 'outcome' in result ? 207 : 200
+  if (answered.status !== expectedStatus || typeof result === 'string') {
     return {
       status: 'failed',
       failure: {
@@ -1330,9 +1471,27 @@ function readConnectionPlanResult(body: unknown, expectedConnector: string): Con
         !['applied', 'unchanged', 'refused', 'skipped'].includes(String(value.outcome))) {
       return `apply step ${at + 1} is malformed`
     }
-    const stepKeys = new Set(['target', 'outcome', 'reason'])
+    const stepKeys = new Set(['target', 'outcome', 'reason', 'action', 'revision', 'may_have_happened'])
     if (Object.keys(value).some((key) => !stepKeys.has(key))) return `apply step ${at + 1} has an unknown member`
     if ('reason' in value && typeof value.reason !== 'string') return `apply step ${at + 1} has an invalid reason`
+    const authorityMembers = ['action', 'revision', 'may_have_happened']
+    const authorityMemberCount = authorityMembers.filter((key) => key in value).length
+    if (authorityMemberCount !== 0) {
+      if (authorityMemberCount !== authorityMembers.length || body.outcome !== 'partial' ||
+          value.outcome !== 'applied' || value.action !== 'proposed' ||
+          !canonicalAuthorityRevision(value.revision) || value.may_have_happened !== true) {
+        return `apply step ${at + 1} has invalid partial authority proposal metadata`
+      }
+      steps.push({
+        target: value.target,
+        outcome: 'applied',
+        action: 'proposed',
+        revision: value.revision,
+        may_have_happened: true,
+        ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+      })
+      continue
+    }
     steps.push({
       target: value.target,
       outcome: value.outcome as ConnectionPlanStep['outcome'],
@@ -1341,6 +1500,13 @@ function readConnectionPlanResult(body: unknown, expectedConnector: string): Con
   }
   const plan = readConnectionPlan(body.plan, expectedConnector)
   if (typeof plan === 'string') return `the returned plan is unreadable: ${plan}`
+  for (const [at, step] of steps.entries()) {
+    if (!('action' in step)) continue
+    const field = plan.fields.find((candidate) => candidate.target?.id === step.target)
+    if (field?.authority?.state !== 'proposed' || field.authority.revision !== step.revision) {
+      return `apply step ${at + 1} proposal revision does not match the returned authority plan`
+    }
+  }
   return { outcome: body.outcome as ConnectionPlanResult['outcome'], steps, plan }
 }
 

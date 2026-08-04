@@ -13,12 +13,13 @@ import {
   applyConnectionPlan,
   connectionAuthorityEndpoint,
   connectionPlanEndpoint,
+  inspectConnectionAuthority,
   loadConnectionPlan,
   transitionConnectionAuthority,
 } from '../src/service.mts'
 
 const consoleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const fixturePath = path.resolve(consoleRoot, '../docs/fixtures/connection-plan.v1.json')
+const fixturePath = path.resolve(consoleRoot, '../tests/fixtures/exchange-connection-plan-v1/connection-plan.v1.json')
 const contract = JSON.parse(readFileSync(fixturePath, 'utf8'))
 
 const form = (props) => renderToString(createSSRApp(Connect, {
@@ -50,7 +51,10 @@ function completeContract() {
     field.set = true
     if (field.target === null) field.target = { id: `fixture.${field.identity}` }
     delete field.reason
-    if (field.authority !== undefined) field.authority.state = 'approved'
+    if (field.authority !== undefined) {
+      field.authority.state = 'approved'
+      field.authority.actions = { revoke: field.authority.actions.revoke }
+    }
   }
   return complete
 }
@@ -184,7 +188,8 @@ test('custom_origin_authority_is_strict_value_free_and_not_a_vendor_schema', asy
 
   const html = await form()
   assert.match(html, new RegExp(`data-plan-field="${field.identity}"[\\s\\S]*?data-authority-state="proposed"`))
-  assert.match(html, /Approve proposed authority/)
+  assert.match(html, /Review proposed origin/)
+  assert.doesNotMatch(html, /Approve proposed authority/)
   assert.match(html, /Revoke proposal/)
   assert.match(html, /cannot use it until an operator approves this revision/i)
   assert.doesNotMatch(JSON.stringify(field), /https?:\/\//, 'the fixture disclosed the proposed origin')
@@ -221,14 +226,17 @@ test('custom_origin_authority_is_strict_value_free_and_not_a_vendor_schema', asy
   const approvedPlan = structuredClone(contract)
   const approvedField = approvedPlan.fields.find(({ identity }) => identity === field.identity)
   approvedField.authority.state = 'approved'
+  approvedField.authority.actions = { revoke: approvedField.authority.actions.revoke }
   approvedField.set = true
   const approvedHtml = await form({ plan: { status: 'ready', plan: approvedPlan } })
   assert.match(approvedHtml, /data-authority-state="approved"/)
   assert.match(approvedHtml, /Revoke authority/)
+  assert.doesNotMatch(approvedHtml, /Approve proposed authority/)
 
   const revokedPlan = structuredClone(contract)
   const revokedField = revokedPlan.fields.find(({ identity }) => identity === field.identity)
   revokedField.authority.state = 'revoked'
+  revokedField.authority.actions = null
   const revokedHtml = await form({ plan: { status: 'ready', plan: revokedPlan } })
   assert.match(revokedHtml, /data-authority-state="revoked"/)
   assert.doesNotMatch(revokedHtml, /Approve proposed authority/)
@@ -240,6 +248,25 @@ test('custom_origin_authority_is_strict_value_free_and_not_a_vendor_schema', asy
   const unsetHtml = await form({ plan: { status: 'ready', plan: unsetPlan } })
   assert.match(unsetHtml, /data-authority-state="unset"/)
   assert.match(unsetHtml, /No proposal/)
+
+  const revokedAdvertisingApprove = structuredClone(revokedPlan)
+  revokedAdvertisingApprove.fields.find(({ identity }) => identity === field.identity).authority.actions = {
+    approve: field.authority.actions.approve,
+  }
+  const invalidRevoked = await loadConnectionPlan(contract.connector, contract.selection, {
+    fetch: answer(200, revokedAdvertisingApprove).fetch,
+  })
+  assert.equal(invalidRevoked.status, 'failed')
+  assert.match(invalidRevoked.failure.detail, /revoked.*action/i)
+
+  const approvedAdvertisingApprove = structuredClone(approvedPlan)
+  approvedAdvertisingApprove.fields.find(({ identity }) => identity === field.identity).authority.actions.approve =
+    field.authority.actions.approve
+  const invalidApproved = await loadConnectionPlan(contract.connector, contract.selection, {
+    fetch: answer(200, approvedAdvertisingApprove).fetch,
+  })
+  assert.equal(invalidApproved.status, 'failed')
+  assert.match(invalidApproved.failure.detail, /approved.*action/i)
 
   const unrelatedTarget = structuredClone(contract)
   const actions = unrelatedTarget.fields.find(({ identity }) => identity === field.identity).authority.actions
@@ -266,6 +293,7 @@ test('authority_actions_send_only_version_and_revision_and_accept_only_the_match
     label: contract.selection,
     service: field.service,
     field: field.binds,
+    action: 'approved',
     authority: { state: 'approved', revision },
   }
   const served = answer(200, approved)
@@ -319,7 +347,8 @@ test('revocation_uses_delete_with_the_same_revision_and_returns_no_origin', asyn
   const revision = field.authority.revision
   const body = {
     version: CONNECTION_PLAN_VERSION, connector: contract.connector, label: contract.selection,
-    service: field.service, field: field.binds, authority: { state: 'revoked', revision },
+    service: field.service, field: field.binds, action: 'revoked',
+    authority: { state: 'revoked', revision },
   }
   const served = answer(200, body)
   const outcome = await transitionConnectionAuthority({
@@ -411,7 +440,106 @@ test('one_control_and_one_submission_key_represent_rows_that_share_a_target', as
       'credential.example_helpdesk.service_token': 'one-token',
       'setting.default.endpoint.region': 'europe',
     },
+    expected_revisions: {},
   })
+})
+
+test('replacement_submissions_carry_the_exact_plan_revision_and_initial_proposals_do_not', () => {
+  const field = contract.fields.find(({ authority }) => authority?.state === 'proposed')
+  const data = new FormData()
+  data.set('name', contract.selection)
+  data.set(field.target.id, 'https://replacement.example.invalid')
+
+  assert.deepEqual(connectionPlanSubmission(contract, data).expected_revisions, {
+    [field.target.id]: field.authority.revision,
+  })
+
+  const initial = structuredClone(contract)
+  const initialField = initial.fields.find(({ identity }) => identity === field.identity)
+  initialField.authority = { state: 'unset', revision: null, actions: null }
+  const initialSubmission = connectionPlanSubmission(initial, data)
+  assert.deepEqual(initialSubmission.expected_revisions, {})
+  assert.equal(field.target.id in initialSubmission.values, true)
+})
+
+test('operator_inspection_reads_the_exact_normalized_proposal_without_putting_it_in_the_plan', async () => {
+  const field = contract.fields.find(({ authority }) => authority?.state === 'proposed')
+  const origin = 'https://normalized.example.invalid'
+  const inspection = {
+    version: CONNECTION_PLAN_VERSION,
+    connector: contract.connector,
+    label: contract.selection,
+    service: field.service,
+    field: field.binds,
+    authority: { state: 'proposed', revision: field.authority.revision, origin },
+  }
+  const served = answer(200, inspection)
+  const outcome = await inspectConnectionAuthority({
+    connector: contract.connector,
+    label: contract.selection,
+    service: field.service,
+    field: field.binds,
+    state: field.authority.state,
+    revision: field.authority.revision,
+  }, { fetch: served.fetch })
+
+  assert.equal(outcome.status, 'answered')
+  assert.deepEqual(outcome.result, inspection)
+  assert.deepEqual(served.asked.map(({ url, init }) => [url, init?.method ?? 'GET']), [
+    [field.authority.actions.approve.target, 'GET'],
+  ])
+  assert.doesNotMatch(JSON.stringify(contract), new RegExp(origin))
+
+  const beforeReview = await form()
+  assert.match(beforeReview, /Review proposed origin/)
+  assert.doesNotMatch(beforeReview, /Approve proposed authority/)
+  const afterReview = await form({ authorityInspection: outcome })
+  assert.match(afterReview, new RegExp(origin.replaceAll('.', '\\.')))
+  assert.match(afterReview, new RegExp(`Revision ${field.authority.revision}`))
+  assert.match(afterReview, /Approve proposed authority/)
+
+  for (const malformed of [
+    { ...inspection, version: 'exchange.connection-plan.v2' },
+    { ...inspection, authority: { ...inspection.authority, revision: '43' } },
+    { ...inspection, authority: { ...inspection.authority, origin: null } },
+    { ...inspection, authority: { ...inspection.authority, authorization: 'must-not-render' } },
+    { ...inspection, origin },
+  ]) {
+    const rejected = await inspectConnectionAuthority({
+      connector: contract.connector, label: contract.selection, service: field.service, field: field.binds,
+      state: field.authority.state, revision: field.authority.revision,
+    }, { fetch: answer(200, malformed).fetch })
+    assert.equal(rejected.status, 'failed')
+    assert.match(rejected.failure.detail, /authority|closed|version|revision|origin/i)
+  }
+})
+
+test('an_authority_partial_answer_is_explicitly_may_have_happened_and_value_free', async () => {
+  const field = contract.fields.find(({ authority }) => authority?.state === 'proposed')
+  const revision = field.authority.revision
+  const partial = {
+    version: CONNECTION_PLAN_VERSION,
+    connector: contract.connector,
+    label: contract.selection,
+    service: field.service,
+    field: field.binds,
+    action: 'approved',
+    authority: { state: 'approved', revision },
+    outcome: 'partial',
+    may_have_happened: true,
+  }
+  const outcome = await transitionConnectionAuthority({
+    connector: contract.connector, label: contract.selection, service: field.service, field: field.binds,
+    revision, action: field.authority.actions.approve,
+  }, { fetch: answer(207, partial).fetch })
+
+  assert.equal(outcome.status, 'answered')
+  assert.equal(outcome.result.outcome, 'partial')
+  assert.equal(outcome.result.may_have_happened, true)
+  assert.doesNotMatch(JSON.stringify(outcome), /https?:\/\//)
+  const html = await form({ authorityOutcome: outcome })
+  assert.match(html, /may have happened/i)
+  assert.match(html, new RegExp(`Revision ${revision}`))
 })
 
 test('secrets_exist_only_in_the_post_body_and_never_in_url_or_returned_outcome', async () => {
@@ -422,6 +550,7 @@ test('secrets_exist_only_in_the_post_body_and_never_in_url_or_returned_outcome',
     version: CONNECTION_PLAN_VERSION,
     name: 'production',
     values: { 'credential.example_helpdesk.api_token': sentinel },
+    expected_revisions: {},
   }, { fetch: served.fetch })
 
   const [{ url, init }] = served.asked
@@ -443,6 +572,7 @@ test('complete_incomplete_refused_and_partial_apply_outcomes_are_distinct', asyn
       version: CONNECTION_PLAN_VERSION,
       name: 'production',
       values: {},
+      expected_revisions: {},
     }, { fetch: answer(status, body).fetch })
 
     assert.equal(outcome.status, 'answered', `${value} was collapsed into a transport state`)
@@ -451,15 +581,55 @@ test('complete_incomplete_refused_and_partial_apply_outcomes_are_distinct', asyn
     assert.match(html, new RegExp(`data-outcome="${value}"`))
   }
 
+  const proposal = contract.fields.find(({ authority }) => authority?.state === 'proposed')
+  const mayHaveHappened = {
+    outcome: 'partial',
+    steps: [{
+      target: proposal.target.id,
+      outcome: 'applied',
+      action: 'proposed',
+      revision: proposal.authority.revision,
+      may_have_happened: true,
+      reason: 'audit finalization did not confirm the durable proposal',
+    }],
+    plan: contract,
+  }
+  const proposedPartial = await applyConnectionPlan(contract.connector, {
+    version: CONNECTION_PLAN_VERSION, name: 'production', values: {}, expected_revisions: {},
+  }, { fetch: answer(207, mayHaveHappened).fetch })
+  assert.equal(proposedPartial.status, 'answered')
+  const proposedHtml = await form({ outcome: proposedPartial })
+  assert.match(proposedHtml, /proposal revision 42 may have happened/i)
+  assert.match(proposedHtml, /audit finalization did not confirm the durable proposal/)
+  assert.match(proposedHtml, /re-read/i)
+  assert.doesNotMatch(proposedHtml, /https?:\/\//)
+
+  for (const mutate of [
+    (body) => { body.outcome = 'complete' },
+    (body) => { delete body.steps[0].may_have_happened },
+    (body) => { body.steps[0].action = 'approved' },
+    (body) => { body.steps[0].revision = '41' },
+    (body) => { body.steps[0].target = 'setting.default.endpoint.region' },
+    (body) => { body.steps[0].reason = 7 },
+  ]) {
+    const malformed = structuredClone(mayHaveHappened)
+    mutate(malformed)
+    const rejected = await applyConnectionPlan(contract.connector, {
+      version: CONNECTION_PLAN_VERSION, name: 'production', values: {}, expected_revisions: {},
+    }, { fetch: answer(malformed.outcome === 'partial' ? 207 : 200, malformed).fetch })
+    assert.equal(rejected.status, 'failed')
+    assert.match(rejected.failure.detail, /proposal|partial|step|revision|authority|unknown/i)
+  }
+
   const partialAt200 = await applyConnectionPlan(contract.connector, {
-    version: CONNECTION_PLAN_VERSION, name: 'production', values: {},
+    version: CONNECTION_PLAN_VERSION, name: 'production', values: {}, expected_revisions: {},
   }, { fetch: answer(200, { outcome: 'partial', steps: [], plan: contract }).fetch })
   assert.equal(partialAt200.status, 'failed')
   assert.equal(partialAt200.failure.status, 200)
   assert.match(partialAt200.failure.detail, /cannot carry outcome `partial`/)
 
   const completeAt500 = await applyConnectionPlan(contract.connector, {
-    version: CONNECTION_PLAN_VERSION, name: 'production', values: {},
+    version: CONNECTION_PLAN_VERSION, name: 'production', values: {}, expected_revisions: {},
   }, { fetch: answer(500, { outcome: 'complete', steps: [], plan: completeContract() }).fetch })
   assert.equal(completeAt500.status, 'failed')
   assert.equal(completeAt500.failure.status, 500)
@@ -469,7 +639,7 @@ test('complete_incomplete_refused_and_partial_apply_outcomes_are_distinct', asyn
     { outcome: 'complete', steps: [{ target: 'connection.name', outcome: 'applied', future: true }], plan: completeContract() },
   ]) {
     const unknown = await applyConnectionPlan(contract.connector, {
-      version: CONNECTION_PLAN_VERSION, name: 'production', values: {},
+      version: CONNECTION_PLAN_VERSION, name: 'production', values: {}, expected_revisions: {},
     }, { fetch: answer(200, body).fetch })
     assert.equal(unknown.status, 'failed', 'accepted an unknown apply-response member')
     assert.match(unknown.failure.detail, /closed|unknown/i)
@@ -506,6 +676,11 @@ test('secret_values_have_no_reactive_or_persistent_mirror', () => {
   assert.match(appSource, /connectionPlanRequests\.admits/)
   assert.match(appSource, /connectionApplyRequests\.admits/)
   assert.match(appSource, /authorityRequests\.admits/)
+  assert.match(
+    appSource,
+    /watch\(\s*\(\) => route\.value\.name,\s*\(next, previous\)[\s\S]*?previous === 'connections'[\s\S]*?invalidateAuthority\(\)/,
+    'leaving the connection screen does not clear an inspected normalized origin from root state',
+  )
 })
 
 test('a_late_plan_for_an_old_connector_or_label_cannot_replace_the_current_one', () => {

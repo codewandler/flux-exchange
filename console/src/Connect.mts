@@ -7,6 +7,8 @@ import type { Connector } from './catalog.mts'
 import {
   CONNECTION_PLAN_VERSION,
   type ConnectionAuthorityAction,
+  type ConnectionAuthorityInspectionOutcome,
+  type ConnectionAuthorityInspectionRequest,
   type ConnectionAuthorityOutcome,
   type ConnectionAuthorityTransition,
   type ConnectionPlan,
@@ -45,14 +47,21 @@ function refusalNotice(refusal: ServiceRefusal): VNode {
 export function connectionPlanSubmission(plan: ConnectionPlan, data: FormData): ConnectionPlanSubmission {
   const name = data.get('name')
   const values: Record<string, string> = {}
+  const expectedRevisions: Record<string, string> = {}
   const consumed = new Set<string>()
 
   for (const field of plan.fields) {
     const target = field.target?.id
-    if (!field.routable || target === undefined || target === 'connection.name' || consumed.has(target)) continue
-    consumed.add(target)
-    const value = data.get(target)
-    if (typeof value === 'string' && value !== '') values[target] = value
+    if (!field.routable || target === undefined || target === 'connection.name') continue
+    if (!consumed.has(target)) {
+      consumed.add(target)
+      const value = data.get(target)
+      if (typeof value === 'string' && value !== '') values[target] = value
+    }
+    const authority = field.authority
+    if (target in values && authority !== undefined && authority.state !== 'unset' && authority.revision !== null) {
+      expectedRevisions[target] = authority.revision
+    }
   }
 
   const selected = plan.selection
@@ -62,6 +71,7 @@ export function connectionPlanSubmission(plan: ConnectionPlan, data: FormData): 
     name: chosenName,
     ...(selected !== null && selected !== chosenName ? { current_name: selected } : {}),
     values,
+    expected_revisions: expectedRevisions,
   }
 }
 
@@ -100,7 +110,10 @@ function authorityBody(
   plan: ConnectionPlan,
   field: ConnectionPlanField,
   busy: string,
+  inspection: ConnectionAuthorityInspectionOutcome | null,
+  inspecting: string,
   transition: (identity: string, request: ConnectionAuthorityTransition) => void,
+  inspect: (identity: string, request: ConnectionAuthorityInspectionRequest) => void,
 ): VNode | null {
   const authority = field.authority
   if (authority === undefined) return null
@@ -126,6 +139,30 @@ function authorityBody(
     })
   }
   const working = busy === field.identity
+  const reviewing = inspecting === field.identity
+  const approve = authority.state === 'proposed' ? authority.actions.approve : undefined
+  const revoke = authority.state === 'proposed' || authority.state === 'approved'
+    ? authority.actions.revoke
+    : undefined
+  const inspected = inspection?.status === 'answered' && plan.selection !== null && field.service !== null &&
+    field.binds !== null && inspection.result.connector === plan.connector &&
+    inspection.result.label === plan.selection && inspection.result.service === field.service &&
+    inspection.result.field === field.binds && inspection.result.authority.state === authority.state &&
+    inspection.result.authority.revision === authority.revision
+    ? inspection.result
+    : null
+  const inspectProposal = (): void => {
+    if (authority.state !== 'proposed' || plan.selection === null || field.service === null ||
+        field.binds === null || authority.revision === null) return
+    inspect(field.identity, {
+      connector: plan.connector,
+      label: plan.selection,
+      service: field.service,
+      field: field.binds,
+      state: authority.state,
+      revision: authority.revision,
+    })
+  }
 
   return h('aside', {
     class: ['connect__authority', `connect__authority--${authority.state}`],
@@ -139,18 +176,28 @@ function authorityBody(
     ]),
     h('p', { class: 'connect__authority-help' }, explanation),
     authority.actions === null ? null : h('div', { class: 'connect__authority-actions' }, [
-      authority.state === 'proposed'
-        ? h('button', {
-          type: 'button', disabled: working,
-          onClick: () => action(authority.actions!.approve),
-        }, working ? 'Changing authority…' : 'Approve proposed authority')
-        : null,
-      authority.state === 'proposed' || authority.state === 'approved'
-        ? h('button', {
-          type: 'button', disabled: working,
-          onClick: () => action(authority.actions!.revoke),
-        }, working ? 'Changing authority…' : authority.state === 'proposed' ? 'Revoke proposal' : 'Revoke authority')
-        : null,
+      approve === undefined
+        ? null
+        : h('button', {
+          type: 'button', disabled: working || reviewing,
+          onClick: inspectProposal,
+        }, reviewing ? 'Reading proposal…' : 'Review proposed origin'),
+      inspected === null ? null : h('p', { class: 'connect__authority-proposal' }, [
+        `Normalized origin for revision ${inspected.authority.revision}: `,
+        h('code', { 'data-authority-origin': 'reviewed' }, inspected.authority.origin),
+      ]),
+      approve === undefined || inspected === null
+        ? null
+        : h('button', {
+          type: 'button', disabled: working || reviewing,
+          onClick: () => action(approve),
+        }, working ? 'Changing authority…' : 'Approve proposed authority'),
+      revoke === undefined
+        ? null
+        : h('button', {
+          type: 'button', disabled: working || reviewing,
+          onClick: () => action(revoke),
+        }, working ? 'Changing authority…' : authority.state === 'proposed' ? 'Revoke proposal' : 'Revoke authority'),
     ]),
   ])
 }
@@ -159,7 +206,10 @@ function authorityBody(
 function planFields(
   plan: ConnectionPlan,
   authorityBusy: string,
+  authorityInspection: ConnectionAuthorityInspectionOutcome | null,
+  authorityInspecting: string,
   transition: (identity: string, request: ConnectionAuthorityTransition) => void,
+  inspect: (identity: string, request: ConnectionAuthorityInspectionRequest) => void,
 ): VNode {
   const controls = new Map<string, ConnectionPlanField>()
   return h('div', { class: 'connect__fields' }, plan.fields.map((field) => {
@@ -204,7 +254,7 @@ function planFields(
       ]),
       h('p', { class: 'connect__help' }, field.help),
       control,
-      authorityBody(plan, field, authorityBusy, transition),
+      authorityBody(plan, field, authorityBusy, authorityInspection, authorityInspecting, transition, inspect),
     ])
   }))
 }
@@ -215,7 +265,10 @@ function planBody(
   retry: () => void,
   select: (label: string) => void,
   authorityBusy: string,
+  authorityInspection: ConnectionAuthorityInspectionOutcome | null,
+  authorityInspecting: string,
   transition: (identity: string, request: ConnectionAuthorityTransition) => void,
+  inspect: (identity: string, request: ConnectionAuthorityInspectionRequest) => void,
 ): VNode {
   switch (state.status) {
     case 'loading':
@@ -247,7 +300,7 @@ function planBody(
             ...plan.labels.map((label) => h('option', { key: label, value: label }, label)),
           ]),
         ]),
-        planFields(plan, authorityBusy, transition),
+        planFields(plan, authorityBusy, authorityInspection, authorityInspecting, transition, inspect),
       ])
     }
   }
@@ -261,12 +314,30 @@ function authorityOutcomeBody(outcome: ConnectionAuthorityOutcome): VNode {
       h('p', { class: 'failure__message' }, failureSentence(outcome.failure)),
     ])
   }
+  if ('outcome' in outcome.result) {
+    return h('section', {
+      class: 'failure', role: 'alert', 'data-authority-outcome': 'partial',
+    }, [
+      h('h3', { class: 'failure__title' }, 'The authority change may have happened'),
+      h('p', { class: 'failure__message' },
+        `Revision ${outcome.result.authority.revision} may have happened. Re-read the authority state before retrying.`),
+    ])
+  }
   return h('p', {
     class: 'connect__authority-result', role: 'status',
     'data-authority-outcome': outcome.result.authority.state,
   }, outcome.result.authority.state === 'approved'
     ? `Revision ${outcome.result.authority.revision} is approved.`
     : `Revision ${outcome.result.authority.revision} is revoked.`)
+}
+
+function authorityInspectionFailure(outcome: ConnectionAuthorityInspectionOutcome): VNode | null {
+  if (outcome.status === 'answered') return null
+  if (outcome.status === 'refused') return refusalNotice(outcome.refusal)
+  return h('section', { class: 'failure', role: 'alert', 'data-authority-inspection': 'failed' }, [
+    h('h3', { class: 'failure__title' }, 'The proposed origin could not be read'),
+    h('p', { class: 'failure__message' }, failureSentence(outcome.failure)),
+  ])
 }
 
 function resultBody(outcome: ConnectionPlanOutcome): VNode {
@@ -291,7 +362,11 @@ function resultBody(outcome: ConnectionPlanOutcome): VNode {
     h('h3', null, title),
     result.steps.length === 0 ? null : h('ol', { class: 'connect__steps' }, result.steps.map((step) =>
       h('li', { key: step.target, 'data-step-outcome': step.outcome }, [
-        h('code', null, step.target), ` — ${step.outcome}`, step.reason ? `: ${step.reason}` : '',
+        h('code', null, step.target), ` — ${step.outcome}`,
+        'reason' in step && step.reason ? `: ${step.reason}` : '',
+        'action' in step
+          ? `: proposal revision ${step.revision} may have happened; re-read the authority state before retrying.`
+          : '',
       ])
     )),
     h('p', null, result.plan.state === 'complete'
@@ -311,9 +386,11 @@ export default defineComponent({
     outcome: { type: Object as PropType<ConnectionPlanOutcome | null>, default: null },
     authorityOutcome: { type: Object as PropType<ConnectionAuthorityOutcome | null>, default: null },
     authorityBusy: { type: String, default: '' },
+    authorityInspection: { type: Object as PropType<ConnectionAuthorityInspectionOutcome | null>, default: null },
+    authorityInspecting: { type: String, default: '' },
     busy: { type: Boolean, default: false },
   },
-  emits: ['choose', 'select-label', 'submit', 'retry', 'authority'],
+  emits: ['choose', 'select-label', 'submit', 'retry', 'authority', 'inspect-authority'],
   setup(props, { emit }) {
     const element = ref<HTMLFormElement | null>(null)
     watch(() => props.outcome, (outcome) => {
@@ -358,7 +435,10 @@ export default defineComponent({
               () => emit('retry'),
               (label) => emit('select-label', label),
               props.authorityBusy,
+              props.authorityInspection,
+              props.authorityInspecting,
               (identity, request) => emit('authority', identity, request),
+              (identity, request) => emit('inspect-authority', identity, request),
             )
             : null,
           h('button', {
@@ -366,6 +446,7 @@ export default defineComponent({
             disabled: props.busy || !ready,
           }, props.busy ? 'Applying…' : 'Apply connection plan'),
         ]),
+        props.authorityInspection === null ? null : authorityInspectionFailure(props.authorityInspection),
         props.authorityOutcome === null ? null : authorityOutcomeBody(props.authorityOutcome),
         props.outcome === null ? null : resultBody(props.outcome),
       ])

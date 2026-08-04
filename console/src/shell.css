@@ -532,6 +532,14 @@
   line-height: 18px;
 }
 
+.connect__authority-proposal {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--vp-c-text-1);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .connect__authority-actions button {
   padding: 6px 10px;
   border: 1px solid var(--vp-c-divider);

@@ -44,6 +44,7 @@ import {
   loadSignInAvailability,
   loadWorkflows,
   installApp,
+  inspectConnectionAuthority,
   publishWorkflow,
   previewGrant,
   replaceGrants,
@@ -72,6 +73,8 @@ import {
   type ConnectionPlanState,
   type ConnectionPlanSubmission,
   type ConnectionAuthorityOutcome,
+  type ConnectionAuthorityInspectionOutcome,
+  type ConnectionAuthorityInspectionRequest,
   type ConnectionAuthorityTransition,
   type EditorCatalogState,
   type GrantOutcome,
@@ -335,7 +338,9 @@ onUnmounted(() => window.clearInterval(activityPoll))
 // Wiring a connector up. The console's other job, and until X-44 the one it could not do.
 //
 // The selected connector and label, the value-free plan, and the last value-free result are all
-// safe to retain. **What the operator typed is not among them.** A value
+// safe to retain. The one deliberate exception is the exact normalized origin returned by the
+// configured-operator review route: it is held only for that plan revision and cleared before any
+// transition, retry or navigation. **What the operator typed is not among them.** A value
 // lives in the input element it was typed into and in the request body, and this component holds
 // none of it — see `Connect.mts`, which is where that is enforced rather than merely intended.
 // ---------------------------------------------------------------------------------------------
@@ -346,16 +351,31 @@ const connectionPlan = shallowRef<ConnectionPlanState | null>(null)
 const outcome = shallowRef<ConnectionPlanOutcome | null>(null)
 const authorityOutcome = shallowRef<ConnectionAuthorityOutcome | null>(null)
 const authorityBusy = shallowRef('')
+const authorityInspection = shallowRef<ConnectionAuthorityInspectionOutcome | null>(null)
+const authorityInspecting = shallowRef('')
 const connecting = shallowRef(false)
 const connectionPlanRequests = new LatestConnectionRequest()
 const connectionApplyRequests = new LatestConnectionRequest()
 const authorityRequests = new LatestConnectionRequest()
+const authorityInspectionRequests = new LatestConnectionRequest()
 
 function invalidateAuthority(): void {
   authorityRequests.invalidate()
+  authorityInspectionRequests.invalidate()
   authorityBusy.value = ''
+  authorityInspecting.value = ''
   authorityOutcome.value = null
+  authorityInspection.value = null
 }
+
+watch(
+  () => route.value.name,
+  (next, previous) => {
+    // App.vue outlives every screen. The operator-only normalized origin does not: leaving the
+    // connection surface clears both the rendered value and any in-flight inspection answer.
+    if (previous === 'connections' && next !== 'connections') invalidateAuthority()
+  },
+)
 
 /** A connector was chosen: ask for its complete plan, and forget the last attempt. */
 async function chooseConnector(connector: string) {
@@ -404,6 +424,7 @@ async function selectConnectionLabel(label: string) {
 async function retryConnectionPlan() {
   const connector = chosen.value
   if (connector === null) return
+  invalidateAuthority()
   const selection = selectedConnectionLabel.value
   const ticket = connectionPlanRequests.begin(connector, selection)
   connectionPlan.value = { status: 'loading' }
@@ -446,11 +467,23 @@ async function changeConnectionAuthority(identity: string, transition: Connectio
 
   const field = current.plan.fields.find((candidate) => candidate.identity === identity)
   const authority = field?.authority
-  const advertised = transition.action.method === 'PUT' ? authority?.actions?.approve : authority?.actions?.revoke
+  const advertised = transition.action.method === 'PUT'
+    ? authority?.state === 'proposed' ? authority.actions.approve : undefined
+    : authority?.state === 'proposed' || authority?.state === 'approved' ? authority.actions.revoke : undefined
   if (field?.service === null || field?.service !== transition.service || field.binds !== transition.field ||
       authority?.revision !== transition.revision || advertised?.method !== transition.action.method ||
       advertised.target !== transition.action.target) return
+  if (transition.action.method === 'PUT') {
+    const reviewed = authorityInspection.value
+    if (reviewed?.status !== 'answered' || reviewed.result.connector !== transition.connector ||
+        reviewed.result.label !== transition.label || reviewed.result.service !== transition.service ||
+        reviewed.result.field !== transition.field || reviewed.result.authority.state !== 'proposed' ||
+        reviewed.result.authority.revision !== transition.revision) return
+  }
 
+  authorityInspectionRequests.invalidate()
+  authorityInspecting.value = ''
+  authorityInspection.value = null
   const ticket = authorityRequests.begin(transition.connector, transition.label)
   authorityBusy.value = identity
   authorityOutcome.value = null
@@ -467,6 +500,29 @@ async function changeConnectionAuthority(identity: string, transition: Connectio
       connectionPlan.value = state
     }
   }
+}
+
+/** Read the exact normalized proposal only through the configured-operator authority surface. */
+async function inspectAuthority(identity: string, request: ConnectionAuthorityInspectionRequest) {
+  if (connecting.value || authorityBusy.value !== '' || authorityInspecting.value !== '') return
+  const current = connectionPlan.value
+  if (current?.status !== 'ready' || current.plan.connector !== chosen.value ||
+      current.plan.selection !== selectedConnectionLabel.value || request.connector !== chosen.value ||
+      request.label !== selectedConnectionLabel.value) return
+
+  const field = current.plan.fields.find((candidate) => candidate.identity === identity)
+  const authority = field?.authority
+  if (field?.service === null || field?.service !== request.service || field.binds !== request.field ||
+      authority?.state !== request.state || authority.revision !== request.revision ||
+      authority.state !== 'proposed' || authority.actions.approve === undefined) return
+
+  const ticket = authorityInspectionRequests.begin(request.connector, request.label)
+  authorityInspecting.value = identity
+  authorityInspection.value = null
+  const answered = await inspectConnectionAuthority(request)
+  if (!authorityInspectionRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) return
+  authorityInspecting.value = ''
+  authorityInspection.value = answered
 }
 
 const rotating = shallowRef('')
@@ -677,12 +733,15 @@ const active = computed(() => surfaceOfRoute(route.value.name))
             :outcome="outcome"
             :authority-outcome="authorityOutcome"
             :authority-busy="authorityBusy"
+            :authority-inspection="authorityInspection"
+            :authority-inspecting="authorityInspecting"
             :busy="connecting"
             @choose="chooseConnector"
             @select-label="selectConnectionLabel"
             @submit="connectChosen"
             @retry="retryConnectionPlan"
             @authority="changeConnectionAuthority"
+            @inspect-authority="inspectAuthority"
           />
         </template>
 
