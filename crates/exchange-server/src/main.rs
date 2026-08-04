@@ -25,6 +25,7 @@ mod execution;
 mod local_identity;
 mod local_state;
 mod managed_apps;
+mod native_root;
 mod oidc;
 mod operator;
 pub mod protocol;
@@ -208,6 +209,19 @@ where
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    #[cfg(feature = "native-root-test-seam")]
+    if arguments == [OsStr::new("native-root-test-seam")] {
+        return match native_root::authenticated_account_state_root() {
+            Ok(path) => {
+                println!("{}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if arguments == [OsStr::new("compatibility"), OsStr::new("--json")] {
         return match supervisor::compatibility_json().and_then(|bytes| {
             use std::io::Write;

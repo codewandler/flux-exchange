@@ -197,6 +197,9 @@ jobs:
       - name: Exercise zero-configuration state selection
         run: cargo test -p flux-exchange --bin flux-exchange --locked local_state
 
+      - name: Prove production root discovery ignores inherited home variables
+        run: cargo test -p flux-exchange --test local_state_regressions --features native-root-test-seam --locked --target ${{ matrix.target }} native_process_derives_production_root_from_the_authenticated_os_account
+
       - name: Exercise the native Unix supervisor ABI and owner-death path
         if: runner.os != 'Windows'
         run: cargo test -p flux-exchange --test supervised_unix --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }}

@@ -3,6 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(all(feature = "native-root-test-seam", windows))]
+use std::ffi::OsString;
+#[cfg(all(feature = "native-root-test-seam", unix))]
+use std::ffi::{CStr, OsString};
+
 const STORE_SETTINGS: [&str; 8] = [
     "FLUX_EXCHANGE_CREDENTIALS",
     "FLUX_EXCHANGE_SETTINGS",
@@ -295,14 +300,9 @@ fn configured_non_dev_partial_store_set_enumerates_every_missing_sibling() {
 
 #[test]
 fn production_root_discovery_does_not_consult_inherited_home_variables() {
-    let source =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/local_state.rs"))
-            .expect("local-state composition source");
-    let discovery = source
-        .split("fn conventional_root()")
-        .nth(1)
-        .and_then(|tail| tail.split("fn ensure_owner_only_root").next())
-        .expect("conventional-root implementation");
+    let discovery =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_root.rs"))
+            .expect("native account root implementation");
 
     for inherited in ["HOME", "XDG_STATE_HOME", "USERPROFILE", "LOCALAPPDATA"] {
         assert!(
@@ -317,6 +317,110 @@ fn production_root_discovery_does_not_consult_inherited_home_variables() {
     }
     #[cfg(windows)]
     assert!(discovery.contains("SHGetKnownFolderPath"), "{discovery}");
+}
+
+#[cfg(feature = "native-root-test-seam")]
+#[test]
+fn native_process_derives_production_root_from_the_authenticated_os_account() {
+    let scratch = Scratch::new("poisoned-inherited-homes");
+    let poisoned = [
+        ("HOME", scratch.path().join("home")),
+        ("XDG_STATE_HOME", scratch.path().join("xdg")),
+        ("USERPROFILE", scratch.path().join("profile")),
+        ("LOCALAPPDATA", scratch.path().join("local-app-data")),
+    ];
+    let mut command = Command::new(env!("CARGO_BIN_EXE_flux-exchange"));
+    command.env_clear().arg("native-root-test-seam");
+    for (name, path) in &poisoned {
+        command.env(name, path);
+    }
+    let output = command
+        .output()
+        .expect("real flux-exchange native-root process seam");
+    let evidence = diagnostics(&output);
+
+    assert!(output.status.success(), "{evidence}");
+    assert!(output.stderr.is_empty(), "{evidence}");
+    let selected = PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("native root is printable UTF-8 for the process seam")
+            .trim_end(),
+    );
+    assert_eq!(selected, authenticated_account_root());
+    for (name, path) in poisoned {
+        assert!(
+            !path.exists(),
+            "production root discovery created something below poisoned {name}: {}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(all(feature = "native-root-test-seam", unix))]
+fn authenticated_account_root() -> PathBuf {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    // This is deliberately independent of the server's resolver: the test looks up the effective
+    // account again and compares the real child process output with the native account database.
+    let uid = unsafe { libc::geteuid() };
+    let mut buffer = vec![0_u8; 4096];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found = std::ptr::null_mut();
+        let result = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if result == libc::ERANGE && buffer.len() < 1024 * 1024 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        assert_eq!(result, 0, "getpwuid_r refused uid {uid}: errno {result}");
+        assert!(
+            !found.is_null(),
+            "getpwuid_r found no account for uid {uid}"
+        );
+        let entry = unsafe { entry.assume_init() };
+        let home = unsafe { CStr::from_ptr(entry.pw_dir) };
+        let home = PathBuf::from(OsString::from_vec(home.to_bytes().to_vec()));
+        #[cfg(target_os = "macos")]
+        return home.join("Library/Application Support/Flux/Exchange");
+        #[cfg(not(target_os = "macos"))]
+        return home.join(".local/state/flux-exchange");
+    }
+}
+
+#[cfg(all(feature = "native-root-test-seam", windows))]
+fn authenticated_account_root() -> PathBuf {
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_LocalAppData, SHGetKnownFolderPath, KF_FLAG_DONT_VERIFY,
+    };
+
+    let mut raw = std::ptr::null_mut();
+    let result = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_LocalAppData,
+            KF_FLAG_DONT_VERIFY as u32,
+            std::ptr::null_mut(),
+            &mut raw,
+        )
+    };
+    assert_eq!(
+        result, 0,
+        "SHGetKnownFolderPath refused: HRESULT {result:#x}"
+    );
+    assert!(!raw.is_null(), "SHGetKnownFolderPath returned a null path");
+    let length = unsafe { (0..).take_while(|offset| *raw.add(*offset) != 0).count() };
+    let value = OsString::from_wide(unsafe { std::slice::from_raw_parts(raw, length) });
+    unsafe { CoTaskMemFree(raw.cast()) };
+    PathBuf::from(value).join("Flux/Exchange")
 }
 
 #[cfg(unix)]
