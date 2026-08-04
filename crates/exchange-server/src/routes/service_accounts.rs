@@ -105,7 +105,7 @@
 //!   the page. The remedy is the revocation route on this same resource.
 
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, MethodRouter};
 use axum::{Extension, Json};
@@ -160,17 +160,15 @@ fn item() -> MethodRouter<AppState> {
 
 /// What a caller supplies when it mints a Service Account.
 ///
-/// Unknown fields are **not** denied, following
-/// [`NewConnection`](super::connections) — a body carrying `tenant` is not refused, it is ignored,
-/// and [`tests::a_tenant_in_a_body_field_does_not_influence_the_tenant_minted_for`] asserts the
-/// stronger property that the principal still comes back in the resolved tenant. Refusing the field
-/// would be the weaker claim: it would say this host noticed, rather than that it could not have
-/// been influenced.
+/// This is the sole remaining JSON mint surface and its non-secret shape is exact. Unknown fields
+/// refuse before the store is reached, so no future alias can quietly become a credential-bearing
+/// path alongside the one-way FXSA response.
 ///
 /// **No `Debug`.** Nothing here is a credential today, but this is the body type of the one route
 /// that mints one, and a derived `Debug` is one `debug!(?body)` away from being the place a future
 /// field gets logged.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewServiceAccount {
     /// What to call the Service Account within this tenant.
     id: String,
@@ -209,22 +207,30 @@ async fn mint(
     };
 
     match service_accounts.mint(&principal, &body.id, expiry) {
-        Ok(minted) => {
-            (
-                StatusCode::CREATED,
-                Json(json!({
-                    "principal": minted.principal,
-                    "expires_at": minted.expires_at,
-                    // The one disclosure, and the whole point of the route. It is not recoverable from
-                    // this host afterwards: `crate::service_account`'s module documentation says what the store
-                    // holds instead, and `an_attacker_who_reads_the_store_obtains_no_usable_token`
-                    // pins it.
-                    "token": minted.token.as_str(),
-                    "shown": "once",
-                })),
-            )
-                .into_response()
-        }
+        Ok(minted) => match crate::local_management::service_account_handoff::encode(
+            minted.token.as_str().as_bytes(),
+        ) {
+            Some(frame) => {
+                let mut response = (StatusCode::CREATED, frame).into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(
+                        "application/vnd.flux-exchange.service-account-handoff-v1",
+                    ),
+                );
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                response
+            }
+            None => {
+                error!("minted Service Account token exceeds the closed FXSA handoff bound");
+                refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cannot hand off the Service Account token".to_owned(),
+                )
+            }
+        },
         Err(error) => refuse_mint(error),
     }
 }
@@ -465,11 +471,29 @@ mod tests {
             .await
             .expect("a response body");
 
-        (
-            status,
-            headers,
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        )
+        let body = if headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            == Some("application/vnd.flux-exchange.service-account-handoff-v1")
+        {
+            assert_eq!(
+                headers
+                    .get("cache-control")
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store")
+            );
+            assert!(bytes.len() >= 13, "FXSA carries a nonempty token");
+            assert_eq!(&bytes[..8], &[b'F', b'X', b'S', b'A', 1, 1, 0, 0]);
+            let declared =
+                u32::from_be_bytes(bytes[8..12].try_into().expect("FXSA length")) as usize;
+            assert_eq!(bytes.len(), 12 + declared, "FXSA is exactly one frame");
+            let token = std::str::from_utf8(&bytes[12..]).expect("current token is UTF-8");
+            json!({ "token": token })
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+
+        (status, headers, body)
     }
 
     /// A `POST /api/service-accounts` carrying `alice`'s development credential and `body`.
@@ -491,6 +515,31 @@ mod tests {
     /// Thirty days out, as an operator wiring a Service Account into a config would state it.
     fn in_thirty_days() -> i64 {
         session::now() + 30 * 24 * 60 * 60
+    }
+
+    fn assert_minted_for_resolved_tenant(scratch: &Scratch) {
+        let actor = Principal::new(
+            PrincipalKind::User,
+            "alice",
+            exchange_host::Tenant::new(RESOLVED).expect("resolved tenant"),
+        );
+        let accounts = scratch
+            .store()
+            .list(&actor, session::now())
+            .expect("the resolved operator lists its tenant");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "triage-bot");
+
+        let claimed = Principal::new(
+            PrincipalKind::User,
+            "mallory",
+            exchange_host::Tenant::new(CLAIMED).expect("claimed tenant"),
+        );
+        assert!(scratch
+            .store()
+            .list(&claimed, session::now())
+            .expect("the claimed tenant is independently listable")
+            .is_empty());
     }
 
     /// **X-40's headline.** Only a `User` mints — asserted for all three kinds in one run.
@@ -527,7 +576,7 @@ mod tests {
             "a user must still mint, or the refusals below pass by having broken minting for \
              everyone: {minted}",
         );
-        assert_eq!(minted["principal"]["id"], MINTED_BY_A_USER);
+        assert!(minted["token"].is_string(), "the handoff carries one token");
 
         // Legs two and three: neither of the non-human kinds creates a principal.
         //
@@ -625,9 +674,6 @@ mod tests {
         assert_eq!(token.len(), 69, "fxsa_ plus 256 bits, hex encoded");
         assert!(token.starts_with("fxsa_"));
         assert!(token[5..].bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(body["principal"]["kind"], "service_account");
-        assert_eq!(body["principal"]["id"], "triage-bot");
-        assert_eq!(body["principal"]["tenant"], RESOLVED);
 
         let on_disk = std::fs::read_to_string(store.path()).expect("minting writes the store");
         assert!(
@@ -650,7 +696,6 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(created["principal"]["kind"], "service_account");
         let token = created["token"].as_str().expect("one-time token");
 
         let (status, _, session) = call(
@@ -866,8 +911,7 @@ mod tests {
     /// Vector 2 — a **body field**.
     ///
     /// The likeliest of the three by far: this route takes a body, so `tenant` is the field a
-    /// caller would reach for. It is not refused — it is ignored, and the principal still comes
-    /// back in `acme`.
+    /// caller would reach for. The closed non-secret mint object refuses it before mutation.
     #[tokio::test]
     async fn a_tenant_in_a_body_field_does_not_influence_the_tenant_minted_for() {
         let scratch = Scratch::new("body-vector");
@@ -884,15 +928,17 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(
-            body["principal"]["tenant"], RESOLVED,
-            "the tenant must come from the resolved principal, not from the body field",
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let actor = Principal::new(
+            PrincipalKind::User,
+            "alice",
+            exchange_host::Tenant::new(RESOLVED).expect("resolved tenant"),
         );
-        assert_eq!(
-            body["principal"]["kind"], "service_account",
-            "and the kind is this host's, not the body's",
-        );
+        assert!(scratch
+            .store()
+            .list(&actor, session::now())
+            .expect("the refused body did not mutate the store")
+            .is_empty());
         assert!(
             !body.to_string().contains(CLAIMED),
             "nothing the body claimed may survive into the answer: {body}",
@@ -925,10 +971,7 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(
-            body["principal"]["tenant"], RESOLVED,
-            "the tenant must come from the resolved principal, not from a header",
-        );
+        assert_minted_for_resolved_tenant(&scratch);
         assert!(
             !body.to_string().contains(CLAIMED),
             "nothing a header claimed may survive into the answer: {body}",

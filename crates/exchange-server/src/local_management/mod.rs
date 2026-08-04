@@ -3,20 +3,32 @@
 #[allow(dead_code)]
 mod codec;
 
+mod connection;
+
 mod dispatcher;
 mod grant;
+pub(crate) mod proposal;
+mod service_account;
 
 pub mod transaction;
 
+pub(crate) use dispatcher::deadline_frame;
+pub(crate) use dispatcher::ActiveSession;
 pub(crate) use dispatcher::Dispatcher;
 pub(crate) use dispatcher::Transport;
+pub(crate) use dispatcher::{SessionAdvance, SessionBegin};
 pub use transaction::TransactionCoordinator;
 
-#[allow(dead_code)]
-mod service_account_handoff;
+pub(crate) mod service_account_handoff;
 
 #[cfg(unix)]
 mod unix;
 
+#[cfg(windows)]
+mod windows;
+
 #[cfg(unix)]
 pub(crate) use unix::LocalManagement;
+
+#[cfg(windows)]
+pub(crate) use windows::LocalManagement;

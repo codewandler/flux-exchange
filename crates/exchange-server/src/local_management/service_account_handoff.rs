@@ -7,7 +7,7 @@
 use std::fmt;
 
 #[cfg(unix)]
-pub(super) mod unix_transfer;
+pub(crate) mod unix_transfer;
 
 const MAGIC: &[u8; 4] = b"FXSA";
 const VERSION: u8 = 1;
@@ -16,6 +16,13 @@ const HEADER_LEN: usize = 12;
 const MIN_TOKEN_BYTES: usize = 1;
 const MAX_TOKEN_BYTES: usize = 512;
 const MAX_FRAME_BYTES: usize = HEADER_LEN + MAX_TOKEN_BYTES;
+
+/// Encode one already-minted opaque token for the one-shot HTTP/native handoff surfaces.
+pub(crate) fn encode(token: &[u8]) -> Option<Vec<u8>> {
+    HandoffFrame::new(token.to_vec())
+        .ok()
+        .map(|frame| frame.encode())
+}
 
 /// One opaque Service Account credential handoff.
 ///
@@ -180,7 +187,7 @@ impl Default for HandoffWriter {
 
 /// Value-free refusal from the closed FXSA byte/state contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum HandoffError {
+pub(crate) enum HandoffError {
     InvalidMagic,
     UnsupportedVersion(u8),
     WrongDirection(u8),

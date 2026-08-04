@@ -19,10 +19,16 @@ mod bind;
 pub mod channel;
 mod connection_guard;
 pub mod credential_acquisition;
+mod credential_head;
 mod dev_identity;
 pub use flux_exchange::entropy;
 mod execution;
 mod hosted_origin;
+mod local_helper;
+#[cfg(unix)]
+mod local_helper_unix;
+#[cfg(windows)]
+mod local_helper_windows;
 mod local_identity;
 pub mod local_management;
 mod local_state;
@@ -57,6 +63,7 @@ use crate::channel::{
     CatalogueChannelDeclarations, ChannelSupervisor, DeploymentChannelPlacement,
     GeneratedChannelRunner,
 };
+use crate::credential_head::{CredentialHeadKey, CredentialHeadStore};
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
 use crate::execution::{channel_execution_system, invoker};
 use crate::local_identity::{
@@ -251,6 +258,28 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+    if arguments.first().map(std::ffi::OsString::as_os_str) == Some(OsStr::new("local")) {
+        #[cfg(unix)]
+        {
+            return match local_helper::parse_local_helper(
+                local_helper::HelperPlatform::Unix,
+                &arguments,
+            ) {
+                Ok(invocation) => ExitCode::from(local_helper_unix::run(invocation).code()),
+                Err(_) => ExitCode::FAILURE,
+            };
+        }
+        #[cfg(windows)]
+        {
+            return match local_helper::parse_local_helper(
+                local_helper::HelperPlatform::Windows,
+                &arguments,
+            ) {
+                Ok(invocation) => ExitCode::from(local_helper_windows::run(invocation).code()),
+                Err(_) => ExitCode::FAILURE,
+            };
+        }
     }
     if arguments
         .first()
@@ -470,14 +499,12 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
         .local_addr()
         .map_err(|source| StartupRefusal::BindUnavailable { bind, source })?;
 
-    #[cfg(unix)]
     let local_management = local_management::LocalManagement::bind_for_mode(
         supervised,
         state.clone(),
         composition.coordinator.clone(),
     )
     .map_err(|reason| StartupRefusal::Supervised { reason })?;
-    #[cfg(unix)]
     let local_management_task = local_management.map(|endpoint| tokio::spawn(endpoint.serve()));
 
     if let Some(supervision) = supervision {
@@ -515,7 +542,6 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
     .with_graceful_shutdown(stop_requested())
     .await
     .map_err(|source| StartupRefusal::Serving { source });
-    #[cfg(unix)]
     if let Some(task) = local_management_task {
         task.abort();
         let _ = task.await;
@@ -641,12 +667,29 @@ async fn compose(
         state = state.with_audit(audit);
     }
 
-    if let Some(registry) = connection_registry(
+    let registry = connection_registry(
         local_state
             .as_ref()
             .map(|paths| paths.connections.as_path()),
-    )? {
-        state = state.with_connection_registry(registry);
+    )?;
+    let legacy_head_keys = registry
+        .as_ref()
+        .map(|binding| binding.legacy_head_keys.clone())
+        .unwrap_or_default();
+    if let Some(binding) = registry {
+        state = state.with_connection_registry(binding.port);
+    }
+    if let Some(root) = local_state
+        .as_ref()
+        .and_then(|paths| paths.credential_heads_root.as_deref())
+    {
+        let heads =
+            CredentialHeadStore::migrate_legacy(root, &legacy_head_keys).map_err(|error| {
+                StartupRefusal::LocalState {
+                    reason: error.to_string(),
+                }
+            })?;
+        state = state.with_credential_heads(Arc::new(heads));
     }
 
     // Bound before the invoker, because the invoker reads it. A composition with no settings store
@@ -751,6 +794,16 @@ async fn compose(
             "a channel store is bound but no credential store is available, so channel management \
              refuses instead of supervising unauthenticated vendor connections"
         );
+    }
+    if let Some(bound) = coordinator.as_ref() {
+        // Provider recovery reaches its one-way terminal decision first. Only then may Exchange
+        // roll the retained value-free metadata/head/audit image forward. This happens before the
+        // listener, native endpoint, readiness signal or any route becomes reachable.
+        local_management::Dispatcher::new(state.clone(), bound.clone())
+            .recover_publications()
+            .map_err(|refusal| StartupRefusal::TransactionCoordinator {
+                reason: refusal.startup_reason().to_owned(),
+            })?;
     }
     if let Some((workflows, pure, runs)) =
         workflow_store(local_state.as_ref().map(|paths| paths.workflows.as_path()))?
@@ -1094,10 +1147,15 @@ fn settings_store(
     Ok(Some(Arc::new(store)))
 }
 
+struct ConnectionRegistryBinding {
+    port: Arc<dyn exchange_host::ConnectionRegistry>,
+    legacy_head_keys: Vec<CredentialHeadKey>,
+}
+
 /// Bind the durable label-to-UUID overlay, or bind none for sole-connection compatibility.
 fn connection_registry(
     configured: Option<&std::path::Path>,
-) -> Result<Option<Arc<dyn exchange_host::ConnectionRegistry>>, StartupRefusal> {
+) -> Result<Option<ConnectionRegistryBinding>, StartupRefusal> {
     use exchange_host::{ConnectionRegistryStore, CONNECTION_REGISTRY_SETTING};
 
     let Some(configured) = configured else {
@@ -1112,8 +1170,28 @@ fn connection_registry(
             reason: source.to_string(),
         }
     })?;
+    let legacy_head_keys = store
+        .all_entries()
+        .map_err(|source| StartupRefusal::ConnectionRegistry {
+            reason: source.to_string(),
+        })?
+        .into_iter()
+        .map(|entry| {
+            CredentialHeadKey::new(
+                entry.tenant.as_str(),
+                entry.connector,
+                entry.connection.label.as_str(),
+            )
+            .map_err(|error| StartupRefusal::ConnectionRegistry {
+                reason: error.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     info!("{}", store.banner());
-    Ok(Some(Arc::new(store)))
+    Ok(Some(ConnectionRegistryBinding {
+        port: Arc::new(store),
+        legacy_head_keys,
+    }))
 }
 
 /// Bind the identity port this composition serves with.

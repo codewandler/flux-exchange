@@ -238,6 +238,11 @@ use crate::state::AppState;
 
 mod plan;
 
+pub(crate) use plan::{
+    native_query as native_plan_query, native_snapshot as native_plan_snapshot, NativePlanRefusal,
+    NativePlanSnapshot,
+};
+
 /// The setting that names the credential store, quoted when none is bound.
 ///
 /// Spelled through the host's own constant so this refusal and the reader that would have produced
@@ -545,11 +550,11 @@ fn connection_route() -> MethodRouter<AppState> {
 
 /// The third verb on that path, gated to [`MAY_SUPPLY_A_CREDENTIAL`].
 fn create_route() -> MethodRouter<AppState> {
-    post(create)
+    production_secret_json_route(create)
 }
 
 fn credential_route() -> MethodRouter<AppState> {
-    put(rotate)
+    production_secret_json_put_route(rotate)
 }
 
 fn settings_route() -> MethodRouter<AppState> {
@@ -569,7 +574,7 @@ fn instance_read_route() -> MethodRouter<AppState> {
 }
 
 fn instance_write_route() -> MethodRouter<AppState> {
-    post(create_instance).put(rename_instance)
+    production_secret_json_route(create_instance).put(rename_instance)
 }
 
 fn instance_settings_route() -> MethodRouter<AppState> {
@@ -581,7 +586,51 @@ fn instance_setting_route() -> MethodRouter<AppState> {
 }
 
 fn instance_credential_route() -> MethodRouter<AppState> {
-    put(rotate_instance)
+    production_secret_json_put_route(rotate_instance)
+}
+
+/// Keep historical handler-level unit fixtures available while the shipped binary refuses every
+/// legacy secret-bearing JSON route before body extraction. Native and hosted FXLM are now the sole
+/// credential input surfaces; integration tests exercise this non-test composition.
+fn production_secret_json_route<H, T>(legacy_test_handler: H) -> MethodRouter<AppState>
+where
+    H: axum::handler::Handler<T, AppState>,
+    T: 'static,
+{
+    #[cfg(test)]
+    {
+        post(legacy_test_handler)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = legacy_test_handler;
+        post(secret_json_forbidden)
+    }
+}
+
+fn production_secret_json_put_route<H, T>(legacy_test_handler: H) -> MethodRouter<AppState>
+where
+    H: axum::handler::Handler<T, AppState>,
+    T: 'static,
+{
+    #[cfg(test)]
+    {
+        put(legacy_test_handler)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = legacy_test_handler;
+        put(secret_json_forbidden)
+    }
+}
+
+#[cfg(not(test))]
+async fn secret_json_forbidden() -> Response {
+    (
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        Json(json!({ "code": "secret_json_forbidden" })),
+    )
+        .into_response()
 }
 
 /// The values a caller supplies when it connects a connector.
@@ -795,7 +844,7 @@ async fn create(
     // `POST`s both probe an empty address, both write and both answer `201` — one value silently
     // replaced, and the caller that lost told it succeeded. That is the exact failure the `409`
     // below exists to prevent, so leaving the window open would have made the refusal decorative.
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
 
@@ -897,7 +946,7 @@ async fn create_acquired_connection(
         Err(response) => return *response,
     };
 
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
     match held(store, &addresses).await {
@@ -1581,6 +1630,11 @@ async fn connection_views(
     provider: &'static Provider,
     declaration: &ConnectorDeclaration<'_>,
 ) -> Result<Vec<Value>, Response> {
+    match state.connection_publication_pending(tenant, provider.id) {
+        Ok(false) => {}
+        Ok(true) => return Err(change_in_flight(provider)),
+        Err(()) => return Err(no_store()),
+    }
     // A composition without the naming overlay is deliberately the pre-X-14 compatibility mode.
     // It may bind a store such as Vault that can do point operations but cannot prove a safe
     // listing policy. Keep sole legacy connections working there; instance management below is
@@ -1861,6 +1915,11 @@ pub(super) async fn invocation_instance_using(
     supplied: Option<&str>,
     store: &Arc<dyn SecretStore>,
 ) -> Result<Option<InstanceId>, Response> {
+    match state.connection_publication_pending(principal.tenant(), provider.id) {
+        Ok(false) => {}
+        Ok(true) => return Err(change_in_flight(provider)),
+        Err(()) => return Err(no_store()),
+    }
     let Some(registry) = state.connection_registry() else {
         if supplied.is_some() {
             return Err(no_registry());
@@ -2158,7 +2217,7 @@ async fn label_legacy(
         Ok(label) => label,
         Err(refusal) => return registry_refused(&refusal),
     };
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
     let declared = declared_credentials(provider);
@@ -2257,7 +2316,7 @@ async fn create_instance(
             json!({ "connector": provider.id }),
         );
     }
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
     let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
@@ -2619,7 +2678,7 @@ async fn rename_instance(
         Ok(label) => label,
         Err(refusal) => return registry_refused(&refusal),
     };
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
     if let Err(response) =
@@ -2656,7 +2715,7 @@ async fn remove_instance(
         Ok(None) => return unknown_label(provider, &label),
         Err(refusal) => return registry_refused(&refusal),
     };
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
     if state.channels().is_some_and(|channels| {
@@ -2840,7 +2899,7 @@ async fn rotate(
                 "refresh acquisition cannot also carry a pasted credential",
             );
         }
-        let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+        let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
             return change_in_flight(provider);
         };
         return refresh_acquired_connection(
@@ -2890,7 +2949,7 @@ async fn rotate(
     // The claim `create` and `remove` take, for the same reason and against the same neighbours: a
     // rotation deciding against a value a `DELETE` is in the middle of destroying would put a
     // fresh credential back at an address an operator has just revoked.
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
 
@@ -2966,7 +3025,7 @@ async fn rotate_instance(
     let Some(store) = state.credentials() else {
         return no_store();
     };
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
     let selected = match invocation_instance(&state, &principal, provider, Some(&label)).await {
@@ -3080,7 +3139,7 @@ async fn remove(
     // The same claim `create` takes, for the same reason and against the same neighbour: a delete
     // that decided against a value another request is in the middle of writing would destroy half
     // of it.
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
 
@@ -4613,10 +4672,11 @@ mod tests {
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        async_trait, AcquiredCredential, AuthHazard, AuthPosture, ConnectionSettings as _,
-        CredentialAcquirer, Layout as _, TenantLayout, MAX_CREDENTIAL_VALUE_BYTES,
-        MAX_TENANT_STORE_BYTES, TENANTS_ROOT,
+        async_trait, ConnectionSettings as _, Layout as _, TenantLayout,
+        MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES, TENANTS_ROOT,
     };
+    #[cfg(unix)]
+    use exchange_host::{AcquiredCredential, AuthHazard, AuthPosture, CredentialAcquirer};
     use tower::Service;
 
     use crate::dev_identity::DevIdentity;

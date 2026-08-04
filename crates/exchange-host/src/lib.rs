@@ -174,7 +174,8 @@ pub use grant_cas::{
     GrantReceiptId, GrantSelector, GrantTransactionRefusal, GrantTransactions, StoreRevision,
 };
 pub use instances::{
-    ConnectionLabel, ConnectionRegistry, MemoryConnectionRegistry, NamedConnection, RegistryRefusal,
+    ConnectionLabel, ConnectionRegistry, MemoryConnectionRegistry, NamedConnection,
+    RegisteredConnection, RegistryRefusal,
 };
 pub use instances::{ConnectionRegistryStore, ConnectionRegistryStoreError};
 pub use invoke::{

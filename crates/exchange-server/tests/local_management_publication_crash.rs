@@ -24,6 +24,7 @@ const CONNECT_COMMIT: u16 = 0x0004;
 const CONNECT_RECEIPT: u16 = 0x0006;
 const PLAN_QUERY: u16 = 0x0007;
 const PLAN_RESPONSE: u16 = 0x0008;
+const ERROR: u16 = 0x7fff;
 const SENTINEL: &[u8] = b"x134-publication-crash-secret-7c81f0";
 
 #[derive(Clone, Copy)]
@@ -34,9 +35,9 @@ struct CrashCase {
     phase: &'static str,
 }
 
-const CASES: [CrashCase; 4] = [
+const CASES: [CrashCase; 5] = [
     CrashCase {
-        connector: "freshdesk",
+        connector: "zendesk",
         durable_image: "settings/store.json",
         label: "after-setting",
         phase: "setting-0",
@@ -48,13 +49,19 @@ const CASES: [CrashCase; 4] = [
         phase: "authority-0",
     },
     CrashCase {
-        connector: "freshdesk",
+        connector: "github",
         durable_image: "credential-heads-v1/image.json",
         label: "after-head",
         phase: "head",
     },
     CrashCase {
-        connector: "freshdesk",
+        connector: "github",
+        durable_image: "credential-heads-v1/image.json",
+        label: "after-audit",
+        phase: "audit",
+    },
+    CrashCase {
+        connector: "github",
         durable_image: "connections/store.json",
         label: "after-label",
         phase: "label",
@@ -85,7 +92,11 @@ impl Fixture {
     }
 
     fn spawn(&self, crash_after: Option<&str>) -> Server {
-        Server::spawn(&self.state, crash_after)
+        Server::spawn(&self.state, crash_after, None)
+    }
+
+    fn spawn_with_failure(&self, fail_after: &str) -> Server {
+        Server::spawn(&self.state, None, Some(fail_after))
     }
 
     fn image(&self, relative: &str) -> Vec<u8> {
@@ -130,7 +141,7 @@ struct Server {
 }
 
 impl Server {
-    fn spawn(state: &Path, crash_after: Option<&str>) -> Self {
+    fn spawn(state: &Path, crash_after: Option<&str>, fail_after: Option<&str>) -> Self {
         let readiness = PipeEnds::new();
         let liveness = PipeEnds::new();
         let readiness_source = duplicate_high(readiness.write);
@@ -154,6 +165,11 @@ impl Server {
             command.env("FLUX_EXCHANGE_TEST_PUBLICATION_CRASH_AFTER", phase);
         } else {
             command.env_remove("FLUX_EXCHANGE_TEST_PUBLICATION_CRASH_AFTER");
+        }
+        if let Some(phase) = fail_after {
+            command.env("FLUX_EXCHANGE_TEST_PUBLICATION_FAIL_AFTER", phase);
+        } else {
+            command.env_remove("FLUX_EXCHANGE_TEST_PUBLICATION_FAIL_AFTER");
         }
         // SAFETY: this closure uses only descriptor operations before exec.
         unsafe {
@@ -179,7 +195,28 @@ impl Server {
             socket: state.join("run/local-management-v1.sock"),
         };
         let readiness = server.readiness();
-        assert!(!readiness.is_empty(), "Exchange refused before readiness");
+        if readiness.is_empty() {
+            let status = server.child.wait().expect("startup refusal status");
+            let mut stdout = String::new();
+            server
+                .child
+                .stdout
+                .take()
+                .expect("captured startup stdout")
+                .read_to_string(&mut stdout)
+                .expect("startup stdout");
+            let mut stderr = String::new();
+            server
+                .child
+                .stderr
+                .take()
+                .expect("captured startup stderr")
+                .read_to_string(&mut stderr)
+                .expect("startup stderr");
+            panic!(
+                "Exchange refused before readiness ({status}): stdout={stdout:?} stderr={stderr:?}"
+            );
+        }
         server
     }
 
@@ -214,7 +251,38 @@ impl Server {
         response.json()
     }
 
-    fn wait_for_injected_crash(&mut self, phase: &str) {
+    fn wait_for_injected_crash(&mut self, phase: &str, mut committing: Session) {
+        committing
+            .stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("crash-observation timeout");
+        let mut header = [0_u8; 12];
+        match committing.stream.read_exact(&mut header) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                ) => {}
+            Err(error) => {
+                panic!("server neither exited nor returned a terminal frame after {phase}: {error}")
+            }
+            Ok(()) => {
+                let length =
+                    u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+                let mut payload = vec![0_u8; length];
+                committing
+                    .stream
+                    .read_exact(&mut payload)
+                    .expect("terminal payload after missing crash");
+                panic!(
+                    "server returned opcode {:#06x} instead of crashing after {phase}: {}",
+                    u16::from_be_bytes([header[6], header[7]]),
+                    String::from_utf8_lossy(&payload)
+                );
+            }
+        }
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
             if let Some(status) = self.child.try_wait().expect("child state") {
@@ -348,12 +416,31 @@ impl WireFrame {
 #[test]
 fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
     for case in CASES {
+        eprintln!("publication crash case {}", case.phase);
         let fixture = Fixture::new(case);
         let mut crashed = fixture.spawn(Some(case.phase));
         let plan = crashed.plan(case.connector, None);
         let begin = connect_begin(&plan, case.label);
-        commit_until_crash(&crashed, &begin);
-        crashed.wait_for_injected_crash(case.phase);
+        if case.phase == "setting-0" || case.phase == "authority-0" {
+            assert!(
+                begin["settings"]
+                    .as_array()
+                    .is_some_and(|settings| !settings.is_empty()),
+                "the injected metadata boundary must be present in the exact proposal: {plan}"
+            );
+        }
+        if case.phase == "authority-0" {
+            assert_eq!(
+                begin["authorities"].as_array().map(Vec::len),
+                Some(1),
+                "the authority crash case must carry one exact CAS projection"
+            );
+        }
+        // Keep the transport alive until the injected exit. Closing immediately after COMMIT
+        // creates a scheduler race in which EOF can abort the active ceremony before the server
+        // consumes the decision frame, which would make this crash boundary test vacuous.
+        let committing = start_commit(&crashed, &begin);
+        crashed.wait_for_injected_crash(case.phase, committing);
 
         let durable_at_crash = fixture.image(case.durable_image);
         assert_excludes(&durable_at_crash, SENTINEL);
@@ -364,12 +451,20 @@ fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
         let selected = recovered.plan(case.connector, Some(case.label));
         assert_complete_selected_plan(&selected, case.label);
         let first_receipt = replay_receipt(&recovered, &begin);
-        assert_eq!(
-            fixture.image(case.durable_image),
-            durable_at_crash,
-            "recovery after {} must not create a second semantic revision",
-            case.phase
-        );
+        let recovered_image = fixture.image(case.durable_image);
+        if case.durable_image == "settings/store.json" {
+            assert_settings_replay_only_completes_missing_projection(
+                &durable_at_crash,
+                &recovered_image,
+                case.phase,
+            );
+        } else {
+            assert_eq!(
+                recovered_image, durable_at_crash,
+                "recovery after {} must not create a second semantic revision",
+                case.phase
+            );
+        }
         let selected_bytes = serde_json::to_vec(&selected).expect("canonical selected plan");
         recovered.finish();
 
@@ -407,12 +502,56 @@ fn connection_readers_and_mutations_are_both_guarded_by_pending_publication_stat
         "connect and credential mutations must both refuse around an unresolved publication"
     );
     assert!(
-        plan.contains("publication_pending_for("),
+        plan.contains("connection_publication_pending("),
         "the live connection-plan reader must not project settings/head/label partial state"
     );
 }
 
-fn commit_until_crash(server: &Server, begin: &Value) {
+#[test]
+fn a_live_unresolved_publication_gates_plan_and_mutation_until_same_proposal_replay() {
+    let case = CrashCase {
+        connector: "github",
+        durable_image: "credential-heads-v1/image.json",
+        label: "live-gate",
+        phase: "head",
+    };
+    let fixture = Fixture::new(case);
+    let server = fixture.spawn_with_failure(case.phase);
+    let initial = server.plan(case.connector, None);
+    let begin = connect_begin(&initial, case.label);
+    let refusal = commit_and_read(&server, &begin);
+    assert_eq!(refusal.opcode, ERROR);
+    assert_eq!(refusal.json()["commit"], "query_receipt");
+
+    let mut plan = server.session();
+    plan.send_control(
+        PLAN_QUERY,
+        &json!({"connector": case.connector, "selection": null}),
+    );
+    let refusal = plan.read();
+    assert_eq!(refusal.opcode, ERROR);
+    assert_eq!(refusal.json()["code"], "connect_busy");
+
+    let mut changed = begin.clone();
+    changed["label"] = json!("different-proposal");
+    let mut mutation = server.session();
+    mutation.send_control(CONNECT_BEGIN, &changed);
+    let refusal = mutation.read();
+    assert_eq!(refusal.opcode, ERROR);
+    assert_eq!(refusal.json()["code"], "connect_busy");
+
+    let receipt = replay_receipt(&server, &begin);
+    assert_eq!(receipt["commit"]["resource"], "committed");
+    assert_complete_selected_plan(&server.plan(case.connector, Some(case.label)), case.label);
+    server.finish();
+    fixture.assert_value_free();
+}
+
+fn commit_and_read(server: &Server, begin: &Value) -> WireFrame {
+    start_commit(server, begin).read()
+}
+
+fn start_commit(server: &Server, begin: &Value) -> Session {
     let digest = proposal_digest("exchange.local-management.v1.connect-proposal", begin);
     let mut session = server.session();
     session.send_control(CONNECT_BEGIN, begin);
@@ -442,6 +581,7 @@ fn commit_until_crash(server: &Server, begin: &Value) {
             "transaction_id": needed["transaction_id"],
         }),
     );
+    session
 }
 
 fn replay_receipt(server: &Server, begin: &Value) -> Value {
@@ -494,21 +634,62 @@ fn assert_complete_selected_plan(plan: &Value, label: &str) {
     }
 }
 
+fn assert_settings_replay_only_completes_missing_projection(
+    at_crash: &[u8],
+    recovered: &[u8],
+    phase: &str,
+) {
+    let at_crash: Value =
+        serde_json::from_slice(at_crash).expect("settings image at crash is canonical JSON");
+    let recovered: Value =
+        serde_json::from_slice(recovered).expect("recovered settings image is canonical JSON");
+    assert_eq!(
+        recovered["next_origin_revision"], at_crash["next_origin_revision"],
+        "recovery after {phase} allocated a second authority revision"
+    );
+    assert_json_subset(
+        &at_crash["values"],
+        &recovered["values"],
+        "settings values already durable at the crash boundary",
+    );
+}
+
+fn assert_json_subset(expected: &Value, actual: &Value, path: &str) {
+    match expected {
+        Value::Object(expected) => {
+            let actual = actual
+                .as_object()
+                .unwrap_or_else(|| panic!("{path} stopped being an object"));
+            for (key, expected) in expected {
+                let actual = actual
+                    .get(key)
+                    .unwrap_or_else(|| panic!("{path}.{key} disappeared during recovery"));
+                assert_json_subset(expected, actual, &format!("{path}.{key}"));
+            }
+        }
+        _ => assert_eq!(actual, expected, "{path} changed during recovery replay"),
+    }
+}
+
 fn connect_begin(plan: &Value, label: &str) -> Value {
     let mut targets = Vec::new();
     let mut settings = Vec::new();
     let mut authorities = Vec::new();
     for field in plan["fields"].as_array().expect("plan fields") {
-        if !field["required"].as_bool().expect("required")
-            || !field["routable"].as_bool().expect("routable")
-        {
+        // Select every routable optional as well as every required target so the crash matrix
+        // necessarily crosses settings, authority, head, audit, and label publication boundaries.
+        if !field["routable"].as_bool().expect("routable") {
             continue;
         }
-        let target = &field["target"];
-        if !targets.iter().any(|held| held == target) {
-            targets.push(target.clone());
+        let plan_target = &field["target"];
+        let target = json!({
+            "revision": plan_target["revision"],
+            "target": plan_target["id"],
+        });
+        if !targets.iter().any(|held| held == &target) {
+            targets.push(target);
         }
-        let id = target["id"].as_str().expect("target id");
+        let id = plan_target["id"].as_str().expect("target id");
         if id != "connection.name" && !field["secret"].as_bool().expect("secret fact") {
             settings.push(json!({"target": id, "value": setting_value(id)}));
         }
@@ -530,6 +711,8 @@ fn setting_value(target: &str) -> &'static str {
     match target {
         "setting.default.endpoint.domain" => "acme.freshdesk.com",
         "setting.default.endpoint.origin" => "https://gitlab.example",
+        target if target.ends_with(".endpoint.subdomain") => "acme",
+        target if target.contains(".username.") => "operator@example.com",
         other => panic!("publication crash fixture has no value for {other}"),
     }
 }

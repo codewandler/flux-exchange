@@ -342,7 +342,7 @@ impl SupervisedChild {
 
 fn assert_new_start_refuses_at_metadata_expiry(target: &str) {
     let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v1");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v2");
     let fixture: flux_exchange_release::FixtureSet = flux_exchange_release::canonical::parse(
         &flux_exchange_release::read_bounded_file(
             &fixture_root.join("fixture-set.json"),

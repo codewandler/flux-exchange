@@ -47,6 +47,16 @@ impl Allocation {
     pub const fn receipt_id(&self) -> ReceiptId {
         self.receipt
     }
+
+    /// Opaque provider identity for the FXLM control object. It must never enter a URL or log.
+    pub fn transaction_protocol_bytes(&self) -> [u8; 32] {
+        self.id.protocol_bytes()
+    }
+
+    /// Exact proposal identity associated with this allocation.
+    pub fn proposal_protocol_bytes(&self) -> [u8; 32] {
+        self.proposal.protocol_bytes()
+    }
 }
 
 /// A separate opaque receipt identity. The all-zero value is reserved and never emitted.
@@ -74,6 +84,22 @@ impl ReceiptId {
 pub enum ProposalState {
     Active,
     Committed(ReceiptId),
+}
+
+/// One durable, value-free publication still owed after provider recovery.
+pub struct PendingPublication {
+    receipt: ReceiptId,
+    bytes: Vec<u8>,
+}
+
+impl PendingPublication {
+    pub const fn receipt_id(&self) -> ReceiptId {
+        self.receipt
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 /// Durable coordinator around one process-lifetime prepared-store port.
@@ -135,14 +161,27 @@ impl TransactionCoordinator {
         label: &str,
         proposal: SecretProposalDigest,
     ) -> Result<Allocation, CoordinatorError> {
+        self.allocate_for_tenant(kind, "", connector, label, proposal)
+    }
+
+    /// Allocate inside one server-derived tenant boundary.
+    pub fn allocate_for_tenant(
+        &self,
+        kind: TransactionKind,
+        tenant: &str,
+        connector: &str,
+        label: &str,
+        proposal: SecretProposalDigest,
+    ) -> Result<Allocation, CoordinatorError> {
         let nonce = nonzero_nonce()?;
         let receipt = nonzero_receipt()?;
-        self.allocate_with(kind, connector, label, proposal, nonce, receipt)
+        self.allocate_with(kind, tenant, connector, label, proposal, nonce, receipt)
     }
 
     fn allocate_with(
         &self,
         kind: TransactionKind,
+        tenant: &str,
         connector: &str,
         label: &str,
         proposal: SecretProposalDigest,
@@ -178,8 +217,8 @@ impl TransactionCoordinator {
         let inserted = transaction.execute(
             "INSERT INTO transactions (
                  transaction_id, generation, nonce, proposal_digest, receipt_id, kind,
-                 connector, label, phase, decided
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'allocated', 0)",
+                 tenant, connector, label, phase, decided
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'allocated', 0)",
             params![
                 id.protocol_bytes().as_slice(),
                 generation_value.to_string(),
@@ -187,6 +226,7 @@ impl TransactionCoordinator {
                 proposal.protocol_bytes().as_slice(),
                 receipt.protocol_bytes().as_slice(),
                 kind.as_str(),
+                tenant,
                 connector,
                 label,
             ],
@@ -224,14 +264,28 @@ impl TransactionCoordinator {
         label: &str,
         proposal: SecretProposalDigest,
     ) -> Result<Option<ProposalState>, CoordinatorError> {
+        self.proposal_state_for_tenant(kind, "", connector, label, proposal)
+    }
+
+    /// Return same-proposal state only inside the server-derived tenant boundary.
+    pub fn proposal_state_for_tenant(
+        &self,
+        kind: TransactionKind,
+        tenant: &str,
+        connector: &str,
+        label: &str,
+        proposal: SecretProposalDigest,
+    ) -> Result<Option<ProposalState>, CoordinatorError> {
         let journal = self.lock()?;
         let row: Option<(Vec<u8>, String)> = journal
             .query_row(
                 "SELECT receipt_id, phase FROM transactions
-                 WHERE kind = ?1 AND connector = ?2 AND label = ?3 AND proposal_digest = ?4
+                 WHERE kind = ?1 AND tenant = ?2 AND connector = ?3 AND label = ?4
+                   AND proposal_digest = ?5
                  ORDER BY rowid DESC LIMIT 1",
                 params![
                     kind.as_str(),
+                    tenant,
                     connector,
                     label,
                     proposal.protocol_bytes().as_slice()
@@ -248,6 +302,128 @@ impl TransactionCoordinator {
             }
         })
         .transpose()
+    }
+
+    /// Attach the complete non-secret roll-forward image before any provider prepare.
+    pub fn attach_publication(
+        &self,
+        allocation: Allocation,
+        canonical: &[u8],
+    ) -> Result<(), CoordinatorError> {
+        let journal = self.lock()?;
+        let changed = journal
+            .execute(
+                "UPDATE transactions SET publication = ?1, published = 0
+                 WHERE transaction_id = ?2 AND proposal_digest = ?3
+                   AND phase = 'allocated' AND publication IS NULL",
+                params![
+                    canonical,
+                    allocation.id.protocol_bytes().as_slice(),
+                    allocation.proposal.protocol_bytes().as_slice(),
+                ],
+            )
+            .map_err(|source| self.database(source))?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(CoordinatorError::InvalidPhase)
+        }
+    }
+
+    /// Every provider-terminal row whose value-free metadata/audit image is not yet published.
+    pub fn pending_publications(&self) -> Result<Vec<PendingPublication>, CoordinatorError> {
+        let journal = self.lock()?;
+        let mut statement = journal
+            .prepare(
+                "SELECT receipt_id, publication FROM transactions
+                 WHERE phase = 'terminal' AND published = 0
+                 ORDER BY rowid",
+            )
+            .map_err(|source| self.database(source))?;
+        let publications = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|source| self.database(source))?
+            .map(|row| {
+                let (receipt, bytes) = row.map_err(|source| self.database(source))?;
+                Ok(PendingPublication {
+                    receipt: decode_receipt(&receipt)?,
+                    bytes,
+                })
+            })
+            .collect();
+        publications
+    }
+
+    /// Whether one tenant/connector still has a provider-committed public image to roll forward.
+    ///
+    /// A same-proposal replay may resolve this row, but a different mutation must not observe the
+    /// intermediate durable steps or race them after the original in-process claim is released.
+    pub fn publication_pending_for(
+        &self,
+        tenant: &str,
+        connector: &str,
+    ) -> Result<bool, CoordinatorError> {
+        self.lock()?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM transactions
+                 WHERE tenant = ?1 AND connector = ?2
+                   AND phase = 'terminal' AND published = 0)",
+                params![tenant, connector],
+                |row| row.get(0),
+            )
+            .map_err(|source| self.database(source))
+    }
+
+    /// Close one exact roll-forward row only after metadata and audit are both durable.
+    pub fn mark_published(&self, receipt: ReceiptId) -> Result<(), CoordinatorError> {
+        let journal = self.lock()?;
+        let changed = journal
+            .execute(
+                "UPDATE transactions SET published = 1
+                 WHERE receipt_id = ?1 AND phase = 'terminal' AND published = 0",
+                [receipt.protocol_bytes().as_slice()],
+            )
+            .map_err(|source| self.database(source))?;
+        let terminal = journal
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM transactions WHERE receipt_id = ?1 AND phase = 'terminal' AND published = 1)",
+                [receipt.protocol_bytes().as_slice()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|source| self.database(source))?;
+        if changed == 1 || terminal {
+            Ok(())
+        } else {
+            Err(CoordinatorError::UnknownAllocation)
+        }
+    }
+
+    /// Value-free publication image for receipt query or same-proposal replay.
+    pub fn publication(&self, receipt: ReceiptId) -> Result<Option<Vec<u8>>, CoordinatorError> {
+        let journal = self.lock()?;
+        journal
+            .query_row(
+                "SELECT publication FROM transactions WHERE receipt_id = ?1 AND phase = 'terminal'",
+                [receipt.protocol_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|source| self.database(source))
+    }
+
+    /// Whether public metadata and canonical audit have already crossed their durable boundary.
+    pub fn publication_is_complete(&self, receipt: ReceiptId) -> Result<bool, CoordinatorError> {
+        let journal = self.lock()?;
+        journal
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM transactions
+                 WHERE receipt_id = ?1 AND phase = 'terminal' AND published = 1)",
+                [receipt.protocol_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|source| self.database(source))
     }
 
     /// Prepare the complete provider-owned candidate. Exchange never inspects its mutations.
@@ -492,7 +668,7 @@ impl TransactionCoordinator {
             return Ok(false);
         }
         let rows = transaction
-            .prepare("SELECT transaction_id, generation, phase FROM transactions")
+            .prepare("SELECT transaction_id, generation, phase, published FROM transactions")
             .and_then(|mut statement| {
                 statement
                     .query_map([], |row| {
@@ -500,19 +676,20 @@ impl TransactionCoordinator {
                             row.get::<_, Vec<u8>>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, String>(2)?,
+                            row.get::<_, bool>(3)?,
                         ))
                     })?
                     .collect::<Result<Vec<_>, _>>()
             })
             .map_err(|source| CoordinatorRefusal::internal_predecision(self.database(source)))?;
         let mut retiring = Vec::new();
-        for (id, generation, phase) in rows {
+        for (id, generation, phase, published) in rows {
             let generation = generation
                 .parse::<u64>()
                 .map_err(|_| CoordinatorError::GenerationCorrupt)
                 .map_err(CoordinatorRefusal::internal_predecision)?;
             if generation <= maximum {
-                if phase != "terminal" {
+                if phase != "terminal" || !published {
                     return Err(CoordinatorRefusal::internal_predecision(
                         CoordinatorError::ReclaimStillReferenced,
                     ));
@@ -835,19 +1012,71 @@ fn initialise(connection: &Connection, path: &Path) -> Result<(), CoordinatorErr
                  proposal_digest BLOB NOT NULL CHECK(length(proposal_digest) = 32),
                  receipt_id BLOB NOT NULL UNIQUE CHECK(length(receipt_id) = 32),
                  kind TEXT NOT NULL CHECK(kind IN ('connect', 'credential')),
+                 tenant TEXT NOT NULL,
                  connector TEXT NOT NULL,
                  label TEXT NOT NULL,
                  phase TEXT NOT NULL CHECK(phase IN ('allocated', 'prepared', 'decided', 'terminal')),
-                 decided INTEGER NOT NULL CHECK(decided IN (0, 1))
+                 decided INTEGER NOT NULL CHECK(decided IN (0, 1)),
+                 publication BLOB,
+                 published INTEGER NOT NULL DEFAULT 1 CHECK(published IN (0, 1))
              );
-             CREATE UNIQUE INDEX IF NOT EXISTS transaction_proposal
-                 ON transactions(kind, connector, label, proposal_digest);
              INSERT OR IGNORE INTO coordinator_metadata(key, value)
                  VALUES ('schema', 'exchange.transaction-journal.v1');
              INSERT OR IGNORE INTO coordinator_metadata(key, value)
                  VALUES ('next_generation', '1');
              INSERT OR IGNORE INTO coordinator_metadata(key, value)
                  VALUES ('retired_generation', '0');",
+        )
+        .map_err(|source| CoordinatorError::Journal {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let columns = connection
+        .prepare("PRAGMA table_info(transactions)")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|source| CoordinatorError::Journal {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !columns.iter().any(|column| column == "tenant") {
+        connection
+            .execute(
+                "ALTER TABLE transactions ADD COLUMN tenant TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|source| CoordinatorError::Journal {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    if !columns.iter().any(|column| column == "publication") {
+        connection
+            .execute("ALTER TABLE transactions ADD COLUMN publication BLOB", [])
+            .map_err(|source| CoordinatorError::Journal {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    if !columns.iter().any(|column| column == "published") {
+        connection
+            .execute(
+                "ALTER TABLE transactions ADD COLUMN published INTEGER NOT NULL DEFAULT 1 CHECK(published IN (0, 1))",
+                [],
+            )
+            .map_err(|source| CoordinatorError::Journal {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    connection
+        .execute_batch(
+            "DROP INDEX IF EXISTS transaction_proposal;
+             CREATE UNIQUE INDEX IF NOT EXISTS transaction_proposal_v2
+                 ON transactions(kind, tenant, connector, label, proposal_digest);",
         )
         .map_err(|source| CoordinatorError::Journal {
             path: path.to_path_buf(),
@@ -986,6 +1215,7 @@ mod tests {
         coordinator
             .allocate_with(
                 TransactionKind::Connect,
+                "",
                 "example",
                 "primary",
                 proposal,
@@ -1202,6 +1432,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_publication_gates_its_tenant_connector_until_closed() {
+        let scratch = Scratch::new();
+        let (_ordinary, prepared, _bound) = stores(&scratch);
+        let coordinator =
+            TransactionCoordinator::bind(scratch.journal(), prepared).expect("coordinator");
+        let allocation = coordinator
+            .allocate_with(
+                TransactionKind::Connect,
+                "acme",
+                "example",
+                "primary",
+                digest(27),
+                [27; 24],
+                ReceiptId::from_protocol_bytes([28; 32]).expect("receipt"),
+            )
+            .expect("allocation");
+        coordinator
+            .attach_publication(allocation, br#"{"schema":"test"}"#)
+            .expect("publication image");
+        coordinator
+            .prepare(allocation, &batch("pending-publication-sentinel"))
+            .await
+            .expect("provider prepare");
+        coordinator.decide_commit(allocation).expect("decision");
+        let receipt = coordinator
+            .commit(allocation)
+            .await
+            .expect("provider commit");
+
+        assert!(coordinator
+            .publication_pending_for("acme", "example")
+            .expect("pending query"));
+        assert!(!coordinator
+            .publication_pending_for("other", "example")
+            .expect("tenant isolation"));
+        assert!(!coordinator
+            .publication_pending_for("acme", "other")
+            .expect("connector isolation"));
+        coordinator
+            .mark_published(receipt)
+            .expect("close publication");
+        assert!(!coordinator
+            .publication_pending_for("acme", "example")
+            .expect("closed query"));
+    }
+
+    #[tokio::test]
     async fn predecision_recovery_aborts_provider_staging_and_removes_the_journal_row() {
         let scratch = Scratch::new();
         let (ordinary, prepared, _bound) = stores(&scratch);
@@ -1256,6 +1533,7 @@ mod tests {
         assert!(matches!(
             restarted.allocate_with(
                 TransactionKind::Connect,
+                "",
                 "example",
                 "zero-nonce",
                 digest(31),

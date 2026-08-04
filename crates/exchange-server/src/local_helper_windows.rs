@@ -1,10 +1,9 @@
 //! Windows execution boundary for the verified local helper modes.
 //!
 //! The production vendor client authenticates and process-pins the owner endpoint across its PLAN
-//! and mutation connections. The inherited Service Account writer remains a process capability,
-//! not protocol data: its typed test seam validates the write end and models `DuplicateHandle`, but
-//! production refuses until the named-pipe endpoint defines a capability receiver association. It
-//! deliberately does not serialize a HANDLE or claim to enumerate the process handle table.
+//! and mutation connections. The Service Account helper validates its inherited writer locally,
+//! then names that non-secret process capability in the fixed `FXHA` attachment. The authenticated
+//! server duplicates it from this exact client process; the helper never duplicates into it.
 
 // Windows-only integration targets include this source directly. Production also compiles the
 // module and enters it only through the closed `LocalHelperInvocation` parsed in `main`.
@@ -20,10 +19,9 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
-use windows_sys::Wdk::Foundation::{NtQueryObject, OBJECT_NAME_INFORMATION};
 use windows_sys::Win32::Foundation::{
     CloseHandle, CompareObjectHandles, GetHandleInformation, GetLastError, SetHandleInformation,
-    ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE,
     HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
@@ -31,14 +29,14 @@ use windows_sys::Win32::Security::{
     TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileType, ReadFile, WriteFile, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_TYPE_PIPE, OPEN_EXISTING, SYNCHRONIZE,
+    CreateFileW, GetFileType, GetFinalPathNameByHandleW, ReadFile, WriteFile, FILE_NAME_NORMALIZED,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_PIPE, OPEN_EXISTING, SYNCHRONIZE, VOLUME_NAME_NT,
 };
 use windows_sys::Win32::System::Pipes::{
     GetNamedPipeInfo, GetNamedPipeServerProcessId, PeekNamedPipe, PIPE_SERVER_END,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, WaitForSingleObject,
+    GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, WaitForSingleObject,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
@@ -70,6 +68,7 @@ const ERROR: u16 = 0x7fff;
 const RECEIPT_SCHEMA: &str = "exchange.service-account-mint-receipt.v1";
 const ERROR_SCHEMA: &str = "exchange.local-management-error.v1";
 const ENABLE_ECHO_INPUT: u32 = 0x0004;
+const ATTACHMENT_BYTES: usize = 16;
 
 /// Execute one already-closed Windows helper invocation before tracing or the server runtime.
 pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
@@ -82,16 +81,13 @@ pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
             Err(_) => HelperExit::CapabilityOrTransportFailure,
         },
         LocalHelperInvocation::ServiceAccountMint {
+            id,
+            expires_at,
             writer: MintWriterCapability::Windows(writer),
-            ..
-        } => {
-            // The accepted contract does not define how the target-process HANDLE returned by
-            // DuplicateHandle crosses the named-pipe boundary, and the production server consumes
-            // only FXLM bytes. Take and close the inherited capability rather than serializing a
-            // HANDLE into MINT JSON or inventing an unauthenticated transport preface.
-            let _ = InheritedWriter::take(writer);
-            HelperExit::CapabilityOrTransportFailure
-        }
+        } => match NativeMintPort::new() {
+            Ok(mut port) => run_mint(&id, expires_at, writer, &mut port),
+            Err(_) => HelperExit::CapabilityOrTransportFailure,
+        },
         _ => HelperExit::CapabilityOrTransportFailure,
     }
 }
@@ -411,6 +407,7 @@ impl PinnedEndpoint {
 struct ProcessIdentity {
     sid: Vec<u8>,
     session: u32,
+    creation: u64,
 }
 
 fn process_token_identity(process: HANDLE) -> Result<ProcessIdentity, WindowsHelperError> {
@@ -487,7 +484,19 @@ fn process_token_identity(process: HANDLE) -> Result<ProcessIdentity, WindowsHel
     {
         return Err(WindowsHelperError::OwnerIdentity);
     }
-    Ok(ProcessIdentity { sid, session })
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err(WindowsHelperError::OwnerIdentity);
+    }
+    let creation = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+    Ok(ProcessIdentity {
+        sid,
+        session,
+        creation,
+    })
 }
 
 fn pipe_name_for_sid(sid: &[u8]) -> String {
@@ -801,32 +810,72 @@ pub(crate) fn run_vendor<C: VendorCeremony>(
 ///
 /// Implementations connect to the account-derived named pipe, pin that exact server process, and
 /// compare its `TokenUser` SID and session with the helper before returning `Session`. The
-/// `duplicate_writer` implementation must call `DuplicateHandle` from the helper into that pinned
-/// process. Because `exchange_mint` consumes the same `Session` and `DuplicatedWriter`, a writer
-/// from another connection or process cannot be substituted by the orchestration seam.
+/// helper then writes `FXHA` and MINT on that same connection. Only the server may resolve the
+/// attachment's source HANDLE with `DuplicateHandle` from the authenticated client process.
 pub(crate) trait AuthenticatedMintPort {
     type Error;
     type Session;
-    type DuplicatedWriter;
 
     /// Open, owner-authenticate, and process-pin one local-management connection.
     fn open_owner_session(&mut self, ready_by: Instant) -> Result<Self::Session, Self::Error>;
 
-    /// Duplicate the validated writer into the exact server process pinned by `session`.
-    fn duplicate_writer(
-        &mut self,
-        session: &mut Self::Session,
-        writer: HANDLE,
-    ) -> Result<Self::DuplicatedWriter, Self::Error>;
-
-    /// Send exact MINT plus the duplicated capability and read its sole terminal response.
+    /// Send exact FXHA plus MINT and read the sole terminal response.
     fn exchange_mint(
         &mut self,
         session: Self::Session,
-        writer: Self::DuplicatedWriter,
-        mint_frame: &[u8],
+        request: &[u8],
         ready_by: Instant,
     ) -> Result<Vec<u8>, Self::Error>;
+}
+
+struct NativeMintPort {
+    runtime: tokio::runtime::Runtime,
+}
+
+impl NativeMintPort {
+    fn new() -> Result<Self, WindowsHelperError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|_| WindowsHelperError::Transport)?;
+        Ok(Self { runtime })
+    }
+}
+
+struct NativeMintSession {
+    _endpoint: PinnedEndpoint,
+    pipe: NamedPipeClient,
+}
+
+impl AuthenticatedMintPort for NativeMintPort {
+    type Error = WindowsHelperError;
+    type Session = NativeMintSession;
+
+    fn open_owner_session(&mut self, ready_by: Instant) -> Result<Self::Session, Self::Error> {
+        self.runtime.block_on(async {
+            let mut endpoint = PinnedEndpoint::authenticated()?;
+            let pipe = endpoint.connect_before(ready_by).await?;
+            Ok(NativeMintSession {
+                _endpoint: endpoint,
+                pipe,
+            })
+        })
+    }
+
+    fn exchange_mint(
+        &mut self,
+        mut session: Self::Session,
+        request: &[u8],
+        ready_by: Instant,
+    ) -> Result<Vec<u8>, Self::Error> {
+        self.runtime.block_on(async {
+            write_before_async(&mut session.pipe, request, ready_by).await?;
+            Ok(read_terminal_before_async(&mut session.pipe, ready_by)
+                .await?
+                .bytes)
+        })
+    }
 }
 
 /// Execute the Windows Service Account helper through one authenticated, process-pinned session.
@@ -843,29 +892,29 @@ pub(crate) fn run_mint<P: AuthenticatedMintPort>(
     let ready_by = Instant::now()
         .checked_add(HELPER_SETUP_DEADLINE)
         .unwrap_or_else(Instant::now);
-    let mut session = match port.open_owner_session(ready_by) {
+    let session = match port.open_owner_session(ready_by) {
         Ok(session) if Instant::now() < ready_by => session,
         _ => return HelperExit::CapabilityOrTransportFailure,
     };
-    let duplicated =
-        match port.duplicate_writer(&mut session, writer.descriptor.as_raw_handle() as HANDLE) {
-            Ok(duplicated) if Instant::now() < ready_by => duplicated,
-            _ => return HelperExit::CapabilityOrTransportFailure,
-        };
-    // The helper's source handle closes after duplication. Only the pinned server process retains
-    // the writer that can receive one FXSA frame.
-    drop(writer);
-
+    let source = writer.descriptor.as_raw_handle() as usize as u64;
     let payload = format!(
         "{{\"expires_at\":\"{}\",\"id\":\"{}\"}}",
         expires_at.value(),
         id.as_str()
     );
     let mint = encode_frame(CLIENT_DIRECTION, SERVICE_ACCOUNT_MINT, payload.as_bytes());
-    let terminal = match port.exchange_mint(session, duplicated, &mint, ready_by) {
+    let mut request = Vec::with_capacity(ATTACHMENT_BYTES + mint.len());
+    request.extend_from_slice(b"FXHA");
+    request.extend_from_slice(&[1, 1, 1, 0]);
+    request.extend_from_slice(&source.to_be_bytes());
+    request.extend_from_slice(&mint);
+    // Keep the source live until the server has consumed the attachment and returned a terminal
+    // response. Closing it earlier races the server-side DuplicateHandle.
+    let terminal = match port.exchange_mint(session, &request, ready_by) {
         Ok(terminal) if Instant::now() < ready_by => terminal,
         _ => return HelperExit::CapabilityOrTransportFailure,
     };
+    drop(writer);
     if validate_terminal(&terminal, id.as_str()) {
         HelperExit::TerminalFrameWritten
     } else {
@@ -989,53 +1038,20 @@ fn inherited_pipe(
 }
 
 fn pipe_identity(handle: HANDLE) -> Result<Vec<u16>, WindowsHelperError> {
-    const OBJECT_NAME_INFORMATION_CLASS: i32 = 1;
-    let mut required = 0_u32;
-    unsafe {
-        NtQueryObject(
-            handle,
-            OBJECT_NAME_INFORMATION_CLASS,
-            null_mut(),
-            0,
-            &mut required,
-        )
+    let flags = FILE_NAME_NORMALIZED | VOLUME_NAME_NT;
+    let required = unsafe { GetFinalPathNameByHandleW(handle, null_mut(), 0, flags) };
+    if required == 0 {
+        return Err(WindowsHelperError::Capability);
+    }
+    let mut identity = vec![0_u16; required as usize];
+    let written = unsafe {
+        GetFinalPathNameByHandleW(handle, identity.as_mut_ptr(), identity.len() as u32, flags)
     };
-    if required < std::mem::size_of::<OBJECT_NAME_INFORMATION>() as u32 {
+    if written == 0 || written as usize >= identity.len() {
         return Err(WindowsHelperError::Capability);
     }
-    let words = (required as usize).div_ceil(std::mem::size_of::<usize>());
-    let mut storage = vec![0_usize; words];
-    let status = unsafe {
-        NtQueryObject(
-            handle,
-            OBJECT_NAME_INFORMATION_CLASS,
-            storage.as_mut_ptr().cast(),
-            required,
-            &mut required,
-        )
-    };
-    if status < 0 {
-        return Err(WindowsHelperError::Capability);
-    }
-    // SAFETY: a successful query initialized OBJECT_NAME_INFORMATION at the aligned buffer start.
-    let information = unsafe { &*(storage.as_ptr().cast::<OBJECT_NAME_INFORMATION>()) };
-    let length = usize::from(information.Name.Length);
-    let address = information.Name.Buffer as usize;
-    let start = storage.as_ptr() as usize;
-    let end = start
-        .checked_add(storage.len() * std::mem::size_of::<usize>())
-        .ok_or(WindowsHelperError::Capability)?;
-    if length == 0
-        || length % std::mem::size_of::<u16>() != 0
-        || address < start
-        || address
-            .checked_add(length)
-            .is_none_or(|name_end| name_end > end)
-    {
-        return Err(WindowsHelperError::Capability);
-    }
-    // SAFETY: the validated UNICODE_STRING range lies wholly inside `storage`.
-    Ok(unsafe { std::slice::from_raw_parts(information.Name.Buffer, length / 2) }.to_vec())
+    identity.truncate(written as usize);
+    Ok(identity)
 }
 
 fn clear_inheritance(handle: HANDLE) -> Result<(), WindowsHelperError> {

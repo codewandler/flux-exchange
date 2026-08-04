@@ -45,6 +45,133 @@ struct Selection {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct NativeSelection {
+    connector: String,
+    selection: serde_json::Value,
+}
+
+/// One value-free refusal from the native plan projection.
+pub(crate) struct NativePlanRefusal {
+    pub(crate) code: &'static str,
+    pub(crate) status: u16,
+    pub(crate) retry: &'static str,
+}
+
+/// Value-free plan facts consumed by the local-management proposal validator.
+pub(crate) struct NativePlanSnapshot {
+    pub(crate) canonical: Vec<u8>,
+    pub(crate) credential_revision: Option<String>,
+    pub(crate) plan_revision: String,
+    pub(crate) targets: Vec<NativeTargetFact>,
+}
+
+/// One ordered target fact without a stored value or credential-presence bit.
+pub(crate) struct NativeTargetFact {
+    pub(crate) id: String,
+    pub(crate) revision: String,
+    pub(crate) required: bool,
+    pub(crate) partition: crate::local_management::proposal::TargetPartition,
+}
+
+/// Project the same canonical v2 body used by HTTP after a closed native PLAN_QUERY.
+pub(crate) fn native_query(
+    state: &AppState,
+    tenant: &Tenant,
+    payload: &[u8],
+) -> Result<Vec<u8>, NativePlanRefusal> {
+    let request: NativeSelection = serde_json::from_slice(payload)
+        .map_err(|_| native_refusal("invalid_request", 400, "never"))?;
+    let selection = match request.selection {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(label) => Some(label),
+        _ => return Err(native_refusal("invalid_request", 400, "never")),
+    };
+    let snapshot = native_snapshot(state, tenant, &request.connector, selection.as_deref())?;
+    Ok(snapshot.canonical)
+}
+
+/// Resolve one exact plan snapshot for a BEGIN before any transaction allocation.
+pub(crate) fn native_snapshot(
+    state: &AppState,
+    tenant: &Tenant,
+    connector: &str,
+    selection: Option<&str>,
+) -> Result<NativePlanSnapshot, NativePlanRefusal> {
+    let provider =
+        catalogued(connector).ok_or_else(|| native_refusal("unknown_connector", 404, "refresh"))?;
+    match state.connection_publication_pending(tenant, provider.id) {
+        Ok(false) => {}
+        Ok(true) => return Err(native_refusal("connect_busy", 409, "refresh")),
+        Err(()) => return Err(native_refusal("store_unavailable", 503, "operator")),
+    }
+    if let Some(label) = selection.as_deref() {
+        let label = ConnectionLabel::new(label)
+            .map_err(|_| native_refusal("invalid_label", 422, "never"))?;
+        let registry = state
+            .connection_registry()
+            .ok_or_else(|| native_refusal("local_management_unavailable", 503, "operator"))?;
+        match registry.resolve(tenant, provider.id, &label) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(native_refusal("unknown_label", 404, "refresh")),
+            Err(_) => {
+                return Err(native_refusal("store_unavailable", 503, "operator"));
+            }
+        }
+    }
+    let principal = Principal::new(
+        exchange_host::PrincipalKind::User,
+        "local-owner",
+        tenant.clone(),
+    );
+    let plan = project(state, &principal, provider, selection.as_deref())
+        .map_err(|_| native_refusal("store_unavailable", 503, "operator"))?;
+    let canonical =
+        canonical_json(&plan).map_err(|_| native_refusal("internal_refusal", 500, "operator"))?;
+    let mut seen_targets = BTreeSet::new();
+    let targets = plan
+        .fields
+        .iter()
+        .filter_map(|field| {
+            field.target.as_ref().and_then(|target| {
+                // One connector address may be shared by several presentation fields. FXLM's
+                // target universe carries that address exactly once, in first plan order.
+                seen_targets
+                    .insert(target.id.as_str())
+                    .then(|| NativeTargetFact {
+                        id: target.id.clone(),
+                        revision: target.revision.clone(),
+                        required: field.required,
+                        partition: if target.id == "connection.name" {
+                            crate::local_management::proposal::TargetPartition::ConnectionName
+                        } else if field.secret {
+                            crate::local_management::proposal::TargetPartition::Credential
+                        } else if field.authority.is_some() {
+                            crate::local_management::proposal::TargetPartition::Authority
+                        } else {
+                            crate::local_management::proposal::TargetPartition::Setting
+                        },
+                    })
+            })
+        })
+        .collect();
+    Ok(NativePlanSnapshot {
+        canonical,
+        credential_revision: plan.credential_revision,
+        plan_revision: plan.plan_revision,
+        targets,
+    })
+}
+
+const fn native_refusal(code: &'static str, status: u16, retry: &'static str) -> NativePlanRefusal {
+    NativePlanRefusal {
+        code,
+        status,
+        retry,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AuthoritySubmission {
     version: String,
     revision: String,
@@ -335,7 +462,7 @@ async fn transition_authority(
             setting: declared.binds(),
         });
     }
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
     let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
@@ -592,6 +719,11 @@ fn project(
     provider: &'static Provider,
     selection: Option<&str>,
 ) -> Result<Plan, Box<Response>> {
+    match state.connection_publication_pending(principal.tenant(), provider.id) {
+        Ok(false) => {}
+        Ok(true) => return Err(Box::new(change_in_flight(provider))),
+        Err(()) => return Err(Box::new(no_store())),
+    }
     let context = connection_context(state, principal, provider, selection)?;
     let settings = state
         .settings()
@@ -700,14 +832,24 @@ fn project(
         ))
     })?;
 
-    let credential_revision = selection.map(|label| {
-        credential_revision(
-            principal.tenant(),
-            provider.id,
-            label,
-            context.selected_instance.as_ref(),
-        )
-    });
+    let credential_revision = selection
+        .map(|label| {
+            let heads = state
+                .credential_heads()
+                .ok_or_else(|| "the durable credential-head store is unavailable".to_owned())?;
+            let key = crate::credential_head::CredentialHeadKey::new(
+                principal.tenant().as_str(),
+                provider.id,
+                label,
+            )
+            .map_err(|error| error.to_string())?;
+            heads
+                .current(&key)
+                .map(|head| head.as_str().to_owned())
+                .map_err(|error| error.to_string())
+        })
+        .transpose()
+        .map_err(|refusal| Box::new(internal_plan_refusal(refusal)))?;
     validate_plan_shape(
         &fields,
         &context.labels,
@@ -989,28 +1131,6 @@ fn plan_revision(provider: &Provider, fields: &[FieldView]) -> Result<String, St
     )
 }
 
-fn credential_revision(
-    tenant: &Tenant,
-    connector: &str,
-    label: &str,
-    instance: Option<&InstanceId>,
-) -> String {
-    // The head is deliberately independent of credential presence. X-134's coordinator replaces
-    // this legacy projection when it publishes a fresh head after a prepared credential commit.
-    let input = json!({
-        "connector": connector,
-        "instance": instance.map(InstanceId::as_str),
-        "label": label,
-        "tenant": tenant.as_str(),
-    });
-    let bytes = canonical_json(&input).expect("credential-head input is infallible");
-    domain_digest(
-        b"exchange.connection-plan.v2.legacy-credential-head",
-        &bytes,
-    )
-    .expect("SHA-256 output is infallible")
-}
-
 fn domain_digest(domain: &[u8], canonical: &[u8]) -> Result<String, String> {
     let mut digest = Sha256::new();
     digest.update(domain);
@@ -1132,7 +1252,11 @@ fn connection_context(
             let Some(entry) = entries.iter().find(|entry| entry.label == label) else {
                 return Err(Box::new(unknown_label(provider, &label)));
             };
-            Some(entry.instance.clone())
+            // The first named connection still occupies the legacy unqualified settings layout.
+            // Creating the second connection migrates that layout to its UUID before publication;
+            // from then on every selected label is qualified. Projecting the sole label through
+            // its UUID would hide the first connection's already-durable settings after recovery.
+            (entries.len() > 1).then(|| entry.instance.clone())
         }
     };
     Ok(ConnectionContext {
@@ -1453,6 +1577,7 @@ mod tests {
         app: Router,
         credentials: Arc<dyn SecretStore>,
         registry: Arc<MemoryConnectionRegistry>,
+        heads: Arc<crate::credential_head::CredentialHeadStore>,
         _scratch: Scratch,
     }
 
@@ -1463,6 +1588,10 @@ mod tests {
         let settings: Arc<dyn ConnectionSettings> =
             Arc::new(SettingsStore::bind(scratch.join("settings.json")).expect("settings store"));
         let registry = Arc::new(MemoryConnectionRegistry::default());
+        let heads = Arc::new(
+            crate::credential_head::CredentialHeadStore::migrate_legacy(&scratch.0, &[])
+                .expect("empty legacy migration"),
+        );
         let ordinary = credentials.secrets();
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("roster"),
@@ -1470,11 +1599,13 @@ mod tests {
         .with_operator_policy(crate::operator::OperatorPolicy::one("alice"))
         .with_credentials(ordinary.clone())
         .with_settings(settings)
-        .with_connection_registry(registry.clone());
+        .with_connection_registry(registry.clone())
+        .with_credential_heads(heads.clone());
         Harness {
             app: super::super::super::app(state),
             credentials: ordinary,
             registry,
+            heads,
             _scratch: scratch,
         }
     }
@@ -1919,6 +2050,14 @@ mod tests {
             .registry
             .assign(&tenant, provider.id, &label, &instance)
             .expect("held label");
+        let key = crate::credential_head::CredentialHeadKey::new(
+            tenant.as_str(),
+            provider.id,
+            label.as_str(),
+        )
+        .expect("head key");
+        let head = harness.heads.allocate_new(&key).expect("new head");
+        harness.heads.insert_new(key, head).expect("publish head");
         let path = "/api/connections/jira/plan?version=exchange.connection-plan.v2&name=company";
 
         let (status, absent) = call(&harness.app, "alice", Method::GET, path, None).await;

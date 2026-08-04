@@ -12,14 +12,15 @@ use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::net::UnixStream;
 
-use super::{HandoffError, HandoffFrame, HandoffWriter};
+use super::{HandoffDecoder, HandoffError, HandoffFrame, HandoffWriter};
 use crate::local_management::codec::{Direction, Opcode, StreamDecoder};
+use crate::local_management::service_account::{OneShotWriter, WriterRefusal};
 
 const FIXED_WRITER_FD: RawFd = 5;
 const MAX_RIGHTS_PER_MESSAGE: usize = 4;
 
 /// The helper's validated inherited FXSA write pipe.
-pub(in crate::local_management) struct HelperWriter {
+pub(crate) struct HelperWriter {
     descriptor: OwnedFd,
 }
 
@@ -28,7 +29,7 @@ impl HelperWriter {
     ///
     /// The caller invokes this only after selecting the closed Unix helper grammar. Taking
     /// ownership is intentional: every success or refusal closes FD 5 before the helper exits.
-    pub(in crate::local_management) fn inherited_fd5() -> Result<Self, UnixHandoffError> {
+    pub(crate) fn inherited_fd5() -> Result<Self, UnixHandoffError> {
         if descriptor_flags(FIXED_WRITER_FD).is_err() {
             return Err(UnixHandoffError::WriterMissing);
         }
@@ -46,7 +47,7 @@ impl HelperWriter {
     ///
     /// The descriptor is attached once. If the stream accepts only a prefix in that send, the
     /// remaining bytes are written normally; repeating `SCM_RIGHTS` would create a second writer.
-    pub(in crate::local_management) fn transfer_mint(
+    pub(crate) fn transfer_mint(
         self,
         stream: &UnixStream,
         mint_frame: &[u8],
@@ -94,6 +95,17 @@ impl ReceivedWriter {
     }
 }
 
+impl OneShotWriter for ReceivedWriter {
+    fn write_once(self: Box<Self>, bytes: &[u8]) -> Result<(), WriterRefusal> {
+        let mut decoder = HandoffDecoder::new();
+        decoder.push(bytes).map_err(|_| WriterRefusal::Invalid)?;
+        let frame = decoder.finish().map_err(|_| WriterRefusal::Invalid)?;
+        (*self)
+            .write_frame(&frame)
+            .map_err(|_| WriterRefusal::Closed)
+    }
+}
+
 /// Authenticate an accepted local-management stream and receive exactly one writer capability.
 ///
 /// `bytes` receives the FXLM bytes carried by the same stream message. It must be nonempty because
@@ -103,10 +115,35 @@ pub(in crate::local_management) fn receive_writer(
     expected_uid: u32,
     bytes: &mut [u8],
 ) -> Result<(ReceivedWriter, usize), UnixHandoffError> {
+    let (writer, received) = receive_initial(stream, expected_uid, bytes)?;
+    writer
+        .map(|writer| (writer, received))
+        .ok_or(UnixHandoffError::WriterMissing)
+}
+
+/// Receive the first FXLM bytes and at most one separately transferred writer capability.
+///
+/// Every native operation uses this first read so absence of a descriptor remains a valid input
+/// for non-MINT frames. A descriptor on any other opcode stays observable to the dispatcher and is
+/// refused there instead of being silently closed and treating the request as descriptor-free.
+pub(in crate::local_management) fn receive_initial(
+    stream: &UnixStream,
+    expected_uid: u32,
+    bytes: &mut [u8],
+) -> Result<(Option<ReceivedWriter>, usize), UnixHandoffError> {
+    receive_initial_fd(stream.as_raw_fd(), expected_uid, bytes)
+}
+
+/// Async-listener form of [`receive_initial`] operating on the already-owned socket descriptor.
+pub(in crate::local_management) fn receive_initial_fd(
+    stream: RawFd,
+    expected_uid: u32,
+    bytes: &mut [u8],
+) -> Result<(Option<ReceivedWriter>, usize), UnixHandoffError> {
     if bytes.is_empty() {
         return Err(UnixHandoffError::MissingProtocolBytes);
     }
-    authenticate_peer(stream, expected_uid)?;
+    authenticate_peer_fd(stream, expected_uid)?;
     let (mut descriptors, received, flags) = receive_descriptors(stream, bytes)?;
     if flags & libc::MSG_CTRUNC != 0 {
         return Err(UnixHandoffError::ControlTruncated);
@@ -117,25 +154,22 @@ pub(in crate::local_management) fn receive_writer(
     if received == 0 {
         return Err(UnixHandoffError::MissingProtocolBytes);
     }
-    if descriptors.len() != 1 {
-        return Err(if descriptors.is_empty() {
-            UnixHandoffError::WriterMissing
-        } else {
-            UnixHandoffError::MultipleWriters
-        });
+    if descriptors.len() > 1 {
+        return Err(UnixHandoffError::MultipleWriters);
     }
     let Some(descriptor) = descriptors.pop() else {
-        return Err(UnixHandoffError::WriterMissing);
+        return Ok((None, received));
     };
     // Linux receives atomically close-on-exec; macOS receives then immediately sets it here.
     set_close_on_exec(descriptor.as_raw_fd())?;
     validate_anonymous_write_pipe(descriptor.as_raw_fd())?;
-    Ok((ReceivedWriter { descriptor }, received))
+    Ok((Some(ReceivedWriter { descriptor }), received))
 }
 
 /// Value-free refusal from the Unix capability-transfer boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::local_management) enum UnixHandoffError {
+pub(crate) enum UnixHandoffError {
+    WouldBlock,
     WriterMissing,
     MultipleWriters,
     MissingProtocolBytes,
@@ -224,7 +258,7 @@ fn send_one_descriptor(
 }
 
 fn receive_descriptors(
-    stream: &UnixStream,
+    stream: RawFd,
     bytes: &mut [u8],
 ) -> Result<(Vec<OwnedFd>, usize, i32), UnixHandoffError> {
     let control_bytes = cmsg_space(MAX_RIGHTS_PER_MESSAGE * std::mem::size_of::<RawFd>());
@@ -244,9 +278,15 @@ fn receive_descriptors(
     #[cfg(target_os = "macos")]
     let receive_flags = 0;
     // SAFETY: msghdr and all referenced output buffers remain live for recvmsg.
-    let received = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut message, receive_flags) };
+    let received = unsafe { libc::recvmsg(stream, &mut message, receive_flags) };
     if received < 0 {
-        return Err(UnixHandoffError::StreamFailure);
+        return Err(
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+                UnixHandoffError::WouldBlock
+            } else {
+                UnixHandoffError::StreamFailure
+            },
+        );
     }
 
     let mut descriptors = Vec::new();
@@ -348,6 +388,10 @@ fn descriptor_flags(descriptor: RawFd) -> Result<i32, UnixHandoffError> {
 }
 
 fn authenticate_peer(stream: &UnixStream, expected_uid: u32) -> Result<(), UnixHandoffError> {
+    authenticate_peer_fd(stream.as_raw_fd(), expected_uid)
+}
+
+fn authenticate_peer_fd(stream: RawFd, expected_uid: u32) -> Result<(), UnixHandoffError> {
     if peer_uid(stream)? == expected_uid {
         Ok(())
     } else {
@@ -356,13 +400,13 @@ fn authenticate_peer(stream: &UnixStream, expected_uid: u32) -> Result<(), UnixH
 }
 
 #[cfg(target_os = "linux")]
-fn peer_uid(stream: &UnixStream) -> Result<u32, UnixHandoffError> {
+fn peer_uid(stream: RawFd) -> Result<u32, UnixHandoffError> {
     let mut credential = MaybeUninit::<libc::ucred>::zeroed();
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     // SAFETY: the stream is live and the output region has the exact ucred size.
     let result = unsafe {
         libc::getsockopt(
-            stream.as_raw_fd(),
+            stream,
             libc::SOL_SOCKET,
             libc::SO_PEERCRED,
             credential.as_mut_ptr().cast(),
@@ -377,11 +421,11 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, UnixHandoffError> {
 }
 
 #[cfg(target_os = "macos")]
-fn peer_uid(stream: &UnixStream) -> Result<u32, UnixHandoffError> {
+fn peer_uid(stream: RawFd) -> Result<u32, UnixHandoffError> {
     let mut uid = 0;
     let mut gid = 0;
     // SAFETY: the live stream and both output pointers satisfy getpeereid.
-    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+    if unsafe { libc::getpeereid(stream, &mut uid, &mut gid) } != 0 {
         Err(UnixHandoffError::PeerUnverified)
     } else {
         Ok(uid)

@@ -28,6 +28,10 @@ mod platform {
     const MAX_ACCOUNT_BUFFER: usize = 1024 * 1024;
 
     pub(super) fn authenticated_account_state_root() -> Result<PathBuf, String> {
+        #[cfg(feature = "native-root-test-seam")]
+        if let Some(home) = controlled_test_account_home()? {
+            return Ok(account_state_root(home));
+        }
         // SAFETY: `geteuid` has no pointer arguments or preconditions and returns the identity the
         // kernel applies to filesystem access. It is intentionally not inferred from USER/HOME.
         let uid = unsafe { libc::geteuid() };
@@ -81,11 +85,36 @@ mod platform {
                     "the authenticated account for effective uid {uid} has a non-absolute home directory"
                 ));
             }
-            #[cfg(target_os = "macos")]
-            return Ok(home.join("Library/Application Support/Flux/Exchange"));
-            #[cfg(not(target_os = "macos"))]
-            return Ok(home.join(".local/state/flux-exchange"));
+            return Ok(account_state_root(home));
         }
+    }
+
+    fn account_state_root(home: PathBuf) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        return home.join("Library/Application Support/Flux/Exchange");
+        #[cfg(not(target_os = "macos"))]
+        return home.join(".local/state/flux-exchange");
+    }
+
+    #[cfg(feature = "native-root-test-seam")]
+    fn controlled_test_account_home() -> Result<Option<PathBuf>, String> {
+        const ACCOUNT_HOME: &str = "FLUX_EXCHANGE_TEST_UNIX_ACCOUNT_HOME";
+        let Some(home) = std::env::var_os(ACCOUNT_HOME).map(PathBuf::from) else {
+            return Ok(None);
+        };
+        if !home.is_absolute()
+            || home.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err(format!(
+                "{ACCOUNT_HOME} must name one absolute authenticated-account test home without traversal"
+            ));
+        }
+        Ok(Some(home))
     }
 
     fn initial_buffer_size() -> usize {
@@ -156,6 +185,10 @@ mod platform {
     }
 
     fn authenticated_account_paths() -> Result<(PathBuf, PathBuf, PathBuf), String> {
+        #[cfg(feature = "native-root-test-seam")]
+        if let Some(paths) = controlled_test_account_paths()? {
+            return Ok(paths);
+        }
         let profile = known_folder(&FOLDERID_Profile, "FOLDERID_Profile")?;
         let local_app_data = known_folder(&FOLDERID_LocalAppData, "FOLDERID_LocalAppData")?;
         if !local_app_data.starts_with(&profile) {
@@ -167,6 +200,29 @@ mod platform {
         }
         let root = local_app_data.join("Flux/Exchange");
         Ok((profile, local_app_data, root))
+    }
+
+    #[cfg(feature = "native-root-test-seam")]
+    fn controlled_test_account_paths() -> Result<Option<(PathBuf, PathBuf, PathBuf)>, String> {
+        const PROFILE: &str = "FLUX_EXCHANGE_TEST_WINDOWS_PROFILE";
+        const LOCAL_APP_DATA: &str = "FLUX_EXCHANGE_TEST_WINDOWS_LOCAL_APP_DATA";
+        let profile = std::env::var_os(PROFILE).map(PathBuf::from);
+        let local_app_data = std::env::var_os(LOCAL_APP_DATA).map(PathBuf::from);
+        match (profile, local_app_data) {
+            (None, None) => Ok(None),
+            (Some(profile), Some(local_app_data)) => {
+                if !profile.is_absolute() || !local_app_data.is_absolute() {
+                    return Err(
+                        "the controlled Windows account-root test paths must be absolute".into(),
+                    );
+                }
+                let root = local_app_data.join("Flux/Exchange");
+                Ok(Some((profile, local_app_data, root)))
+            }
+            _ => Err(format!(
+                "{PROFILE} and {LOCAL_APP_DATA} must be set together for the controlled Windows account-root test seam"
+            )),
+        }
     }
 
     fn known_folder(folder: &windows_sys::core::GUID, name: &str) -> Result<PathBuf, String> {

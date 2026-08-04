@@ -43,6 +43,8 @@ pub struct LocalStatePaths {
     pub service_accounts: PathBuf,
     /// Value-free prepared-transaction recovery state below the authenticated owner root.
     pub coordinator: Option<PathBuf>,
+    /// Authenticated owner root containing value-free per-label credential heads.
+    pub credential_heads_root: Option<PathBuf>,
     pub apps: Option<PathBuf>,
 }
 
@@ -59,6 +61,7 @@ impl LocalStatePaths {
             audit: root.join("audit/events.sqlite3"),
             service_accounts: root.join("service-accounts/store.json"),
             coordinator: Some(root.join("coordinator/transactions.sqlite3")),
+            credential_heads_root: Some(root.to_path_buf()),
             apps: Some(root.join("apps")),
         }
     }
@@ -112,6 +115,7 @@ impl LocalStatePaths {
             audit: PathBuf::from(&configured[AUDIT_SETTING]),
             service_accounts: PathBuf::from(&configured[SERVICE_ACCOUNT_STORE_SETTING]),
             coordinator: None,
+            credential_heads_root: None,
             apps: None,
         })
     }
@@ -135,16 +139,7 @@ fn select(
     let configured = configured?;
 
     if development || root.is_some() {
-        #[cfg(windows)]
-        let account_default = root.is_none();
-        let root = match root {
-            Some(root) => root,
-            None => conventional_root()?,
-        };
-        #[cfg(windows)]
-        let root = ensure_owner_only_root(&root, account_default)?;
-        #[cfg(not(windows))]
-        let root = ensure_owner_only_root(&root)?;
+        let root = owner_root(root)?;
         return Ok(Some(
             LocalStatePaths::development(&root).with_explicit(&configured),
         ));
@@ -153,8 +148,23 @@ fn select(
     if configured.is_empty() {
         Ok(None)
     } else {
-        LocalStatePaths::explicit(&configured).map(Some)
+        let owner = owner_root(None)?;
+        let mut paths = LocalStatePaths::explicit(&configured)?;
+        paths.coordinator = Some(owner.join("coordinator/transactions.sqlite3"));
+        paths.credential_heads_root = Some(owner);
+        Ok(Some(paths))
     }
+}
+
+fn owner_root(requested: Option<PathBuf>) -> Result<PathBuf, LocalStateRefusal> {
+    #[cfg(windows)]
+    let account_default = requested.is_none();
+    let root = requested.map_or_else(conventional_root, Ok)?;
+    #[cfg(windows)]
+    let root = ensure_owner_only_root(&root, account_default)?;
+    #[cfg(not(windows))]
+    let root = ensure_owner_only_root(&root)?;
+    Ok(root)
 }
 
 fn read_explicit() -> Result<BTreeMap<&'static str, String>, LocalStateRefusal> {

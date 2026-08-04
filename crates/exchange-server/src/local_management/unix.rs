@@ -1,21 +1,28 @@
 use std::ffi::CString;
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::io::{Read as _, Seek as _, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, Interest};
 use tokio::net::{UnixListener, UnixStream};
 
 use super::codec::{Direction, StreamDecoder};
-use super::dispatcher::Transport;
-use super::{Dispatcher, TransactionCoordinator};
+use super::dispatcher::{deadline_frame, Transport};
+use super::service_account::OneShotWriter;
+use super::service_account_handoff::unix_transfer::{receive_initial_fd, UnixHandoffError};
+use super::{ActiveSession, Dispatcher, SessionAdvance, SessionBegin, TransactionCoordinator};
 use crate::state::AppState;
 
 const RUN_DIRECTORY: &str = "run";
 const SOCKET_NAME: &str = "local-management-v1.sock";
+const LEASE_NAME: &str = "local-management-v1.lease";
+const LEASE_SCHEMA: &str = "exchange.local-management-lease.v1";
 const LOCAL_OWNER_TENANT: &str = "local";
 const LOCAL_OWNER_PRINCIPAL: &str = "local-owner";
 #[cfg(test)]
@@ -31,6 +38,7 @@ pub(crate) struct LocalManagement {
     socket: PathBuf,
     socket_device: u64,
     socket_inode: u64,
+    _lease: EndpointLease,
     expected_peer_uid: u32,
     dispatcher: Dispatcher,
 }
@@ -80,22 +88,7 @@ impl LocalManagement {
         inspect_private_directory(&run, startup_euid, 0o700, "local-management run directory")?;
 
         let socket = run.join(SOCKET_NAME);
-        match std::fs::symlink_metadata(&socket) {
-            Ok(metadata) => {
-                return Err(format!(
-                    "refusing local-management endpoint `{}`: an existing {} is planted there; Exchange did not remove or replace it",
-                    socket.display(),
-                    object_kind(&metadata)
-                ));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "cannot inspect local-management endpoint `{}` without following it: {error}",
-                    socket.display()
-                ));
-            }
-        }
+        let mut lease = EndpointLease::acquire(&run, &socket, startup_euid)?;
 
         let listener = std::os::unix::net::UnixListener::bind(&socket).map_err(|error| {
             format!(
@@ -161,11 +154,13 @@ impl LocalManagement {
                     socket.display()
                 )
             })?;
+            lease.record_socket(bound_device, bound_inode)?;
             Ok(Self {
                 listener,
                 socket: socket.clone(),
                 socket_device: bound_device,
                 socket_inode: bound_inode,
+                _lease: lease,
                 expected_peer_uid: startup_euid,
                 dispatcher,
             })
@@ -191,7 +186,37 @@ impl LocalManagement {
                     let owner = LocalOwner::authenticated();
                     let _closed_projection =
                         (owner.tenant, owner.principal, owner.user, owner.operator);
-                    let _ = dispatch_one(stream, dispatcher).await;
+                    let mut stream = stream;
+                    let deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+                    let mut initial = [0_u8; 65_548];
+                    let received = tokio::time::timeout_at(
+                        deadline,
+                        receive_initial_capability(&stream, expected_peer_uid, &mut initial),
+                    )
+                    .await;
+                    let (writer, received) = match received {
+                        Ok(Ok(received)) => received,
+                        Ok(Err(_)) => {
+                            let _ = stream.shutdown().await;
+                            return;
+                        }
+                        Err(_) => {
+                            let _ = stream.write_all(&deadline_frame()).await;
+                            let _ = stream.shutdown().await;
+                            return;
+                        }
+                    };
+                    if tokio::time::timeout_at(
+                        deadline,
+                        dispatch_one(&mut stream, dispatcher, &initial[..received], writer),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        let _ = stream.write_all(&deadline_frame()).await;
+                        let _ = stream.shutdown().await;
+                    }
                 }
             });
         }
@@ -216,6 +241,200 @@ impl Drop for LocalManagement {
                 remove_exact_socket(&self.socket, self.socket_device, self.socket_inode);
             }
         }
+    }
+}
+
+struct EndpointLease {
+    file: File,
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl EndpointLease {
+    fn acquire(run: &Path, socket: &Path, owner: u32) -> Result<Self, String> {
+        let path = run.join(LEASE_NAME);
+        let (file, created) = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+            .open(&path)
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                    .open(&path)
+                    .map_err(|error| {
+                        format!(
+                            "refusing local-management lease `{}` without following it: {error}",
+                            path.display()
+                        )
+                    })?;
+                (file, false)
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot create local-management lease `{}` at owner mode 0600: {error}",
+                    path.display()
+                ));
+            }
+        };
+        let metadata = file.metadata().map_err(|error| {
+            format!(
+                "cannot inspect local-management lease `{}`: {error}",
+                path.display()
+            )
+        })?;
+        let named = std::fs::symlink_metadata(&path).map_err(|error| {
+            format!(
+                "cannot inspect local-management lease name `{}`: {error}",
+                path.display()
+            )
+        })?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != owner
+            || metadata.mode() & 0o7777 != 0o600
+            || metadata.nlink() != 1
+            || metadata.dev() != named.dev()
+            || metadata.ino() != named.ino()
+        {
+            if created {
+                let _ = std::fs::remove_file(&path);
+            }
+            return Err(format!(
+                "refusing local-management lease `{}`: expected one owner regular file for uid {owner} at mode 0600",
+                path.display()
+            ));
+        }
+        // SAFETY: flock operates on this owned regular-file descriptor and holds until it closes.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(format!(
+                "refusing local-management lease `{}`: another server still owns the endpoint",
+                path.display()
+            ));
+        }
+        let mut lease = Self {
+            file,
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let existing = std::fs::symlink_metadata(socket);
+        if created {
+            return match existing {
+                Ok(metadata) => {
+                    lease.remove_exact();
+                    Err(format!(
+                    "refusing local-management endpoint `{}`: an existing {} has no Exchange lease and is planted there; Exchange did not remove or replace it",
+                    socket.display(),
+                    object_kind(&metadata)
+                    ))
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(lease),
+                Err(error) => {
+                    lease.remove_exact();
+                    Err(format!(
+                        "cannot inspect local-management endpoint `{}` without following it: {error}",
+                        socket.display()
+                    ))
+                }
+            };
+        }
+
+        let mut record = String::new();
+        lease
+            .file
+            .seek(std::io::SeekFrom::Start(0))
+            .map_err(|error| {
+                format!(
+                    "cannot read local-management lease `{}`: {error}",
+                    lease.path.display()
+                )
+            })?;
+        lease.file.read_to_string(&mut record).map_err(|error| {
+            format!(
+                "cannot read local-management lease `{}`: {error}",
+                lease.path.display()
+            )
+        })?;
+        match existing {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && record.is_empty() => Ok(lease),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                lease.file.set_len(0).map_err(|error| error.to_string())?;
+                Ok(lease)
+            }
+            Err(error) => Err(format!(
+                "cannot inspect local-management endpoint `{}` without following it: {error}",
+                socket.display()
+            )),
+            Ok(metadata) => {
+                let mut fields = record.trim_end_matches('\n').split(' ');
+                let schema = fields.next();
+                let device = fields.next().and_then(|value| value.parse::<u64>().ok());
+                let inode = fields.next().and_then(|value| value.parse::<u64>().ok());
+                if schema != Some(LEASE_SCHEMA)
+                    || device != Some(metadata.dev())
+                    || inode != Some(metadata.ino())
+                    || fields.next().is_some()
+                    || !metadata.file_type().is_socket()
+                    || metadata.uid() != owner
+                    || metadata.mode() & 0o7777 != 0o600
+                {
+                    return Err(format!(
+                        "refusing local-management endpoint `{}`: its stale lease does not identify this exact owner socket",
+                        socket.display()
+                    ));
+                }
+                remove_exact_socket(socket, metadata.dev(), metadata.ino());
+                if std::fs::symlink_metadata(socket).is_ok() {
+                    return Err(format!(
+                        "refusing local-management endpoint `{}`: the exact stale owner socket could not be removed",
+                        socket.display()
+                    ));
+                }
+                lease.file.set_len(0).map_err(|error| {
+                    format!(
+                        "cannot reset local-management lease `{}`: {error}",
+                        lease.path.display()
+                    )
+                })?;
+                Ok(lease)
+            }
+        }
+    }
+
+    fn record_socket(&mut self, device: u64, inode: u64) -> Result<(), String> {
+        self.file
+            .seek(std::io::SeekFrom::Start(0))
+            .and_then(|_| self.file.set_len(0))
+            .and_then(|_| writeln!(self.file, "{LEASE_SCHEMA} {device} {inode}"))
+            .and_then(|_| self.file.sync_all())
+            .map_err(|error| {
+                format!(
+                    "cannot publish local-management lease `{}`: {error}",
+                    self.path.display()
+                )
+            })
+    }
+
+    fn remove_exact(&self) {
+        if let Ok(metadata) = std::fs::symlink_metadata(&self.path) {
+            if metadata.is_file() && metadata.dev() == self.device && metadata.ino() == self.inode {
+                let _ = std::fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
+impl Drop for EndpointLease {
+    fn drop(&mut self) {
+        self.remove_exact();
     }
 }
 
@@ -245,35 +464,99 @@ impl LocalOwner {
     }
 }
 
-async fn dispatch_one(mut stream: UnixStream, dispatcher: Dispatcher) -> io::Result<()> {
+async fn receive_initial_capability(
+    stream: &UnixStream,
+    expected_peer_uid: u32,
+    bytes: &mut [u8],
+) -> io::Result<(Option<Box<dyn OneShotWriter>>, usize)> {
+    stream
+        .async_io(Interest::READABLE, || {
+            receive_initial_fd(stream.as_raw_fd(), expected_peer_uid, bytes)
+                .map(|(writer, received)| {
+                    (
+                        writer.map(|writer| Box::new(writer) as Box<dyn OneShotWriter>),
+                        received,
+                    )
+                })
+                .map_err(|refusal| match refusal {
+                    UnixHandoffError::WouldBlock => io::ErrorKind::WouldBlock.into(),
+                    _ => io::Error::other("local-management writer capability refused"),
+                })
+        })
+        .await
+}
+
+async fn dispatch_one(
+    stream: &mut UnixStream,
+    dispatcher: Dispatcher,
+    initial: &[u8],
+    mut writer: Option<Box<dyn OneShotWriter>>,
+) -> io::Result<()> {
     let mut decoder = StreamDecoder::new(Direction::ClientToServer);
     let mut bytes = [0_u8; 4096];
+    let mut first = Some(initial);
+    let mut active: Option<ActiveSession> = None;
     loop {
-        let received = stream.read(&mut bytes).await?;
-        if received == 0 {
-            let _ = decoder.finish();
-            return Ok(());
-        }
-        if decoder.push(&bytes[..received]).is_err() {
-            return Ok(());
-        }
-        match decoder.next_frame() {
-            Ok(Some(request)) => {
-                let response = dispatcher
-                    .dispatch_frame(
-                        Transport::Native,
-                        &exchange_host::Tenant::new(LOCAL_OWNER_TENANT)
-                            .expect("the fixed native owner tenant is valid"),
-                        request,
-                    )
-                    .await
-                    .encode();
-                stream.write_all(&response).await?;
-                stream.shutdown().await?;
+        let received = if let Some(initial) = first.take() {
+            if decoder.push(initial).is_err() {
                 return Ok(());
             }
-            Ok(None) => {}
-            Err(_) => return Ok(()),
+            initial.len()
+        } else {
+            let received = stream.read(&mut bytes).await?;
+            if received != 0 && decoder.push(&bytes[..received]).is_err() {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
+                return Ok(());
+            }
+            received
+        };
+        if received == 0 {
+            let _ = decoder.finish();
+            if let Some(session) = &active {
+                session.abort().await;
+            }
+            return Ok(());
+        }
+        while let Some(request) = match decoder.next_frame() {
+            Ok(frame) => frame,
+            Err(_) => {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
+                return Ok(());
+            }
+        } {
+            if let Some(session) = active.as_mut() {
+                match session.accept_frame(request).await {
+                    SessionAdvance::Awaiting => {}
+                    SessionAdvance::Terminal(reply) => {
+                        let (response, _) = reply.into_parts();
+                        stream.write_all(&response).await?;
+                        stream.shutdown().await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                let tenant = exchange_host::Tenant::new(LOCAL_OWNER_TENANT)
+                    .expect("the fixed native owner tenant is valid");
+                match dispatcher
+                    .begin_frame_with_writer(Transport::Native, &tenant, request, writer.take())
+                    .await
+                {
+                    SessionBegin::Terminal(reply) => {
+                        let (response, _) = reply.into_parts();
+                        stream.write_all(&response).await?;
+                        stream.shutdown().await?;
+                        return Ok(());
+                    }
+                    SessionBegin::Active { response, session } => {
+                        stream.write_all(&response).await?;
+                        active = Some(session);
+                    }
+                }
+            }
         }
     }
 }

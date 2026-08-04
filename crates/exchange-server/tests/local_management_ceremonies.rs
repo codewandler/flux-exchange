@@ -497,11 +497,15 @@ fn connect_begin(
         {
             continue;
         }
-        let target = &field["target"];
-        if !targets.iter().any(|held| held == target) {
-            targets.push(target.clone());
+        let plan_target = &field["target"];
+        let target = json!({
+            "revision": plan_target["revision"],
+            "target": plan_target["id"],
+        });
+        if !targets.iter().any(|held| held == &target) {
+            targets.push(target);
         }
-        let id = target["id"].as_str().expect("target id");
+        let id = plan_target["id"].as_str().expect("target id");
         if id != "connection.name" && !field["secret"].as_bool().expect("secret fact") {
             settings.push(json!({
                 "target": id,
@@ -530,9 +534,13 @@ fn credential_begin(plan: &Value, label: &str, action: &str, head: &str) -> Valu
         {
             continue;
         }
-        let target = &field["target"];
-        if !targets.iter().any(|held| held == target) {
-            targets.push(target.clone());
+        let plan_target = &field["target"];
+        let target = json!({
+            "revision": plan_target["revision"],
+            "target": plan_target["id"],
+        });
+        if !targets.iter().any(|held| held == &target) {
+            targets.push(target);
         }
     }
     assert!(

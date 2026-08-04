@@ -11,8 +11,9 @@ use exchange_host::{
 use crate::audit::AuditJournal;
 use crate::bind::IdentityBinding;
 use crate::channel::ChannelSupervisor;
-use crate::connection_guard::ConnectionGuard;
+use crate::connection_guard::{Claim, ConnectionGuard};
 use crate::credential_acquisition::AcquisitionBindings;
+use crate::credential_head::CredentialHeadStore;
 use crate::dev_identity::DevIdentity;
 use crate::local_identity::LocalUsers;
 use crate::local_management::TransactionCoordinator;
@@ -45,6 +46,8 @@ pub struct AppState {
     credentials: Option<Arc<dyn SecretStore>>,
     /// The one recovered prepared-transaction coordinator shared by native and hosted management.
     coordinator: Option<Arc<TransactionCoordinator>>,
+    /// Durable opaque heads for labelled credential partitions.
+    credential_heads: Option<Arc<CredentialHeadStore>>,
     /// The startup-validated byte-exact origin admitted by the hosted management transport.
     hosted_origin: Option<Arc<str>>,
     /// The revisioned whole-set grant port retained from the same store invocation reads.
@@ -255,6 +258,7 @@ impl AppState {
             sign_in: SignIn::Unconfigured,
             credentials: None,
             coordinator: None,
+            credential_heads: None,
             hosted_origin: None,
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
@@ -291,6 +295,7 @@ impl AppState {
             sign_in: SignIn::Unconfigured,
             credentials: None,
             coordinator: None,
+            credential_heads: None,
             hosted_origin: None,
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
@@ -324,6 +329,7 @@ impl AppState {
             sign_in: SignIn::Development { automatic: false },
             credentials: None,
             coordinator: None,
+            credential_heads: None,
             hosted_origin: None,
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
@@ -359,6 +365,7 @@ impl AppState {
             sign_in: SignIn::LocalUsers,
             credentials: None,
             coordinator: None,
+            credential_heads: None,
             hosted_origin: None,
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
@@ -395,6 +402,7 @@ impl AppState {
             sign_in: SignIn::Oidc(oidc),
             credentials: None,
             coordinator: None,
+            credential_heads: None,
             hosted_origin: None,
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
@@ -428,6 +436,7 @@ impl AppState {
             sign_in: SignIn::NoTokenExchange,
             credentials: None,
             coordinator: None,
+            credential_heads: None,
             hosted_origin: None,
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
@@ -523,6 +532,47 @@ impl AppState {
     /// The recovered transaction coordinator, if this composition bound one.
     pub fn transaction_coordinator(&self) -> Option<&Arc<TransactionCoordinator>> {
         self.coordinator.as_ref()
+    }
+
+    /// Whether a provider-committed connection image is still being published for this key.
+    pub(crate) fn connection_publication_pending(
+        &self,
+        tenant: &exchange_host::Tenant,
+        connector: &str,
+    ) -> Result<bool, ()> {
+        self.coordinator
+            .as_ref()
+            .map(|coordinator| {
+                coordinator
+                    .publication_pending_for(tenant.as_str(), connector)
+                    .map_err(|_| ())
+            })
+            .unwrap_or(Ok(false))
+    }
+
+    /// Claim a mutation only when no durable post-decision publication owns the same key.
+    pub(crate) fn claim_connection(
+        &self,
+        tenant: &exchange_host::Tenant,
+        connector: &str,
+    ) -> Option<Claim> {
+        matches!(
+            self.connection_publication_pending(tenant, connector),
+            Ok(false)
+        )
+        .then(|| self.connections.claim(tenant, connector))
+        .flatten()
+    }
+
+    /// Bind the one owner-root credential-head store shared by plans and ceremonies.
+    pub(crate) fn with_credential_heads(mut self, heads: Arc<CredentialHeadStore>) -> Self {
+        self.credential_heads = Some(heads);
+        self
+    }
+
+    /// The durable value-free credential-head store, when startup migration completed.
+    pub(crate) fn credential_heads(&self) -> Option<&Arc<CredentialHeadStore>> {
+        self.credential_heads.as_ref()
     }
 
     /// Bind the canonical origin admitted by hosted local management.

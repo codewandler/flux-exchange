@@ -345,6 +345,7 @@ impl ReceiptIds for FixedReceiptId {
 }
 
 /// One exact native Service Account MINT or QUERY operation.
+#[derive(Clone)]
 pub(crate) struct ServiceAccountCeremony {
     port: Arc<dyn MintPort>,
     receipts: Arc<dyn ReceiptIds>,

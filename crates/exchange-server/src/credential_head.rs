@@ -59,7 +59,7 @@ impl CredentialHead {
         &self.0
     }
 
-    fn parse(value: String) -> Result<Self, CredentialHeadError> {
+    pub(crate) fn parse(value: String) -> Result<Self, CredentialHeadError> {
         if value.len() != 64
             || value
                 .bytes()
@@ -130,7 +130,7 @@ impl CredentialHeadStore {
         let directory = private_root.join(STORE_DIRECTORY);
         if directory.exists() {
             let store = Self::open(private_root)?;
-            store.require_exact_keys(keys)?;
+            store.require_legacy_keys(keys)?;
             return Ok(store);
         }
 
@@ -162,14 +162,14 @@ impl CredentialHeadStore {
             Ok(()) => sync_directory(private_root)?,
             Err(_error) if directory.exists() => {
                 let store = Self::open(private_root)?;
-                store.require_exact_keys(keys)?;
+                store.require_legacy_keys(keys)?;
                 return Ok(store);
             }
             Err(error) => return Err(CredentialHeadError::Io(error)),
         }
 
         let store = Self::open(private_root)?;
-        store.require_exact_keys(keys)?;
+        store.require_legacy_keys(keys)?;
         Ok(store)
     }
 
@@ -285,7 +285,7 @@ impl CredentialHeadStore {
         self.write(&image)
     }
 
-    fn require_exact_keys(&self, keys: &[CredentialHeadKey]) -> Result<(), CredentialHeadError> {
+    fn require_legacy_keys(&self, keys: &[CredentialHeadKey]) -> Result<(), CredentialHeadError> {
         let _guard = self.lock()?;
         let image = self.read()?;
         let actual = image
@@ -293,8 +293,11 @@ impl CredentialHeadStore {
             .iter()
             .map(|entry| &entry.key)
             .collect::<HashSet<_>>();
-        let expected = keys.iter().collect::<HashSet<_>>();
-        if actual != expected {
+        // A provider-terminal connect publishes its head before the registry projection. If the
+        // process stops at that exact boundary, the owner-only head is intentionally an extra key
+        // until the coordinator outbox rolls the registry forward on restart. A registry key with
+        // no head is never such a boundary and remains a corruption refusal.
+        if keys.iter().any(|key| !actual.contains(key)) {
             return Err(CredentialHeadError::Corrupt);
         }
         Ok(())

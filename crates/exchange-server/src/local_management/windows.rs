@@ -4,24 +4,43 @@ use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::ptr::{null_mut, NonNull};
+use std::sync::Arc;
 
 use sha2::{Digest as _, Sha256};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
-use windows_sys::Win32::Foundation::{GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CompareObjectHandles, DuplicateHandle, GetHandleInformation, GetLastError, LocalFree,
+    SetHandleInformation, DUPLICATE_SAME_ACCESS, ERROR_INSUFFICIENT_BUFFER, FILETIME, HANDLE,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows_sys::Win32::Security::{
-    GetLengthSid, GetTokenInformation, IsValidSid, RevertToSelf, TokenUser, PSECURITY_DESCRIPTOR,
-    PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    GetLengthSid, GetTokenInformation, IsValidSid, RevertToSelf, TokenSessionId, TokenUser,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
 };
-use windows_sys::Win32::System::Pipes::ImpersonateNamedPipeClient;
+use windows_sys::Win32::Storage::FileSystem::{
+    FlushFileBuffers, GetFileType, WriteFile, FILE_TYPE_PIPE, SYNCHRONIZE,
+};
+use windows_sys::Win32::System::Pipes::{
+    GetNamedPipeClientProcessId, GetNamedPipeInfo, ImpersonateNamedPipeClient, PIPE_SERVER_END,
+};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThread, OpenProcessToken, OpenThreadToken,
+    GetCurrentProcess, GetCurrentThread, GetProcessTimes, OpenProcess, OpenProcessToken,
+    OpenThreadToken, WaitForSingleObject, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION,
 };
+
+use super::codec::{Direction, Frame, Opcode, StreamDecoder};
+use super::dispatcher::{deadline_frame, Transport};
+use super::service_account::{OneShotWriter, WriterRefusal};
+use super::{ActiveSession, Dispatcher, SessionAdvance, SessionBegin, TransactionCoordinator};
+use crate::state::AppState;
 
 const PIPE_PREFIX: &str = r"\\.\pipe\flux-exchange-local-management-v1-";
 const MAX_FRAME_BYTES: u32 = 65_548;
+const ATTACHMENT_BYTES: usize = 16;
 
 /// One first-instance, owner-authenticated local-management pipe endpoint.
 ///
@@ -32,6 +51,18 @@ const MAX_FRAME_BYTES: u32 = 65_548;
 pub(crate) struct WindowsEndpoint {
     pipe_name: String,
     owner_sid: OwnedSid,
+    waiting: Option<NamedPipeServer>,
+}
+
+struct AuthenticatedPipe {
+    pipe: NamedPipeServer,
+    client: PinnedClient,
+}
+
+struct PinnedClient {
+    process_id: u32,
+    creation: u64,
+    process: OwnedHandle,
 }
 
 impl WindowsEndpoint {
@@ -41,21 +72,35 @@ impl WindowsEndpoint {
         // Windows uses the kernel named-pipe namespace directly. No inherited filesystem path,
         // profile value or caller-controlled component exists here to traverse as a reparse point.
         let pipe_name = pipe_name_for_sid(owner_sid.bytes());
-        Ok(Self {
+        let mut endpoint = Self {
             pipe_name,
             owner_sid,
-        })
+            waiting: None,
+        };
+        // Holding the first instance is part of startup admission, not deferred work in the serve
+        // task. Readiness can therefore never precede ownership of the authenticated endpoint.
+        endpoint.waiting = Some(endpoint.create_first_instance()?);
+        Ok(endpoint)
     }
 
-    /// Accept exactly one connected owner pipe, authenticating before any byte can be read.
-    pub(crate) async fn accept_one(&self) -> Result<NamedPipeServer, WindowsEndpointRefusal> {
-        let server = self.create_first_instance()?;
-        server
-            .connect()
+    /// Accept one pipe while retaining the authenticated client's pinned process identity.
+    async fn accept_authenticated(&mut self) -> Result<AuthenticatedPipe, WindowsEndpointRefusal> {
+        let pipe = self.waiting.take().ok_or(WindowsEndpointRefusal::Bind)?;
+        pipe.connect()
             .await
             .map_err(|_| WindowsEndpointRefusal::Connect)?;
-        authenticate_owner(server.as_raw_handle() as HANDLE, self.owner_sid.bytes())?;
-        Ok(server)
+        let raw = pipe.as_raw_handle() as HANDLE;
+        authenticate_owner(raw, self.owner_sid.bytes())?;
+        let client = PinnedClient::open(raw, self.owner_sid.bytes())?;
+        Ok(AuthenticatedPipe { pipe, client })
+    }
+
+    fn rearm(&mut self) -> Result<(), WindowsEndpointRefusal> {
+        if self.waiting.is_some() {
+            return Err(WindowsEndpointRefusal::Bind);
+        }
+        self.waiting = Some(self.create_first_instance()?);
+        Ok(())
     }
 
     fn create_first_instance(&self) -> Result<NamedPipeServer, WindowsEndpointRefusal> {
@@ -93,6 +138,388 @@ impl WindowsEndpoint {
     fn pipe_name(&self) -> &str {
         &self.pipe_name
     }
+}
+
+impl PinnedClient {
+    fn open(pipe: HANDLE, owner_sid: &[u8]) -> Result<Self, WindowsEndpointRefusal> {
+        let mut process_id = 0_u32;
+        if unsafe { GetNamedPipeClientProcessId(pipe, &mut process_id) } == 0 || process_id == 0 {
+            return Err(WindowsEndpointRefusal::PeerIdentity);
+        }
+        let raw = unsafe {
+            OpenProcess(
+                PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                0,
+                process_id,
+            )
+        };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            return Err(WindowsEndpointRefusal::PeerIdentity);
+        }
+        // SAFETY: successful OpenProcess returns one owned non-pseudo handle.
+        let process = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+        let expected = process_token_identity(unsafe { GetCurrentProcess() })?;
+        let actual = process_token_identity(process.as_raw_handle() as HANDLE)?;
+        if actual.sid != owner_sid
+            || actual.session != expected.session
+            || unsafe { WaitForSingleObject(process.as_raw_handle() as HANDLE, 0) } != WAIT_TIMEOUT
+        {
+            return Err(WindowsEndpointRefusal::PeerIdentity);
+        }
+        let creation = process_creation(process.as_raw_handle() as HANDLE)?;
+        let mut confirmed = 0_u32;
+        if unsafe { GetNamedPipeClientProcessId(pipe, &mut confirmed) } == 0
+            || confirmed != process_id
+            || process_creation(process.as_raw_handle() as HANDLE)? != creation
+        {
+            return Err(WindowsEndpointRefusal::PeerIdentity);
+        }
+        Ok(Self {
+            process_id,
+            creation,
+            process,
+        })
+    }
+
+    fn duplicate_writer(
+        &self,
+        pipe: HANDLE,
+        source: u64,
+    ) -> Result<WindowsWriter, AttachmentRefusal> {
+        let source = usize::try_from(source).map_err(|_| AttachmentRefusal::WriterInvalid)?;
+        if source == 0 {
+            return Err(AttachmentRefusal::WriterInvalid);
+        }
+        let mut confirmed = 0_u32;
+        if unsafe { GetNamedPipeClientProcessId(pipe, &mut confirmed) } == 0
+            || confirmed != self.process_id
+            || process_creation(self.process.as_raw_handle() as HANDLE)
+                .map_err(|_| AttachmentRefusal::WriterInvalid)?
+                != self.creation
+            || unsafe { WaitForSingleObject(self.process.as_raw_handle() as HANDLE, 0) }
+                != WAIT_TIMEOUT
+        {
+            return Err(AttachmentRefusal::WriterInvalid);
+        }
+        let mut duplicate: HANDLE = null_mut();
+        if unsafe {
+            DuplicateHandle(
+                self.process.as_raw_handle() as HANDLE,
+                source as HANDLE,
+                GetCurrentProcess(),
+                &mut duplicate,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            )
+        } == 0
+            || duplicate.is_null()
+            || duplicate == INVALID_HANDLE_VALUE
+        {
+            return Err(AttachmentRefusal::WriterInvalid);
+        }
+        // SAFETY: DuplicateHandle returned one target-process-owned handle.
+        let writer = unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) };
+        let raw = writer.as_raw_handle() as HANDLE;
+        if unsafe { CompareObjectHandles(raw, pipe) } != 0
+            || unsafe { CompareObjectHandles(raw, self.process.as_raw_handle() as HANDLE) } != 0
+            || unsafe { GetFileType(raw) } != FILE_TYPE_PIPE
+        {
+            return Err(AttachmentRefusal::WriterInvalid);
+        }
+        let mut pipe_flags = 0_u32;
+        if unsafe { GetNamedPipeInfo(raw, &mut pipe_flags, null_mut(), null_mut(), null_mut()) }
+            == 0
+            || pipe_flags & PIPE_SERVER_END != 0
+            || unsafe { SetHandleInformation(raw, HANDLE_FLAG_INHERIT, 0) } == 0
+        {
+            return Err(AttachmentRefusal::WriterInvalid);
+        }
+        let mut flags = HANDLE_FLAG_INHERIT;
+        if unsafe { GetHandleInformation(raw, &mut flags) } == 0 || flags & HANDLE_FLAG_INHERIT != 0
+        {
+            return Err(AttachmentRefusal::WriterInvalid);
+        }
+        Ok(WindowsWriter(writer))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachmentRefusal {
+    Truncated,
+    InvalidFrame,
+    UnexpectedFrame,
+    WriterInvalid,
+}
+
+impl AttachmentRefusal {
+    const fn body(self) -> &'static [u8] {
+        match self {
+            Self::Truncated => br#"{"code":"truncated_frame","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":400}"#,
+            Self::InvalidFrame => br#"{"code":"invalid_frame","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":400}"#,
+            Self::UnexpectedFrame => br#"{"code":"unexpected_frame","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":409}"#,
+            Self::WriterInvalid => br#"{"code":"writer_invalid","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":400}"#,
+        }
+    }
+}
+
+fn parse_attachment(bytes: &[u8; ATTACHMENT_BYTES]) -> Result<u64, AttachmentRefusal> {
+    if &bytes[..4] != b"FXHA" || bytes[4] != 1 || bytes[5] != 1 || bytes[6] != 1 || bytes[7] != 0 {
+        return Err(AttachmentRefusal::WriterInvalid);
+    }
+    let source = u64::from_be_bytes(
+        bytes[8..]
+            .try_into()
+            .map_err(|_| AttachmentRefusal::WriterInvalid)?,
+    );
+    (source != 0)
+        .then_some(source)
+        .ok_or(AttachmentRefusal::WriterInvalid)
+}
+
+struct WindowsWriter(OwnedHandle);
+
+impl OneShotWriter for WindowsWriter {
+    fn write_once(self: Box<Self>, frame: &[u8]) -> Result<(), WriterRefusal> {
+        let raw = self.0.as_raw_handle() as HANDLE;
+        let mut offset = 0_usize;
+        while offset < frame.len() {
+            let mut written = 0_u32;
+            let remaining =
+                u32::try_from(frame.len() - offset).map_err(|_| WriterRefusal::Invalid)?;
+            if unsafe {
+                WriteFile(
+                    raw,
+                    frame[offset..].as_ptr(),
+                    remaining,
+                    &mut written,
+                    null_mut(),
+                )
+            } == 0
+                || written == 0
+            {
+                return Err(WriterRefusal::Closed);
+            }
+            offset += written as usize;
+        }
+        if unsafe { FlushFileBuffers(raw) } == 0 {
+            return Err(WriterRefusal::Closed);
+        }
+        Ok(())
+    }
+}
+
+/// Supervised production composition of the authenticated Windows pipe and shared dispatcher.
+pub(crate) struct LocalManagement {
+    endpoint: WindowsEndpoint,
+    dispatcher: Dispatcher,
+    tenant: exchange_host::Tenant,
+}
+
+impl LocalManagement {
+    /// Bind the first pipe instance before readiness only for supervised single-tenant startup.
+    pub(crate) fn bind_for_mode(
+        supervised: bool,
+        state: AppState,
+        coordinator: Option<Arc<TransactionCoordinator>>,
+    ) -> Result<Option<Self>, String> {
+        if !supervised {
+            return Ok(None);
+        }
+        let coordinator = coordinator.ok_or_else(|| {
+            "the supervised local-management endpoint has no transaction coordinator".to_owned()
+        })?;
+        let tenant = exchange_host::Tenant::new("local")
+            .map_err(|_| "the fixed native owner tenant is invalid".to_owned())?;
+        let dispatcher = Dispatcher::new(state, coordinator);
+        let endpoint = WindowsEndpoint::bind().map_err(|refusal| refusal.to_string())?;
+        Ok(Some(Self {
+            endpoint,
+            dispatcher,
+            tenant,
+        }))
+    }
+
+    /// Accept authenticated owner operations until shutdown or an endpoint integrity refusal.
+    pub(crate) async fn serve(mut self) {
+        loop {
+            let Ok(mut connection) = self.endpoint.accept_authenticated().await else {
+                return;
+            };
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+            if tokio::time::timeout_at(
+                deadline,
+                dispatch_one(&mut connection, &self.dispatcher, &self.tenant),
+            )
+            .await
+            .is_err()
+            {
+                let _ = connection.pipe.write_all(&deadline_frame()).await;
+                let _ = connection.pipe.shutdown().await;
+            }
+            // The endpoint is rearmed only after both the pipe and its pinned client process have
+            // been dropped, so no attachment can be associated with the next connection.
+            drop(connection);
+            if self.endpoint.rearm().is_err() {
+                return;
+            }
+        }
+    }
+}
+
+async fn dispatch_one(
+    connection: &mut AuthenticatedPipe,
+    dispatcher: &Dispatcher,
+    tenant: &exchange_host::Tenant,
+) -> std::io::Result<()> {
+    let mut prefix = [0_u8; 4];
+    let prefix_length = read_prefix(&mut connection.pipe, &mut prefix).await?;
+    if prefix_length == 0 {
+        return Ok(());
+    }
+
+    let mut writer: Option<Box<dyn OneShotWriter>> = None;
+    if prefix_length < prefix.len() {
+        if b"FXHA".starts_with(&prefix[..prefix_length]) {
+            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated).await?;
+        }
+        return Ok(());
+    }
+    if &prefix == b"FXHA" {
+        let mut attachment = [0_u8; ATTACHMENT_BYTES];
+        attachment[..4].copy_from_slice(&prefix);
+        if read_prefix(&mut connection.pipe, &mut attachment[4..]).await? < ATTACHMENT_BYTES - 4 {
+            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated).await?;
+            return Ok(());
+        }
+        let source = match parse_attachment(&attachment) {
+            Ok(source) => source,
+            Err(refusal) => {
+                refuse_attachment(&mut connection.pipe, refusal).await?;
+                return Ok(());
+            }
+        };
+        let duplicate = match connection
+            .client
+            .duplicate_writer(connection.pipe.as_raw_handle() as HANDLE, source)
+        {
+            Ok(writer) => writer,
+            Err(refusal) => {
+                refuse_attachment(&mut connection.pipe, refusal).await?;
+                return Ok(());
+            }
+        };
+        writer = Some(Box::new(duplicate));
+        let following = read_prefix(&mut connection.pipe, &mut prefix).await?;
+        if following < prefix.len() {
+            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated).await?;
+            return Ok(());
+        }
+        let refusal = if &prefix == b"FXHA" {
+            Some(AttachmentRefusal::UnexpectedFrame)
+        } else if &prefix != b"FXLM" {
+            Some(AttachmentRefusal::InvalidFrame)
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            refuse_attachment(&mut connection.pipe, refusal).await?;
+            return Ok(());
+        }
+    }
+
+    let mut decoder = StreamDecoder::new(Direction::ClientToServer);
+    let mut bytes = [0_u8; 4096];
+    let mut active: Option<ActiveSession> = None;
+    if decoder.push(&prefix).is_err() {
+        return Ok(());
+    }
+    let mut initial_pending = true;
+    loop {
+        let used_initial = initial_pending;
+        let received = if used_initial {
+            initial_pending = false;
+            prefix.len()
+        } else {
+            connection.pipe.read(&mut bytes).await?
+        };
+        if received == 0 {
+            let _ = decoder.finish();
+            if let Some(session) = &active {
+                session.abort().await;
+            }
+            return Ok(());
+        }
+        if !used_initial && decoder.push(&bytes[..received]).is_err() {
+            if let Some(session) = &active {
+                session.abort().await;
+            }
+            return Ok(());
+        }
+        while let Some(request) = match decoder.next_frame() {
+            Ok(frame) => frame,
+            Err(_) => {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
+                return Ok(());
+            }
+        } {
+            if let Some(session) = active.as_mut() {
+                match session.accept_frame(request).await {
+                    SessionAdvance::Awaiting => {}
+                    SessionAdvance::Terminal(reply) => {
+                        let (response, _) = reply.into_parts();
+                        connection.pipe.write_all(&response).await?;
+                        connection.pipe.shutdown().await?;
+                        return Ok(());
+                    }
+                }
+            } else {
+                match dispatcher
+                    .begin_frame_with_writer(Transport::Native, tenant, request, writer.take())
+                    .await
+                {
+                    SessionBegin::Terminal(reply) => {
+                        let (response, _) = reply.into_parts();
+                        connection.pipe.write_all(&response).await?;
+                        connection.pipe.shutdown().await?;
+                        return Ok(());
+                    }
+                    SessionBegin::Active { response, session } => {
+                        connection.pipe.write_all(&response).await?;
+                        active = Some(session);
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn read_prefix(stream: &mut NamedPipeServer, bytes: &mut [u8]) -> std::io::Result<usize> {
+    let mut offset = 0_usize;
+    while offset < bytes.len() {
+        let received = stream.read(&mut bytes[offset..]).await?;
+        if received == 0 {
+            break;
+        }
+        offset += received;
+    }
+    Ok(offset)
+}
+
+async fn refuse_attachment(
+    stream: &mut NamedPipeServer,
+    refusal: AttachmentRefusal,
+) -> std::io::Result<()> {
+    if let Ok(frame) = Frame::control(
+        Direction::ServerToClient,
+        Opcode::Error,
+        refusal.body().to_vec(),
+    ) {
+        stream.write_all(&frame.encode()).await?;
+    }
+    stream.shutdown().await
 }
 
 /// A fixed, value-free native endpoint refusal.
@@ -154,6 +581,52 @@ fn process_token_sid() -> Result<OwnedSid, WindowsEndpointRefusal> {
         token.as_raw_handle() as HANDLE,
         WindowsEndpointRefusal::OwnerIdentity,
     )
+}
+
+struct TokenIdentity {
+    sid: Vec<u8>,
+    session: u32,
+}
+
+fn process_token_identity(process: HANDLE) -> Result<TokenIdentity, WindowsEndpointRefusal> {
+    let mut raw: HANDLE = null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw) } == 0 {
+        return Err(WindowsEndpointRefusal::PeerIdentity);
+    }
+    let token = owned_handle(raw).ok_or(WindowsEndpointRefusal::PeerIdentity)?;
+    let sid = token_sid(
+        token.as_raw_handle() as HANDLE,
+        WindowsEndpointRefusal::PeerIdentity,
+    )?
+    .bytes()
+    .to_vec();
+    let mut session = 0_u32;
+    let mut length = size_of::<u32>() as u32;
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle() as HANDLE,
+            TokenSessionId,
+            (&mut session as *mut u32).cast(),
+            length,
+            &mut length,
+        )
+    } == 0
+        || length as usize != size_of::<u32>()
+    {
+        return Err(WindowsEndpointRefusal::PeerIdentity);
+    }
+    Ok(TokenIdentity { sid, session })
+}
+
+fn process_creation(process: HANDLE) -> Result<u64, WindowsEndpointRefusal> {
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err(WindowsEndpointRefusal::PeerIdentity);
+    }
+    Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
 
 fn thread_token_sid() -> Result<OwnedSid, WindowsEndpointRefusal> {
@@ -375,8 +848,10 @@ mod tests {
     use windows_sys::Win32::Security::{
         AclSizeInformation, GetAce, GetAclInformation, GetSecurityDescriptorControl,
         ACCESS_ALLOWED_ACE, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION,
-        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SE_DACL_PRESENT, SE_DACL_PROTECTED,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_DACL_PRESENT,
+        SE_DACL_PROTECTED,
     };
+    use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 
     #[test]
@@ -384,6 +859,48 @@ mod tests {
         assert_eq!(
             pipe_name_for_sid(&[0, 1, 2]),
             r"\\.\pipe\flux-exchange-local-management-v1-ae4b3280e56e2faf83f414a6e3dabe9d"
+        );
+    }
+
+    #[test]
+    fn fxha_is_exactly_one_closed_sixteen_byte_attachment() {
+        let mut attachment = *b"FXHA\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x07";
+        assert_eq!(parse_attachment(&attachment), Ok(7));
+
+        for index in 0..8 {
+            let original = attachment[index];
+            attachment[index] ^= 0xff;
+            assert_eq!(
+                parse_attachment(&attachment),
+                Err(AttachmentRefusal::WriterInvalid),
+                "field byte {index} must be closed"
+            );
+            attachment[index] = original;
+        }
+        attachment[8..].fill(0);
+        assert_eq!(
+            parse_attachment(&attachment),
+            Err(AttachmentRefusal::WriterInvalid)
+        );
+    }
+
+    #[test]
+    fn attachment_refusals_have_the_frozen_status_and_retry_rows() {
+        assert_eq!(
+            AttachmentRefusal::Truncated.body(),
+            br#"{"code":"truncated_frame","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":400}"#
+        );
+        assert_eq!(
+            AttachmentRefusal::InvalidFrame.body(),
+            br#"{"code":"invalid_frame","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":400}"#
+        );
+        assert_eq!(
+            AttachmentRefusal::UnexpectedFrame.body(),
+            br#"{"code":"unexpected_frame","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":409}"#
+        );
+        assert_eq!(
+            AttachmentRefusal::WriterInvalid.body(),
+            br#"{"code":"writer_invalid","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":400}"#
         );
     }
 
@@ -454,11 +971,11 @@ mod tests {
 
     #[tokio::test]
     async fn native_pipe_has_only_owner_and_system_in_a_protected_dacl() {
-        let endpoint = WindowsEndpoint::bind().expect("startup TokenUser");
+        let mut endpoint = WindowsEndpoint::bind().expect("startup TokenUser");
         assert!(endpoint.pipe_name().starts_with(PIPE_PREFIX));
         assert_eq!(endpoint.pipe_name().len(), PIPE_PREFIX.len() + 32);
         let owner_text = sid_string(endpoint.owner_sid.as_ptr()).expect("owner SID text");
-        let pipe = endpoint.create_first_instance().expect("owner pipe");
+        let pipe = endpoint.waiting.as_ref().expect("owner pipe");
         assert_eq!(
             endpoint.create_first_instance().err(),
             Some(WindowsEndpointRefusal::Bind),
@@ -534,9 +1051,11 @@ mod tests {
         let client = ClientOptions::new()
             .open(endpoint.pipe_name())
             .expect("same-account local client");
-        pipe.connect().await.expect("connected owner pipe");
-        authenticate_owner(pipe.as_raw_handle() as HANDLE, endpoint.owner_sid.bytes())
-            .expect("same startup owner");
+        let accepted = endpoint
+            .accept_authenticated()
+            .await
+            .expect("connected owner pipe");
+        let pipe = accepted.pipe;
         let mut unexpected_token: HANDLE = null_mut();
         assert_eq!(
             unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 0, &mut unexpected_token,) },
@@ -546,5 +1065,60 @@ mod tests {
         assert_eq!(unsafe { GetLastError() }, ERROR_NO_TOKEN);
         drop(client);
         drop(pipe);
+    }
+
+    #[tokio::test]
+    async fn authenticated_client_identity_is_pinned_before_source_handle_duplication() {
+        let mut endpoint = WindowsEndpoint::bind().expect("startup TokenUser");
+        let pipe_name = endpoint.pipe_name().to_owned();
+        let accepting = endpoint.accept_authenticated();
+        let connecting = async {
+            loop {
+                match ClientOptions::new().open(&pipe_name) {
+                    Ok(client) => break client,
+                    Err(_) => tokio::task::yield_now().await,
+                }
+            }
+        };
+        let (accepted, client) = tokio::join!(accepting, connecting);
+        let accepted = accepted.expect("authenticated same-account client");
+
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: null_mut(),
+            bInheritHandle: 0,
+        };
+        let mut read: HANDLE = null_mut();
+        let mut write: HANDLE = null_mut();
+        assert_ne!(
+            unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) },
+            0
+        );
+        // SAFETY: CreatePipe returned two newly owned handles.
+        let read = unsafe { OwnedHandle::from_raw_handle(read.cast()) };
+        // SAFETY: CreatePipe returned two newly owned handles.
+        let write = unsafe { OwnedHandle::from_raw_handle(write.cast()) };
+        let duplicate = accepted
+            .client
+            .duplicate_writer(
+                accepted.pipe.as_raw_handle() as HANDLE,
+                write.as_raw_handle() as usize as u64,
+            )
+            .expect("source handle from pinned client process");
+        let mut flags = HANDLE_FLAG_INHERIT;
+        assert_ne!(
+            unsafe { GetHandleInformation(duplicate.0.as_raw_handle() as HANDLE, &mut flags) },
+            0
+        );
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        assert_eq!(
+            unsafe { GetFileType(duplicate.0.as_raw_handle() as HANDLE) },
+            FILE_TYPE_PIPE
+        );
+        drop(duplicate);
+        drop(write);
+        drop(read);
+        drop(client);
+        drop(accepted);
     }
 }

@@ -4,9 +4,11 @@
 //! typed port because the production dispatcher owns its plan/coordinator state machine, while the
 //! Service Account writer remains the separately validated `HelperWriter` capability.
 
+use std::ffi::CString;
 use std::fmt;
-use std::io;
+use std::io::{self, Read as _, Write as _};
 use std::mem::MaybeUninit;
+use std::net::Shutdown;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _, OwnedFd, RawFd};
 #[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStringExt as _;
@@ -15,10 +17,17 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::local_helper::{
-    validate_unix_vendor_capabilities, ExpiresAt, HelperExit, PipeCapabilityFacts, PipeDirection,
-    ServiceAccountId, UnixVendorCapabilityFacts, HELPER_SETUP_DEADLINE, MAX_HELPER_FRAME_BYTES,
-    UNIX_VENDOR_REQUEST_FD, UNIX_VENDOR_RESPONSE_FD,
+    validate_unix_vendor_capabilities, ExpiresAt, HelperExit, LocalHelperInvocation,
+    MintWriterCapability, PipeCapabilityFacts, PipeDirection, ServiceAccountId,
+    UnixVendorCapabilityFacts, VendorSecretCapabilities, HELPER_RESULT_DEADLINE,
+    HELPER_SETUP_DEADLINE, MAX_HELPER_FRAME_BYTES, UNIX_MINT_WRITER_FD, UNIX_VENDOR_REQUEST_FD,
+    UNIX_VENDOR_RESPONSE_FD,
+};
+use crate::local_management::service_account_handoff::unix_transfer::{
+    HelperWriter, UnixHandoffError,
 };
 
 const RUN_DIRECTORY: &str = "run";
@@ -28,11 +37,37 @@ const MAX_CONTROL_BYTES: usize = 65_536;
 const CLIENT_DIRECTION: u8 = 1;
 const SERVER_DIRECTION: u8 = 2;
 const CONNECT_BEGIN: u16 = 0x0001;
+const NEED_SECRETS: u16 = 0x0002;
+const SECRET: u16 = 0x0003;
+const CONNECT_COMMIT: u16 = 0x0004;
 const CONNECT_RECEIPT: u16 = 0x0006;
+const PLAN_QUERY: u16 = 0x0007;
+const PLAN_RESPONSE: u16 = 0x0008;
 const SERVICE_ACCOUNT_MINT: u16 = 0x0020;
+const SERVICE_ACCOUNT_RECEIPT: u16 = 0x0022;
 const CREDENTIAL_BEGIN: u16 = 0x0030;
+const CREDENTIAL_COMMIT: u16 = 0x0031;
 const CREDENTIAL_RECEIPT: u16 = 0x0032;
 const ERROR: u16 = 0x7fff;
+const MAX_SECRET_BYTES: usize = 8_192;
+
+/// Execute one already-closed Unix helper invocation before tracing or an async runtime exists.
+pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
+    match invocation {
+        LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Unix) => {
+            run_vendor(&mut NativeVendorCeremony)
+        }
+        LocalHelperInvocation::ServiceAccountMint {
+            id,
+            expires_at,
+            writer: MintWriterCapability::UnixFd5,
+        } => match HelperWriter::inherited_fd5() {
+            Ok(writer) => run_mint(&id, expires_at, writer),
+            Err(_) => HelperExit::CapabilityOrTransportFailure,
+        },
+        _ => HelperExit::CapabilityOrTransportFailure,
+    }
+}
 
 /// One request whose complete frame and EOF passed the Flux-to-helper transport contract.
 ///
@@ -76,6 +111,10 @@ pub(crate) struct PinnedEndpoint {
 
 impl PinnedEndpoint {
     fn authenticated() -> Result<Self, UnixHelperError> {
+        #[cfg(feature = "native-root-test-seam")]
+        if let Some(root) = std::env::var_os("FLUX_EXCHANGE_TEST_LOCAL_MANAGEMENT_ROOT") {
+            return Self::at(Path::new(&root));
+        }
         let root = crate::native_root::authenticated_account_state_root()
             .map_err(|_| UnixHelperError::EndpointUnavailable)?;
         Self::at(&root)
@@ -137,6 +176,440 @@ pub(crate) trait VendorCeremony {
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
+struct NativeVendorCeremony;
+
+impl VendorCeremony for NativeVendorCeremony {
+    type Error = UnixHelperError;
+
+    fn execute(
+        &mut self,
+        endpoint: &PinnedEndpoint,
+        request: &VendorRequest,
+        ready_by: Instant,
+    ) -> Result<Vec<u8>, Self::Error> {
+        let begin = BeginFacts::parse(request)?;
+        let mut plan_stream = endpoint.connect_before(ready_by)?;
+        let plan_query = serde_json::to_vec(&PlanQuery {
+            connector: &begin.connector,
+            selection: match request.kind() {
+                VendorRequestKind::Connect => None,
+                VendorRequestKind::Credential => Some(begin.label.as_str()),
+            },
+        })
+        .map_err(|_| UnixHelperError::Protocol)?;
+        write_before(
+            &mut plan_stream,
+            &encode_frame(CLIENT_DIRECTION, PLAN_QUERY, &plan_query),
+            ready_by,
+        )?;
+        plan_stream
+            .shutdown(Shutdown::Write)
+            .map_err(|_| UnixHelperError::Transport)?;
+        let plan = read_terminal_before(&mut plan_stream, ready_by)?;
+        if plan.opcode == ERROR {
+            return Ok(plan.bytes);
+        }
+        if plan.opcode != PLAN_RESPONSE || !begin.admits_plan(&plan.payload, request.kind()) {
+            return Err(UnixHelperError::Protocol);
+        }
+
+        let mut mutation = endpoint.connect_before(ready_by)?;
+        write_before(&mut mutation, request.bytes(), ready_by)?;
+        let need = read_frame_before(&mut mutation, ready_by)?;
+        if need.opcode == ERROR {
+            mutation
+                .shutdown(Shutdown::Write)
+                .map_err(|_| UnixHelperError::Transport)?;
+            return Ok(need.bytes);
+        }
+        if need.opcode != NEED_SECRETS {
+            return Err(UnixHelperError::Protocol);
+        }
+        let need_payload = need.payload;
+        let need: NeedSecrets =
+            serde_json::from_slice(&need_payload).map_err(|_| UnixHelperError::Protocol)?;
+        if !need.is_canonical(&need_payload) {
+            return Err(UnixHelperError::Protocol);
+        }
+
+        let predecision = Instant::now()
+            .checked_add(Duration::from_secs(300))
+            .ok_or(UnixHelperError::Deadline)?;
+        for (index, secret) in need.secrets.iter().enumerate() {
+            if usize::from(secret.ordinal) != index + 1 || secret.target.is_empty() {
+                return Err(UnixHelperError::Protocol);
+            }
+            let mut value = read_private_tty_line(predecision)?;
+            let frame = encode_secret(secret.ordinal, &value)?;
+            let result = write_before(&mut mutation, &frame, predecision);
+            value.fill(0);
+            result?;
+        }
+        let commit = serde_json::to_vec(&Commit {
+            proposal_digest: &need.proposal_digest,
+            transaction_id: &need.transaction_id,
+        })
+        .map_err(|_| UnixHelperError::Protocol)?;
+        let opcode = match request.kind() {
+            VendorRequestKind::Connect => CONNECT_COMMIT,
+            VendorRequestKind::Credential => CREDENTIAL_COMMIT,
+        };
+        write_before(
+            &mut mutation,
+            &encode_frame(CLIENT_DIRECTION, opcode, &commit),
+            predecision,
+        )?;
+        mutation
+            .shutdown(Shutdown::Write)
+            .map_err(|_| UnixHelperError::Transport)?;
+        let postdecision = Instant::now()
+            .checked_add(Duration::from_secs(30))
+            .ok_or(UnixHelperError::Deadline)?;
+        Ok(read_terminal_before(&mut mutation, postdecision)?.bytes)
+    }
+}
+
+impl MintTransfer for HelperWriter {
+    type Error = UnixHandoffError;
+
+    fn transfer(self, stream: &UnixStream, mint_frame: &[u8]) -> Result<(), Self::Error> {
+        self.transfer_mint(stream, mint_frame)
+    }
+}
+
+#[derive(Serialize)]
+struct PlanQuery<'a> {
+    connector: &'a str,
+    selection: Option<&'a str>,
+}
+
+struct BeginFacts {
+    connector: String,
+    credential_revision: Option<String>,
+    label: String,
+    plan_revision: String,
+}
+
+impl BeginFacts {
+    fn parse(request: &VendorRequest) -> Result<Self, UnixHelperError> {
+        let payload = request
+            .bytes()
+            .get(HEADER_BYTES..)
+            .ok_or(UnixHelperError::Protocol)?;
+        let value: serde_json::Value =
+            serde_json::from_slice(payload).map_err(|_| UnixHelperError::Protocol)?;
+        let object = value.as_object().ok_or(UnixHelperError::Protocol)?;
+        let connector = required_string(object, "connector")?;
+        let label = required_string(object, "label")?;
+        let plan_revision = required_string(object, "plan_revision")?;
+        let credential_revision = match object.get("credential_revision") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(value)) => Some(value.clone()),
+            _ => return Err(UnixHelperError::Protocol),
+        };
+        match request.kind() {
+            VendorRequestKind::Connect if credential_revision.is_some() => {
+                return Err(UnixHelperError::Protocol);
+            }
+            VendorRequestKind::Credential
+                if !credential_revision
+                    .as_deref()
+                    .is_some_and(is_nonzero_lowerhex_32) =>
+            {
+                return Err(UnixHelperError::Protocol);
+            }
+            _ => {}
+        }
+        Ok(Self {
+            connector,
+            credential_revision,
+            label,
+            plan_revision,
+        })
+    }
+
+    fn admits_plan(&self, payload: &[u8], kind: VendorRequestKind) -> bool {
+        let Ok(plan) = serde_json::from_slice::<serde_json::Value>(payload) else {
+            return false;
+        };
+        plan.get("version").and_then(serde_json::Value::as_str)
+            == Some("exchange.connection-plan.v2")
+            && plan.get("connector").and_then(serde_json::Value::as_str)
+                == Some(self.connector.as_str())
+            && plan
+                .get("plan_revision")
+                .and_then(serde_json::Value::as_str)
+                == Some(self.plan_revision.as_str())
+            && match kind {
+                VendorRequestKind::Connect => {
+                    plan.get("selection") == Some(&serde_json::Value::Null)
+                        && plan.get("credential_revision") == Some(&serde_json::Value::Null)
+                }
+                VendorRequestKind::Credential => {
+                    plan.get("selection").and_then(serde_json::Value::as_str)
+                        == Some(self.label.as_str())
+                        && plan
+                            .get("credential_revision")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(is_nonzero_lowerhex_32)
+                        && self.credential_revision.is_some()
+                }
+            }
+    }
+}
+
+fn required_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<String, UnixHelperError> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or(UnixHelperError::Protocol)
+}
+
+fn is_nonzero_lowerhex_32(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && value.bytes().any(|byte| byte != b'0')
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NeedSecrets {
+    proposal_digest: String,
+    secrets: Vec<NeedSecret>,
+    transaction_id: String,
+}
+
+impl NeedSecrets {
+    fn is_canonical(&self, payload: &[u8]) -> bool {
+        is_nonzero_lowerhex_32(&self.proposal_digest)
+            && self.transaction_id.len() == 64
+            && self
+                .transaction_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && self.transaction_id.bytes().any(|byte| byte != b'0')
+            && serde_json::to_vec(self).is_ok_and(|canonical| canonical == payload)
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NeedSecret {
+    ordinal: u16,
+    target: String,
+}
+
+#[derive(Serialize)]
+struct Commit<'a> {
+    proposal_digest: &'a str,
+    transaction_id: &'a str,
+}
+
+struct NativeFrame {
+    bytes: Vec<u8>,
+    opcode: u16,
+    payload: Vec<u8>,
+}
+
+fn write_before(
+    stream: &mut UnixStream,
+    bytes: &[u8],
+    deadline: Instant,
+) -> Result<(), UnixHelperError> {
+    stream
+        .set_write_timeout(Some(remaining(deadline)?))
+        .map_err(|_| UnixHelperError::Transport)?;
+    stream
+        .write_all(bytes)
+        .map_err(|error| timeout_or_transport(&error))
+}
+
+fn read_frame_before(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> Result<NativeFrame, UnixHelperError> {
+    stream
+        .set_read_timeout(Some(remaining(deadline)?))
+        .map_err(|_| UnixHelperError::Transport)?;
+    let mut header = [0_u8; HEADER_BYTES];
+    stream
+        .read_exact(&mut header)
+        .map_err(|error| timeout_or_transport(&error))?;
+    if &header[..4] != b"FXLM" || header[4] != 1 || header[5] != SERVER_DIRECTION {
+        return Err(UnixHelperError::Protocol);
+    }
+    let payload_length =
+        u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+    if payload_length > MAX_CONTROL_BYTES {
+        return Err(UnixHelperError::Protocol);
+    }
+    let mut payload = vec![0_u8; payload_length];
+    stream
+        .read_exact(&mut payload)
+        .map_err(|error| timeout_or_transport(&error))?;
+    let mut bytes = header.to_vec();
+    bytes.extend_from_slice(&payload);
+    Ok(NativeFrame {
+        bytes,
+        opcode: u16::from_be_bytes([header[6], header[7]]),
+        payload,
+    })
+}
+
+fn read_terminal_before(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> Result<NativeFrame, UnixHelperError> {
+    let frame = read_frame_before(stream, deadline)?;
+    stream
+        .set_read_timeout(Some(remaining(deadline)?))
+        .map_err(|_| UnixHelperError::Transport)?;
+    let mut extra = [0_u8; 1];
+    match stream.read(&mut extra) {
+        Ok(0) => Ok(frame),
+        Ok(_) => Err(UnixHelperError::Protocol),
+        Err(error) => Err(timeout_or_transport(&error)),
+    }
+}
+
+fn remaining(deadline: Instant) -> Result<Duration, UnixHelperError> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or(UnixHelperError::Deadline)
+}
+
+fn timeout_or_transport(error: &io::Error) -> UnixHelperError {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+    ) {
+        UnixHelperError::Deadline
+    } else {
+        UnixHelperError::Transport
+    }
+}
+
+fn encode_secret(ordinal: u16, secret: &[u8]) -> Result<Vec<u8>, UnixHelperError> {
+    if ordinal == 0 || !(1..=MAX_SECRET_BYTES).contains(&secret.len()) {
+        return Err(UnixHelperError::Protocol);
+    }
+    let mut payload = Vec::with_capacity(2 + secret.len());
+    payload.extend_from_slice(&ordinal.to_be_bytes());
+    payload.extend_from_slice(secret);
+    Ok(encode_frame(CLIENT_DIRECTION, SECRET, &payload))
+}
+
+fn read_private_tty_line(deadline: Instant) -> Result<Vec<u8>, UnixHelperError> {
+    let tty = CString::new("/dev/tty").expect("fixed terminal path");
+    // SAFETY: the fixed NUL-terminated path is valid and open returns one owned descriptor.
+    let descriptor = unsafe { libc::open(tty.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if descriptor < 0 {
+        return Err(UnixHelperError::Terminal);
+    }
+    // SAFETY: successful open transfers this descriptor exactly once.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    let mut original = MaybeUninit::<libc::termios>::zeroed();
+    // SAFETY: the descriptor is a live terminal and the output region is exact.
+    if unsafe { libc::tcgetattr(descriptor.as_raw_fd(), original.as_mut_ptr()) } != 0 {
+        return Err(UnixHelperError::Terminal);
+    }
+    // SAFETY: tcgetattr succeeded and initialized the complete termios value.
+    let original = unsafe { original.assume_init() };
+    let mut private = original;
+    private.c_lflag &= !libc::ECHO;
+    // SAFETY: only the terminal's echo flag changes; this process restores it through the guard.
+    if unsafe { libc::tcsetattr(descriptor.as_raw_fd(), libc::TCSANOW, &private) } != 0 {
+        return Err(UnixHelperError::Terminal);
+    }
+    let guard = TerminalEchoGuard {
+        descriptor: descriptor.as_raw_fd(),
+        original,
+    };
+    let mut secret = Vec::new();
+    loop {
+        if Instant::now() >= deadline {
+            return Err(UnixHelperError::Deadline);
+        }
+        if !wait_fd_readable(descriptor.as_raw_fd(), deadline)? {
+            return Err(UnixHelperError::Deadline);
+        }
+        let mut byte = 0_u8;
+        // SAFETY: the descriptor is a validated terminal and the one-byte output is live.
+        let received =
+            unsafe { libc::read(descriptor.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) };
+        if received < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if received <= 0 {
+            return Err(UnixHelperError::Terminal);
+        }
+        if byte == b'\n' {
+            break;
+        }
+        if secret.len() == MAX_SECRET_BYTES {
+            secret.fill(0);
+            return Err(UnixHelperError::Protocol);
+        }
+        secret.push(byte);
+    }
+    drop(guard);
+    if secret.last() == Some(&b'\r') {
+        secret.pop();
+    }
+    if secret.is_empty() {
+        Err(UnixHelperError::Protocol)
+    } else {
+        Ok(secret)
+    }
+}
+
+fn wait_fd_readable(descriptor: RawFd, deadline: Instant) -> Result<bool, UnixHelperError> {
+    let mut poll = libc::pollfd {
+        fd: descriptor,
+        events: libc::POLLIN | libc::POLLHUP,
+        revents: 0,
+    };
+    loop {
+        let milliseconds = remaining(deadline)?
+            .as_millis()
+            .max(1)
+            .min(i32::MAX as u128) as i32;
+        // SAFETY: poll receives one live descriptor record for a bounded duration.
+        let result = unsafe { libc::poll(&mut poll, 1, milliseconds) };
+        if result > 0 {
+            return Ok(true);
+        }
+        if result == 0 {
+            return Ok(false);
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return Err(UnixHelperError::Terminal);
+        }
+    }
+}
+
+struct TerminalEchoGuard {
+    descriptor: RawFd,
+    original: libc::termios,
+}
+
+impl Drop for TerminalEchoGuard {
+    fn drop(&mut self) {
+        // SAFETY: the descriptor remains owned by the caller until after this guard drops.
+        unsafe {
+            libc::tcsetattr(self.descriptor, libc::TCSANOW, &self.original);
+        }
+    }
+}
+
 /// Typed adapter for the existing Unix `HelperWriter` transfer.
 ///
 /// The implementation consumes its FD5 capability and attaches it to these exact validated MINT
@@ -154,6 +627,7 @@ pub(crate) fn run_vendor<C: VendorCeremony>(ceremony: &mut C) -> HelperExit {
         ceremony,
         HELPER_SETUP_DEADLINE,
         HELPER_SETUP_DEADLINE,
+        HELPER_RESULT_DEADLINE,
     )
 }
 
@@ -184,6 +658,7 @@ pub(crate) fn run_vendor_at_for_test<C: VendorCeremony>(
         ceremony,
         request_deadline,
         setup_deadline,
+        setup_deadline,
     )
 }
 
@@ -209,6 +684,7 @@ fn run_vendor_with<C, E>(
     ceremony: &mut C,
     request_budget: Duration,
     setup_budget: Duration,
+    result_budget: Duration,
 ) -> HelperExit
 where
     C: VendorCeremony,
@@ -229,13 +705,16 @@ where
     let ready_by = Instant::now()
         .checked_add(setup_budget)
         .unwrap_or_else(Instant::now);
+    let result_by = Instant::now()
+        .checked_add(result_budget)
+        .unwrap_or_else(Instant::now);
     let endpoint = match endpoint() {
         Ok(endpoint) if Instant::now() < ready_by => endpoint,
         Ok(_) => return finish_response(response, Refusal::Deadline.frame()),
         Err(_) => return finish_response(response, Refusal::LocalManagementUnavailable.frame()),
     };
     let terminal = match ceremony.execute(&endpoint, &request, ready_by) {
-        Ok(bytes) if Instant::now() < ready_by => bytes,
+        Ok(bytes) if Instant::now() < result_by => bytes,
         Ok(_) => return finish_response(response, Refusal::LocalManagementUnavailable.frame()),
         Err(_) => return finish_response(response, Refusal::LocalManagementUnavailable.frame()),
     };
@@ -275,9 +754,17 @@ where
     );
     let frame = encode_frame(CLIENT_DIRECTION, SERVICE_ACCOUNT_MINT, payload.as_bytes());
     if transfer.transfer(&stream, &frame).is_err() || Instant::now() >= ready_by {
-        HelperExit::CapabilityOrTransportFailure
-    } else {
-        HelperExit::TerminalFrameWritten
+        return HelperExit::CapabilityOrTransportFailure;
+    }
+    let terminal_by = Instant::now()
+        .checked_add(Duration::from_secs(30))
+        .unwrap_or_else(Instant::now);
+    let mut stream = stream;
+    match read_terminal_before(&mut stream, terminal_by) {
+        Ok(frame) if matches!(frame.opcode, SERVICE_ACCOUNT_RECEIPT | ERROR) => {
+            HelperExit::TerminalFrameWritten
+        }
+        _ => HelperExit::CapabilityOrTransportFailure,
     }
 }
 
@@ -294,7 +781,7 @@ fn acquire_vendor_capabilities() -> Result<VendorCapabilities, UnixHelperError> 
     let facts = UnixVendorCapabilityFacts {
         request,
         response,
-        fd5_closed: descriptor_is_closed(5),
+        fd5_closed: descriptor_is_closed(UNIX_MINT_WRITER_FD as RawFd),
         all_other_nonstandard_fds_closed: all_other_descriptors_closed(request_fd, response_fd)?,
     };
     validate_unix_vendor_capabilities(&facts).map_err(|_| UnixHelperError::Capability)?;
@@ -351,6 +838,44 @@ fn is_anonymous_pipe(descriptor: RawFd) -> bool {
     (unsafe { libc::fcntl(descriptor, libc::F_GETPATH, path.as_mut_ptr()) }) == -1
 }
 
+#[cfg(target_os = "linux")]
+fn all_other_descriptors_closed(request: RawFd, response: RawFd) -> Result<bool, UnixHelperError> {
+    let path = CString::new("/proc/self/fd").expect("fixed proc descriptor directory");
+    // SAFETY: the fixed path is NUL terminated and opendir returns one owned directory stream.
+    let directory = unsafe { libc::opendir(path.as_ptr()) };
+    if directory.is_null() {
+        return Err(UnixHelperError::Capability);
+    }
+    // SAFETY: `directory` remains live until the matching closedir below.
+    let inspection = unsafe { libc::dirfd(directory) };
+    let mut closed = true;
+    loop {
+        // SAFETY: readdir returns either null or one entry owned by the live directory stream.
+        let entry = unsafe { libc::readdir(directory) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: d_name is NUL-terminated within the returned dirent.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let Ok(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(name) = name.parse::<RawFd>() else {
+            continue;
+        };
+        if name > 2 && name != request && name != response && name != inspection {
+            closed = false;
+            break;
+        }
+    }
+    // SAFETY: this closes exactly the directory stream opened above.
+    if unsafe { libc::closedir(directory) } != 0 {
+        return Err(UnixHelperError::Capability);
+    }
+    Ok(closed)
+}
+
+#[cfg(target_os = "macos")]
 fn all_other_descriptors_closed(request: RawFd, response: RawFd) -> Result<bool, UnixHelperError> {
     // SAFETY: getrlimit writes one exact output structure.
     let mut limit = unsafe { MaybeUninit::<libc::rlimit>::zeroed().assume_init() };
@@ -698,6 +1223,9 @@ fn effective_uid() -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnixHelperError {
     Capability,
+    Protocol,
+    Transport,
+    Terminal,
     UnsafeEndpoint,
     EndpointUnavailable,
     EndpointChanged,
@@ -709,6 +1237,9 @@ impl fmt::Display for UnixHelperError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::Capability => "local helper capability contract refused",
+            Self::Protocol => "local helper protocol contract refused",
+            Self::Transport => "local helper transport refused",
+            Self::Terminal => "local helper private terminal input refused",
             Self::UnsafeEndpoint => "local helper endpoint metadata refused",
             Self::EndpointUnavailable => "local management is unavailable",
             Self::EndpointChanged => "local helper endpoint identity changed",

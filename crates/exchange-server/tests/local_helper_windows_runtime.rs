@@ -16,12 +16,10 @@ use local_helper::{
 };
 use local_helper_windows::{run_mint, AuthenticatedMintPort};
 use windows_sys::Win32::Foundation::{
-    DuplicateHandle, GetHandleInformation, SetHandleInformation, DUPLICATE_SAME_ACCESS, HANDLE,
-    HANDLE_FLAG_INHERIT,
+    GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::System::Pipes::CreatePipe;
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 fn invocation(handle: HANDLE) -> LocalHelperInvocation {
     parse_local_helper(
@@ -64,7 +62,7 @@ struct Session;
 
 struct RecordingPort {
     calls: Vec<&'static str>,
-    mint: Vec<u8>,
+    request: Vec<u8>,
     terminal: Vec<u8>,
 }
 
@@ -72,7 +70,7 @@ impl RecordingPort {
     fn successful() -> Self {
         Self {
             calls: Vec::new(),
-            mint: Vec::new(),
+            request: Vec::new(),
             terminal: terminal(
                 0x0022,
                 br#"{"commit":{"frame_written":true,"verifier":"committed"},"id":"worker","receipt_id":"1111111111111111111111111111111111111111111111111111111111111111","replayed":false,"schema":"exchange.service-account-mint-receipt.v1"}"#,
@@ -84,50 +82,29 @@ impl RecordingPort {
 impl AuthenticatedMintPort for RecordingPort {
     type Error = ();
     type Session = Session;
-    type DuplicatedWriter = OwnedHandle;
 
     fn open_owner_session(&mut self, _ready_by: Instant) -> Result<Self::Session, Self::Error> {
         self.calls.push("open-owner-session");
         Ok(Session)
     }
 
-    fn duplicate_writer(
-        &mut self,
-        _session: &mut Self::Session,
-        writer: HANDLE,
-    ) -> Result<Self::DuplicatedWriter, Self::Error> {
-        self.calls.push("duplicate-writer");
-        let mut flags = 0;
-        assert_ne!(unsafe { GetHandleInformation(writer, &mut flags) }, 0);
-        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0, "inheritance was cleared");
-
-        let mut duplicate = null_mut();
-        assert_ne!(
-            unsafe {
-                DuplicateHandle(
-                    GetCurrentProcess(),
-                    writer,
-                    GetCurrentProcess(),
-                    &mut duplicate,
-                    0,
-                    0,
-                    DUPLICATE_SAME_ACCESS,
-                )
-            },
-            0
-        );
-        Ok(unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) })
-    }
-
     fn exchange_mint(
         &mut self,
         _session: Self::Session,
-        _writer: Self::DuplicatedWriter,
-        mint_frame: &[u8],
+        request: &[u8],
         _ready_by: Instant,
     ) -> Result<Vec<u8>, Self::Error> {
         self.calls.push("exchange-mint");
-        self.mint.extend_from_slice(mint_frame);
+        assert_eq!(&request[..8], b"FXHA\x01\x01\x01\x00");
+        let source = u64::from_be_bytes(request[8..16].try_into().expect("FXHA source HANDLE"));
+        let mut flags = HANDLE_FLAG_INHERIT;
+        assert_ne!(
+            unsafe { GetHandleInformation(source as usize as HANDLE, &mut flags) },
+            0,
+            "the helper source remains live through server attachment"
+        );
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0, "inheritance was cleared");
+        self.request.extend_from_slice(request);
         Ok(self.terminal.clone())
     }
 }
@@ -143,7 +120,7 @@ fn terminal(opcode: u16, payload: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn mint_clears_inheritance_duplicates_only_the_declared_writer_and_accepts_exact_receipt() {
+fn mint_clears_inheritance_and_sends_exact_fxha_then_mint() {
     let (_read, write) = inheritable_pipe();
     let (_canary_read, canary_write) = inheritable_pipe();
     let mut canary_flags = 0;
@@ -161,17 +138,18 @@ fn mint_clears_inheritance_duplicates_only_the_declared_writer_and_accepts_exact
     else {
         panic!("mint invocation");
     };
+    let writer_value = write.as_raw_handle() as usize as u64;
     std::mem::forget(write);
     let mut port = RecordingPort::successful();
     assert!(run_mint(&id, expires_at, writer, &mut port) == HelperExit::TerminalFrameWritten);
-    assert_eq!(
-        port.calls,
-        ["open-owner-session", "duplicate-writer", "exchange-mint"]
-    );
-    assert_eq!(
-        port.mint,
-        terminal(0x0020, br#"{"expires_at":"1800000000","id":"worker"}"#)
-    );
+    assert_eq!(port.calls, ["open-owner-session", "exchange-mint"]);
+    let mut expected = b"FXHA\x01\x01\x01\x00".to_vec();
+    expected.extend_from_slice(&writer_value.to_be_bytes());
+    expected.extend_from_slice(&terminal(
+        0x0020,
+        br#"{"expires_at":"1800000000","id":"worker"}"#,
+    ));
+    assert_eq!(port.request, expected);
 
     let mut still_inherited = 0;
     assert_ne!(

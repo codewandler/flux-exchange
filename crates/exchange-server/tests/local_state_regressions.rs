@@ -18,6 +18,8 @@ const STORE_SETTINGS: [&str; 8] = [
     "FLUX_EXCHANGE_AUDIT",
     "FLUX_EXCHANGE_SERVICE_ACCOUNTS",
 ];
+#[cfg(all(feature = "native-root-test-seam", unix))]
+const UNIX_ACCOUNT_HOME_SEAM: &str = "FLUX_EXCHANGE_TEST_UNIX_ACCOUNT_HOME";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -469,6 +471,101 @@ fn authenticated_account_root() -> PathBuf {
         #[cfg(not(target_os = "macos"))]
         return home.join(".local/state/flux-exchange");
     }
+}
+
+#[cfg(all(feature = "native-root-test-seam", unix))]
+fn complete_explicit_store_environment(root: &Path) -> Vec<(&'static str, String)> {
+    STORE_SETTINGS
+        .into_iter()
+        .enumerate()
+        .map(|(index, setting)| {
+            (
+                setting,
+                root.join(format!("store-{index}")).display().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[cfg(all(feature = "native-root-test-seam", unix))]
+#[test]
+fn production_account_root_refuses_a_symlinked_home_without_repair() {
+    use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+    let scratch = Scratch::new("account-home-symlink");
+    let real_home = scratch.path().join("real-home");
+    std::fs::create_dir(&real_home).expect("real account home");
+    std::fs::set_permissions(&real_home, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-only real account home");
+    let linked_home = scratch.path().join("linked-home");
+    symlink(&real_home, &linked_home).expect("symlinked account home");
+    let mut environment = complete_explicit_store_environment(scratch.path());
+    environment.push((UNIX_ACCOUNT_HOME_SEAM, linked_home.display().to_string()));
+    environment.push(("RUST_LOG", "warn".to_owned()));
+
+    let output = run_to_final_bind(&[], environment);
+    let refusal = diagnostics(&output);
+
+    assert!(
+        !output.status.success(),
+        "the unsafe account root was admitted"
+    );
+    assert!(
+        refusal.contains("symlink") && refusal.contains(&linked_home.display().to_string()),
+        "the production account-root seam did not refuse its symlinked home precisely:\n{refusal}"
+    );
+    assert!(
+        std::fs::symlink_metadata(&linked_home)
+            .expect("account-home symlink after refusal")
+            .file_type()
+            .is_symlink(),
+        "startup repaired or replaced the authenticated-account symlink"
+    );
+    assert!(
+        !real_home.join(".local").exists()
+            && !real_home.join("Library/Application Support/Flux").exists(),
+        "startup followed the account-home symlink and created production state"
+    );
+}
+
+#[cfg(all(feature = "native-root-test-seam", unix))]
+#[test]
+fn production_account_root_refuses_an_untrusted_writable_home_without_repair() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("account-home-writable");
+    let home = scratch.path().join("writable-home");
+    std::fs::create_dir(&home).expect("account home");
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o777))
+        .expect("untrusted-writable account home");
+    let mut environment = complete_explicit_store_environment(scratch.path());
+    environment.push((UNIX_ACCOUNT_HOME_SEAM, home.display().to_string()));
+    environment.push(("RUST_LOG", "warn".to_owned()));
+
+    let output = run_to_final_bind(&[], environment);
+    let refusal = diagnostics(&output);
+    let mode_after = std::fs::metadata(&home)
+        .expect("account home after refusal")
+        .permissions()
+        .mode()
+        & 0o777;
+
+    assert!(
+        !output.status.success(),
+        "the unsafe account root was admitted"
+    );
+    assert!(
+        refusal.contains("writable") && refusal.contains(&home.display().to_string()),
+        "the production account-root seam did not refuse its writable home precisely:\n{refusal}"
+    );
+    assert_eq!(
+        mode_after, 0o777,
+        "startup repaired the unsafe account home"
+    );
+    assert!(
+        !home.join(".local").exists() && !home.join("Library/Application Support/Flux").exists(),
+        "startup created production state below the unsafe account home"
+    );
 }
 
 #[cfg(all(feature = "native-root-test-seam", windows))]

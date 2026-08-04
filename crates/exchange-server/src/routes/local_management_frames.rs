@@ -2,18 +2,19 @@
 
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{OriginalUri, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
 use axum::{Extension, Json};
 use exchange_host::Principal;
-use futures_util::SinkExt as _;
 use serde_json::json;
 
 use super::{Access, Module, Route};
-use crate::local_management::{Dispatcher, Transport};
+use crate::local_management::{
+    deadline_frame, Dispatcher, SessionAdvance, SessionBegin, Transport,
+};
 use crate::state::AppState;
 
 const PROTOCOL: &str = "exchange.local-management.v1";
@@ -86,9 +87,13 @@ async fn upgrade(
         }
     };
     let tenant = principal.tenant().clone();
+    // The occupancy claim already exists and the 101 has not been constructed yet. Starting the
+    // absolute budget here includes handshake response scheduling exactly as the hosted contract
+    // requires; traffic in `serve` never replaces this deadline.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     let mut response = upgrade
         .protocols([PROTOCOL])
-        .on_upgrade(move |socket| serve(socket, dispatcher, tenant, claim));
+        .on_upgrade(move |socket| serve(socket, dispatcher, tenant, claim, deadline));
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -100,31 +105,87 @@ async fn serve(
     dispatcher: Dispatcher,
     tenant: exchange_host::Tenant,
     _claim: crate::traffic::HostedClaim,
+    deadline: tokio::time::Instant,
 ) {
-    let incoming = tokio::time::timeout(Duration::from_secs(30), socket.recv()).await;
-    let response = match incoming {
-        Ok(Some(Ok(Message::Binary(bytes)))) if bytes.len() <= MAX_MESSAGE_BYTES => {
-            dispatcher
-                .dispatch_message(Transport::Hosted, &tenant, &bytes)
-                .await
+    let mut active: Option<crate::local_management::ActiveSession> = None;
+    loop {
+        match tokio::time::timeout_at(deadline, socket.recv()).await {
+            Err(_) => {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
+                let _ = socket.send(Message::Binary(deadline_frame().into())).await;
+                close(&mut socket, close_code::POLICY).await;
+                return;
+            }
+            Ok(Some(Ok(Message::Binary(bytes)))) if bytes.len() <= MAX_MESSAGE_BYTES => {
+                if let Some(session) = active.as_mut() {
+                    match session.accept_message(&bytes).await {
+                        SessionAdvance::Awaiting => {}
+                        SessionAdvance::Terminal(reply) => {
+                            let (response, code) = reply.into_parts();
+                            let _ = socket.send(Message::Binary(response.into())).await;
+                            close(&mut socket, code).await;
+                            return;
+                        }
+                    }
+                } else {
+                    match dispatcher
+                        .begin_message(Transport::Hosted, &tenant, &bytes)
+                        .await
+                    {
+                        SessionBegin::Terminal(reply) => {
+                            let (response, code) = reply.into_parts();
+                            let _ = socket.send(Message::Binary(response.into())).await;
+                            close(&mut socket, code).await;
+                            return;
+                        }
+                        SessionBegin::Active { response, session } => {
+                            let _ = socket.send(Message::Binary(response.into())).await;
+                            active = Some(session);
+                        }
+                    }
+                }
+            }
+            Ok(Some(Ok(Message::Binary(_)))) => {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
+                close(&mut socket, close_code::SIZE).await;
+                return;
+            }
+            Ok(Some(Ok(Message::Text(_)))) => {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
+                close(&mut socket, close_code::UNSUPPORTED).await;
+                return;
+            }
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
+                return;
+            }
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {}
+            Ok(Some(Err(_))) => {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
+                close(&mut socket, close_code::PROTOCOL).await;
+                return;
+            }
         }
-        _ => invalid_frame(),
-    };
-    let _ = socket.send(Message::Binary(response.into())).await;
-    let _ = socket.close().await;
+    }
 }
 
-fn invalid_frame() -> Vec<u8> {
-    // Fixed canonical FXLM ERROR frame for a transport-level invalid request.
-    let payload = br#"{"code":"invalid_frame","commit":"none","retry":"never","schema":"exchange.local-management-error.v1","status":422}"#;
-    let mut frame = Vec::with_capacity(12 + payload.len());
-    frame.extend_from_slice(b"FXLM");
-    frame.push(1);
-    frame.push(2);
-    frame.extend_from_slice(&0x7fff_u16.to_be_bytes());
-    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    frame.extend_from_slice(payload);
-    frame
+async fn close(socket: &mut WebSocket, code: u16) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: "".into(),
+        })))
+        .await;
 }
 
 fn refusal(status: StatusCode, code: &'static str) -> Response {

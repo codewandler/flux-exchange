@@ -18,6 +18,9 @@ mod apps;
 pub(crate) mod catalogue;
 mod channels;
 mod connections;
+pub(crate) use connections::{
+    native_plan_query, native_plan_snapshot, NativePlanRefusal, NativePlanSnapshot,
+};
 mod grants;
 mod health;
 mod identity;
