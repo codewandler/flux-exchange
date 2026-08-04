@@ -787,6 +787,7 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
 ];
 
 const REQUIRED_NATIVE_CASES: &[&str] = &[
+    "production-root-inherited-environment",
     "expiry-equality-live",
     "supervisor-death-normal-responsive-unix",
     "supervisor-death-normal-wedged-unix",
@@ -814,6 +815,12 @@ const UNIX_RELEASE_TARGETS: &[&str] = &[
 const WINDOWS_RELEASE_TARGETS: &[&str] = &["x86_64-pc-windows-msvc"];
 
 const REQUIRED_NATIVE_BINDINGS: &[RequiredNativeBinding] = &[
+    RequiredNativeBinding {
+        id: "production-root-inherited-environment",
+        targets: release::SUPPORTED_TARGETS,
+        test_target: "local_state_regressions",
+        exact_test: "native_process_derives_production_root_from_the_authenticated_os_account",
+    },
     RequiredNativeBinding {
         id: "expiry-equality-live",
         targets: UNIX_RELEASE_TARGETS,

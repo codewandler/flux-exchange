@@ -1038,6 +1038,20 @@ fn native_fixture_cases() -> Vec<NativeFixtureCase> {
 
     vec![
         NativeFixtureCase {
+            id: "production-root-inherited-environment".into(),
+            evidence: vec![evidence(
+                &[
+                    "aarch64-apple-darwin",
+                    "aarch64-unknown-linux-gnu",
+                    "x86_64-apple-darwin",
+                    "x86_64-pc-windows-msvc",
+                    "x86_64-unknown-linux-gnu",
+                ],
+                "local_state_regressions",
+                "native_process_derives_production_root_from_the_authenticated_os_account",
+            )],
+        },
+        NativeFixtureCase {
             id: "expiry-equality-live".into(),
             evidence: vec![
                 evidence(

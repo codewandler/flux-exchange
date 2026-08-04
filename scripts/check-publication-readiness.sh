@@ -235,12 +235,13 @@ targets = {
     "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc",
 }
 native = fixture.get("native_cases")
-if not isinstance(native, list) or len(native) != 9:
-    refuse("fixture-set must retain exactly nine native case mappings")
+if not isinstance(native, list) or len(native) != 10:
+    refuse("fixture-set must retain the nine X-128 mappings plus production-root poisoning")
 native_ids = [case.get("id") for case in native if isinstance(case, dict)]
-if len(native_ids) != 9 or len(set(native_ids)) != 9:
+if len(native_ids) != 10 or len(set(native_ids)) != 10:
     refuse("native case ids are absent or duplicated")
 expected_native_ids = {
+    "production-root-inherited-environment",
     "expiry-equality-live",
     "supervisor-death-normal-responsive-unix",
     "supervisor-death-normal-wedged-unix",
@@ -252,7 +253,15 @@ expected_native_ids = {
     "windows-inherited-abi",
 }
 if set(native_ids) != expected_native_ids:
-    refuse(f"the nine X-128 native case identities changed: {sorted(set(native_ids) ^ expected_native_ids)}")
+    refuse(f"the X-128 plus production-root native case identities changed: {sorted(set(native_ids) ^ expected_native_ids)}")
+root_case = next(case for case in native if case.get("id") == "production-root-inherited-environment")
+expected_root_evidence = [{
+    "targets": sorted(targets),
+    "test_target": "local_state_regressions",
+    "exact_test": "native_process_derives_production_root_from_the_authenticated_os_account",
+}]
+if root_case.get("evidence") != expected_root_evidence:
+    refuse("production-root poisoning is not bound to its exact real-process test on all five targets")
 bindings = []
 covered = set()
 for case in native:
@@ -272,8 +281,8 @@ for case in native:
             refuse(f"native case {case.get('id')!r} duplicates an evidence binding")
         bindings.append(identity)
         covered.update(selected)
-if len(bindings) != 14 or covered != targets:
-    refuse(f"native fixture mapping has {len(bindings)} bindings over {sorted(covered)}, want 14 over all five targets")
+if len(bindings) != 15 or covered != targets:
+    refuse(f"native fixture mapping has {len(bindings)} bindings over {sorted(covered)}, want 15 over all five targets")
 
 required_contract_cases = {
     "positive-linux", "positive-macos", "positive-windows", "positive-signer-overlap",
@@ -281,7 +290,8 @@ required_contract_cases = {
     "minisign-key-malformed", "minisign-key-reused", "channel-floor-survives-rotation",
     "higher-channel-no-compatible", "higher-channel-target-fails", "same-number-different-bytes",
     "expiry-equality-stopped", "expiry-equality-live", "readiness-bind-domain",
-    "readiness-start-kind", "unix-inherited-abi", "windows-inherited-abi",
+    "readiness-start-kind", "production-root-inherited-environment",
+    "unix-inherited-abi", "windows-inherited-abi",
     "provenance-client-input",
 }
 missing_contract_cases = sorted(required_contract_cases - set(case_ids) - set(native_ids))
@@ -381,6 +391,7 @@ for relative, document in documents.items():
 trust_cases = '''trust-rollback trust-equivocation minisign-key-malformed minisign-key-wrong-length minisign-key-wrong-algorithm minisign-key-embedded-id-disagreement minisign-key-reused minisign-key-reused-within-role minisign-key-reused-with-root role-confusion key-id-empty key-id-overlong key-id-slash key-id-double-hyphen key-id-leading-punctuation key-id-trailing-punctuation key-id-nonascii key-id-uppercase trust-future-issued root-threshold-failure trust-signature-missing trust-signature-substituted release-threshold-failure channel-threshold-failure channel-signature-missing channel-signature-substituted manifest-signature-missing manifest-signature-key-id-disagree github-initial-trust key-id-substituted positive-linux positive-macos positive-windows positive-signer-overlap integer-over-jcs-safe decimal-noncanonical id-or-basename-unsafe channel-floor-survives-rotation higher-channel-no-compatible higher-channel-target-fails same-number-different-bytes expiry-equality-stopped readiness-bind-domain readiness-start-kind provenance-client-input'''.split()
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 native_ids = [
+    "production-root-inherited-environment",
     "expiry-equality-live", "supervisor-death-normal-responsive-unix",
     "supervisor-death-normal-wedged-unix", "supervisor-death-sigkill-responsive-unix",
     "supervisor-death-sigkill-wedged-unix", "supervisor-death-terminate-responsive-windows",
@@ -388,10 +399,17 @@ native_ids = [
 ]
 native = []
 for index, case_id in enumerate(native_ids):
-    count = 2 if index < 5 else 1
+    count = 1 if case_id == "production-root-inherited-environment" else (2 if index < 6 else 1)
     evidence = []
     for item in range(count):
-        evidence.append({"test_target": f"target-{index}-{item}", "exact_test": f"test-{index}-{item}", "targets": targets if index == 0 and item == 0 else [targets[(index + item) % len(targets)]]})
+        if case_id == "production-root-inherited-environment":
+            evidence.append({
+                "test_target": "local_state_regressions",
+                "exact_test": "native_process_derives_production_root_from_the_authenticated_os_account",
+                "targets": sorted(targets),
+            })
+        else:
+            evidence.append({"test_target": f"target-{index}-{item}", "exact_test": f"test-{index}-{item}", "targets": [targets[(index + item) % len(targets)]]})
     native.append({"id": case_id, "evidence": evidence})
 files = {}
 for path in sorted(candidate for candidate in fixtures.rglob("*") if candidate.is_file()):
@@ -483,7 +501,16 @@ import json, sys
 path=sys.argv[1]; value=json.load(open(path)); value["native_cases"][0]["evidence"].pop()
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
-  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted thirteen native bindings"; fi
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted fourteen native bindings"; fi
+  mv "$fixture_set.clean" "$fixture_set"
+
+  cp "$fixture_set" "$fixture_set.clean"
+  python3 - "$fixture_set" <<'PY'
+import json, sys
+path=sys.argv[1]; value=json.load(open(path)); value["native_cases"][0]["evidence"][0]["exact_test"]="renamed_or_substituted_test"
+open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
+PY
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted production-root process test"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
   cp "$fixture_set" "$fixture_set.clean"

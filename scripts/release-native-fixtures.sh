@@ -22,7 +22,8 @@ PY
 }
 
 if [ "${1:-}" = --self-test ]; then
-  expected='expiry-equality-live
+  expected='production-root-inherited-environment
+expiry-equality-live
 supervisor-death-normal-responsive-unix
 supervisor-death-normal-wedged-unix
 supervisor-death-sigkill-responsive-unix
@@ -32,8 +33,8 @@ supervisor-death-terminate-wedged-windows
 unix-inherited-abi
 windows-inherited-abi'
   actual="$(inventory | cut -f1 | LC_ALL=C sort -u)"
-  [ "$actual" = "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ] || fail 'native case inventory is not the exact nine-case set'
-  [ "$(inventory | wc -l | tr -d ' ')" = 14 ] || fail 'native process evidence is not the exact fourteen-test mapping'
+  [ "$actual" = "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ] || fail 'native case inventory is not the exact ten-case set'
+  [ "$(inventory | wc -l | tr -d ' ')" = 15 ] || fail 'native process evidence is not the exact fifteen-test mapping'
   for target in \
     aarch64-apple-darwin \
     aarch64-unknown-linux-gnu \
@@ -65,6 +66,11 @@ count=0
 while IFS=$'\t' read -r case_id test_target exact_test; do
   [ -n "$case_id" ] || continue
   case "$test_target" in
+    local_state_regressions)
+      [ "$case_id" = production-root-inherited-environment ] \
+        || fail "native case $case_id cannot use the production-root test target"
+      test_args=(--test local_state_regressions)
+      ;;
     "$expected_test_target") test_args=(--test "$test_target") ;;
     lib)
       [ "$target" = x86_64-pc-windows-msvc ] || fail "lib evidence is not admitted for $target"
@@ -74,7 +80,7 @@ while IFS=$'\t' read -r case_id test_target exact_test; do
   esac
   cargo_args=(
     test -p flux-exchange
-    --features supervisor-test-wedge,supervisor-test-bind-refusal
+    --features native-root-test-seam,supervisor-test-wedge,supervisor-test-bind-refusal
     --locked --target "$target" "${test_args[@]}"
   )
   listing="$(cargo "${cargo_args[@]}" -- --list --format terse)"
