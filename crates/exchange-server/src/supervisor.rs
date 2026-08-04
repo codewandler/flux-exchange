@@ -929,12 +929,14 @@ fn validate_windows_handle(
     read: bool,
     name: &str,
 ) -> Result<(), String> {
+    use windows_sys::Wdk::Foundation::{NtQueryObject, ObjectBasicInformation};
     use windows_sys::Win32::Foundation::{
         GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT,
     };
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileType, ReadFile, WriteFile, FILE_TYPE_PIPE,
+        GetFileType, FILE_READ_DATA, FILE_TYPE_PIPE, FILE_WRITE_DATA,
     };
+    use windows_sys::Win32::System::WindowsProgramming::PUBLIC_OBJECT_BASIC_INFORMATION;
 
     let mut inherited = 0_u32;
     // SAFETY: output storage is valid and the numeric capability is only observed.
@@ -949,49 +951,32 @@ fn validate_windows_handle(
     if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
         return Err(format!("supervisor {name} HANDLE is not a pipe"));
     }
-    let mut transferred = 0_u32;
-    // A zero-byte operation returns immediately but still validates the handle's access mask.
-    // SAFETY: no buffer is accessed for a zero-byte operation and the output count is valid.
-    let usable = unsafe {
-        if read {
-            ReadFile(
-                handle,
-                std::ptr::null_mut(),
-                0,
-                &mut transferred,
-                std::ptr::null_mut(),
-            )
-        } else {
-            WriteFile(
-                handle,
-                std::ptr::null(),
-                0,
-                &mut transferred,
-                std::ptr::null_mut(),
-            )
-        }
+    let mut information = PUBLIC_OBJECT_BASIC_INFORMATION::default();
+    let expected_size = std::mem::size_of::<PUBLIC_OBJECT_BASIC_INFORMATION>() as u32;
+    let mut returned_size = 0_u32;
+    // A zero-byte `ReadFile` on an empty synchronous pipe can block on Windows. Querying the
+    // kernel-granted access mask proves direction without consuming or waiting on either stream.
+    // SAFETY: the typed public output structure is live for the complete native query.
+    let status = unsafe {
+        NtQueryObject(
+            handle,
+            ObjectBasicInformation,
+            (&mut information as *mut PUBLIC_OBJECT_BASIC_INFORMATION).cast(),
+            expected_size,
+            &mut returned_size,
+        )
     };
-    // SAFETY: the opposite zero-byte operation likewise carries no payload and cannot block.
-    let opposite_usable = unsafe {
-        if read {
-            WriteFile(
-                handle,
-                std::ptr::null(),
-                0,
-                &mut transferred,
-                std::ptr::null_mut(),
-            )
-        } else {
-            ReadFile(
-                handle,
-                std::ptr::null_mut(),
-                0,
-                &mut transferred,
-                std::ptr::null_mut(),
-            )
-        }
+    if status < 0 || returned_size != expected_size {
+        return Err(format!(
+            "cannot inspect supervisor {name} HANDLE access without reading it"
+        ));
+    }
+    let (required, forbidden) = if read {
+        (FILE_READ_DATA, FILE_WRITE_DATA)
+    } else {
+        (FILE_WRITE_DATA, FILE_READ_DATA)
     };
-    if usable == 0 || opposite_usable != 0 {
+    if information.GrantedAccess & required == 0 || information.GrantedAccess & forbidden != 0 {
         return Err(format!("supervisor {name} HANDLE has the wrong direction"));
     }
     // SAFETY: clearing inheritance on the discovered capability cannot widen authority.

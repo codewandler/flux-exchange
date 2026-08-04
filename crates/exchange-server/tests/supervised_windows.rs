@@ -623,9 +623,9 @@ fn environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities
     let mut readiness_write = std::ptr::null_mut();
     let mut liveness_read = std::ptr::null_mut();
     let mut liveness_write = std::ptr::null_mut();
-    // These are inheritable pipe capabilities, but Rust's production process launcher does not put
-    // them in its explicit handle list. Numeric argv and similarly named environment inputs cannot
-    // turn an unlisted handle, stdout or the environment into the supervised ABI.
+    // Plant real pipe handles, then make them ineligible for inheritance before starting the child.
+    // Numeric argv and similarly named environment inputs cannot turn an unlisted handle, stdout or
+    // the environment into the supervised ABI.
     assert_ne!(
         unsafe { CreatePipe(&mut readiness_read, &mut readiness_write, &attributes, 0) },
         0
@@ -634,6 +634,10 @@ fn environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities
         unsafe { CreatePipe(&mut liveness_read, &mut liveness_write, &attributes, 0) },
         0
     );
+    clear_inherit(readiness_read);
+    clear_inherit(readiness_write);
+    clear_inherit(liveness_read);
+    clear_inherit(liveness_write);
     let output = exchange_command()
         .args([
             "--supervised",
