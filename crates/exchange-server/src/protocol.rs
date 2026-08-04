@@ -54,6 +54,61 @@ pub(crate) struct ErrorBody {
     error: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkflowConnectionRefusalBody {
+    refusal: WorkflowConnectionRefusalCode,
+    message: String,
+}
+
+impl WorkflowConnectionRefusalBody {
+    pub(crate) fn invalid_connection_selector() -> Self {
+        Self {
+            refusal: WorkflowConnectionRefusalCode::InvalidConnectionSelector,
+            message: "a stored workflow is not one connector connection; remove `connection`"
+                .to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowConnectionRefusalCode {
+    InvalidConnectionSelector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkflowRunRefusalBody {
+    error: String,
+    run: String,
+}
+
+impl WorkflowRunRefusalBody {
+    pub(crate) fn new(error: impl Into<String>, run: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            run: run.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkflowLookupRefusalBody {
+    error: String,
+    current_revision: Option<u64>,
+}
+
+impl WorkflowLookupRefusalBody {
+    pub(crate) fn new(error: impl Into<String>, current_revision: Option<u64>) -> Self {
+        Self {
+            error: error.into(),
+            current_revision,
+        }
+    }
+}
+
 impl ErrorBody {
     pub(crate) fn new(error: impl Into<String>) -> Self {
         Self {
@@ -169,9 +224,13 @@ impl From<&InvokeRefusal> for InvocationRefusalCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InvokeResponse {
     Success(Invocation),
+    WorkflowSuccess(exchange_host::WorkflowInvocation),
     Refusal(InvocationRefusalBody),
     Error(ErrorBody),
     Connection(ConnectionSelectionRefusal),
+    WorkflowConnection(WorkflowConnectionRefusalBody),
+    WorkflowRun(WorkflowRunRefusalBody),
+    WorkflowLookup(WorkflowLookupRefusalBody),
 }
 
 #[cfg(test)]
@@ -235,15 +294,24 @@ pub(crate) fn decode_invoke_response(status: u16, bytes: &[u8]) -> Result<Invoke
     reject_duplicate_members(bytes)?;
     match status {
         200 => {
-            let invocation: Invocation =
+            if let Ok(invocation) = serde_json::from_slice::<Invocation>(bytes) {
+                if credential_shaped(&invocation.operation)
+                    || credential_shaped(&invocation.content)
+                    || invocation.view.as_deref().is_some_and(credential_shaped)
+                {
+                    return Err("invocation success contains a credential-shaped value".to_owned());
+                }
+                return Ok(InvokeResponse::Success(invocation));
+            }
+            let invocation: exchange_host::WorkflowInvocation =
                 serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if credential_shaped(&invocation.operation)
+                || credential_shaped(&invocation.workflow_id)
                 || credential_shaped(&invocation.content)
-                || invocation.view.as_deref().is_some_and(credential_shaped)
             {
-                return Err("invocation success contains a credential-shaped value".to_owned());
+                return Err("workflow success contains a credential-shaped value".to_owned());
             }
-            Ok(InvokeResponse::Success(invocation))
+            Ok(InvokeResponse::WorkflowSuccess(invocation))
         }
         403 | 404 | 409 | 422 | 502 => {
             if let Ok(body) = serde_json::from_slice::<InvocationRefusalBody>(bytes) {
@@ -252,20 +320,56 @@ pub(crate) fn decode_invoke_response(status: u16, bytes: &[u8]) -> Result<Invoke
                 }
                 return Ok(InvokeResponse::Refusal(body));
             }
-            let body: ConnectionSelectionRefusal =
-                serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-            if !body.admits_status(status) {
-                return Err("connection-selection refusal status and body disagree".to_owned());
+            if let Ok(body) = serde_json::from_slice::<ConnectionSelectionRefusal>(bytes) {
+                if !body.admits_status(status) {
+                    return Err("connection-selection refusal status and body disagree".to_owned());
+                }
+                return Ok(InvokeResponse::Connection(body));
             }
-            Ok(InvokeResponse::Connection(body))
+            if let Ok(body) = serde_json::from_slice::<WorkflowConnectionRefusalBody>(bytes) {
+                if status != 422 || credential_shaped(&body.message) {
+                    return Err("workflow connection refusal status and body disagree".to_owned());
+                }
+                return Ok(InvokeResponse::WorkflowConnection(body));
+            }
+            if let Ok(body) = serde_json::from_slice::<WorkflowRunRefusalBody>(bytes) {
+                if !matches!(status, 403 | 409 | 422 | 502)
+                    || body.run.is_empty()
+                    || credential_shaped(&body.error)
+                    || credential_shaped(&body.run)
+                {
+                    return Err("workflow run refusal status and body disagree".to_owned());
+                }
+                return Ok(InvokeResponse::WorkflowRun(body));
+            }
+            if let Ok(body) = serde_json::from_slice::<ErrorBody>(bytes) {
+                if !matches!(status, 422 | 502) || !body.is_bounded_and_value_free() {
+                    return Err("generic invocation refusal status and body disagree".to_owned());
+                }
+                return Ok(InvokeResponse::Error(body));
+            }
+            if let Ok(body) = serde_json::from_slice::<WorkflowLookupRefusalBody>(bytes) {
+                if !matches!(status, 404 | 409 | 422) || credential_shaped(&body.error) {
+                    return Err("workflow lookup refusal status and body disagree".to_owned());
+                }
+                return Ok(InvokeResponse::WorkflowLookup(body));
+            }
+            Err("response body does not match a closed invocation refusal".to_owned())
         }
         400 | 401 | 429 | 503 => {
-            let body: ErrorBody =
-                serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-            if !body.is_bounded_and_value_free() {
-                return Err("invocation error body exceeds its value-free bound".to_owned());
+            if let Ok(body) = serde_json::from_slice::<ErrorBody>(bytes) {
+                if !body.is_bounded_and_value_free() {
+                    return Err("invocation error body exceeds its value-free bound".to_owned());
+                }
+                return Ok(InvokeResponse::Error(body));
             }
-            Ok(InvokeResponse::Error(body))
+            if let Ok(body) = serde_json::from_slice::<WorkflowLookupRefusalBody>(bytes) {
+                if status != 503 || credential_shaped(&body.error) {
+                    return Err("workflow lookup refusal status and body disagree".to_owned());
+                }
+                return Ok(InvokeResponse::WorkflowLookup(body));
+            }
+            Err("response body does not match a closed invocation refusal".to_owned())
         }
         _ => Err(format!(
             "status {status} is not an exchange.invoke-response.v1 outcome"
@@ -277,9 +381,13 @@ pub(crate) fn decode_invoke_response(status: u16, bytes: &[u8]) -> Result<Invoke
 fn encode_invoke_response(response: &InvokeResponse) -> Result<Vec<u8>, serde_json::Error> {
     match response {
         InvokeResponse::Success(invocation) => serde_json::to_vec(invocation),
+        InvokeResponse::WorkflowSuccess(invocation) => serde_json::to_vec(invocation),
         InvokeResponse::Refusal(refusal) => serde_json::to_vec(refusal),
         InvokeResponse::Error(error) => serde_json::to_vec(error),
         InvokeResponse::Connection(connection) => serde_json::to_vec(connection),
+        InvokeResponse::WorkflowConnection(refusal) => serde_json::to_vec(refusal),
+        InvokeResponse::WorkflowRun(refusal) => serde_json::to_vec(refusal),
+        InvokeResponse::WorkflowLookup(refusal) => serde_json::to_vec(refusal),
     }
 }
 
@@ -693,6 +801,8 @@ mod tests {
         EffectiveCatalogueAccepted,
         RetryableTransportRefusalAccepted,
         InvocationSuccessAccepted,
+        #[serde(rename = "invalid_connection_label_422")]
+        InvalidConnectionLabel422,
         #[serde(rename = "malformed_request_400")]
         MalformedRequest400,
         #[serde(rename = "no_invoker_503")]
@@ -700,10 +810,19 @@ mod tests {
         #[serde(rename = "registry_unavailable_503")]
         RegistryUnavailable503,
         RequestCaseOutcomesChecked,
+        #[serde(rename = "store_denied_502")]
+        StoreDenied502,
         #[serde(rename = "store_unavailable_503")]
         StoreUnavailable503,
         #[serde(rename = "traffic_429")]
         Traffic429,
+        #[serde(rename = "workflow_connection_422")]
+        WorkflowConnection422,
+        #[serde(rename = "workflow_lookup_404")]
+        WorkflowLookup404,
+        #[serde(rename = "workflow_run_refusal_403")]
+        WorkflowRunRefusal403,
+        WorkflowSuccessAccepted,
     }
 
     impl ExpectedOutcome {
@@ -724,12 +843,16 @@ mod tests {
                 other => {
                     let status = match other {
                         Self::InvocationSuccessAccepted => 200,
+                        Self::WorkflowSuccessAccepted => 200,
                         Self::MalformedRequest400 => 400,
                         Self::Authentication401 => 401,
+                        Self::WorkflowRunRefusal403 => 403,
                         Self::ConnectionSelection404 => 404,
+                        Self::WorkflowLookup404 => 404,
                         Self::ConnectionSelection409 => 409,
                         Self::Traffic429 => 429,
-                        Self::RetryableTransportRefusalAccepted => 502,
+                        Self::InvalidConnectionLabel422 | Self::WorkflowConnection422 => 422,
+                        Self::RetryableTransportRefusalAccepted | Self::StoreDenied502 => 502,
                         Self::NoInvoker503
                         | Self::RegistryUnavailable503
                         | Self::StoreUnavailable503 => 503,
@@ -737,8 +860,8 @@ mod tests {
                             unreachable!("handled above")
                         }
                     };
-                    let decoded =
-                        decode_invoke_response(status, bytes).expect("declared response outcome");
+                    let decoded = decode_invoke_response(status, bytes)
+                        .unwrap_or_else(|error| panic!("{self:?}: {error}"));
                     assert_eq!(
                         encode_invoke_response(&decoded).expect("production serializer"),
                         bytes

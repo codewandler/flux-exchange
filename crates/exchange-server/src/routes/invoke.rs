@@ -76,7 +76,7 @@ use axum::routing::{post, MethodRouter};
 use axum::{Extension, Json};
 use exchange_host::{InvokeRefusal, Principal, Sent};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use tracing::warn;
 
 use super::{rate_limited, Access, Module, Route};
@@ -137,10 +137,7 @@ async fn run(
         if query.connection.is_some() {
             return (
                 StatusCode::UNPROCESSABLE_ENTITY,
-                Json(json!({
-                    "refusal": "invalid_connection_selector",
-                    "message": "a stored workflow is not one connector connection; remove `connection`",
-                })),
+                Json(crate::protocol::WorkflowConnectionRefusalBody::invalid_connection_selector()),
             )
                 .into_response();
         }
@@ -316,6 +313,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{header, Request as HttpRequest};
+    use serde_json::json;
     use tower::{Service, ServiceExt};
 
     use crate::dev_identity::DevIdentity;
@@ -364,6 +362,7 @@ mod tests {
     }
 
     struct UnavailableStore;
+    struct DeniedStore;
 
     #[exchange_host::async_trait]
     impl exchange_host::SecretStore for UnavailableStore {
@@ -399,6 +398,44 @@ mod tests {
             Err(exchange_host::StoreError::Unreachable {
                 path: "tenants/acme".to_owned(),
                 reason: "fixture unavailable".to_owned(),
+            })
+        }
+    }
+
+    #[exchange_host::async_trait]
+    impl exchange_host::SecretStore for DeniedStore {
+        async fn get(
+            &self,
+            reference: &exchange_host::CredentialRef,
+        ) -> Result<exchange_host::Secret, exchange_host::StoreError> {
+            Err(exchange_host::StoreError::Denied {
+                path: exchange_host::address_path(reference),
+                reason: "fixture denied".to_owned(),
+            })
+        }
+
+        async fn put(
+            &self,
+            _: &exchange_host::CredentialRef,
+            _: &exchange_host::Secret,
+        ) -> Result<(), exchange_host::StoreError> {
+            unreachable!("no test here writes a credential")
+        }
+
+        async fn delete(
+            &self,
+            _: &exchange_host::CredentialRef,
+        ) -> Result<(), exchange_host::StoreError> {
+            unreachable!("no test here destroys a credential")
+        }
+
+        async fn references(
+            &self,
+            _: &exchange_host::CredentialScope,
+        ) -> Result<Vec<exchange_host::CredentialRef>, exchange_host::StoreError> {
+            Err(exchange_host::StoreError::Denied {
+                path: "tenants/acme".to_owned(),
+                reason: "fixture denied".to_owned(),
             })
         }
     }
@@ -925,6 +962,50 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_v1_refusal(status, &body);
+
+        let credentials: Arc<dyn exchange_host::SecretStore> = Arc::new(DeniedStore);
+        let (status, body) = post_json(
+            identified().with_invoker(invoker_over(credentials)),
+            "/api/operations/github-repo-get/invoke",
+            json!({ "owner": "codewandler", "repo": "flux-exchange" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        assert_v1_refusal(status, &body);
+    }
+
+    #[tokio::test]
+    async fn invalid_labels_and_workflow_connection_axes_are_closed_v1_422_refusals() {
+        let credentials: Arc<dyn exchange_host::SecretStore> = Arc::new(TwoGithubInstances {
+            references: vec![exchange_host::CredentialRef::new(
+                "acme",
+                "com.github.api",
+                "default",
+                "token",
+            )
+            .expect("github reference")],
+        });
+        let state = identified()
+            .with_connection_registry(Arc::new(exchange_host::MemoryConnectionRegistry::default()))
+            .with_invoker(invoker_over(credentials));
+        let params = json!({ "owner": "codewandler", "repo": "flux-exchange" });
+        let (status, body) = post_json(
+            state.clone(),
+            "/api/operations/github-repo-get/invoke?connection=bad%20label",
+            params,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_v1_refusal(status, &body);
+
+        let (status, body) = post_json(
+            state,
+            "/api/operations/workflow.cleanup.run/invoke?connection=prod",
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         assert_v1_refusal(status, &body);
     }
 }

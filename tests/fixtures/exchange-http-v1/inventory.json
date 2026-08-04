@@ -7,11 +7,17 @@
     {"name":"effective-catalogue-response.json","sha256":"593455777ecc62d038af1b2e005f8c5268837d040300882bf2ae06a987e8e715","expected":"effective_catalogue_accepted"},
     {"name":"invoke-refusal.json","sha256":"c1c0a6ad73708df32dacaa9525c129becf91ed1600300adecffb163533aa3b06","expected":"retryable_transport_refusal_accepted"},
     {"name":"invoke-success.json","sha256":"60fb00cd4d38c05067636b3e2a1b40ae7e362a1892a76f92a48c12c002db5931","expected":"invocation_success_accepted"},
+    {"name":"invalid-connection-label-422.json","sha256":"5d5d14806a284dce112e5b9c3b00f575e50ba4874fc5fc73f6c3fa94b97e58ae","expected":"invalid_connection_label_422"},
     {"name":"malformed-request-400.json","sha256":"bb2ee014a1beb6fbebb6968ecb017c57fc34fa14ed348f8771b3deb08d4a2c8e","expected":"malformed_request_400"},
     {"name":"no-invoker-503.json","sha256":"92693a46921f0a0fffe3b3a8cf3f45fc59d4eaa25f7729f7ed57df2bd4bbcd16","expected":"no_invoker_503"},
     {"name":"registry-unavailable-503.json","sha256":"ece71838f88320be3e0e992077cce5de2eafe8aab0b3caef649dcedffe34e207","expected":"registry_unavailable_503"},
     {"name":"requests.json","sha256":"cefa7a1bba65f791a607fbac4ba1c1f033f1c421edcb4a7709d6f580fe04b2eb","expected":"request_case_outcomes_checked"},
+    {"name":"store-denied-502.json","sha256":"3b29f9c022325137953823071b07cfca535de279ddf46433a88e26468e4800b5","expected":"store_denied_502"},
     {"name":"store-unavailable-503.json","sha256":"a07083e9901e6c1e0cf625e90885258c102d0644cd420aa1130b08d32a723a93","expected":"store_unavailable_503"},
-    {"name":"traffic-429.json","sha256":"a9d6d783fda236588ca6a6876155afef2df0e400ae88ed7e376cfa6c053ab928","expected":"traffic_429"}
+    {"name":"traffic-429.json","sha256":"a9d6d783fda236588ca6a6876155afef2df0e400ae88ed7e376cfa6c053ab928","expected":"traffic_429"},
+    {"name":"workflow-connection-422.json","sha256":"70ef0b24c192d3ce18a94573a37bee65adeedc4cd73e1179d3841fcc7e7e22ce","expected":"workflow_connection_422"},
+    {"name":"workflow-lookup-404.json","sha256":"dc8ecdf909124d069f4aa3f14a2c340fa6c6d50a621317014be81094bbdf0ce5","expected":"workflow_lookup_404"},
+    {"name":"workflow-run-refusal-403.json","sha256":"7a1fd18d9295f848675f38ea2e539ea549838c324ad5ba2694eaf5bce03d787e","expected":"workflow_run_refusal_403"},
+    {"name":"workflow-success.json","sha256":"e12ab29a03374d443964179617d0410e60e88e9c0ada6b2d97ebb902f5b05a8e","expected":"workflow_success_accepted"}
   ]
 }

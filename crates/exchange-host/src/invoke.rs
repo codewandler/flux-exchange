@@ -720,6 +720,7 @@ impl FlowSink for SilentSink {}
 
 /// A redacted result from one immutable workflow version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowInvocation {
     /// Virtual operation id.
     pub operation: String,

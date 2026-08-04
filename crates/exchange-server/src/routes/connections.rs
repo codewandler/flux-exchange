@@ -4270,13 +4270,13 @@ fn no_registry() -> Response {
     let setting = exchange_host::CONNECTION_REGISTRY_SETTING;
     #[cfg(not(unix))]
     let setting = "FLUX_EXCHANGE_CONNECTIONS";
-    refuse(
+    (
         StatusCode::SERVICE_UNAVAILABLE,
-        format!(
+        Json(crate::protocol::ErrorBody::new(format!(
             "no connection registry is configured. Set `{setting}` to a durable path before using labels or multiple connector instances"
-        ),
-        json!({}),
+        ))),
     )
+        .into_response()
 }
 
 fn unknown_label(provider: &'static Provider, label: &ConnectionLabel) -> Response {
@@ -4300,13 +4300,19 @@ fn registry_refused(refusal: &RegistryRefusal) -> Response {
     };
     if matches!(refusal, RegistryRefusal::Unavailable { .. }) {
         error!(%refusal, "the connection registry failed");
-        return refuse(
+        return (
             status,
-            "the connection registry could not be read or written; nothing was repaired. Retrying may work",
-            json!({}),
-        );
+            Json(crate::protocol::ErrorBody::new(
+                "the connection registry could not be read or written; nothing was repaired. Retrying may work",
+            )),
+        )
+            .into_response();
     }
-    refuse(status, refusal.to_string(), json!({}))
+    (
+        status,
+        Json(crate::protocol::ErrorBody::new(refusal.to_string())),
+    )
+        .into_response()
 }
 
 /// The store failed, and *how* it failed survives out to the caller.
@@ -4336,7 +4342,13 @@ fn store_failed(error: &StoreError) -> Response {
 
     error!(%error, "the credential store failed");
 
-    refuse(status, format!("{happened}. {advice}"), json!({}))
+    (
+        status,
+        Json(crate::protocol::ErrorBody::new(format!(
+            "{happened}. {advice}"
+        ))),
+    )
+        .into_response()
 }
 
 /// How a store failure is answered: its status, what happened, and what an operator is to do.
