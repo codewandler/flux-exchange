@@ -263,7 +263,7 @@ implements its manager in C-510.
   padded RFC 4648 base64 of the complete unencrypted minisign secret-key file bytes. This story
   creates or configures none of them and stays in progress until explicitly authorized external
   provisioning and a real public verifier run.
-- 2026-08-04: Roadmap Decisions 0004 and 0007, frozen at `22a8754`, make the current exact
+- 2026-08-04: Roadmap Decisions 0004 and 0007, frozen at `ba82cb0`, make the current exact
   six-protocol v1 schema implementation evidence only. The next unused tag is `v0.18.0`, whose push
   would irreversibly start both five-target binary and crates.io publication; neither that joint
   operator boundary nor the trust ceremony, public release, or stable-head update may occur until
@@ -274,7 +274,7 @@ implements its manager in C-510.
 
 - Cross-repository authority:
   `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at frozen roadmap
-  authority `22a8754`.
+  authority `ba82cb0`.
 - Flux C-510 consumes this channel and owns rollback state, compatible selection, verified
   cache/install/start/status/stop and audit of the installed exact identity. X-126 does not add a
   downloader or lifecycle manager to Exchange.
