@@ -1,13 +1,13 @@
-//! Windows execution boundary for the one-shot Service Account helper.
+//! Windows execution boundary for the verified local helper modes.
 //!
-//! The inherited writer is a process capability, not protocol data. This module validates the
-//! designated anonymous-pipe write end, clears inheritance, and keeps owner authentication,
-//! process pinning, `DuplicateHandle`, MINT, and its terminal response on one typed session. It
-//! deliberately does not claim to enumerate the process handle table: launch-time
-//! `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` closure is proved by the native launcher fixture.
+//! The production vendor client authenticates and process-pins the owner endpoint across its PLAN
+//! and mutation connections. The inherited Service Account writer remains a process capability,
+//! not protocol data: its typed test seam validates the write end and models `DuplicateHandle`, but
+//! production refuses until the named-pipe endpoint defines a capability receiver association. It
+//! deliberately does not serialize a HANDLE or claim to enumerate the process handle table.
 
-// The two Windows-only integration targets include this source directly and exercise disjoint
-// vendor and mint modes. Production compilation does not receive this allowance.
+// Windows-only integration targets include this source directly. Production also compiles the
+// module and enters it only through the closed `LocalHelperInvocation` parsed in `main`.
 #![cfg_attr(test, allow(dead_code))]
 
 use std::fmt;
@@ -18,37 +18,83 @@ use std::time::Duration;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use windows_sys::Wdk::Foundation::{NtQueryObject, OBJECT_NAME_INFORMATION};
 use windows_sys::Win32::Foundation::{
     CloseHandle, CompareObjectHandles, GetHandleInformation, GetLastError, SetHandleInformation,
-    ERROR_BROKEN_PIPE, GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT,
-    INVALID_HANDLE_VALUE,
+    ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+};
+use windows_sys::Win32::Security::{
+    GetLengthSid, GetTokenInformation, IsValidSid, TokenSessionId, TokenUser, TOKEN_QUERY,
+    TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, GetFileType, ReadFile, WriteFile, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_TYPE_PIPE, OPEN_EXISTING,
+    FILE_TYPE_PIPE, OPEN_EXISTING, SYNCHRONIZE,
 };
-use windows_sys::Win32::System::Pipes::{GetNamedPipeInfo, PeekNamedPipe, PIPE_SERVER_END};
+use windows_sys::Win32::System::Pipes::{
+    GetNamedPipeInfo, GetNamedPipeServerProcessId, PeekNamedPipe, PIPE_SERVER_END,
+};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, OpenProcessToken, WaitForSingleObject,
+    PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 use crate::local_helper::{
-    ExpiresAt, HelperExit, ServiceAccountId, WindowsHandle, HELPER_RESULT_DEADLINE,
-    HELPER_SETUP_DEADLINE, MAX_HELPER_FRAME_BYTES,
+    ExpiresAt, HelperExit, LocalHelperInvocation, MintWriterCapability, ServiceAccountId,
+    VendorSecretCapabilities, WindowsHandle, HELPER_RESULT_DEADLINE, HELPER_SETUP_DEADLINE,
+    MAX_HELPER_FRAME_BYTES,
 };
 
+const PIPE_PREFIX: &str = r"\\.\pipe\flux-exchange-local-management-v1-";
 const HEADER_BYTES: usize = 12;
 const MAX_CONTROL_BYTES: usize = 65_536;
+const MAX_SECRET_BYTES: usize = 8_192;
 const CLIENT_DIRECTION: u8 = 1;
 const SERVER_DIRECTION: u8 = 2;
 const SERVICE_ACCOUNT_MINT: u16 = 0x0020;
 const SERVICE_ACCOUNT_RECEIPT: u16 = 0x0022;
 const CONNECT_BEGIN: u16 = 0x0001;
+const NEED_SECRETS: u16 = 0x0002;
+const SECRET: u16 = 0x0003;
+const CONNECT_COMMIT: u16 = 0x0004;
 const CONNECT_RECEIPT: u16 = 0x0006;
+const PLAN_QUERY: u16 = 0x0007;
+const PLAN_RESPONSE: u16 = 0x0008;
 const CREDENTIAL_BEGIN: u16 = 0x0030;
+const CREDENTIAL_COMMIT: u16 = 0x0031;
 const CREDENTIAL_RECEIPT: u16 = 0x0032;
 const ERROR: u16 = 0x7fff;
 const RECEIPT_SCHEMA: &str = "exchange.service-account-mint-receipt.v1";
 const ERROR_SCHEMA: &str = "exchange.local-management-error.v1";
 const ENABLE_ECHO_INPUT: u32 = 0x0004;
+
+/// Execute one already-closed Windows helper invocation before tracing or the server runtime.
+pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
+    match invocation {
+        LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Windows {
+            request,
+            response,
+        }) => match NativeVendorCeremony::new() {
+            Ok(mut ceremony) => run_vendor(request, response, &mut ceremony),
+            Err(_) => HelperExit::CapabilityOrTransportFailure,
+        },
+        LocalHelperInvocation::ServiceAccountMint {
+            writer: MintWriterCapability::Windows(writer),
+            ..
+        } => {
+            // The accepted contract does not define how the target-process HANDLE returned by
+            // DuplicateHandle crosses the named-pipe boundary, and the production server consumes
+            // only FXLM bytes. Take and close the inherited capability rather than serializing a
+            // HANDLE into MINT JSON or inventing an unauthenticated transport preface.
+            let _ = InheritedWriter::take(writer);
+            HelperExit::CapabilityOrTransportFailure
+        }
+        _ => HelperExit::CapabilityOrTransportFailure,
+    }
+}
 
 /// One request whose frame and EOF passed the Windows Flux-to-helper capability boundary.
 ///
@@ -127,6 +173,580 @@ pub(crate) enum VendorPreparation<Session> {
     Terminal(Vec<u8>),
     /// The pinned, revalidated connection 2 is ready to receive the byte-identical BEGIN.
     Ready(Session),
+}
+
+struct NativeVendorCeremony {
+    runtime: tokio::runtime::Runtime,
+}
+
+impl NativeVendorCeremony {
+    fn new() -> Result<Self, WindowsHelperError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|_| WindowsHelperError::Transport)?;
+        Ok(Self { runtime })
+    }
+}
+
+struct NativeVendorSession {
+    // Retaining the pinned process handle through the terminal frame makes a server exit observable
+    // and prevents the second connection from silently becoming a different same-owner process.
+    _endpoint: PinnedEndpoint,
+    pipe: NamedPipeClient,
+    kind: VendorRequestKind,
+}
+
+impl VendorCeremony for NativeVendorCeremony {
+    type Error = WindowsHelperError;
+    type Session = NativeVendorSession;
+
+    fn prepare(
+        &mut self,
+        request: &VendorRequest,
+        ready_by: Instant,
+    ) -> Result<VendorPreparation<Self::Session>, Self::Error> {
+        let begin = BeginFacts::parse(request)?;
+        self.runtime.block_on(async {
+            let mut endpoint = PinnedEndpoint::authenticated()?;
+            let mut plan_pipe = endpoint.connect_before(ready_by).await?;
+            let plan_query = serde_json::to_vec(&PlanQuery {
+                connector: &begin.connector,
+                selection: match request.kind() {
+                    VendorRequestKind::Connect => None,
+                    VendorRequestKind::Credential => Some(begin.label.as_str()),
+                },
+            })
+            .map_err(|_| WindowsHelperError::Protocol)?;
+            write_before_async(
+                &mut plan_pipe,
+                &encode_frame(CLIENT_DIRECTION, PLAN_QUERY, &plan_query),
+                ready_by,
+            )
+            .await?;
+            let plan = read_terminal_before_async(&mut plan_pipe, ready_by).await?;
+            if plan.opcode == ERROR {
+                return Ok(VendorPreparation::Terminal(plan.bytes));
+            }
+            if plan.opcode != PLAN_RESPONSE || !begin.admits_plan(&plan.payload, request.kind()) {
+                return Err(WindowsHelperError::Protocol);
+            }
+            drop(plan_pipe);
+
+            let mut mutation = endpoint.connect_before(ready_by).await?;
+            write_before_async(&mut mutation, request.bytes(), ready_by).await?;
+            Ok(VendorPreparation::Ready(NativeVendorSession {
+                _endpoint: endpoint,
+                pipe: mutation,
+                kind: request.kind(),
+            }))
+        })
+    }
+
+    fn exchange(
+        &mut self,
+        mut session: Self::Session,
+        input: &mut PrivateConsole,
+    ) -> Result<Vec<u8>, Self::Error> {
+        self.runtime.block_on(async {
+            let need = read_frame_before_async(
+                &mut session.pipe,
+                Instant::now()
+                    .checked_add(Duration::from_secs(300))
+                    .ok_or(WindowsHelperError::Deadline)?,
+            )
+            .await?;
+            if need.opcode == ERROR {
+                return Ok(need.bytes);
+            }
+            if need.opcode != NEED_SECRETS {
+                return Err(WindowsHelperError::Protocol);
+            }
+            let need_payload = need.payload;
+            let need: NeedSecrets =
+                serde_json::from_slice(&need_payload).map_err(|_| WindowsHelperError::Protocol)?;
+            if !need.is_canonical(&need_payload) {
+                return Err(WindowsHelperError::Protocol);
+            }
+
+            let predecision = Instant::now()
+                .checked_add(Duration::from_secs(300))
+                .ok_or(WindowsHelperError::Deadline)?;
+            for (index, secret) in need.secrets.iter().enumerate() {
+                if usize::from(secret.ordinal) != index + 1 || secret.target.is_empty() {
+                    return Err(WindowsHelperError::Protocol);
+                }
+                if Instant::now() >= predecision {
+                    return Err(WindowsHelperError::Deadline);
+                }
+                let value = input.read_secret()?;
+                let mut frame = encode_secret(secret.ordinal, value.bytes())?;
+                let result = write_before_async(&mut session.pipe, &frame, predecision).await;
+                frame.fill(0);
+                result?;
+            }
+            let commit = serde_json::to_vec(&Commit {
+                proposal_digest: &need.proposal_digest,
+                transaction_id: &need.transaction_id,
+            })
+            .map_err(|_| WindowsHelperError::Protocol)?;
+            let opcode = match session.kind {
+                VendorRequestKind::Connect => CONNECT_COMMIT,
+                VendorRequestKind::Credential => CREDENTIAL_COMMIT,
+            };
+            write_before_async(
+                &mut session.pipe,
+                &encode_frame(CLIENT_DIRECTION, opcode, &commit),
+                predecision,
+            )
+            .await?;
+            let postdecision = Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .ok_or(WindowsHelperError::Deadline)?;
+            Ok(read_terminal_before_async(&mut session.pipe, postdecision)
+                .await?
+                .bytes)
+        })
+    }
+}
+
+struct PinnedEndpoint {
+    pipe_name: String,
+    owner: ProcessIdentity,
+    process: Option<OwnedHandle>,
+}
+
+impl PinnedEndpoint {
+    fn authenticated() -> Result<Self, WindowsHelperError> {
+        let owner = process_token_identity(unsafe { GetCurrentProcess() })?;
+        Ok(Self {
+            pipe_name: pipe_name_for_sid(&owner.sid),
+            owner,
+            process: None,
+        })
+    }
+
+    async fn connect_before(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<NamedPipeClient, WindowsHelperError> {
+        let pipe = loop {
+            if Instant::now() >= deadline {
+                return Err(WindowsHelperError::Deadline);
+            }
+            match ClientOptions::new()
+                .read(true)
+                .write(true)
+                .open(&self.pipe_name)
+            {
+                Ok(pipe) => break pipe,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+        };
+        self.authenticate_and_pin(&pipe)?;
+        if Instant::now() >= deadline {
+            return Err(WindowsHelperError::Deadline);
+        }
+        Ok(pipe)
+    }
+
+    fn authenticate_and_pin(&mut self, pipe: &NamedPipeClient) -> Result<(), WindowsHelperError> {
+        let mut process_id = 0_u32;
+        if unsafe { GetNamedPipeServerProcessId(pipe.as_raw_handle() as HANDLE, &mut process_id) }
+            == 0
+            || process_id == 0
+        {
+            return Err(WindowsHelperError::OwnerIdentity);
+        }
+        let raw = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                0,
+                process_id,
+            )
+        };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            return Err(WindowsHelperError::OwnerIdentity);
+        }
+        // SAFETY: successful OpenProcess returned one owned non-pseudo process handle.
+        let candidate = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+        let mut confirmed_process_id = 0_u32;
+        if process_token_identity(candidate.as_raw_handle() as HANDLE)? != self.owner
+            || unsafe { WaitForSingleObject(candidate.as_raw_handle() as HANDLE, 0) }
+                != WAIT_TIMEOUT
+            || unsafe {
+                GetNamedPipeServerProcessId(
+                    pipe.as_raw_handle() as HANDLE,
+                    &mut confirmed_process_id,
+                )
+            } == 0
+            || confirmed_process_id != process_id
+        {
+            return Err(WindowsHelperError::OwnerIdentity);
+        }
+        match &self.process {
+            Some(process)
+                if unsafe {
+                    CompareObjectHandles(
+                        process.as_raw_handle() as HANDLE,
+                        candidate.as_raw_handle() as HANDLE,
+                    )
+                } == 0 =>
+            {
+                Err(WindowsHelperError::EndpointChanged)
+            }
+            Some(_) => Ok(()),
+            None => {
+                self.process = Some(candidate);
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct ProcessIdentity {
+    sid: Vec<u8>,
+    session: u32,
+}
+
+fn process_token_identity(process: HANDLE) -> Result<ProcessIdentity, WindowsHelperError> {
+    let mut raw: HANDLE = null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw) } == 0 {
+        return Err(WindowsHelperError::OwnerIdentity);
+    }
+    // SAFETY: successful OpenProcessToken returned one owned token handle.
+    let token = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+    let mut length = 0_u32;
+    let sized = unsafe {
+        GetTokenInformation(
+            token.as_raw_handle() as HANDLE,
+            TokenUser,
+            null_mut(),
+            0,
+            &mut length,
+        )
+    };
+    if sized != 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+        return Err(WindowsHelperError::OwnerIdentity);
+    }
+    let capacity = length as usize;
+    if capacity < std::mem::size_of::<TOKEN_USER>() {
+        return Err(WindowsHelperError::OwnerIdentity);
+    }
+    let mut storage = vec![0_usize; capacity.div_ceil(std::mem::size_of::<usize>())];
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle() as HANDLE,
+            TokenUser,
+            storage.as_mut_ptr().cast(),
+            length,
+            &mut length,
+        )
+    } == 0
+        || length as usize > capacity
+    {
+        return Err(WindowsHelperError::OwnerIdentity);
+    }
+    let base = storage.as_ptr().cast::<u8>();
+    // SAFETY: the successful query initialized TOKEN_USER at the aligned buffer start.
+    let sid = unsafe { (*(base.cast::<TOKEN_USER>())).User.Sid.cast::<u8>() };
+    let offset = (sid as usize)
+        .checked_sub(base as usize)
+        .filter(|offset| *offset < capacity)
+        .ok_or(WindowsHelperError::OwnerIdentity)?;
+    if unsafe { IsValidSid(sid.cast()) } == 0 {
+        return Err(WindowsHelperError::OwnerIdentity);
+    }
+    let sid_length = unsafe { GetLengthSid(sid.cast()) } as usize;
+    if sid_length == 0
+        || offset
+            .checked_add(sid_length)
+            .is_none_or(|end| end > capacity)
+    {
+        return Err(WindowsHelperError::OwnerIdentity);
+    }
+    // SAFETY: the validated SID range lies wholly inside the live query allocation.
+    let sid = unsafe { std::slice::from_raw_parts(sid, sid_length) }.to_vec();
+    let mut session = 0_u32;
+    let mut session_length =
+        u32::try_from(std::mem::size_of::<u32>()).map_err(|_| WindowsHelperError::OwnerIdentity)?;
+    if unsafe {
+        GetTokenInformation(
+            token.as_raw_handle() as HANDLE,
+            TokenSessionId,
+            (&mut session as *mut u32).cast(),
+            session_length,
+            &mut session_length,
+        )
+    } == 0
+        || session_length as usize != std::mem::size_of::<u32>()
+    {
+        return Err(WindowsHelperError::OwnerIdentity);
+    }
+    Ok(ProcessIdentity { sid, session })
+}
+
+fn pipe_name_for_sid(sid: &[u8]) -> String {
+    let digest = Sha256::digest(sid);
+    let mut suffix = String::with_capacity(32);
+    for byte in &digest[..16] {
+        use std::fmt::Write as _;
+        let _ = write!(suffix, "{byte:02x}");
+    }
+    format!("{PIPE_PREFIX}{suffix}")
+}
+
+#[derive(Serialize)]
+struct PlanQuery<'a> {
+    connector: &'a str,
+    selection: Option<&'a str>,
+}
+
+struct BeginFacts {
+    connector: String,
+    credential_revision: Option<String>,
+    label: String,
+    plan_revision: String,
+}
+
+impl BeginFacts {
+    fn parse(request: &VendorRequest) -> Result<Self, WindowsHelperError> {
+        let payload = request
+            .bytes()
+            .get(HEADER_BYTES..)
+            .ok_or(WindowsHelperError::Protocol)?;
+        let value: serde_json::Value =
+            serde_json::from_slice(payload).map_err(|_| WindowsHelperError::Protocol)?;
+        let object = value.as_object().ok_or(WindowsHelperError::Protocol)?;
+        let connector = required_string(object, "connector")?;
+        let label = required_string(object, "label")?;
+        let plan_revision = required_string(object, "plan_revision")?;
+        let credential_revision = match object.get("credential_revision") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(value)) => Some(value.clone()),
+            _ => return Err(WindowsHelperError::Protocol),
+        };
+        match request.kind() {
+            VendorRequestKind::Connect if credential_revision.is_some() => {
+                return Err(WindowsHelperError::Protocol);
+            }
+            VendorRequestKind::Credential
+                if !credential_revision
+                    .as_deref()
+                    .is_some_and(is_nonzero_lowerhex_32) =>
+            {
+                return Err(WindowsHelperError::Protocol);
+            }
+            _ => {}
+        }
+        Ok(Self {
+            connector,
+            credential_revision,
+            label,
+            plan_revision,
+        })
+    }
+
+    fn admits_plan(&self, payload: &[u8], kind: VendorRequestKind) -> bool {
+        let Ok(plan) = serde_json::from_slice::<serde_json::Value>(payload) else {
+            return false;
+        };
+        plan.get("version").and_then(serde_json::Value::as_str)
+            == Some("exchange.connection-plan.v2")
+            && plan.get("connector").and_then(serde_json::Value::as_str)
+                == Some(self.connector.as_str())
+            && plan
+                .get("plan_revision")
+                .and_then(serde_json::Value::as_str)
+                == Some(self.plan_revision.as_str())
+            && match kind {
+                VendorRequestKind::Connect => {
+                    plan.get("selection") == Some(&serde_json::Value::Null)
+                        && plan.get("credential_revision") == Some(&serde_json::Value::Null)
+                }
+                VendorRequestKind::Credential => {
+                    plan.get("selection").and_then(serde_json::Value::as_str)
+                        == Some(self.label.as_str())
+                        && plan
+                            .get("credential_revision")
+                            .and_then(serde_json::Value::as_str)
+                            == self.credential_revision.as_deref()
+                }
+            }
+    }
+}
+
+fn required_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<String, WindowsHelperError> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or(WindowsHelperError::Protocol)
+}
+
+fn is_nonzero_lowerhex_32(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && value.bytes().any(|byte| byte != b'0')
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NeedSecrets {
+    proposal_digest: String,
+    secrets: Vec<NeedSecret>,
+    transaction_id: String,
+}
+
+impl NeedSecrets {
+    fn is_canonical(&self, payload: &[u8]) -> bool {
+        is_nonzero_lowerhex_32(&self.proposal_digest)
+            && self.transaction_id.len() == 64
+            && self
+                .transaction_id
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && self.transaction_id.bytes().any(|byte| byte != b'0')
+            && serde_json::to_vec(self).is_ok_and(|canonical| canonical == payload)
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct NeedSecret {
+    ordinal: u16,
+    target: String,
+}
+
+#[derive(Serialize)]
+struct Commit<'a> {
+    proposal_digest: &'a str,
+    transaction_id: &'a str,
+}
+
+struct NativeFrame {
+    bytes: Vec<u8>,
+    opcode: u16,
+    payload: Vec<u8>,
+}
+
+async fn write_before_async(
+    pipe: &mut NamedPipeClient,
+    bytes: &[u8],
+    deadline: Instant,
+) -> Result<(), WindowsHelperError> {
+    let mut written = 0_usize;
+    while written < bytes.len() {
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), pipe.writable())
+            .await
+            .map_err(|_| WindowsHelperError::Deadline)?
+            .map_err(|_| WindowsHelperError::Transport)?;
+        match pipe.try_write(&bytes[written..]) {
+            Ok(0) => return Err(WindowsHelperError::Transport),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(_) => return Err(WindowsHelperError::Transport),
+        }
+    }
+    Ok(())
+}
+
+async fn read_frame_before_async(
+    pipe: &mut NamedPipeClient,
+    deadline: Instant,
+) -> Result<NativeFrame, WindowsHelperError> {
+    let mut header = [0_u8; HEADER_BYTES];
+    read_exact_before_async(pipe, &mut header, deadline).await?;
+    if &header[..4] != b"FXLM" || header[4] != 1 || header[5] != SERVER_DIRECTION {
+        return Err(WindowsHelperError::Protocol);
+    }
+    let payload_length =
+        u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+    if payload_length > MAX_CONTROL_BYTES {
+        return Err(WindowsHelperError::Protocol);
+    }
+    let mut payload = vec![0_u8; payload_length];
+    read_exact_before_async(pipe, &mut payload, deadline).await?;
+    let mut bytes = header.to_vec();
+    bytes.extend_from_slice(&payload);
+    Ok(NativeFrame {
+        bytes,
+        opcode: u16::from_be_bytes([header[6], header[7]]),
+        payload,
+    })
+}
+
+async fn read_terminal_before_async(
+    pipe: &mut NamedPipeClient,
+    deadline: Instant,
+) -> Result<NativeFrame, WindowsHelperError> {
+    let frame = read_frame_before_async(pipe, deadline).await?;
+    let mut extra = [0_u8; 1];
+    loop {
+        match pipe.try_read(&mut extra) {
+            Ok(0) => return Ok(frame),
+            Ok(_) => return Err(WindowsHelperError::Protocol),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                match tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    pipe.readable(),
+                )
+                .await
+                {
+                    Err(_) => return Err(WindowsHelperError::Deadline),
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                        return Ok(frame);
+                    }
+                    Ok(Err(_)) => return Err(WindowsHelperError::Transport),
+                    Ok(Ok(())) => {}
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(frame),
+            Err(_) => return Err(WindowsHelperError::Transport),
+        }
+    }
+}
+
+async fn read_exact_before_async(
+    pipe: &mut NamedPipeClient,
+    bytes: &mut [u8],
+    deadline: Instant,
+) -> Result<(), WindowsHelperError> {
+    let mut received = 0_usize;
+    while received < bytes.len() {
+        match pipe.try_read(&mut bytes[received..]) {
+            Ok(0) => return Err(WindowsHelperError::Transport),
+            Ok(count) => received += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), pipe.readable())
+                    .await
+                    .map_err(|_| WindowsHelperError::Deadline)?
+                    .map_err(|_| WindowsHelperError::Transport)?;
+            }
+            Err(_) => return Err(WindowsHelperError::Transport),
+        }
+    }
+    Ok(())
+}
+
+fn encode_secret(ordinal: u16, secret: &[u8]) -> Result<Vec<u8>, WindowsHelperError> {
+    if ordinal == 0 || !(1..=MAX_SECRET_BYTES).contains(&secret.len()) {
+        return Err(WindowsHelperError::Protocol);
+    }
+    let mut payload = Vec::with_capacity(2 + secret.len());
+    payload.extend_from_slice(&ordinal.to_be_bytes());
+    payload.extend_from_slice(secret);
+    Ok(encode_frame(CLIENT_DIRECTION, SECRET, &payload))
 }
 
 /// Execute the Windows vendor helper from its two validated inherited anonymous pipes.
@@ -640,7 +1260,12 @@ impl Refusal {
 pub(crate) enum WindowsHelperError {
     Capability,
     Console,
+    Deadline,
+    EndpointChanged,
+    OwnerIdentity,
+    Protocol,
     Secret,
+    Transport,
 }
 
 impl fmt::Display for WindowsHelperError {
@@ -648,7 +1273,12 @@ impl fmt::Display for WindowsHelperError {
         formatter.write_str(match self {
             Self::Capability => "Windows helper capability is invalid",
             Self::Console => "Windows console is unavailable",
+            Self::Deadline => "Windows helper deadline elapsed",
+            Self::EndpointChanged => "Windows local-management endpoint changed",
+            Self::OwnerIdentity => "Windows local-management owner identity refused",
+            Self::Protocol => "Windows local-management protocol refused",
             Self::Secret => "Windows console input is invalid",
+            Self::Transport => "Windows local-management transport failed",
         })
     }
 }

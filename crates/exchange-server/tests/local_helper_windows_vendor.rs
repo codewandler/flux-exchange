@@ -162,6 +162,36 @@ fn vendor_seam_consumes_only_the_two_directed_pipes_and_writes_one_terminal_fram
     assert_ne!(canary_flags & HANDLE_FLAG_INHERIT, 0);
 }
 
+#[test]
+fn production_run_enters_the_native_vendor_adapter_and_refuses_an_invalid_begin() {
+    let (request_read, request_write) = inheritable_pipe();
+    let (response_read, response_write) = inheritable_pipe();
+    write_all(&request_write, &frame(1, 0x0001, b"{}"));
+    drop(request_write);
+
+    let invocation = invocation(&request_read, &response_write);
+    // The closed grammar transfers exactly these two capabilities to production `run`.
+    std::mem::forget(request_read);
+    std::mem::forget(response_write);
+    assert!(
+        local_helper_windows::run(invocation) == HelperExit::TerminalFrameWritten,
+        "production run writes one value-free refusal"
+    );
+
+    let mut result = Vec::new();
+    std::fs::File::from(response_read)
+        .read_to_end(&mut result)
+        .expect("terminal refusal plus EOF");
+    assert_eq!(
+        result,
+        frame(
+            2,
+            0x7fff,
+            br#"{"code":"local_management_unavailable","commit":"none","retry":"operator","schema":"exchange.local-management-error.v1","status":503}"#,
+        )
+    );
+}
+
 struct FakeConsole {
     calls: Vec<String>,
     original_mode: u32,
