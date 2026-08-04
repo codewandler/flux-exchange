@@ -4178,10 +4178,21 @@ mod file {
             )
             .expect("legacy fixture");
             SettingsStore::bind(&path)
-                .expect("dormant production policy accepts ordinary legacy data");
+                .expect("production accepts legacy data outside its declared origin address");
             assert!(matches!(
                 SettingsStore::bind_with_custom_origin_policy(&path, Arc::new(TestPolicy)),
                 Err(SettingsStoreError::MigrationRequired { .. })
+            ));
+
+            fs::write(
+                &path,
+                r#"{"acme":{"gitlab":{"default":{"endpoint.origin":"https://legacy.example"}}}}"#,
+            )
+            .expect("released origin legacy fixture");
+            assert!(matches!(
+                SettingsStore::bind(&path),
+                Err(SettingsStoreError::MigrationRequired { connector, setting, .. })
+                    if connector == "gitlab" && setting == "endpoint.origin"
             ));
         }
 
