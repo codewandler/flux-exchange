@@ -127,6 +127,76 @@ five-target C-515 evidence and checksummed 0.20.0 registry artifact, then X-134'
 provider fixtures, then regenerated candidate-bound v2 release evidence and public X-126
 verification.
 
+### Hosted FXLM WebSocket binding
+
+Hosted operators use the same `exchange.local-management.v1` FXLM state machines through a
+WebSocket upgrade at exactly `GET /api/onboarding/frames`. This is a transport binding of the
+existing `local_management` protocol field, never a ninth release-inventory field. The successful
+upgrade echoes the exact, case-sensitive sole subprotocol `exchange.local-management.v1`, includes
+`Cache-Control: no-store`, returns no `Sec-WebSocket-Extensions` and negotiates no compression. An
+offered `permessage-deflate` extension is ignored rather than accepted or treated as malformed.
+
+The upgrade request has no query string or body. Authentication, tenant derivation and the existing
+hosted operator policy are revalidated before upgrade; a Service Account cannot pass the operator
+gate. `Origin` must exactly equal startup-bound `FLUX_EXCHANGE_CONSOLE_ORIGIN`. The explicit setting
+is one canonical origin containing only scheme, host and effective port, with no userinfo, non-root
+path, query or fragment. Production requires HTTPS. `--dev` alone may use HTTP with a literal
+loopback IP and, only when the setting is absent, derives the origin from its explicit loopback
+listener configuration. A hosted route with no usable configured origin is unavailable; an invalid
+explicit setting fails startup. The origin is never derived from an OIDC redirect URI, `Host`,
+`Forwarded` or any `X-Forwarded-*` header, and a missing, `null`, malformed or mismatched request
+origin refuses. Pre-upgrade outcomes are closed: missing or invalid authentication is 401; a
+non-operator or unacceptable origin is 403; malformed upgrade, query, body or subprotocol input is
+400; another method is 405 with `Allow: GET` before body decoding; an unsupported WebSocket version
+is 426 with `Sec-WebSocket-Version: 13`; exhausted bounded ceremony occupancy is 429 with
+`Retry-After`; and unavailable identity, audit, coordinator or configured-origin dependencies are
+503. Every refusal is value-free and `Cache-Control: no-store`.
+
+Native byte-stream reads may split or coalesce bytes arbitrarily; the 12-byte header and declared
+payload length delimit each successive FXLM frame. Only hosted message boundaries equal complete
+frames: after transport reassembly, each WebSocket binary message contains exactly one complete
+FXLM frame. WebSocket fragmentation is transport-only; splitting one frame across messages is a
+truncated frame and coalescing two frames in one message is surplus data. Text is never JSON-decoded.
+The maximum binary message is 65,548 bytes, while the existing 65,536-byte canonical-control,
+8,192-byte-secret, 64-secret-frame and 1-MiB cumulative-payload bounds all remain. One WebSocket
+carries one logical operation. Hosted connect, credential rotation and password acquisition
+preserve the interactive `BEGIN -> NEED_SECRETS -> ordered SECRET... -> COMMIT -> RECEIPT|ERROR`
+state machine and use the same server-owned transaction coordinator as native FXLM. Exchange
+allocates and associates the opaque transaction id only after an admitted `BEGIN`; no transaction
+or receipt id appears in a URL, header or log. Query and same-proposal replay each use a separate
+WebSocket. Replay may return the existing receipt before a prompt; a changed proposal refuses.
+
+A successful receipt or well-formed FXLM error is followed by close code 1000. Malformed FXLM,
+wrong direction or state, surplus data or a second logical operation uses 1002 after a binary FXLM
+error when one can safely be emitted. Text uses 1003; any declared frame, message, control, secret,
+count or cumulative bound excess uses 1009; and an absolute pre-decision ceremony deadline uses
+1008. Close reasons are always empty. Before a durable decision, disconnect, timeout or protocol
+failure zeroizes transient buffers and aborts or tombstones an allocated provider transaction.
+After the decision Exchange never aborts: recovery, query or same-proposal replay rolls forward.
+
+Hosted conformance fixtures cover valid-credential cross-origin requests; missing, malformed,
+`null`, sibling and mismatched request origins; OIDC redirect, `Host`, `Forwarded` and
+`X-Forwarded-*` spoofing; missing, wrong, differently cased and multiple subprotocols;
+offered-but-not-negotiated compression; text and binary JSON shapes; WebSocket fragmentation, frame
+coalescing and message splitting; deceptive lengths and every FXLM control, secret, count, message
+and cumulative bound; wrong direction, opcode, state and ordinal; surplus and second operations;
+cross-tenant transaction and receipt ids; disconnects before prepare, after prepare, before decision,
+after decision and after receipt; and lost-receipt query plus same-proposal replay. Startup-setting
+fixtures admit one canonical production HTTPS origin; refuse userinfo, non-root paths, queries,
+fragments and noncanonical or non-HTTPS production forms; admit HTTP only for `--dev` plus a literal
+loopback IP; bind absent-setting derivation only to the explicit loopback listener; prove a missing
+usable hosted origin makes the route unavailable; and prove an invalid explicit setting fails
+startup. Native-stream fixtures split headers and payloads at every boundary, read byte-by-byte and
+coalesce successive frames, proving only the header plus declared payload length delimit frames.
+Raw, JSON-escaped, percent-encoded and base64 sentinels are absent from logs, audit, journals, URLs,
+headers, close reasons and persisted files.
+
+The existing `POST /api/service-accounts` remains the distinct one-shot hosted operation. It accepts
+only the strict non-secret id/expiry request and returns exactly one FXSA frame with
+`application/vnd.flux-exchange.service-account-handoff-v1` and `Cache-Control: no-store`; metadata
+is read through the existing list route. Every former create/rotate/acquire/mint secret JSON shape
+refuses with status 415 and value-free `secret_json_forbidden` before body decoding or mutation.
+
 ### HTTP v1 compatible-change policy
 
 The four HTTP v1 identities are strict wire identities, not an additive schema promise. A change is
