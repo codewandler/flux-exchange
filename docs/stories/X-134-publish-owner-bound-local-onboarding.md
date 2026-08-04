@@ -77,27 +77,34 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       supervised readiness FD 3/liveness FD 4 and the existing two Windows HANDLE arguments retain
       their exact X-128 directions and value-free meanings. Local management has no lifecycle opcode
       and never shares readiness, liveness or C-510 lifecycle control.
-- [ ] `exchange.local-management.v1` uses one operation per connection and a 12-byte header: ASCII
-      `FXLM`, version byte `1`, direction byte (`1` client-to-server or `2` server-to-client),
-      big-endian `u16` opcode and big-endian `u32` payload length. Canonical control JSON is at most
-      65,536 bytes; each secret frame is an ordinal `u16` plus `1..=8192` raw bytes; at most 64 secret
-      frames and 1 MiB total payload are accepted. The header has no flag field. Compression,
-      unknown opcodes, duplicate JSON members, trailing bytes and a second logical operation refuse.
-      Opcodes are connect begin/need-secrets/secret/commit/query/receipt `0x0001..0x0006`; grant
-      preview/candidate/apply/query/receipt `0x0010..0x0014`; Service Account mint/query/receipt
-      `0x0020..0x0022`; hosted credential rotate-or-acquire begin/commit/receipt/query
-      `0x0030..0x0033`; and error `0x7fff`. Direction and state make each value exhaustive.
-- [ ] Each FXLM connection carries one exact operation then EOF. Connect is client `BEGIN`, server
-      `RECEIPT|ERROR` or server `NEED_SECRETS`, client one `SECRET` for each requested ordinal in
-      request order, client `COMMIT`, server `RECEIPT|ERROR`; a separate client `QUERY` yields server
-      `RECEIPT|ERROR`. Grant preview is client `PREVIEW`, server `CANDIDATE|ERROR`; grant apply is
-      client `APPLY`, server `RECEIPT|ERROR`; a separate client `QUERY` yields server
-      `RECEIPT|ERROR`. Service Account mint is client `MINT` plus its transferred writer capability,
-      server `RECEIPT|ERROR`; a separate client `QUERY` yields server `RECEIPT|ERROR`. Hosted
-      rotate/acquire is client `BEGIN`, server `NEED_SECRETS|ERROR`, client one `SECRET` for each
+- [ ] `exchange.local-management.v1` uses one operation per native connection or hosted WebSocket
+      and a 12-byte header: ASCII `FXLM`, version byte `1`, direction byte (`1` client-to-server or
+      `2` server-to-client), big-endian `u16` opcode and big-endian `u32` payload length. Canonical
+      control JSON is at most 65,536 bytes; each secret frame is an ordinal `u16` plus `1..=8192` raw
+      bytes; at most 64 secret frames and 1 MiB cumulative payload are accepted. The header has no
+      flag field. Native byte-stream reads may split or coalesce bytes arbitrarily; the 12-byte header
+      and declared payload length delimit each successive FXLM frame. Only hosted transport binds
+      message boundaries to frames: each reassembled WebSocket binary message contains exactly one
+      complete FXLM frame and is at most 65,548 bytes. WebSocket fragmentation is transport-only;
+      splitting one FXLM frame across messages is a truncated frame and coalescing frames in one
+      message is surplus data. Compression, unknown opcodes, duplicate JSON members, trailing bytes
+      and a second logical operation per native connection or hosted WebSocket refuse. Opcodes are
+      connect begin/need-secrets/secret/commit/query/receipt `0x0001..0x0006`; grant preview/candidate/
+      apply/query/receipt `0x0010..0x0014`; Service Account mint/query/receipt `0x0020..0x0022`;
+      hosted credential rotate-or-acquire begin/commit/receipt/query `0x0030..0x0033`; and error
+      `0x7fff`. Direction and state make each value exhaustive.
+- [ ] Each native FXLM connection or hosted WebSocket carries one exact logical operation. Connect is
+      client `BEGIN`, server `RECEIPT|ERROR` or server `NEED_SECRETS`, client one `SECRET` for each
       requested ordinal in request order, client `COMMIT`, server `RECEIPT|ERROR`; a separate client
-      `QUERY` yields server `RECEIPT|ERROR`. No other direction, repetition, omission or transition
-      is valid. Closed control objects bind the canonical proposal, opaque 256-bit
+      `QUERY` yields server `RECEIPT|ERROR`. Grant preview is client `PREVIEW`, server
+      `CANDIDATE|ERROR`; grant apply is client `APPLY`, server `RECEIPT|ERROR`; a separate client
+      `QUERY` yields server `RECEIPT|ERROR`. Service Account mint is client `MINT` plus its transferred
+      writer capability, server `RECEIPT|ERROR`; a separate client `QUERY` yields server
+      `RECEIPT|ERROR`. Hosted rotate/acquire is client `BEGIN`, server `NEED_SECRETS|ERROR`, client one
+      `SECRET` for each requested ordinal in request order, client `COMMIT`, server `RECEIPT|ERROR`;
+      a separate WebSocket carrying client `QUERY` yields server `RECEIPT|ERROR`. No other direction,
+      repetition, omission or transition is valid. Closed control objects bind the canonical
+      proposal, opaque 256-bit
       transaction/receipt ids and ordered ordinal/target pairs. Provider fixtures publish
       `exchange.connect-receipt.v1`, `exchange.grant-apply-receipt.v1`,
       `exchange.service-account-mint-receipt.v1` and `exchange.local-management-error.v1` with the
@@ -115,15 +122,49 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       opcode/state/status/code/retry/commit combination and rejects every other combination.
 - [ ] Plan, connection-create, credential-rotation/acquisition and Service Account mint JSON reject
       every secret identity, alias, value and unknown target before mutation without reflecting it.
-      Hosted operators use the same FXLM connect/rotate/acquire bytes only at
-      `POST /api/onboarding/frames`, with the existing hosted tenant/operator authentication,
-      request/response `application/vnd.flux-exchange.vendor-secret-v1` and
-      `Cache-Control: no-store`. The existing `POST /api/service-accounts` accepts only a strict
+      Hosted operators use the same FXLM connect/rotate/acquire state machines only through a
+      WebSocket upgrade at exactly `GET /api/onboarding/frames` with exact, case-sensitive sole
+      subprotocol `exchange.local-management.v1` and `Cache-Control: no-store`. The request has no
+      query string or body. Authentication, tenant derivation and the existing hosted operator
+      policy are revalidated before upgrade; Service Accounts fail the operator gate. `Origin` must
+      exactly equal startup-bound `FLUX_EXCHANGE_CONSOLE_ORIGIN`. The explicit setting is one
+      canonical origin containing only scheme, host and effective port, with no userinfo, non-root
+      path, query or fragment. Production requires HTTPS. `--dev` alone may use HTTP with a literal
+      loopback IP and, only when the setting is absent, derives the origin from the explicit loopback
+      listener configuration. A hosted route with no usable configured origin is unavailable; an
+      invalid explicit setting fails startup. Exchange never derives the origin from an OIDC
+      redirect URI, `Host`, `Forwarded` or any `X-Forwarded-*` header; missing, `null`, malformed and
+      mismatched request origins refuse. Success echoes the exact subprotocol, returns no
+      `Sec-WebSocket-Extensions`, and never negotiates compression; offered `permessage-deflate` is
+      ignored rather than accepted or treated as malformed. Missing or invalid authentication is
+      401; a non-operator or unacceptable origin is 403; malformed upgrade, query, body or
+      subprotocol input is 400; another method is 405 with `Allow: GET` before body decoding; an
+      unsupported WebSocket version is 426 with `Sec-WebSocket-Version: 13`; exhausted bounded
+      ceremony occupancy is 429 with `Retry-After`; and unavailable identity, audit, coordinator or
+      configured-origin dependencies are 503. Every handshake refusal is value-free and
+      `Cache-Control: no-store`.
+- [ ] Hosted Exchange allocates and associates the server-owned opaque transaction id only after an
+      admitted `BEGIN`, returns ordered `NEED_SECRETS`, then accepts exactly those `SECRET` ordinals
+      before `COMMIT`. No transaction or receipt id appears in a URL, header or log. Connect, rotate
+      and password acquisition use the same coordinator and interactive state machine as native
+      FXLM. Query and same-proposal replay each use a separate WebSocket; replay may return the
+      existing receipt before a prompt, while a changed proposal refuses. A successful receipt or
+      well-formed FXLM error is followed by close code 1000. Malformed FXLM, wrong direction
+      or state, surplus data or a second operation uses 1002 after a binary FXLM error when one can
+      safely be emitted; text uses 1003 without JSON decoding; any declared frame, message, control,
+      secret, count or cumulative bound excess uses 1009; an absolute pre-decision ceremony deadline
+      uses 1008. Close reasons are always empty. Before a durable decision, disconnect, timeout or
+      protocol failure zeroizes transient buffers and aborts or tombstones an allocated provider
+      transaction. After the decision it never aborts: recovery, query or same-proposal replay rolls
+      forward.
+- [ ] The existing one-shot `POST /api/service-accounts` is unchanged: it accepts only a strict
       non-secret id/expiry object and returns exactly one FXSA body as
-      `application/vnd.flux-exchange.service-account-handoff-v1`; metadata is obtained through list.
-      Every former secret JSON shape returns status 415 plus value-free `secret_json_forbidden`
-      before body decoding or mutation. No other method, path, query, header or response shape can
-      select a secret target, creation, rotation, acquisition or mint operation.
+      `application/vnd.flux-exchange.service-account-handoff-v1` with `Cache-Control: no-store`;
+      metadata is obtained through list. Every former create/rotate/acquire/mint secret JSON shape
+      returns status 415 plus value-free `secret_json_forbidden` before body decoding or mutation.
+      No other method, path, query, header or response shape can select a secret target, creation,
+      rotation, acquisition or mint operation. The hosted WebSocket binds the existing
+      `exchange.local-management.v1` protocol and never adds a ninth release inventory field.
 - [ ] The verified `flux-exchange` executable owns local TTY/browser secret input. Flux may supply
       connector, label and exact plan/target revision, but never supplies, chooses, parses or orders
       the provider transaction identity. Flux does not read, proxy, inherit, log or render the bytes
@@ -210,14 +251,32 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       mismatched digest or unexpressible stored authority refuses before write. Grants remain tenant-
       and-connector scoped metadata selectors with no label or operation-id authority axis.
 - [ ] Positive/adversarial provider fixtures and tests cover native root poisoning, unsafe metadata,
-      peer authentication, loopback TCP, every secret JSON path, bounded hosted binary input,
-      connect crash/response-loss/replay/conflict, secret-free digests, handoff framing/capability
-      closure, split receipts, grant CAS/preservation and the unchanged X-128 capability ABI. Raw,
-      JSON-escaped, percent-encoded and base64 sentinels are scanned across JSON, URLs, argv,
-      environment, local-management diagnostics, stdout/stderr, tracing, audit, readiness, liveness,
-      lifecycle/control state and every persisted file. Only connector-secrets' committed credential
-      store and C-515 staging sink, the dedicated frame/test sink and later Authorization transport
-      are allowlisted; Exchange journals remain value-free.
+      peer authentication, loopback TCP, every secret JSON path, connect crash/response-loss/replay/
+      conflict, secret-free digests, handoff framing/capability closure, split receipts, grant CAS/
+      preservation and the unchanged X-128 capability ABI. Hosted handshake evidence covers a
+      cross-origin request even with valid credentials; missing, malformed, `null`, sibling and
+      mismatched origins; OIDC redirect, `Host`, `Forwarded` and `X-Forwarded-*` spoofing; missing,
+      wrong, differently cased and multiple subprotocols; offered-but-not-negotiated compression;
+      and the exact 400/401/403/405+`Allow: GET`/426+version/429+`Retry-After`/503 value-free no-store
+      outcomes. Startup-setting fixtures admit a canonical production HTTPS origin; refuse userinfo,
+      non-root paths, queries, fragments and noncanonical or non-HTTPS production forms; admit HTTP
+      only for `--dev` plus a literal loopback IP; prove absent-setting derivation uses only the
+      explicit loopback listener; prove no usable hosted origin makes the route unavailable; and
+      prove an invalid explicit `FLUX_EXCHANGE_CONSOLE_ORIGIN` fails startup. Native-stream fixtures
+      split headers and payloads at every boundary, read byte-by-byte and coalesce successive frames,
+      proving only header plus payload length delimit them. Hosted message/state evidence covers text
+      and binary JSON shapes, WebSocket fragmentation, frame coalescing and message splitting,
+      deceptive lengths, every frame/message/control/secret/count/cumulative bound, wrong direction/
+      opcode/state/ordinal, surplus and second operations, cross-tenant transaction and receipt ids,
+      and empty close reasons with exact close codes. Crash/disconnect evidence covers before
+      prepare, after prepare, before decision, after decision and after receipt; lost-receipt query
+      and same-proposal replay prove roll-forward without a second prompt. Raw, JSON-escaped,
+      percent-encoded and base64 sentinels are scanned across JSON, URLs, headers, argv, environment,
+      local-management diagnostics, close reasons,
+      stdout/stderr, tracing, audit, journals, readiness, liveness, lifecycle/control state and every
+      persisted file. Only connector-secrets' committed credential store and C-515 staging sink, the
+      dedicated frame/test sink and later Authorization transport are allowlisted; Exchange journals
+      remain value-free.
 - [ ] Native CI executes the complete evidence on `macos-15` (`aarch64-apple-darwin`),
       `macos-15-intel` (`x86_64-apple-darwin`), `ubuntu-24.04-arm`
       (`aarch64-unknown-linux-gnu`), `ubuntu-24.04` (`x86_64-unknown-linux-gnu`) and `windows-2025`
@@ -244,7 +303,7 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
 
 - Cross-repository authority:
   `../flux-roadmap/decisions/0007-local-onboarding-uses-owner-bound-capabilities.md` at roadmap
-  commit `daf80d5`.
+  commit `77a0d69b3eb938f6d055650cefc4ba2153228776`.
 - External implementation dependency: connectors C-515 and the checksummed crates.io release of
   `codewandler-connector-secrets` 0.20.0. X-134 remains blocked and no code wave starts from an
   unmerged provider port, unpublished commit, path/git dependency or unmatched lockfile resolution.
