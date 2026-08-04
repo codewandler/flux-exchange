@@ -51,6 +51,9 @@ may certify publication.
 
 ## Progress
 
+- Immutable audit baseline `3dc7b28` contained a committed fixture selecting 12 cases while its
+  release self-test required 13. That exact contradiction is failing-first provenance for replacing
+  copied inventories; 13 is not the final authority or a numeric acceptance ratchet.
 - The committed fixture predating this story is incomplete, and rejected commits `7c1b238` and
   `5e2b3f4` must never be integrated. Useful list/`--exact` mechanics may be reimplemented only from
   the final product-test names delivered by X-135 through X-138.
