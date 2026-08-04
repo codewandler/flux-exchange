@@ -8,6 +8,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Verified local Exchange release machinery now covers the complete pre-production contract**
+  (X-126, implementation slice). CI builds the exact five native targets, runs compatibility and
+  named supervisor/ABI process evidence on each applicable runner, packages bounded deterministic
+  archives, signs canonical trust/channel/manifest metadata through delegated roles, and verifies
+  the immutable public bytes before advancing the stable head. The provider fixture set executes
+  161 explicit conformance cases and binds nine native cases to exact tests; immutable version,
+  trust-version and channel-generation evidence is append-only. Production publication remains
+  intentionally blocked on reviewed external trust/signing inputs, Decision 0007's X-134 schema
+  revalidation, and the first authorized public five-target verifier run.
+
 - **Local Exchange state is durable and owner-only on every supported Flux target** (X-127).
   The complete `--dev` composition binds credentials, settings, grants, labelled connections,
   channels, workflows, audit evidence and Service Accounts below one conventional per-user root.

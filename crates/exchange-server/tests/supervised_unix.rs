@@ -285,6 +285,85 @@ impl SupervisedChild {
     }
 }
 
+fn assert_new_start_refuses_at_metadata_expiry(target: &str) {
+    let fixture_root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v1");
+    let fixture: flux_exchange_release::FixtureSet = flux_exchange_release::canonical::parse(
+        &flux_exchange_release::read_bounded_file(
+            &fixture_root.join("fixture-set.json"),
+            256 * 1024,
+        )
+        .expect("bounded fixture-set read"),
+        256 * 1024,
+    )
+    .expect("canonical fixture-set");
+    let case = fixture
+        .cases
+        .iter()
+        .find(|case| case.id == "expiry-equality-stopped")
+        .expect("expiry-equality-stopped provider case");
+    let policy: flux_exchange_release::RootPolicy = flux_exchange_release::canonical::parse(
+        &flux_exchange_release::read_bounded_file(
+            &fixture_root.join("root-policy.test.json"),
+            64 * 1024,
+        )
+        .expect("bounded root-policy read"),
+        64 * 1024,
+    )
+    .expect("canonical root policy");
+    let attempt = flux_exchange_release::verify_directory_layered(
+        &fixture_root.join(&case.input),
+        &policy,
+        flux_exchange_release::parse_utc(&case.clock).expect("fixture clock"),
+        &flux_exchange_release::Protocols::v1(),
+        &case.prior_state,
+        Some(target),
+    );
+    assert!(matches!(
+        attempt.outcome,
+        Err(flux_exchange_release::Error::Time(_))
+    ));
+    assert_eq!(attempt.state, case.expected_state);
+}
+
+fn native_unix_target() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        platform => panic!("unsupported native release test platform {platform:?}"),
+    }
+}
+
+#[test]
+fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
+    let mut server = SupervisedChild::spawn(0o700);
+    let pid = server.child.id();
+    let ready: serde_json::Value =
+        serde_json::from_slice(&server.readiness()).expect("readiness object");
+    let address: SocketAddr = format!(
+        "{}:{}",
+        ready["bind"]["host"].as_str().expect("host"),
+        ready["bind"]["port"].as_u64().expect("port")
+    )
+    .parse()
+    .expect("reported address");
+
+    assert_new_start_refuses_at_metadata_expiry(native_unix_target());
+    assert_eq!(server.child.id(), pid, "the owned child identity changed");
+    assert!(
+        server.child.try_wait().expect("child state").is_none(),
+        "metadata expiry terminated the already healthy child"
+    );
+    TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .expect("same healthy child remains reachable after metadata expiry");
+
+    let output = server.finish();
+    assert!(!output.status.success());
+    assert!(TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_err());
+}
+
 #[test]
 fn native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged() {
     let mut server = SupervisedChild::spawn_with(0o700, true);

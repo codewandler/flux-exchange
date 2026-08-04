@@ -362,3 +362,39 @@ jobs:
           ./scripts/check-crate-versions.sh
           ./scripts/check-current-version.sh --self-test
           ./scripts/check-current-version.sh
+
+  local-release-contract:
+    name: local release policy and provider conformance
+    runs-on: ubuntu-latest
+    # The tag workflow is intentionally fail-closed until production root/delegate material exists,
+    # so it cannot be the PR ratchet for the release contract. These checks need no production key:
+    # shell mutations prove the closed target/asset/redirect/workflow policy, while the verifier's
+    # test-only root exercises the byte-identical provider fixture set used by Flux.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install release-verifier toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.97.0"
+
+      - name: Cache release-verifier dependencies
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: local-release-contract
+
+      - name: Refuse target, staged-set, redirect and workflow-policy mutations
+        run: |
+          ./scripts/check-local-release.sh --self-test
+          ./scripts/check-local-release.sh
+          ./scripts/release-check-assets.sh --self-test
+          ./scripts/release-native-fixtures.sh --self-test
+          ./scripts/release-download.sh --self-test
+          ./scripts/release-validate-redirect.py --self-test
+
+      - name: Run the provider-owned release fixture set through the production verifier
+        run: >-
+          cargo run --locked -p flux-exchange-release --
+          self-test tests/fixtures/exchange-release-v1

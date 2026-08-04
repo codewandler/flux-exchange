@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/exchange-host", "crates/exchange-server"]
+members = ["crates/exchange-host", "crates/exchange-release", "crates/exchange-server"]
 
 [workspace.package]
 version = "0.17.0"
@@ -17,6 +17,7 @@ exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exc
 
 async-trait = "0.1"
 anyhow = "1"
+base64 = "0.22"
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 # `fs` is X-83's: the console is served by the host it talks to, because the session cookie is
@@ -101,6 +102,8 @@ connector-secrets = { package = "codewandler-connector-secrets", version = "0.19
 # the same reason.
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
 libc = "0.2"
+minisign-verify = "0.2.5"
+minisign = "0.7.9"
 # TLS: `rustls`, so OpenSSL is genuinely absent and there is only one TLS stack in the tree.
 #
 # It does NOT make this build C-free, and an earlier version of this comment wrongly said it did.
@@ -127,11 +130,18 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_json_canonicalizer = "0.3.2"
+semver = "1"
 schemars = "1"
+tar = "0.4"
+tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
 futures-util = "0.3"
 tokio-tungstenite = "0.30"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
+url = "2"
 windows-sys = "0.61.2"
+zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
+zstd = "0.13"

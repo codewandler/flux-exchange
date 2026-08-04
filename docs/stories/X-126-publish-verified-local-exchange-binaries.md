@@ -1,7 +1,7 @@
 ---
 id: X-126
 title: "Publish verified local Exchange binaries for every Flux platform"
-status: ready
+status: in-progress
 priority: 0
 epic: remote-deployment
 areas: [ci, release, supply-chain, exchange-server]
@@ -243,11 +243,38 @@ implements its manager in C-510.
   actual provider wire ids, JCS-safe integers, exact process identity/inherited-handle/liveness ABI,
   global transactional rollback floors, closed grammars/key decoding, provenance-free client trust
   and live-child expiry behavior now precede implementation.
+- 2026-08-04: The implementation wave now has a bounded same-handle verifier, deterministic closed
+  archives, signing-time delegated-key validity, identical Rust/Python transport admission, 161
+  explicitly ratcheted provider cases over 547 inventoried files, and nine native cases mapped to 14
+  exact process tests across the five release runners. The local Linux runner executed all eight
+  applicable liveness, supervisor-death, inherited-FD and live-expiry tests; the release workflow
+  runs the corresponding exact set natively on macOS, Linux arm64 and Windows before admitting an
+  artifact.
+- 2026-08-04: Public evidence is now append-only. An immutable version release and
+  `exchange-stable-v1-generation-<generation>` snapshot are bounded-re-downloaded and verified before
+  the mutable stable head advances; future offline-root rotation must similarly retain
+  `exchange-trust-v1-version-<version>`. Public evidence is never clobbered, deleted or recreated,
+  and a private draft may only fill an absent expected byte after every present name, size and digest
+  agrees.
+- 2026-08-04: Production remains deliberately unproven. No `local-release` environment, delegated
+  signing secret, reviewed root policy, public trust release or stable release exists, and `main` is
+  not protected. The required future environment secrets are
+  `FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64` and `FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64`, each canonical
+  padded RFC 4648 base64 of the complete unencrypted minisign secret-key file bytes. This story
+  creates or configures none of them and stays in progress until explicitly authorized external
+  provisioning and a real public verifier run.
+- 2026-08-04: Roadmap Decisions 0004 and 0007, frozen at `ba82cb0`, make the current exact
+  six-protocol v1 schema implementation evidence only. The next unused tag is `v0.18.0`, whose push
+  would irreversibly start both five-target binary and crates.io publication; neither that joint
+  operator boundary nor the trust ceremony, public release, or stable-head update may occur until
+  canonical X-134 implements and revalidates release-channel, manifest, compatibility and readiness
+  v2, connection-plan v2, local-management v1 and service-account-handoff v1.
 
 ## Notes
 
 - Cross-repository authority:
-  `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at `013a2ab`.
+  `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at frozen roadmap
+  authority `ba82cb0`.
 - Flux C-510 consumes this channel and owns rollback state, compatible selection, verified
   cache/install/start/status/stop and audit of the installed exact identity. X-126 does not add a
   downloader or lifecycle manager to Exchange.

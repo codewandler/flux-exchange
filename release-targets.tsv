@@ -1,0 +1,6 @@
+# target\trunner\tarchive-format\texecutable
+aarch64-apple-darwin	macos-15	tar.zst	flux-exchange
+aarch64-unknown-linux-gnu	ubuntu-24.04-arm	tar.zst	flux-exchange
+x86_64-apple-darwin	macos-15-intel	tar.zst	flux-exchange
+x86_64-pc-windows-msvc	windows-2025	zip	flux-exchange.exe
+x86_64-unknown-linux-gnu	ubuntu-24.04	tar.zst	flux-exchange
