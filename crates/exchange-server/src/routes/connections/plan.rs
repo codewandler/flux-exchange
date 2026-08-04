@@ -22,7 +22,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::*;
 
-const VERSION: &str = "exchange.connection-plan.v1";
+const VERSION: &str = crate::protocol::CONNECTION_PLAN_V1.as_str();
 
 pub(super) fn read_route() -> MethodRouter<AppState> {
     get(show)

@@ -32,6 +32,7 @@ mod routes;
 mod service_account;
 mod session;
 pub mod state;
+mod supervisor;
 mod tenancy;
 mod traffic;
 mod workflow_runs;
@@ -205,15 +206,52 @@ where
         .any(|argument| argument.as_ref() == DEV_FLAG)
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments == [OsStr::new("compatibility"), OsStr::new("--json")] {
+        return match supervisor::compatibility_json().and_then(|bytes| {
+            use std::io::Write;
+            std::io::stdout()
+                .lock()
+                .write_all(&bytes)
+                .map_err(|error| format!("cannot write compatibility JSON: {error}"))
+        }) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "compatibility")
+    {
+        eprintln!("usage: flux-exchange compatibility --json");
+        return ExitCode::FAILURE;
+    }
+
+    // Capability validation and the native liveness thread precede both tracing/runtime setup and
+    // every store/listener action. A wedged async executor therefore cannot outlive its supervisor.
+    let supervision = if arguments.first().is_some_and(|arg| arg == "--supervised") {
+        match supervisor::Supervision::discover(&arguments) {
+            Ok(supervision) => Some(supervision),
+            Err(refusal) => {
+                eprintln!("refusing supervised startup: {refusal}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        None
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("audit-query")) {
+    if arguments.first().map(std::ffi::OsString::as_os_str) == Some(OsStr::new("audit-query")) {
         return match audit_query(std::env::args().skip(2)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(refusal) => {
@@ -223,7 +261,8 @@ async fn main() -> ExitCode {
         };
     }
 
-    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("local-user-secret")) {
+    if arguments.first().map(std::ffi::OsString::as_os_str) == Some(OsStr::new("local-user-secret"))
+    {
         return match local_user_secret(std::env::args().skip(2)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(refusal) => {
@@ -233,7 +272,17 @@ async fn main() -> ExitCode {
         };
     }
 
-    match serve().await {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            error!(%error, "cannot construct the async runtime");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(serve(supervision)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(refusal) => {
             // The refusal is the product here: it names the address it would not serve and what
@@ -328,10 +377,15 @@ fn audit_query(arguments: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 /// Start the server, or refuse and say why.
-async fn serve() -> Result<(), StartupRefusal> {
+async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), StartupRefusal> {
     let startup = Startup::configured()?;
-    let bind = configured_bind()?;
-    let state = compose(&startup, bind)?;
+    let supervised = supervision.is_some();
+    let bind = if supervised {
+        supervised_bind()?
+    } else {
+        configured_bind()?
+    };
+    let state = compose(&startup, bind, supervised)?;
 
     report_deployment(startup.deployment());
     report_surface();
@@ -342,6 +396,21 @@ async fn serve() -> Result<(), StartupRefusal> {
     let local = listener
         .local_addr()
         .map_err(|source| StartupRefusal::BindUnavailable { bind, source })?;
+
+    if let Some(supervision) = supervision {
+        supervision
+            .ready(local)
+            .map_err(|reason| StartupRefusal::Supervised { reason })?;
+        #[cfg(feature = "supervisor-test-wedge")]
+        if std::env::var_os("FLUX_EXCHANGE_TEST_WEDGE_AFTER_READY").is_some() {
+            // This non-default test-feature seam proves liveness does not depend on Tokio making
+            // progress. Default/release binaries do not recognize the variable; the native
+            // liveness thread remains able to invoke `_exit`/`ExitProcess` in every build.
+            loop {
+                std::thread::park();
+            }
+        }
+    }
 
     info!(%local, "flux-exchange is listening");
 
@@ -406,12 +475,17 @@ fn configured_console() -> Option<PathBuf> {
 ///
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
-fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefusal> {
-    let local_state = local_state::configured(startup.is_development()).map_err(|source| {
-        StartupRefusal::LocalState {
-            reason: source.to_string(),
-        }
-    })?;
+fn compose(
+    startup: &Startup,
+    bind: SocketAddr,
+    supervised: bool,
+) -> Result<AppState, StartupRefusal> {
+    let local_state =
+        local_state::configured(startup.is_development() || supervised).map_err(|source| {
+            StartupRefusal::LocalState {
+                reason: source.to_string(),
+            }
+        })?;
     // Read deployment policy before binding any store or background authority. No released
     // connector declares a hazard yet; X-75 hands this posture to the acquisition binding when the
     // first one does. Parsing it now makes an unknown opt-in a startup refusal instead of a policy
@@ -1017,6 +1091,27 @@ fn configured_bind() -> Result<SocketAddr, StartupRefusal> {
             value: configured,
             source,
         })
+}
+
+/// Resolve the fixed supervised bind domain without reserving or re-binding a port.
+fn supervised_bind() -> Result<SocketAddr, StartupRefusal> {
+    let bind: SocketAddr = match std::env::var(BIND_ENV) {
+        Ok(configured) => configured
+            .parse()
+            .map_err(|source| StartupRefusal::UnreadableBind {
+                value: configured,
+                source,
+            })?,
+        Err(_) => "127.0.0.1:0"
+            .parse()
+            .expect("the supervised loopback bind literal is valid"),
+    };
+    if !bind.ip().is_loopback() || bind.port() != 0 {
+        return Err(StartupRefusal::Supervised {
+            reason: format!("{BIND_ENV} must be a literal loopback socket with port 0; got {bind}"),
+        });
+    }
+    Ok(bind)
 }
 
 /// Wait for the operator to ask for a stop, so in-flight requests finish rather than being cut.

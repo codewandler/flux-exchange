@@ -11,6 +11,11 @@ authors.workspace = true
 # Not published. The library (`codewandler-flux-exchange-host`) is the reusable artifact; this
 # binary is one composition of it, and a product embedding the host writes its own.
 publish = false
+build = "build.rs"
+
+[features]
+# Process-only acceptance seam. Default/release binaries do not recognize a wedge control input.
+supervisor-test-wedge = []
 
 [[bin]]
 name = "flux-exchange"
@@ -58,6 +63,15 @@ tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 time.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tokio-tungstenite.workspace = true

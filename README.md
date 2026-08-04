@@ -284,6 +284,27 @@ needs named tenants or more than one principal. With `--dev`, follow **Sign in**
 **Continue as the local development user**; the host establishes the sole implied user's browser
 session and returns to the console.
 
+### Flux-supervised local launch
+
+`flux-exchange compatibility --json` is the side-effect-free release/protocol query: it opens no
+store and binds no listener. `--supervised` is a separate machine-only launch mode for the Flux
+local supervisor. It accepts only an OS-selected loopback port (`FLUX_EXCHANGE_BIND` may be absent
+or a literal loopback address with port `0`) and emits one bounded canonical
+`exchange.supervisor-ready.v1` object after every store/safety check and the one listener bind have
+succeeded. The record goes only to the inherited one-shot readiness capability; stdout and stderr
+remain ordinary process output, the HTTP listener carries application traffic, and later control is
+not part of this channel.
+
+On Unix the complete ABI is `flux-exchange --supervised`: FD 3 is the readiness pipe's write end and
+FD 4 is the liveness pipe's read end, with no other inherited nonstandard descriptor. On Windows the
+complete hidden ABI also supplies `--supervisor-readiness-handle <H>` and
+`--supervisor-liveness-handle <H>`; Flux places exactly those distinct pipe handles in
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. These numeric non-secret capabilities are the only extra
+supervised arguments. A native thread exits the process without unwinding when liveness reaches EOF,
+receives a byte or fails, so supervisor death cannot leave Exchange or its port behind even when the
+async runtime is wedged. Readiness is not logged or copied to HTTP, no PID file is emitted, and
+`/health` becomes useful only after Flux has validated the one-shot process/start identity.
+
 On Linux the default root is `${XDG_STATE_HOME:-$HOME/.local/state}/flux-exchange`; on macOS it is
 `$HOME/Library/Application Support/Flux/Exchange` unless `XDG_STATE_HOME` is explicitly set; on
 Windows it is `%LOCALAPPDATA%\Flux\Exchange`.

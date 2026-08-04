@@ -85,6 +85,11 @@ pub fn admit_audit(bind: SocketAddr, audit_bound: bool) -> Result<(), StartupRef
 /// value, and distinguish failures an operator answers differently — is met below.
 #[derive(Debug)]
 pub enum StartupRefusal {
+    /// The closed supervised launch or readiness protocol was not satisfied.
+    Supervised {
+        /// A value-free ABI, bind or readiness refusal.
+        reason: String,
+    },
     /// The deployment's authentication-hazard policy named a value this build does not know.
     AuthPosture {
         /// The by-name, redaction-safe configuration refusal.
@@ -273,6 +278,7 @@ impl From<DevIdentityRefusal> for StartupRefusal {
 impl fmt::Display for StartupRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Supervised { reason } => write!(f, "refusing supervised startup: {reason}"),
             Self::AuthPosture { reason } => write!(f, "{reason}"),
             Self::DevelopmentMode { reason } => write!(f, "{reason}"),
             Self::Tenancy { reason } => write!(f, "{reason}"),
@@ -339,7 +345,8 @@ impl fmt::Display for StartupRefusal {
 impl std::error::Error for StartupRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::AuthPosture { .. }
+            Self::Supervised { .. }
+            | Self::AuthPosture { .. }
             | Self::ReachableBindWithoutIdentity { .. }
             | Self::ReachableBindWithDevelopmentIdentity { .. }
             | Self::ReachableBindWithoutAudit { .. }
