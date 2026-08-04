@@ -164,6 +164,14 @@ test('the_shared_v1_contract_is_read_whole_and_a_malformed_declared_row_fails_th
     assert.equal(unknown.status, 'failed', 'accepted an unknown v1 member')
     assert.match(unknown.failure.detail, /unknown|closed|member/i)
   }
+
+  const wrongApplyTarget = structuredClone(contract)
+  wrongApplyTarget.apply.target = '/api/grants'
+  const misroutedApply = await loadConnectionPlan(contract.connector, contract.selection, {
+    fetch: answer(200, wrongApplyTarget).fetch,
+  })
+  assert.equal(misroutedApply.status, 'failed')
+  assert.match(misroutedApply.failure.detail, /apply.*target/i)
 })
 
 test('the_generic_consumer_renders_every_shared_contract_descriptor_without_vendor_logic', async () => {
@@ -409,6 +417,7 @@ test('the_form_renders_labels_rename_choices_secrets_optional_status_and_unrouta
   }
   assert.match(html, /data-plan-field="credential.example_helpdesk.api_token"[\s\S]*?data-provenance="provider.auth"/)
   assert.match(html, /data-plan-field="credential.example_helpdesk.api_token"[\s\S]*?type="password"/)
+  assert.match(html, /data-plan-field="config.default.custom_origin"[\s\S]*?type="url"/)
   assert.equal([...html.matchAll(/<input[^>]*\srequired(?:\s|>)/g)].length, 1, 'only the name blocks submission')
   assert.match(html, /data-required="false"/)
   assert.match(html, /Optional/)
@@ -633,6 +642,17 @@ test('complete_incomplete_refused_and_partial_apply_outcomes_are_distinct', asyn
   }, { fetch: answer(500, { outcome: 'complete', steps: [], plan: completeContract() }).fetch })
   assert.equal(completeAt500.status, 'failed')
   assert.equal(completeAt500.failure.status, 500)
+
+  for (const body of [
+    { outcome: 'complete', steps: [], plan: contract },
+    { outcome: 'incomplete', steps: [], plan: completeContract() },
+  ]) {
+    const contradictory = await applyConnectionPlan(contract.connector, {
+      version: CONNECTION_PLAN_VERSION, name: 'production', values: {}, expected_revisions: {},
+    }, { fetch: answer(200, body).fetch })
+    assert.equal(contradictory.status, 'failed', `accepted ${body.outcome} over a ${body.plan.state} plan`)
+    assert.match(contradictory.failure.detail, /outcome|plan|complete|incomplete/i)
+  }
 
   for (const body of [
     { outcome: 'complete', steps: [], plan: completeContract(), future: true },

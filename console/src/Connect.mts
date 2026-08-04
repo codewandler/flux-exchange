@@ -95,9 +95,12 @@ function fieldControl(field: ConnectionPlanField): VNode {
   }
 
   const credentialTarget = target.id.startsWith('credential.')
+  // Catalogue formats are extensible. Preserve the two browser-native validation modes this
+  // consumer understands and render every other open text-like format as text.
+  const inputType = field.input === 'email' || field.input === 'url' ? field.input : 'text'
   return h('input', {
     ...common,
-    type: field.secret || credentialTarget ? 'password' : field.input === 'email' ? 'email' : 'text',
+    type: field.secret || credentialTarget ? 'password' : inputType,
     ...(field.secret || credentialTarget
       ? { autocomplete: 'new-password', spellcheck: 'false' }
       : {}),

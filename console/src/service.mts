@@ -1159,6 +1159,9 @@ function readConnectionPlan(body: unknown, expectedConnector: string): Connectio
   }
   if (body.apply.method !== 'POST' || typeof body.apply.target !== 'string' ||
       typeof body.apply.retry !== 'string') return 'the plan has invalid apply metadata'
+  if (body.apply.target !== connectionPlanEndpoint(expectedConnector)) {
+    return 'the plan apply target does not name this connector plan'
+  }
   const compensation = strings(body.apply.compensation, 'apply.compensation')
   if (typeof compensation === 'string') return compensation
 
@@ -1500,6 +1503,10 @@ function readConnectionPlanResult(body: unknown, expectedConnector: string): Con
   }
   const plan = readConnectionPlan(body.plan, expectedConnector)
   if (typeof plan === 'string') return `the returned plan is unreadable: ${plan}`
+  if ((body.outcome === 'complete' && plan.state !== 'complete') ||
+      (body.outcome === 'incomplete' && plan.state !== 'incomplete')) {
+    return `the apply outcome \`${body.outcome}\` contradicts the returned \`${plan.state}\` plan`
+  }
   for (const [at, step] of steps.entries()) {
     if (!('action' in step)) continue
     const field = plan.fields.find((candidate) => candidate.target?.id === step.target)
