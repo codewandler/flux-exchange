@@ -235,14 +235,15 @@ targets = {
     "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc",
 }
 native = fixture.get("native_cases")
-if not isinstance(native, list) or len(native) != 11:
-    refuse("fixture-set must retain the nine X-128 mappings plus the two ratcheted X-134 case ids")
+if not isinstance(native, list) or len(native) != 12:
+    refuse("fixture-set must retain the nine X-128 mappings plus the three ratcheted X-134 case ids")
 native_ids = [case.get("id") for case in native if isinstance(case, dict)]
-if len(native_ids) != 11 or len(set(native_ids)) != 11:
+if len(native_ids) != 12 or len(set(native_ids)) != 12:
     refuse("native case ids are absent or duplicated")
 expected_native_ids = {
     "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
+    "c515-server-lifetime-lease",
     "expiry-equality-live",
     "supervisor-death-normal-responsive-unix",
     "supervisor-death-normal-wedged-unix",
@@ -271,6 +272,14 @@ expected_root_evidence = [{
 }]
 if root_case.get("evidence") != expected_root_evidence:
     refuse("production-root poisoning is not bound to its exact real-process test on all five targets")
+lease_case = next(case for case in native if case.get("id") == "c515-server-lifetime-lease")
+expected_lease_evidence = [{
+    "targets": sorted(targets),
+    "test_target": "credential_store_process_lease",
+    "exact_test": "real_server_retains_the_c515_lease_through_recovery_and_readiness",
+}]
+if lease_case.get("evidence") != expected_lease_evidence:
+    refuse("C-515 server lifetime lease is not bound to its exact real-process test on all five targets")
 bindings = []
 covered = set()
 for case in native:
@@ -290,8 +299,8 @@ for case in native:
             refuse(f"native case {case.get('id')!r} duplicates an evidence binding")
         bindings.append(identity)
         covered.update(selected)
-if len(bindings) != 16 or covered != targets:
-    refuse(f"native fixture mapping has {len(bindings)} bindings over {sorted(covered)}, want 16 over all five targets")
+if len(bindings) != 17 or covered != targets:
+    refuse(f"native fixture mapping has {len(bindings)} bindings over {sorted(covered)}, want 17 over all five targets")
 
 required_contract_cases = {
     "positive-linux", "positive-macos", "positive-windows", "positive-signer-overlap",
@@ -301,6 +310,7 @@ required_contract_cases = {
     "expiry-equality-stopped", "expiry-equality-live", "readiness-bind-domain",
     "readiness-start-kind", "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
+    "c515-server-lifetime-lease",
     "unix-inherited-abi", "windows-inherited-abi",
     "provenance-client-input",
 }
@@ -403,6 +413,7 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux
 native_ids = [
     "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
+    "c515-server-lifetime-lease",
     "expiry-equality-live", "supervisor-death-normal-responsive-unix",
     "supervisor-death-normal-wedged-unix", "supervisor-death-sigkill-responsive-unix",
     "supervisor-death-sigkill-wedged-unix", "supervisor-death-terminate-responsive-windows",
@@ -410,7 +421,7 @@ native_ids = [
 ]
 native = []
 for index, case_id in enumerate(native_ids):
-    count = 1 if case_id in {"four-form-secret-sentinel-process-scan", "production-root-inherited-environment"} else (2 if index < 7 else 1)
+    count = 3 if case_id in {"unix-inherited-abi", "windows-inherited-abi"} else (2 if case_id == "expiry-equality-live" else 1)
     evidence = []
     for item in range(count):
         if case_id == "four-form-secret-sentinel-process-scan":
@@ -423,6 +434,12 @@ for index, case_id in enumerate(native_ids):
             evidence.append({
                 "test_target": "local_state_regressions",
                 "exact_test": "native_process_derives_production_root_from_the_authenticated_os_account",
+                "targets": sorted(targets),
+            })
+        elif case_id == "c515-server-lifetime-lease":
+            evidence.append({
+                "test_target": "credential_store_process_lease",
+                "exact_test": "real_server_retains_the_c515_lease_through_recovery_and_readiness",
                 "targets": sorted(targets),
             })
         else:
@@ -518,7 +535,7 @@ import json, sys
 path=sys.argv[1]; value=json.load(open(path)); value["native_cases"][0]["evidence"].pop()
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
-  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted fifteen native bindings"; fi
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted sixteen native bindings"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
   cp "$fixture_set" "$fixture_set.clean"
@@ -537,6 +554,15 @@ path=sys.argv[1]; value=json.load(open(path)); case=next(item for item in value[
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
   if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted production-root process test"; fi
+  mv "$fixture_set.clean" "$fixture_set"
+
+  cp "$fixture_set" "$fixture_set.clean"
+  python3 - "$fixture_set" <<'PY'
+import json, sys
+path=sys.argv[1]; value=json.load(open(path)); case=next(item for item in value["native_cases"] if item["id"] == "c515-server-lifetime-lease"); case["evidence"][0]["exact_test"]="renamed_or_substituted_test"
+open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
+PY
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted C-515 server lease process test"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
   cp "$fixture_set" "$fixture_set.clean"

@@ -789,6 +789,7 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
 const REQUIRED_NATIVE_CASES: &[&str] = &[
     "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
+    "c515-server-lifetime-lease",
     "expiry-equality-live",
     "supervisor-death-normal-responsive-unix",
     "supervisor-death-normal-wedged-unix",
@@ -828,6 +829,12 @@ const REQUIRED_NATIVE_BINDINGS: &[RequiredNativeBinding] = &[
         targets: release::SUPPORTED_TARGETS,
         test_target: "local_state_regressions",
         exact_test: "native_process_derives_production_root_from_the_authenticated_os_account",
+    },
+    RequiredNativeBinding {
+        id: "c515-server-lifetime-lease",
+        targets: release::SUPPORTED_TARGETS,
+        test_target: "credential_store_process_lease",
+        exact_test: "real_server_retains_the_c515_lease_through_recovery_and_readiness",
     },
     RequiredNativeBinding {
         id: "expiry-equality-live",

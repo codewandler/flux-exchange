@@ -1066,6 +1066,22 @@ fn native_fixture_cases() -> Vec<NativeFixtureCase> {
             )],
         },
         NativeFixtureCase {
+            // Dependency-crate tests are not Cargo targets in this consumer. This binding proves
+            // Exchange's own server-lifetime lease seam; the exact C-515 parent tests stay upstream.
+            id: "c515-server-lifetime-lease".into(),
+            evidence: vec![evidence(
+                &[
+                    "aarch64-apple-darwin",
+                    "aarch64-unknown-linux-gnu",
+                    "x86_64-apple-darwin",
+                    "x86_64-pc-windows-msvc",
+                    "x86_64-unknown-linux-gnu",
+                ],
+                "credential_store_process_lease",
+                "real_server_retains_the_c515_lease_through_recovery_and_readiness",
+            )],
+        },
+        NativeFixtureCase {
             id: "expiry-equality-live".into(),
             evidence: vec![
                 evidence(

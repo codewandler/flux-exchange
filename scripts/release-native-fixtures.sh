@@ -24,6 +24,7 @@ PY
 if [ "${1:-}" = --self-test ]; then
   expected='four-form-secret-sentinel-process-scan
 production-root-inherited-environment
+c515-server-lifetime-lease
 expiry-equality-live
 supervisor-death-normal-responsive-unix
 supervisor-death-normal-wedged-unix
@@ -34,8 +35,8 @@ supervisor-death-terminate-wedged-windows
 unix-inherited-abi
 windows-inherited-abi'
   actual="$(inventory | cut -f1 | LC_ALL=C sort -u)"
-  [ "$actual" = "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ] || fail 'native case inventory is not the exact eleven-case set'
-  [ "$(inventory | wc -l | tr -d ' ')" = 16 ] || fail 'native process evidence is not the exact sixteen-test mapping'
+  [ "$actual" = "$(printf '%s\n' "$expected" | LC_ALL=C sort)" ] || fail 'native case inventory is not the exact twelve-case set'
+  [ "$(inventory | wc -l | tr -d ' ')" = 17 ] || fail 'native process evidence is not the exact seventeen-test mapping'
   for target in \
     aarch64-apple-darwin \
     aarch64-unknown-linux-gnu \
@@ -76,6 +77,11 @@ while IFS=$'\t' read -r case_id test_target exact_test; do
       [ "$case_id" = production-root-inherited-environment ] \
         || fail "native case $case_id cannot use the production-root test target"
       test_args=(--test local_state_regressions)
+      ;;
+    credential_store_process_lease)
+      [ "$case_id" = c515-server-lifetime-lease ] \
+        || fail "native case $case_id cannot use the credential-store lease test target"
+      test_args=(--test credential_store_process_lease)
       ;;
     "$expected_test_target") test_args=(--test "$test_target") ;;
     lib)
