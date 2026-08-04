@@ -69,6 +69,242 @@ implement and revalidate these owner-bound local-management, direct-secret and o
 Account handoff bytes before X-126 publishes. The first public release cannot omit a field, add an
 unknown ninth field or reuse an existing identity for changed semantics.
 
+### Closed FXLM JSON vocabulary
+
+`exchange.local-management.v1` has no implementation-selected JSON spellings. Every non-secret
+control payload is one RFC 8785 object from the table below; every listed member is required, no
+other member is admitted, and `null` is admitted only where the table says so. A fixture serializes
+each positive object to its exact canonical bytes and then changes every member name, JSON type,
+bound, enum value, omission and added member one at a time. Production parsing must fail those
+mutations before coordinator, store, audit or writer mutation.
+
+The closed scalar and collection types used by those objects are:
+
+| Name | Exact JSON representation and bound |
+|---|---|
+| `Connector` | string, 1..=128 UTF-8 bytes, byte-equal to one released catalogue connector id |
+| `Label` | string, 1..=64 ASCII bytes, each byte alphanumeric, `-` or `_` |
+| `ServiceAccountId` | string with the same 1..=64-byte ASCII grammar as `Label` |
+| `PlanRevision`, `TargetRevision`, `ProposalDigest` | string of exactly 64 lowercase hexadecimal characters |
+| `TransactionId`, `ReceiptId` | opaque 256-bit value encoded as exactly 64 lowercase hexadecimal characters; all-zero refuses |
+| `StoreRevision` | string containing the canonical unsigned decimal representation of `1..=18446744073709551615`: no sign or leading zero, 1..=20 bytes |
+| `ExpiresAt` | string containing the canonical unsigned decimal representation of `1..=9223372036854775807`: no sign or leading zero, 1..=19 bytes |
+| `Target` | string, 1..=512 UTF-8 bytes, byte-equal to a routable target id in the named plan revision |
+| `SettingValue` | string, 0..=1024 UTF-8 bytes; it must also satisfy the named plan target's declared closed choices/normalizer |
+| `Ordinal` | JSON integer `1..=64`; the raw `SECRET` prefix carries the same number as a big-endian `u16` |
+
+A `PlanTarget` is exactly `{"revision":TargetRevision,"target":Target}`. A `Setting` is exactly
+`{"target":Target,"value":SettingValue}`. An `AuthorityRevision` is exactly
+`{"revision":StoreRevision|null,"target":Target}`; `null` means that the plan reported no
+existing authority revision and therefore permits only create, never replacement. A `SecretNeed`
+is exactly `{"ordinal":Ordinal,"target":Target}`. `targets`, `settings`, `authorities` and
+`secrets` are plan order, never lexical or caller-selected order; targets are unique in each array.
+`targets` has 1..=64 entries, `settings` and `authorities` have 0..=64, and `secrets` has 1..=64.
+Every `settings`/`authorities` target occurs exactly once in `targets`; every `secrets` target occurs
+exactly once in the initiating `targets`. Secret ordinals are exactly `1, 2, ..., secrets.len()` in
+array order. There is no ordinal zero and no sparse or caller-chosen ordinal.
+
+One outbound grant selector is the exact object
+`{"effects_within":null|Effects,"idempotency":null|Idempotency,"max_risk":null|Risk}`.
+`Risk` is one of `low`, `medium`, `high`, `destructive`; `Idempotency` is one of `idempotent`,
+`conditional`, `not_idempotent`; `Effects` is a unique lexically sorted array of 0..=3 values from
+`network`, `process`, `workspace_write`. `null` means that axis is unconstrained; omission does not.
+No operation id exception is expressible. One preserved inbound grant is exactly
+`{"binding":string,"events":[string...]}`: `binding` is byte-equal to a released binding id and
+is 1..=128 UTF-8 bytes; `events` has 1..=256 unique lexically sorted entries, each byte-equal to a
+declared event and 1..=128 UTF-8 bytes. A `GrantCandidate` is exactly
+`{"connector":Connector,"inbound":[InboundGrant...],"selector":Selector}` with 0..=64 unique
+inbound bindings in lexical binding order.
+
+The 65,536-byte control bound is measured over the complete canonical JSON payload. The cumulative
+1,048,576-byte ceremony bound is the sum of every FXLM payload length in the one logical operation,
+including control and raw-secret payloads but excluding the 12-byte headers. The limit does not
+replace the per-control, per-secret or 64-secret limits; the first limit crossed refuses.
+
+### Exact FXLM opcode payloads
+
+The opcode determines the control type, so control objects carry no `schema`, `type`, `operation`,
+tenant or principal member. These are the only payloads:
+
+| Opcode and direction | Exact payload object or bytes |
+|---|---|
+| connect `BEGIN` `0x0001`, client | `{"authorities":[AuthorityRevision...],"connector":Connector,"label":Label,"plan_revision":PlanRevision,"settings":[Setting...],"targets":[PlanTarget...]}` |
+| shared `NEED_SECRETS` `0x0002`, server | `{"proposal_digest":ProposalDigest,"secrets":[SecretNeed...],"transaction_id":TransactionId}` |
+| shared `SECRET` `0x0003`, client | non-JSON: big-endian `u16` ordinal followed by 1..=8192 raw secret bytes; payload length is therefore 3..=8194 |
+| connect `COMMIT` `0x0004`, client | `{"proposal_digest":ProposalDigest,"transaction_id":TransactionId}` |
+| connect `QUERY` `0x0005`, client | `{"receipt_id":ReceiptId}` |
+| connect `RECEIPT` `0x0006`, server | the exact connect receipt below |
+| grant `PREVIEW` `0x0010`, client | `{"connector":Connector,"selector":Selector}` |
+| grant `CANDIDATE` `0x0011`, server | `{"candidate":GrantCandidate,"proposal_digest":ProposalDigest,"revision":StoreRevision}` |
+| grant `APPLY` `0x0012`, client | `{"candidate":GrantCandidate,"proposal_digest":ProposalDigest,"revision":StoreRevision}` |
+| grant `QUERY` `0x0013`, client | `{"receipt_id":ReceiptId}` |
+| grant `RECEIPT` `0x0014`, server | the exact grant receipt below |
+| Service Account `MINT` `0x0020`, client | `{"expires_at":ExpiresAt,"id":ServiceAccountId}` plus the separately transferred writer capability; no descriptor/HANDLE number occurs in JSON |
+| Service Account `QUERY` `0x0021`, client | `{"receipt_id":ReceiptId}` |
+| Service Account `RECEIPT` `0x0022`, server | the exact Service Account receipt below |
+| hosted credential `BEGIN` `0x0030`, client | `{"action":"acquire"|"rotate","connector":Connector,"label":Label,"plan_revision":PlanRevision,"targets":[PlanTarget...]}` |
+| hosted credential `COMMIT` `0x0031`, client | `{"proposal_digest":ProposalDigest,"transaction_id":TransactionId}` |
+| hosted credential `RECEIPT` `0x0032`, server | the exact connect receipt below, whose `operation` agrees with `action` |
+| hosted credential `QUERY` `0x0033`, client | `{"receipt_id":ReceiptId}` |
+| `ERROR` `0x7fff`, server | one exact error object below |
+
+Hosted credential ceremonies reuse shared `NEED_SECRETS` `0x0002` and `SECRET` `0x0003`; there are
+no hidden `0x0034`/`0x0035` aliases. `proposal_digest` in `NEED_SECRETS` is the server's SHA-256 over
+the canonical non-secret proposal defined below. `COMMIT` must echo the byte-identical digest and
+transaction id. Receipt query always names a receipt id and never a transaction, connector, label,
+Service Account id or proposal. A response-loss caller that never received a receipt id replays the
+byte-identical initiating proposal on a new connection/WebSocket; it does not manufacture a query.
+
+The state table is exhaustive. `S` is the initial state and `T` is terminal:
+
+| Operation | Valid frames and states |
+|---|---|
+| connect/replay | `S --client 0x0001--> B`; `B --server 0x0006--> T` for same-proposal replay, `B --server 0x0002--> N`, or `B --server 0x7fff--> T`; `N --client 0x0003 ordinals 1..N in order--> C`; `C --client 0x0004--> D`; `D --server 0x0006|0x7fff--> T` |
+| connect query | `S --client 0x0005--> Q --server 0x0006|0x7fff--> T` |
+| grant preview | `S --client 0x0010--> P --server 0x0011|0x7fff--> T` |
+| grant apply | `S --client 0x0012--> D --server 0x0014|0x7fff--> T` |
+| grant query | `S --client 0x0013--> Q --server 0x0014|0x7fff--> T` |
+| Service Account mint | `S --client 0x0020 plus one writer--> D --server 0x0022|0x7fff--> T` |
+| Service Account query | `S --client 0x0021--> Q --server 0x0022|0x7fff--> T` |
+| hosted credential/replay | `S --client 0x0030--> B`; `B --server 0x0032--> T` for same-proposal replay, `B --server 0x0002--> N`, or `B --server 0x7fff--> T`; `N --client 0x0003 ordinals 1..N in order--> C`; `C --client 0x0031--> D`; `D --server 0x0032|0x7fff--> T` |
+| hosted credential query | `S --client 0x0033--> Q --server 0x0032|0x7fff--> T` |
+
+A known opcode with the wrong header direction is `wrong_direction`; a known opcode in any other
+state, a skipped/repeated/out-of-order ordinal, omitted writer or second logical operation is
+`unexpected_frame`; an unknown opcode is `invalid_frame`. Native EOF before the declared frame or
+before `T` is `truncated_frame`; bytes after one complete JSON/raw payload are `surplus_data`.
+Hosted close-code mapping remains the transport mapping below and does not change these FXLM codes.
+
+### Exact receipts, errors and provider mapping
+
+The four provider fixture identities serialize exactly these closed objects. There are no omitted
+or nullable receipt members:
+
+| Fixture identity | Exact object |
+|---|---|
+| `exchange.connect-receipt.v1` | `{"commit":{"audit":"committed","resource":"committed"},"connector":Connector,"label":Label,"operation":"acquire"|"connect"|"rotate","receipt_id":ReceiptId,"replayed":boolean,"schema":"exchange.connect-receipt.v1"}` |
+| `exchange.grant-apply-receipt.v1` | `{"commit":{"audit":"committed","resource":"committed"},"connector":Connector,"receipt_id":ReceiptId,"replayed":boolean,"revision":StoreRevision,"schema":"exchange.grant-apply-receipt.v1"}` |
+| `exchange.service-account-mint-receipt.v1` | `{"commit":{"frame_written":true,"verifier":"committed"},"id":ServiceAccountId,"receipt_id":ReceiptId,"replayed":boolean,"schema":"exchange.service-account-mint-receipt.v1"}` |
+| `exchange.local-management-error.v1`, before decision | `{"code":ErrorCode,"commit":"none","retry":PreDecisionRetry,"schema":"exchange.local-management-error.v1","status":Status}` |
+| `exchange.local-management-error.v1`, after decision | `{"code":PostDecisionCode,"commit":"query_receipt","receipt_id":ReceiptId,"retry":"same_proposal","schema":"exchange.local-management-error.v1","status":Status}` |
+
+The connect receipt's operation is `connect` on opcode `0x0006` and is the initiating `action` on
+opcode `0x0032`. `replayed` is `false` only on the first terminal receipt delivery and `true` on
+query or same-proposal replay. Receipts never contain a proposal digest, setting, expiry, target,
+secret count/presence/length/digest/fingerprint, token fact, credential address, tenant or principal.
+
+`Status` is a JSON integer carrying the closed HTTP-equivalent classification below; it does not
+turn FXLM into HTTP. `PreDecisionRetry` is exactly `never`, `refresh` or `operator`. This is the
+complete pre-decision error table; no other status/retry/commit tuple is valid:
+
+| `code` | `status` | `retry` | `commit` |
+|---|---:|---|---|
+| `invalid_frame` | 400 | `never` | `none` |
+| `unsupported_version` | 426 | `never` | `none` |
+| `wrong_direction` | 400 | `never` | `none` |
+| `unexpected_frame` | 409 | `never` | `none` |
+| `frame_too_large` | 413 | `never` | `none` |
+| `truncated_frame` | 400 | `never` | `none` |
+| `surplus_data` | 400 | `never` | `none` |
+| `peer_unverified` | 403 | `never` | `none` |
+| `unsafe_root` | 503 | `operator` | `none` |
+| `local_management_unavailable` | 503 | `operator` | `none` |
+| `invalid_request` | 400 | `never` | `none` |
+| `unknown_connector` | 404 | `refresh` | `none` |
+| `invalid_label` | 422 | `never` | `none` |
+| `secret_json_forbidden` | 415 | `never` | `none` |
+| `unknown_target` | 422 | `refresh` | `none` |
+| `stale_plan` | 409 | `refresh` | `none` |
+| `proposal_conflict` | 409 | `refresh` | `none` |
+| `connect_busy` | 409 | `refresh` | `none` |
+| `grant_stale` | 409 | `refresh` | `none` |
+| `grant_digest_mismatch` | 409 | `refresh` | `none` |
+| `service_account_conflict` | 409 | `refresh` | `none` |
+| `writer_invalid` | 400 | `never` | `none` |
+| `writer_closed` | 409 | `operator` | `none` |
+| `store_unavailable` | 503 | `operator` | `none` |
+| `audit_unavailable` | 503 | `operator` | `none` |
+| `internal_refusal` | 500 | `operator` | `none` |
+
+Only `store_unavailable`, `audit_unavailable` and `internal_refusal` may be emitted after the durable
+decision. They retain respectively status 503, 503 and 500, must carry the allocated receipt id,
+and have exactly `retry=same_proposal,commit=query_receipt`. No protocol/frame/caller-validation,
+writer, conflict, stale, busy or capacity error is a post-decision tuple.
+
+The released C-515 port maps provider outcomes without implementation choice:
+
+| Provider result | Coordinator phase | FXLM result |
+|---|---|---|
+| `Absent` | before prepare, or after successful abort | internal success; prepare may start or pre-decision cleanup completes; never a receipt |
+| `Prepared` | after prepare and before decision | internal success; Exchange may record the durable decision only after its value-free journal is durable |
+| `Prepared` | after decision/recovery | internal success; repeat `commit` |
+| `Committed` | after decision/recovery | internal success; roll forward metadata/audit and return or replay the receipt |
+| `Committed` | before Exchange's durable decision | `internal_refusal/500/operator/none`; never synthesize a decision or receipt |
+| `Absent` | after Exchange's durable decision | `internal_refusal/500/same_proposal/query_receipt` |
+| `Unsupported` | before decision | `local_management_unavailable/503/operator/none` |
+| `Busy` | before decision | `connect_busy/409/refresh/none` |
+| `DigestMismatch` | before decision | `proposal_conflict/409/refresh/none` |
+| `TransactionIdReused` | before decision | `internal_refusal/500/operator/none` |
+| `NotPrepared` | before decision | `internal_refusal/500/operator/none` |
+| `NotPrepared` | after decision | `internal_refusal/500/same_proposal/query_receipt` |
+| `AlreadyCommitted` from pre-decision abort | before decision | `internal_refusal/500/operator/none` |
+| `Retired` | before decision | `internal_refusal/500/operator/none` |
+| `Retired` | after decision | `internal_refusal/500/same_proposal/query_receipt` |
+| `Capacity` | before decision | `store_unavailable/503/operator/none` |
+| `InvalidBatch` | before decision | `internal_refusal/500/operator/none` |
+| `Backend` or unresolved provider I/O | before decision | resolve with `state`; `Absent` retries the same prepare, `Prepared` continues, `Committed` takes the pre-decision invariant-refusal row; if state/cleanup remains unavailable, `store_unavailable/503/operator/none` |
+| `Backend` or unresolved provider I/O | after decision | `store_unavailable/503/same_proposal/query_receipt`; recovery queries state and repeats commit |
+
+Repeated commit returning `Committed`, repeated same-id/same-digest prepare returning `Prepared` or
+`Committed`, and repeated abort returning `Absent` are success rows, not errors. `reclaim` is never
+on a ceremony response path: Exchange either acknowledges one safe generation internally or logs a
+value-free operator refusal; it cannot turn reclamation pressure into another client tuple. The
+provider fixture enumerates the Cartesian product of operation, state, provider result, decision
+bit and expected tuple and marks every row not listed here invalid.
+
+### Hosted canonical origin and bounded ceremony constants
+
+The canonical origin serialization is ASCII, has no trailing slash, and is exactly
+`scheme://host` when the effective port is the scheme default (`443` for `https`, `80` for `http`),
+or `scheme://host:<port>` otherwise. A non-default port is canonical decimal `1..=65535` with no
+leading zero. Scheme and DNS host are lowercase; a DNS host is an already-ASCII IDNA A-label with no
+trailing dot; IPv4 uses canonical dotted decimal and IPv6 uses lowercase RFC 5952 inside `[...]`.
+The explicit setting is already required to be canonical: `https://example.com:443`,
+`http://127.0.0.1:80`, uppercase host/scheme, a leading-zero port or a trailing `/` fails startup
+rather than being normalized. Examples admitted by serialization are `https://example.com`,
+`https://example.com:8443`, `http://127.0.0.1` and `http://[::1]:3000`; the last two remain limited
+to `--dev` and a literal loopback listener.
+
+The request `Origin` value is compared byte-for-byte to that startup-bound canonical string. It is
+not normalized first: an explicit default port, alternate IPv6 spelling, uppercase host, trailing
+slash or any other byte difference is a 403 mismatch even if a URL library would assign the same
+effective port. Absent-setting `--dev` derivation applies the identical serializer to the explicit
+listener's literal loopback address and numeric port, including omission of port 80.
+
+Hosted admission has exactly 32 live ceremony slots process-wide and 4 per resolved tenant. A
+WebSocket consumes both counters from immediately before its `101` response until its transport is
+closed; query, preview and replay consume slots just like mutating ceremonies. There is no queue,
+reservation, per-principal override or environment/configuration override. If either counter is
+full, the upgrade returns 429 with the exact single delta-seconds header `Retry-After: 5`,
+`Cache-Control: no-store`, and a value-free body. Other 429 producers do not define this ceremony
+header. Native FXLM does not consume hosted slots; contention at C-515's one prepared slot is the
+`connect_busy` tuple above.
+
+Every admitted native or hosted logical operation has an absolute 300-second pre-decision deadline.
+For hosted transport it starts when the slot is reserved immediately before `101`; for native it
+starts after peer authentication immediately before reading the first FXLM header. It includes
+prompt time, is measured by a monotonic clock, is not reset by traffic and ends when the durable
+decision is fsynced or a pre-decision terminal response is selected. Expiry zeroizes/aborts as
+already specified; hosted closes 1008 with an empty reason after an FXLM
+`unexpected_frame/409/never/none` error when safe, while native returns that exact error then EOF
+when safe.
+
+After the durable decision, the connection gets a separate 30-second monotonic response budget to
+complete roll-forward and canonical audit delivery. Its expiry never aborts, rolls back or edits the
+proposal: it returns the applicable post-decision `query_receipt/same_proposal` error when safe,
+closes/releases the hosted slot, and leaves recovery to roll forward. Neither deadline appears in a
+JSON member, close reason, header, argv, environment or log value, and neither is configurable in v1.
+
 ### Prepared credential transaction ownership
 
 `connector-secrets` owns the prepared credential representation, terminal ledger, inclusive
@@ -138,19 +374,20 @@ offered `permessage-deflate` extension is ignored rather than accepted or treate
 
 The upgrade request has no query string or body. Authentication, tenant derivation and the existing
 hosted operator policy are revalidated before upgrade; a Service Account cannot pass the operator
-gate. `Origin` must exactly equal startup-bound `FLUX_EXCHANGE_CONSOLE_ORIGIN`. The explicit setting
-is one canonical origin containing only scheme, host and effective port, with no userinfo, non-root
-path, query or fragment. Production requires HTTPS. `--dev` alone may use HTTP with a literal
-loopback IP and, only when the setting is absent, derives the origin from its explicit loopback
-listener configuration. A hosted route with no usable configured origin is unavailable; an invalid
-explicit setting fails startup. The origin is never derived from an OIDC redirect URI, `Host`,
+gate. `Origin` must exactly equal startup-bound `FLUX_EXCHANGE_CONSOLE_ORIGIN` under the canonical
+serializer above: default `:443`/`:80` is omitted and an explicit default port is noncanonical.
+Production requires HTTPS. `--dev` alone may use HTTP with a literal loopback IP and, only when the
+setting is absent, derives the same serialization from its explicit loopback listener
+configuration. A hosted route with no usable configured origin is unavailable; an invalid explicit
+setting fails startup. The origin is never derived from an OIDC redirect URI, `Host`,
 `Forwarded` or any `X-Forwarded-*` header, and a missing, `null`, malformed or mismatched request
 origin refuses. Pre-upgrade outcomes are closed: missing or invalid authentication is 401; a
 non-operator or unacceptable origin is 403; malformed upgrade, query, body or subprotocol input is
 400; another method is 405 with `Allow: GET` before body decoding; an unsupported WebSocket version
-is 426 with `Sec-WebSocket-Version: 13`; exhausted bounded ceremony occupancy is 429 with
-`Retry-After`; and unavailable identity, audit, coordinator or configured-origin dependencies are
-503. Every refusal is value-free and `Cache-Control: no-store`.
+is 426 with `Sec-WebSocket-Version: 13`; exhaustion of either the exact 32-process/4-tenant slot
+counter is 429 with `Retry-After: 5`; and unavailable identity, audit, coordinator or
+configured-origin dependencies are 503. Every refusal is value-free and
+`Cache-Control: no-store`.
 
 Native byte-stream reads may split or coalesce bytes arbitrarily; the 12-byte header and declared
 payload length delimit each successive FXLM frame. Only hosted message boundaries equal complete
@@ -169,10 +406,12 @@ WebSocket. Replay may return the existing receipt before a prompt; a changed pro
 A successful receipt or well-formed FXLM error is followed by close code 1000. Malformed FXLM,
 wrong direction or state, surplus data or a second logical operation uses 1002 after a binary FXLM
 error when one can safely be emitted. Text uses 1003; any declared frame, message, control, secret,
-count or cumulative bound excess uses 1009; and an absolute pre-decision ceremony deadline uses
-1008. Close reasons are always empty. Before a durable decision, disconnect, timeout or protocol
-failure zeroizes transient buffers and aborts or tombstones an allocated provider transaction.
-After the decision Exchange never aborts: recovery, query or same-proposal replay rolls forward.
+count or cumulative bound excess uses 1009; and expiry of the exact 300-second absolute
+pre-decision deadline uses 1008. Close reasons are always empty. Before a durable decision,
+disconnect, timeout or protocol failure zeroizes transient buffers and aborts or tombstones an
+allocated provider transaction. After the decision Exchange never aborts: its exact 30-second
+response budget may end the transport with `query_receipt`, while recovery, query or same-proposal
+replay rolls forward.
 
 Hosted conformance fixtures cover valid-credential cross-origin requests; missing, malformed,
 `null`, sibling and mismatched request origins; OIDC redirect, `Host`, `Forwarded` and
@@ -186,7 +425,12 @@ fixtures admit one canonical production HTTPS origin; refuse userinfo, non-root 
 fragments and noncanonical or non-HTTPS production forms; admit HTTP only for `--dev` plus a literal
 loopback IP; bind absent-setting derivation only to the explicit loopback listener; prove a missing
 usable hosted origin makes the route unavailable; and prove an invalid explicit setting fails
-startup. Native-stream fixtures split headers and payloads at every boundary, read byte-by-byte and
+startup. The pairs `https://example.com`/`https://example.com:443` and
+`http://127.0.0.1`/`http://127.0.0.1:80` prove default-port omission; non-default canonical ports
+remain admitted. Counter-boundary fixtures hold exactly 32 process slots, exactly 4 tenant slots and
+one below each, asserting no queue and the byte-exact `Retry-After: 5`. Injected monotonic-clock
+fixtures prove 299/300-second pre-decision and 29/30-second post-decision boundaries without reset.
+Native-stream fixtures split headers and payloads at every boundary, read byte-by-byte and
 coalesce successive frames, proving only the header plus declared payload length delimit frames.
 Raw, JSON-escaped, percent-encoded and base64 sentinels are absent from logs, audit, journals, URLs,
 headers, close reasons and persisted files.

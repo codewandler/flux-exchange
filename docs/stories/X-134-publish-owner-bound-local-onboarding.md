@@ -92,7 +92,14 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       connect begin/need-secrets/secret/commit/query/receipt `0x0001..0x0006`; grant preview/candidate/
       apply/query/receipt `0x0010..0x0014`; Service Account mint/query/receipt `0x0020..0x0022`;
       hosted credential rotate-or-acquire begin/commit/receipt/query `0x0030..0x0033`; and error
-      `0x7fff`. Direction and state make each value exhaustive.
+      `0x7fff`. Hosted credential ceremonies reuse `0x0002` NEED_SECRETS and `0x0003` SECRET;
+      no additional opcode exists. Direction and state make each value exhaustive. Failing-first
+      fixtures bind the linked design's exact closed payload objects: member names/types are not
+      aliases, plan/target revisions and proposal digests are exactly 64 lowercase hex, non-zero
+      transaction/receipt ids are opaque 256-bit values encoded as exactly 64 lowercase hex,
+      store revisions/expiries are canonical decimal strings, and requested ordinals are exactly
+      one-based contiguous plan order. Every omitted, renamed, added, nullable, mistyped,
+      out-of-bound or noncanonical member refuses before mutation.
 - [ ] Each native FXLM connection or hosted WebSocket carries one exact logical operation. Connect is
       client `BEGIN`, server `RECEIPT|ERROR` or server `NEED_SECRETS`, client one `SECRET` for each
       requested ordinal in request order, client `COMMIT`, server `RECEIPT|ERROR`; a separate client
@@ -102,9 +109,10 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       writer capability, server `RECEIPT|ERROR`; a separate client `QUERY` yields server
       `RECEIPT|ERROR`. Hosted rotate/acquire is client `BEGIN`, server `NEED_SECRETS|ERROR`, client one
       `SECRET` for each requested ordinal in request order, client `COMMIT`, server `RECEIPT|ERROR`;
-      a separate WebSocket carrying client `QUERY` yields server `RECEIPT|ERROR`. No other direction,
-      repetition, omission or transition is valid. Closed control objects bind the canonical
-      proposal, opaque 256-bit
+      a separate WebSocket carrying client `QUERY` yields server `RECEIPT|ERROR`. A query names
+      exactly the receipt id; response loss before receipt-id delivery uses byte-identical proposal
+      replay, never a client-manufactured query key. No other direction, repetition, omission or
+      transition is valid. Closed control objects bind the canonical proposal, opaque 256-bit
       transaction/receipt ids and ordered ordinal/target pairs. Provider fixtures publish
       `exchange.connect-receipt.v1`, `exchange.grant-apply-receipt.v1`,
       `exchange.service-account-mint-receipt.v1` and `exchange.local-management-error.v1` with the
@@ -114,12 +122,15 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       `invalid_label`, `secret_json_forbidden`, `unknown_target`, `stale_plan`, `proposal_conflict`,
       `connect_busy`, `grant_stale`, `grant_digest_mismatch`, `service_account_conflict`,
       `writer_invalid`, `writer_closed`, `store_unavailable`, `audit_unavailable` and
-      `internal_refusal`. Before a durable decision, `commit=none` combines only with that code's
-      `never|refresh|operator`; an uncertain post-decision error carries the opaque receipt id,
-      `commit=query_receipt` and `retry=same_proposal`. Canonical receipts carry only receipt id,
-      public resource identity, `replayed` and closed commit facts—never a setting, stored proposal
-      digest, secret presence or secret-derived fact. The fixture exhaustively maps every valid
-      opcode/state/status/code/retry/commit combination and rejects every other combination.
+      `internal_refusal`. The linked design's table is the exhaustive byte contract: status is a
+      JSON integer; before decision every error has exactly `commit=none` and its single listed
+      `never|refresh|operator` retry. Only `store_unavailable`/503,
+      `audit_unavailable`/503 and `internal_refusal`/500 exist after decision, with the opaque
+      receipt id and exactly `commit=query_receipt,retry=same_proposal`. Canonical receipts have the
+      design's exact `schema`, public resource identity, receipt id, boolean `replayed` and closed
+      commit object—never a setting, stored proposal digest, target, expiry, secret presence or
+      secret-derived fact. The fixture enumerates every opcode/state/status/code/retry/commit row and
+      rejects the complement; a new tuple requires a new protocol identity.
 - [ ] Plan, connection-create, credential-rotation/acquisition and Service Account mint JSON reject
       every secret identity, alias, value and unknown target before mutation without reflecting it.
       Hosted operators use the same FXLM connect/rotate/acquire state machines only through a
@@ -128,19 +139,26 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       query string or body. Authentication, tenant derivation and the existing hosted operator
       policy are revalidated before upgrade; Service Accounts fail the operator gate. `Origin` must
       exactly equal startup-bound `FLUX_EXCHANGE_CONSOLE_ORIGIN`. The explicit setting is one
-      canonical origin containing only scheme, host and effective port, with no userinfo, non-root
-      path, query or fragment. Production requires HTTPS. `--dev` alone may use HTTP with a literal
-      loopback IP and, only when the setting is absent, derives the origin from the explicit loopback
-      listener configuration. A hosted route with no usable configured origin is unavailable; an
-      invalid explicit setting fails startup. Exchange never derives the origin from an OIDC
+      canonical ASCII origin containing only scheme, host and effective port, with no userinfo,
+      path slash, query or fragment. Default ports are omitted: canonical HTTPS/HTTP omit
+      `:443`/`:80`, while a non-default port is present as decimal `1..=65535` without a leading
+      zero. An explicit default port, trailing slash, uppercase scheme/host, noncanonical IP or
+      leading-zero port fails startup rather than being normalized; request Origin comparison is
+      byte-exact and performs no normalization. Production requires HTTPS. `--dev` alone may use
+      HTTP with a literal loopback IP and, only when the setting is absent, derives the same
+      canonical serialization from the explicit loopback listener configuration. A hosted route
+      with no usable configured origin is unavailable; an invalid explicit setting fails startup.
+      Exchange never derives the origin from an OIDC
       redirect URI, `Host`, `Forwarded` or any `X-Forwarded-*` header; missing, `null`, malformed and
       mismatched request origins refuse. Success echoes the exact subprotocol, returns no
       `Sec-WebSocket-Extensions`, and never negotiates compression; offered `permessage-deflate` is
       ignored rather than accepted or treated as malformed. Missing or invalid authentication is
       401; a non-operator or unacceptable origin is 403; malformed upgrade, query, body or
       subprotocol input is 400; another method is 405 with `Allow: GET` before body decoding; an
-      unsupported WebSocket version is 426 with `Sec-WebSocket-Version: 13`; exhausted bounded
-      ceremony occupancy is 429 with `Retry-After`; and unavailable identity, audit, coordinator or
+      unsupported WebSocket version is 426 with `Sec-WebSocket-Version: 13`. Hosted ceremony
+      occupancy is exactly 32 live WebSockets process-wide and 4 per resolved tenant, including
+      query/preview/replay, with no queue or override; either exhausted counter is 429 with the exact
+      delta-seconds header `Retry-After: 5`. Unavailable identity, audit, coordinator or
       configured-origin dependencies are 503. Every handshake refusal is value-free and
       `Cache-Control: no-store`.
 - [ ] Hosted Exchange allocates and associates the server-owned opaque transaction id only after an
@@ -152,11 +170,15 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       well-formed FXLM error is followed by close code 1000. Malformed FXLM, wrong direction
       or state, surplus data or a second operation uses 1002 after a binary FXLM error when one can
       safely be emitted; text uses 1003 without JSON decoding; any declared frame, message, control,
-      secret, count or cumulative bound excess uses 1009; an absolute pre-decision ceremony deadline
-      uses 1008. Close reasons are always empty. Before a durable decision, disconnect, timeout or
-      protocol failure zeroizes transient buffers and aborts or tombstones an allocated provider
-      transaction. After the decision it never aborts: recovery, query or same-proposal replay rolls
-      forward.
+      secret, count or cumulative bound excess uses 1009. The absolute pre-decision deadline is
+      exactly 300 monotonic seconds from hosted slot reservation before `101`, or native peer
+      authentication before the first header; traffic never resets it and expiry uses 1008. After
+      decision there is a separate exact 30-second response budget: expiry returns the applicable
+      `query_receipt` error, releases the transport/slot and leaves recovery rolling forward. Close
+      reasons are always empty and neither deadline is configurable. Before a durable decision,
+      disconnect, timeout or protocol failure zeroizes transient buffers and aborts or tombstones
+      an allocated provider transaction. After the decision it never aborts: recovery, query or
+      same-proposal replay rolls forward.
 - [ ] The existing one-shot `POST /api/service-accounts` is unchanged: it accepts only a strict
       non-secret id/expiry object and returns exactly one FXSA body as
       `application/vnd.flux-exchange.service-account-handoff-v1` with `Cache-Control: no-store`;
@@ -206,12 +228,20 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       staged the complete next image, so commit has no later deterministic validation failure.
       Provider `Busy`, `DigestMismatch`, `TransactionIdReused`, `NotPrepared`,
       `AlreadyCommitted`, `Retired`, `Capacity`, `InvalidBatch`, `Unsupported` and `Backend` map to
-      one exhaustively fixtured closed value-free code/status/retry/commit tuple beside successful
-      `Absent|Prepared|Committed` outcomes. Before the durable decision every provider refusal uses
-      `commit=none`; provider I/O failure is outcome-uncertain until `state` resolves it. After
-      Exchange's durable commit decision uncertainty uses `commit=query_receipt` and
-      `retry=same_proposal`; recovery queries state and repeats commit, never aborts, re-prepares or
-      edits the proposal.
+      the linked design's one exhaustively fixtured closed value-free tuple beside successful
+      `Absent|Prepared|Committed` outcomes: `Unsupported` is
+      `local_management_unavailable/503/operator`; `Busy` is `connect_busy/409/refresh`;
+      `DigestMismatch` is `proposal_conflict/409/refresh`; `Capacity` is
+      `store_unavailable/503/operator`; and pre-decision `TransactionIdReused`, `NotPrepared`,
+      `AlreadyCommitted`, `Retired` or `InvalidBatch` is `internal_refusal/500/operator`. Each has
+      `commit=none`. Provider `Backend`/I/O first resolves through `state`: `Absent` retries the
+      same prepare, `Prepared` continues, and pre-decision `Committed` is the invariant refusal,
+      never a synthesized decision. If unresolved before decision it is
+      `store_unavailable/503/operator/none`; after decision, `Backend`, `NotPrepared`, `Retired` or
+      impossible `Absent` carries the receipt id with the design's fixed 503 or 500 status and
+      `commit=query_receipt,retry=same_proposal`. Recovery queries state and repeats commit, never
+      aborts, re-prepares or edits the proposal. The fixture rejects every unlisted phase/result
+      pairing.
 - [ ] The connect proposal digest is SHA-256 over canonical non-secret connector, label, plan
       revision, ordered target identities, settings and the ordered collection of every `(authority
       target identity, canonical revision)` pair. It excludes secret bytes, lengths, hashes,
@@ -257,12 +287,17 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       cross-origin request even with valid credentials; missing, malformed, `null`, sibling and
       mismatched origins; OIDC redirect, `Host`, `Forwarded` and `X-Forwarded-*` spoofing; missing,
       wrong, differently cased and multiple subprotocols; offered-but-not-negotiated compression;
-      and the exact 400/401/403/405+`Allow: GET`/426+version/429+`Retry-After`/503 value-free no-store
-      outcomes. Startup-setting fixtures admit a canonical production HTTPS origin; refuse userinfo,
-      non-root paths, queries, fragments and noncanonical or non-HTTPS production forms; admit HTTP
-      only for `--dev` plus a literal loopback IP; prove absent-setting derivation uses only the
-      explicit loopback listener; prove no usable hosted origin makes the route unavailable; and
-      prove an invalid explicit `FLUX_EXCHANGE_CONSOLE_ORIGIN` fails startup. Native-stream fixtures
+      and the exact 400/401/403/405+`Allow: GET`/426+version/429+`Retry-After: 5`/503 value-free
+      no-store outcomes. Occupancy fixtures hold 31/32 process slots and 3/4 tenant slots and prove
+      immediate no-queue refusal at each inclusive bound. Startup-setting fixtures admit a
+      canonical production HTTPS origin; refuse userinfo, non-root paths, queries, fragments and
+      noncanonical or non-HTTPS production forms; specifically admit omitted default ports, refuse
+      explicit `:443`/`:80`, and admit a canonical non-default port. They admit HTTP only for
+      `--dev` plus a literal loopback IP; prove absent-setting derivation uses only the explicit
+      loopback listener; prove no usable hosted origin makes the route unavailable; and prove an
+      invalid explicit `FLUX_EXCHANGE_CONSOLE_ORIGIN` fails startup. Injected-clock fixtures prove
+      the 299/300-second pre-decision and 29/30-second post-decision boundaries without traffic
+      reset. Native-stream fixtures
       split headers and payloads at every boundary, read byte-by-byte and coalesce successive frames,
       proving only header plus payload length delimit them. Hosted message/state evidence covers text
       and binary JSON shapes, WebSocket fragmentation, frame coalescing and message splitting,
