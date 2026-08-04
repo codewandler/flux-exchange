@@ -198,11 +198,11 @@ jobs:
 
       - name: Exercise the native Unix supervisor ABI and owner-death path
         if: runner.os != 'Windows'
-        run: cargo test -p flux-exchange --test supervised_linux --features supervisor-test-wedge --locked --target ${{ matrix.target }}
+        run: cargo test -p flux-exchange --test supervised_linux --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }}
 
       - name: Exercise the native Windows supervisor ABI and owner-death path
         if: runner.os == 'Windows'
-        run: cargo test -p flux-exchange --test supervised_windows --features supervisor-test-wedge --locked --target ${{ matrix.target }}
+        run: cargo test -p flux-exchange --test supervised_windows --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }}
 
       - name: Refuse unsafe Windows stores through the real startup composition
         if: runner.os == 'Windows'

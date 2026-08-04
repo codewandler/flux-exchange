@@ -7,10 +7,13 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::protocol::{ProtocolVersions, PROTOCOL_VERSIONS, SUPERVISOR_READY_V1};
+use crate::protocol_identity::{
+    ProtocolVersions, CONNECTION_PLAN_V1, EFFECTIVE_CATALOGUE_RESPONSE_V1, EXCHANGE_API_V1,
+    INVOKE_REQUEST_V1, INVOKE_RESPONSE_V1, PROTOCOL_VERSIONS, SUPERVISOR_READY_V1,
+};
 
 /// Maximum accepted size of the complete one-shot readiness object.
 pub const MAX_READINESS_BYTES: usize = 16 * 1024;
@@ -97,6 +100,326 @@ enum StartIdentity {
     Windows { filetime: String },
 }
 
+/// The platform selected by the already-open child process handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativePlatform {
+    /// Linux `/proc` boot id and process start ticks.
+    Linux,
+    /// macOS `proc_pidinfo(PROC_PIDTBSDINFO)` start time.
+    Macos,
+    /// Windows `GetProcessTimes` creation FILETIME.
+    Windows,
+}
+
+/// A native process-start identity obtained from an already-open child handle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum VerifiedStartIdentity {
+    /// Linux boot identity and `/proc/<pid>/stat` field 22.
+    #[serde(rename = "linux-proc-start")]
+    Linux {
+        /// Lowercase RFC 4122 boot UUID.
+        boot_id: String,
+        /// Canonical nonzero `u64` decimal start ticks.
+        ticks: String,
+    },
+    /// macOS process start timeval.
+    #[serde(rename = "macos-proc-start")]
+    Macos {
+        /// Native microseconds, `0..=999999`.
+        microseconds: u32,
+        /// Canonical nonzero `i64::MAX`-bounded decimal seconds.
+        seconds: String,
+    },
+    /// Windows process creation time.
+    #[serde(rename = "windows-process-creation")]
+    Windows {
+        /// Canonical nonzero `u64` decimal FILETIME.
+        filetime: String,
+    },
+}
+
+/// Release facts already established from the verified executable and compatibility output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedRelease {
+    /// Release tag reported by compatibility.
+    pub tag: String,
+    /// Stable package version reported by compatibility.
+    pub version: String,
+    /// Exact source commit reported by compatibility.
+    pub source_commit: String,
+    /// Exact build identity reported by compatibility.
+    pub build_id: String,
+    /// SHA-256 of the executable bytes the parent verified and spawned.
+    pub executable_sha256: String,
+}
+
+/// Facts tied to the parent's already-open child handle before lifecycle ownership is committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadinessExpectation {
+    /// Exact release and executable identity expected from the child.
+    pub release: ExpectedRelease,
+    /// PID from the open child handle. Diagnostic only unless start identity also agrees.
+    pub pid: u32,
+    /// Native platform of that open child handle.
+    pub platform: NativePlatform,
+    /// Native start identity read through that handle's platform source.
+    pub start_identity: VerifiedStartIdentity,
+}
+
+/// A fully validated readiness record which may be committed as lifecycle ownership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedReadiness {
+    /// Actual one-time bound listener.
+    pub bind: VerifiedBind,
+    /// Diagnostic PID plus native anti-reuse identity.
+    pub process: VerifiedProcess,
+    /// Six exact provider protocol identities.
+    pub protocols: VerifiedProtocols,
+    /// Release and executable identity.
+    pub release: VerifiedRelease,
+    /// Exact `exchange.supervisor-ready.v1` schema identity.
+    pub schema: String,
+}
+
+/// Closed readiness bind object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedBind {
+    /// Literal `127.0.0.1` or `::1`.
+    pub host: String,
+    /// OS-selected nonzero port.
+    pub port: u16,
+    /// Literal `http`.
+    pub scheme: String,
+}
+
+/// Closed readiness process object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedProcess {
+    /// Diagnostic process id.
+    pub pid: u32,
+    /// Native anti-reuse process-start identity.
+    pub start_identity: VerifiedStartIdentity,
+}
+
+/// Closed six-field protocol object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedProtocols {
+    /// Connection plan identity.
+    pub connection_plan: String,
+    /// Effective catalogue response identity.
+    pub effective_catalogue_response: String,
+    /// Exchange API identity.
+    pub exchange_api: String,
+    /// Invocation request identity.
+    pub invoke_request: String,
+    /// Invocation response identity.
+    pub invoke_response: String,
+    /// Supervision identity.
+    pub supervisor: String,
+}
+
+/// Closed readiness release object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifiedRelease {
+    /// Build identity.
+    pub build_id: String,
+    /// Digest of the exact executable bytes.
+    pub executable_sha256: String,
+    /// Source commit.
+    pub source_commit: String,
+    /// Immutable release tag.
+    pub tag: String,
+    /// Stable release version.
+    pub version: String,
+}
+
+/// Why parent-side readiness verification refused lifecycle ownership.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ReadinessRefusal {
+    /// EOF arrived before a complete object.
+    #[error("readiness ended before one complete object")]
+    Incomplete,
+    /// The bounded channel exceeded its protocol maximum.
+    #[error("readiness exceeded the {MAX_READINESS_BYTES}-byte limit")]
+    TooLarge,
+    /// Bytes were not valid UTF-8.
+    #[error("readiness is not UTF-8")]
+    InvalidUtf8,
+    /// JSON syntax, members or types did not match the closed schema.
+    #[error("readiness is not one closed exchange.supervisor-ready.v1 object: {0}")]
+    InvalidObject(String),
+    /// Bytes did not equal the RFC 8785-equivalent canonical serialization.
+    #[error("readiness is not canonical JSON")]
+    NonCanonical,
+    /// A typed value was outside its closed domain or disagreed with verified parent state.
+    #[error("readiness identity mismatch: {0}")]
+    Mismatch(String),
+}
+
+/// Verify one complete readiness channel before lifecycle ownership is committed.
+///
+/// HTTP health, PID files and a PID alone are deliberately absent inputs. The caller supplies the
+/// release facts it verified and the native identity read through its already-open child handle;
+/// only a returned [`VerifiedReadiness`] is eligible for an ownership commit.
+pub fn verify_readiness(
+    bytes: &[u8],
+    expected: &ReadinessExpectation,
+) -> Result<VerifiedReadiness, ReadinessRefusal> {
+    if bytes.is_empty() {
+        return Err(ReadinessRefusal::Incomplete);
+    }
+    if bytes.len() > MAX_READINESS_BYTES {
+        return Err(ReadinessRefusal::TooLarge);
+    }
+    std::str::from_utf8(bytes).map_err(|_| ReadinessRefusal::InvalidUtf8)?;
+    let record: VerifiedReadiness = serde_json::from_slice(bytes)
+        .map_err(|error| ReadinessRefusal::InvalidObject(error.to_string()))?;
+    let canonical = canonical_json(&record).map_err(ReadinessRefusal::InvalidObject)?;
+    if canonical != bytes {
+        return Err(ReadinessRefusal::NonCanonical);
+    }
+    validate_record(&record, expected)?;
+    Ok(record)
+}
+
+fn validate_record(
+    record: &VerifiedReadiness,
+    expected: &ReadinessExpectation,
+) -> Result<(), ReadinessRefusal> {
+    let mismatch = |reason: &str| ReadinessRefusal::Mismatch(reason.to_owned());
+    if record.schema != SUPERVISOR_READY_V1.as_str() {
+        return Err(mismatch("schema"));
+    }
+    if record.bind.scheme != "http"
+        || !matches!(record.bind.host.as_str(), "127.0.0.1" | "::1")
+        || record.bind.port == 0
+    {
+        return Err(mismatch("bind"));
+    }
+    if record.process.pid == 0 || record.process.pid != expected.pid {
+        return Err(mismatch("pid"));
+    }
+    validate_start_identity(&record.process.start_identity)?;
+    let platform_agrees = matches!(
+        (expected.platform, &record.process.start_identity),
+        (NativePlatform::Linux, VerifiedStartIdentity::Linux { .. })
+            | (NativePlatform::Macos, VerifiedStartIdentity::Macos { .. })
+            | (
+                NativePlatform::Windows,
+                VerifiedStartIdentity::Windows { .. }
+            )
+    );
+    if !platform_agrees || record.process.start_identity != expected.start_identity {
+        return Err(mismatch("native process-start identity"));
+    }
+    let protocols = &record.protocols;
+    if protocols.connection_plan != CONNECTION_PLAN_V1.as_str()
+        || protocols.exchange_api != EXCHANGE_API_V1.as_str()
+        || protocols.effective_catalogue_response != EFFECTIVE_CATALOGUE_RESPONSE_V1.as_str()
+        || protocols.invoke_request != INVOKE_REQUEST_V1.as_str()
+        || protocols.invoke_response != INVOKE_RESPONSE_V1.as_str()
+        || protocols.supervisor != SUPERVISOR_READY_V1.as_str()
+        || protocols.supervisor != record.schema
+    {
+        return Err(mismatch("protocols"));
+    }
+    validate_release(&record.release)?;
+    let release = &expected.release;
+    if record.release.tag != release.tag
+        || record.release.version != release.version
+        || record.release.source_commit != release.source_commit
+        || record.release.build_id != release.build_id
+        || record.release.executable_sha256 != release.executable_sha256
+    {
+        return Err(mismatch("release or executable"));
+    }
+    Ok(())
+}
+
+fn validate_release(release: &VerifiedRelease) -> Result<(), ReadinessRefusal> {
+    let mismatch = |reason: &str| ReadinessRefusal::Mismatch(reason.to_owned());
+    if !valid_stable_version(&release.version)
+        || release.tag != format!("refs/tags/v{}", release.version)
+        || release.source_commit.len() != 40
+        || !lower_hex(&release.source_commit)
+        || release.executable_sha256.len() != 64
+        || !lower_hex(&release.executable_sha256)
+        || release.build_id.is_empty()
+        || release.build_id.len() > 128
+        || !release
+            .build_id
+            .bytes()
+            .all(|byte| (0x20..=0x7e).contains(&byte))
+    {
+        return Err(mismatch("release field domain"));
+    }
+    Ok(())
+}
+
+fn validate_start_identity(identity: &VerifiedStartIdentity) -> Result<(), ReadinessRefusal> {
+    let mismatch = |reason: &str| ReadinessRefusal::Mismatch(reason.to_owned());
+    match identity {
+        VerifiedStartIdentity::Linux { boot_id, ticks } => {
+            if !valid_lower_uuid_any_target(boot_id)
+                || parse_decimal(ticks, u64::MAX, false).is_err()
+            {
+                return Err(mismatch("Linux process-start domain"));
+            }
+        }
+        VerifiedStartIdentity::Macos {
+            microseconds,
+            seconds,
+        } => {
+            if *microseconds > 999_999 || parse_decimal(seconds, i64::MAX as u64, false).is_err() {
+                return Err(mismatch("macOS process-start domain"));
+            }
+        }
+        VerifiedStartIdentity::Windows { filetime } => {
+            if parse_decimal(filetime, u64::MAX, false).is_err() {
+                return Err(mismatch("Windows process-start domain"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn lower_hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_stable_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 9
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'))
+    };
+    parts.next().is_some_and(valid_part)
+        && parts.next().is_some_and(valid_part)
+        && parts.next().is_some_and(valid_part)
+        && parts.next().is_none()
+}
+
+fn valid_lower_uuid_any_target(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if matches!(index, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
 /// The validated readiness writer retained after the liveness thread starts.
 pub struct Supervision {
     readiness: ReadyWriter,
@@ -118,7 +441,11 @@ impl Supervision {
 
     /// Emit exactly one bounded canonical object after the already-bound listener is ready.
     pub fn ready(mut self, bind: SocketAddr) -> Result<(), String> {
-        if !bind.ip().is_loopback() || bind.port() == 0 {
+        if !matches!(
+            bind.ip(),
+            IpAddr::V4(std::net::Ipv4Addr::LOCALHOST) | IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+        ) || bind.port() == 0
+        {
             return Err(format!(
                 "refusing supervised readiness for non-bound loopback address {bind}"
             ));
@@ -616,6 +943,312 @@ fn liveness_wait(mut reader: LivenessReader) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ConformanceFixture {
+        record: VerifiedReadiness,
+        expected: ReadinessExpectation,
+    }
+
+    impl ConformanceFixture {
+        fn linux() -> Self {
+            let start_identity = VerifiedStartIdentity::Linux {
+                boot_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+                ticks: "1".to_owned(),
+            };
+            let release = VerifiedRelease {
+                build_id: "fixture-build".to_owned(),
+                executable_sha256: "11".repeat(32),
+                source_commit: "22".repeat(20),
+                tag: "refs/tags/v1.2.3".to_owned(),
+                version: "1.2.3".to_owned(),
+            };
+            Self {
+                record: VerifiedReadiness {
+                    bind: VerifiedBind {
+                        host: "127.0.0.1".to_owned(),
+                        port: 43123,
+                        scheme: "http".to_owned(),
+                    },
+                    process: VerifiedProcess {
+                        pid: 42,
+                        start_identity: start_identity.clone(),
+                    },
+                    protocols: VerifiedProtocols {
+                        connection_plan: CONNECTION_PLAN_V1.as_str().to_owned(),
+                        effective_catalogue_response: EFFECTIVE_CATALOGUE_RESPONSE_V1
+                            .as_str()
+                            .to_owned(),
+                        exchange_api: EXCHANGE_API_V1.as_str().to_owned(),
+                        invoke_request: INVOKE_REQUEST_V1.as_str().to_owned(),
+                        invoke_response: INVOKE_RESPONSE_V1.as_str().to_owned(),
+                        supervisor: SUPERVISOR_READY_V1.as_str().to_owned(),
+                    },
+                    release: release.clone(),
+                    schema: SUPERVISOR_READY_V1.as_str().to_owned(),
+                },
+                expected: ReadinessExpectation {
+                    release: ExpectedRelease {
+                        tag: release.tag,
+                        version: release.version,
+                        source_commit: release.source_commit,
+                        build_id: release.build_id,
+                        executable_sha256: release.executable_sha256,
+                    },
+                    pid: 42,
+                    platform: NativePlatform::Linux,
+                    start_identity,
+                },
+            }
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            canonical_json(&self.record).expect("canonical readiness fixture")
+        }
+    }
+
+    #[derive(Default)]
+    struct OwnershipState {
+        committed: Option<VerifiedReadiness>,
+    }
+
+    impl OwnershipState {
+        fn verify_then_commit(&mut self, bytes: &[u8], expected: &ReadinessExpectation) {
+            if let Ok(verified) = verify_readiness(bytes, expected) {
+                self.committed = Some(verified);
+            }
+        }
+    }
+
+    fn changed(
+        fixture: &ConformanceFixture,
+        mutate: impl FnOnce(&mut serde_json::Value),
+    ) -> Vec<u8> {
+        let mut value = serde_json::to_value(&fixture.record).expect("fixture value");
+        mutate(&mut value);
+        canonical_json(&value).expect("canonical mutated fixture")
+    }
+
+    fn assert_refused(bytes: &[u8], expected: &ReadinessExpectation) {
+        let mut ownership = OwnershipState::default();
+        ownership.verify_then_commit(bytes, expected);
+        assert!(ownership.committed.is_none(), "refusal committed ownership");
+        assert!(verify_readiness(bytes, expected).is_err());
+    }
+
+    #[test]
+    fn strict_parent_verifier_commits_only_one_complete_canonical_matching_record() {
+        let fixture = ConformanceFixture::linux();
+        let bytes = fixture.bytes();
+        let mut ownership = OwnershipState::default();
+        ownership.verify_then_commit(&bytes, &fixture.expected);
+        assert_eq!(ownership.committed, Some(fixture.record.clone()));
+
+        assert_eq!(
+            verify_readiness(b"", &fixture.expected),
+            Err(ReadinessRefusal::Incomplete)
+        );
+        assert_refused(b"{", &fixture.expected);
+        assert_eq!(
+            verify_readiness(&vec![b' '; MAX_READINESS_BYTES + 1], &fixture.expected),
+            Err(ReadinessRefusal::TooLarge)
+        );
+        assert_eq!(
+            verify_readiness(&[0xff], &fixture.expected),
+            Err(ReadinessRefusal::InvalidUtf8)
+        );
+
+        let mut duplicate = bytes[..bytes.len() - 1].to_vec();
+        duplicate.extend_from_slice(b",\"schema\":\"exchange.supervisor-ready.v1\"}");
+        assert_refused(&duplicate, &fixture.expected);
+        assert_refused(
+            &changed(&fixture, |value| value["unknown"] = serde_json::json!(true)),
+            &fixture.expected,
+        );
+        let mut trailing = bytes.clone();
+        trailing.extend_from_slice(b"x");
+        assert_refused(&trailing, &fixture.expected);
+        let mut second = bytes.clone();
+        second.extend_from_slice(&bytes);
+        assert_refused(&second, &fixture.expected);
+        let mut noncanonical = b" ".to_vec();
+        noncanonical.extend_from_slice(&bytes);
+        assert_eq!(
+            verify_readiness(&noncanonical, &fixture.expected),
+            Err(ReadinessRefusal::NonCanonical)
+        );
+    }
+
+    #[test]
+    fn closed_readiness_serializer_has_no_authority_value_slot() {
+        // These represent the six value classes the production server can hold or receive. The
+        // readiness serializer accepts only `VerifiedReadiness`; unlike a map or flattened state
+        // object, that closed construction has no field through which any of them can enter.
+        let authority_values = [
+            "credential-secret-7c96d9",
+            "setting-value-7c96d9",
+            "grant-body-7c96d9",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "session-value-7c96d9",
+            "control-credential-7c96d9",
+        ];
+        let bytes = ConformanceFixture::linux().bytes();
+        let object: serde_json::Value = serde_json::from_slice(&bytes).expect("readiness object");
+        assert_eq!(
+            object
+                .as_object()
+                .expect("top-level object")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["bind", "process", "protocols", "release", "schema"]
+        );
+        for value in authority_values {
+            assert!(!bytes
+                .windows(value.len())
+                .any(|window| window == value.as_bytes()));
+        }
+    }
+
+    #[test]
+    fn every_identity_axis_and_unknown_or_duplicate_nested_member_refuses_commit() {
+        let fixture = ConformanceFixture::linux();
+        let mutations: Vec<Vec<u8>> = vec![
+            changed(&fixture, |v| v["schema"] = serde_json::json!("other.v1")),
+            changed(&fixture, |v| {
+                v["bind"]["scheme"] = serde_json::json!("https")
+            }),
+            changed(&fixture, |v| {
+                v["bind"]["host"] = serde_json::json!("127.0.0.2")
+            }),
+            changed(&fixture, |v| v["bind"]["port"] = serde_json::json!(0)),
+            changed(&fixture, |v| v["process"]["pid"] = serde_json::json!(0)),
+            changed(&fixture, |v| v["process"]["pid"] = serde_json::json!(43)),
+            changed(&fixture, |v| {
+                v["release"]["tag"] = serde_json::json!("refs/tags/v1.2.4")
+            }),
+            changed(&fixture, |v| {
+                v["release"]["version"] = serde_json::json!("01.2.3")
+            }),
+            changed(&fixture, |v| {
+                v["release"]["source_commit"] = serde_json::json!("A".repeat(40))
+            }),
+            changed(&fixture, |v| {
+                v["release"]["build_id"] = serde_json::json!("")
+            }),
+            changed(&fixture, |v| {
+                v["release"]["executable_sha256"] = serde_json::json!("g".repeat(64))
+            }),
+            changed(&fixture, |v| {
+                v["protocols"]["exchange_api"] = serde_json::json!("exchange.api.v2")
+            }),
+            changed(&fixture, |v| {
+                v["protocols"]["supervisor"] = serde_json::json!("exchange.supervisor-ready.v2")
+            }),
+            changed(&fixture, |v| {
+                v["process"]["unknown"] = serde_json::json!(true)
+            }),
+            changed(&fixture, |v| {
+                v["release"]["unknown"] = serde_json::json!(true)
+            }),
+            changed(&fixture, |v| {
+                v["protocols"]["unknown"] = serde_json::json!(true)
+            }),
+        ];
+        for bytes in mutations {
+            assert_refused(&bytes, &fixture.expected);
+        }
+        for field in [
+            "connection_plan",
+            "effective_catalogue_response",
+            "exchange_api",
+            "invoke_request",
+            "invoke_response",
+            "supervisor",
+        ] {
+            assert_refused(
+                &changed(&fixture, |value| {
+                    value["protocols"][field] = serde_json::json!("exchange.wrong.v1");
+                }),
+                &fixture.expected,
+            );
+        }
+
+        let bytes = fixture.bytes();
+        let duplicate_nested = String::from_utf8(bytes).expect("UTF-8 fixture").replacen(
+            "\"scheme\":\"http\"",
+            "\"scheme\":\"http\",\"scheme\":\"http\"",
+            1,
+        );
+        assert_refused(duplicate_nested.as_bytes(), &fixture.expected);
+        let out_of_range_port = String::from_utf8(fixture.bytes())
+            .expect("UTF-8 fixture")
+            .replacen("\"port\":43123", "\"port\":65536", 1);
+        assert_refused(out_of_range_port.as_bytes(), &fixture.expected);
+        let out_of_range_pid = String::from_utf8(fixture.bytes())
+            .expect("UTF-8 fixture")
+            .replacen("\"pid\":42", "\"pid\":4294967296", 1);
+        assert_refused(out_of_range_pid.as_bytes(), &fixture.expected);
+    }
+
+    #[test]
+    fn every_native_start_tag_encoding_and_domain_mutation_refuses() {
+        let fixture = ConformanceFixture::linux();
+        let identities = [
+            serde_json::json!({"kind":"unknown","value":"1"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"00000000-0000-0000-0000-00000000000A","ticks":"1"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"not-a-uuid","ticks":"1"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"00000000-0000-0000-0000-000000000001","ticks":"0"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"00000000-0000-0000-0000-000000000001","ticks":"01"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"00000000-0000-0000-0000-000000000001","ticks":"+1"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"00000000-0000-0000-0000-000000000001","ticks":"-1"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"00000000-0000-0000-0000-000000000001","ticks":"18446744073709551616"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"00000000-0000-0000-0000-000000000001","ticks":"111111111111111111111"}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"1","microseconds":0}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"0","microseconds":0}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"01","microseconds":0}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"+1","microseconds":0}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"-1","microseconds":0}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"111111111111111111111","microseconds":0}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"1","microseconds":-1}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"1","microseconds":1.5}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"9223372036854775808","microseconds":0}),
+            serde_json::json!({"kind":"macos-proc-start","seconds":"1","microseconds":1000000}),
+            serde_json::json!({"kind":"windows-process-creation","filetime":"1"}),
+            serde_json::json!({"kind":"windows-process-creation","filetime":"0"}),
+            serde_json::json!({"kind":"windows-process-creation","filetime":"01"}),
+            serde_json::json!({"kind":"windows-process-creation","filetime":"+1"}),
+            serde_json::json!({"kind":"windows-process-creation","filetime":"-1"}),
+            serde_json::json!({"kind":"windows-process-creation","filetime":"18446744073709551616"}),
+            serde_json::json!({"kind":"windows-process-creation","filetime":"111111111111111111111"}),
+            serde_json::json!({"kind":"linux-proc-start","boot_id":"00000000-0000-0000-0000-000000000001","ticks":"1","unknown":true}),
+        ];
+        for identity in identities {
+            let bytes = changed(&fixture, |value| {
+                value["process"]["start_identity"] = identity;
+            });
+            assert_refused(&bytes, &fixture.expected);
+        }
+    }
+
+    #[test]
+    fn health_pid_files_and_pid_reuse_never_substitute_for_verified_readiness() {
+        let fixture = ConformanceFixture::linux();
+        let foreign_health = std::net::TcpListener::bind("127.0.0.1:0").expect("foreign health");
+        let pid_file = std::env::temp_dir().join(format!(
+            "flux-exchange-x128-planted-pid-{}",
+            std::process::id()
+        ));
+        std::fs::write(&pid_file, fixture.expected.pid.to_string()).expect("planted PID file");
+        assert!(foreign_health.local_addr().is_ok());
+        assert!(pid_file.exists());
+        assert_refused(b"", &fixture.expected);
+
+        let reused = changed(&fixture, |value| {
+            value["process"]["start_identity"]["ticks"] = serde_json::json!("2");
+        });
+        assert_refused(&reused, &fixture.expected);
+        std::fs::remove_file(pid_file).expect("remove planted PID fixture");
+    }
 
     #[test]
     fn compatibility_is_exact_canonical_json_from_the_six_field_source() {

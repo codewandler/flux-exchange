@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::io::{BufRead, Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::os::fd::RawFd;
+use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -11,7 +11,80 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-const SENTINEL: &str = "X128_VENDOR_TOKEN_DO_NOT_SERIALIZE_7c96d9";
+use flux_exchange::supervisor::{
+    verify_readiness, ExpectedRelease, NativePlatform, ReadinessExpectation, VerifiedStartIdentity,
+};
+
+const SENTINELS: [(&str, &str); 6] = [
+    ("X128_CREDENTIAL_VALUE", "credential-secret-7c96d9"),
+    ("X128_SETTING_VALUE", "setting-value-7c96d9"),
+    ("X128_GRANT_BODY", "grant-body-7c96d9"),
+    (
+        "X128_SERVICE_ACCOUNT_VERIFIER",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ),
+    ("X128_SESSION_VALUE", "session-value-7c96d9"),
+    ("X128_CONTROL_CREDENTIAL", "control-credential-7c96d9"),
+];
+
+fn exchange_command() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+}
+
+fn seed_production_authority_stores(root: &std::path::Path) {
+    use exchange_host::{ConnectionSettings, Grants};
+
+    let tenant = exchange_host::Tenant::new("dev").expect("sentinel tenant");
+    let credential = exchange_host::CredentialStore::bind(root.join("credentials/store.txt"))
+        .expect("production credential store");
+    let reference =
+        exchange_host::CredentialRef::new("dev", "com.zendesk.api", "support", "api_token")
+            .expect("sentinel credential address");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("sentinel store runtime")
+        .block_on(
+            credential
+                .secrets()
+                .put(&reference, &exchange_host::Secret::new(SENTINELS[0].1)),
+        )
+        .expect("production credential write");
+
+    let settings = exchange_host::SettingsStore::bind(root.join("settings/store.json"))
+        .expect("production settings store");
+    let declared = exchange_host::DeclaredSetting::parse("default", "endpoint.subdomain")
+        .expect("declared sentinel setting");
+    settings
+        .set(&tenant, "zendesk", &declared, SENTINELS[1].1)
+        .expect("production setting write");
+
+    let grants = exchange_host::GrantStore::bind(root.join("grants/store.json"))
+        .expect("production grant store");
+    let grant = exchange_host::Grant::for_connector(
+        SENTINELS[2].1,
+        exchange_host::Selector::at_most(exchange_host::Risk::Low),
+    );
+    grants
+        .set(&tenant, &[grant])
+        .expect("production grant write");
+
+    let service_accounts = serde_json::json!({
+        "version": 1,
+        "agents": {
+            (SENTINELS[3].1): {
+                "tenant": "dev",
+                "id": "sentinel-service",
+                "expires_at": 4_102_444_800_i64
+            }
+        }
+    });
+    exchange_host::write_private_state_file(
+        root.join("service-accounts/store.json"),
+        &serde_json::to_vec(&service_accounts).expect("service account fixture JSON"),
+    )
+    .expect("production Service Account verifier write");
+}
 
 struct PipeEnds {
     read: RawFd,
@@ -52,10 +125,15 @@ impl SupervisedChild {
     }
 
     fn spawn_with(root_mode: u32, wedge: bool) -> Self {
-        Self::spawn_config(root_mode, wedge, None)
+        Self::spawn_config(root_mode, wedge, None, None)
     }
 
-    fn spawn_config(root_mode: u32, wedge: bool, bind: Option<&str>) -> Self {
+    fn spawn_config(
+        root_mode: u32,
+        wedge: bool,
+        bind: Option<&str>,
+        occupied_bind: Option<SocketAddr>,
+    ) -> Self {
         use std::os::unix::fs::PermissionsExt;
 
         let root = std::env::temp_dir().join(format!(
@@ -64,6 +142,9 @@ impl SupervisedChild {
             unique_counter()
         ));
         std::fs::create_dir(&root).expect("private state fixture root");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("private fixture root before authority writes");
+        seed_production_authority_stores(&root);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(root_mode))
             .expect("fixture root mode");
         let readiness = PipeEnds::new();
@@ -71,11 +152,10 @@ impl SupervisedChild {
         let readiness_source = duplicate_high(readiness.write);
         let liveness_source = duplicate_high(liveness.read);
 
-        let mut command = Command::new(env!("CARGO_BIN_EXE_flux-exchange"));
+        let mut command = exchange_command();
         command
             .arg("--supervised")
             .env("FLUX_EXCHANGE_STATE", &root)
-            .env("X128_VENDOR_TOKEN", SENTINEL)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if wedge {
@@ -83,6 +163,12 @@ impl SupervisedChild {
         }
         if let Some(bind) = bind {
             command.env("FLUX_EXCHANGE_BIND", bind);
+        }
+        if let Some(occupied_bind) = occupied_bind {
+            command.env(
+                "FLUX_EXCHANGE_TEST_OCCUPIED_BIND",
+                occupied_bind.to_string(),
+            );
         }
         // SAFETY: the closure uses only async-signal-safe descriptor operations before exec.
         unsafe {
@@ -129,6 +215,15 @@ impl SupervisedChild {
         }
     }
 
+    fn send_liveness_byte(&self) {
+        let byte = [0x5a_u8; 1];
+        // SAFETY: the one-byte buffer is live and this is the owned liveness write end.
+        assert_eq!(
+            unsafe { libc::write(self.liveness_write, byte.as_ptr().cast(), 1) },
+            1
+        );
+    }
+
     fn finish(mut self) -> std::process::Output {
         self.close_liveness();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -158,11 +253,14 @@ impl SupervisedChild {
             .read_to_end(&mut stderr)
             .expect("stderr bytes");
         let _ = std::fs::remove_dir_all(&self.state_root);
-        std::process::Output {
+        let output = std::process::Output {
             status,
             stdout,
             stderr,
-        }
+        };
+        assert_no_sentinels(&output.stdout);
+        assert_no_sentinels(&output.stderr);
+        output
     }
 }
 
@@ -185,6 +283,26 @@ fn native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged() {
     let output = server.finish();
     assert!(!output.status.success());
     assert!(TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_err());
+}
+
+#[test]
+fn any_liveness_byte_exits_without_waiting_for_eof() {
+    let mut server = SupervisedChild::spawn(0o700);
+    assert!(!server.readiness().is_empty());
+    server.send_liveness_byte();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if server.child.try_wait().expect("child state").is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "liveness byte did not exit Exchange"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = server.finish();
+    assert!(!output.status.success());
 }
 
 impl Drop for SupervisedChild {
@@ -220,6 +338,17 @@ fn unique_counter() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+fn assert_no_sentinels(bytes: &[u8]) {
+    for (_, sentinel) in SENTINELS {
+        assert!(
+            !bytes
+                .windows(sentinel.len())
+                .any(|candidate| candidate == sentinel.as_bytes()),
+            "captured a value-shaped sentinel"
+        );
+    }
+}
+
 #[test]
 fn supervisor_helper_process() {
     if std::env::var_os("X128_RUN_SUPERVISOR_HELPER").is_none() {
@@ -242,14 +371,25 @@ fn supervisor_helper_process() {
 
 #[test]
 fn sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its_port() {
-    let mut helper = Command::new(std::env::current_exe().expect("integration test executable"))
+    assert_sigkill_supervisor(true);
+}
+
+#[test]
+fn sigkill_of_the_real_supervisor_kills_a_responsive_exchange_and_releases_its_port() {
+    assert_sigkill_supervisor(false);
+}
+
+fn assert_sigkill_supervisor(wedge: bool) {
+    let mut command = Command::new(std::env::current_exe().expect("integration test executable"));
+    command
         .args(["--exact", "supervisor_helper_process", "--nocapture"])
         .env("X128_RUN_SUPERVISOR_HELPER", "1")
-        .env("X128_HELPER_WEDGE", "1")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("outer supervisor helper");
+        .stderr(Stdio::piped());
+    if wedge {
+        command.env("X128_HELPER_WEDGE", "1");
+    }
+    let mut helper = command.spawn().expect("outer supervisor helper");
     let mut reader = std::io::BufReader::new(helper.stdout.take().expect("helper stdout"));
     let line = loop {
         let mut line = String::new();
@@ -305,6 +445,9 @@ fn sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its
 #[test]
 fn real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof() {
     let mut server = SupervisedChild::spawn(0o700);
+    // The expected native identity comes from the owned Child before readiness is consumed.
+    let expected_pid = server.child.id();
+    let expected_start_identity = captured_native_start_identity(expected_pid);
     let readiness = server.readiness();
     assert!(
         !readiness.is_empty(),
@@ -312,12 +455,10 @@ fn real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof() 
     );
     assert!(readiness.len() <= 16 * 1024);
     assert!(!readiness.ends_with(b"\n"));
-    assert!(!readiness
-        .windows(SENTINEL.len())
-        .any(|bytes| bytes == SENTINEL.as_bytes()));
+    assert_no_sentinels(&readiness);
     let ready: serde_json::Value = serde_json::from_slice(&readiness).expect("readiness object");
 
-    let compatibility = Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+    let compatibility = exchange_command()
         .args(["compatibility", "--json"])
         .output()
         .expect("compatibility process");
@@ -336,8 +477,34 @@ fn real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof() 
         .collect::<String>();
     assert_eq!(ready["release"]["executable_sha256"], digest);
     assert_eq!(ready["schema"], ready["protocols"]["supervisor"]);
-    assert_eq!(ready["process"]["pid"], server.child.id());
-    assert_native_start_identity(server.child.id(), &ready["process"]["start_identity"]);
+    assert_eq!(ready["process"]["pid"], expected_pid);
+    let expected = ReadinessExpectation {
+        release: ExpectedRelease {
+            tag: compatibility["release"]["tag"]
+                .as_str()
+                .expect("tag")
+                .to_owned(),
+            version: compatibility["release"]["version"]
+                .as_str()
+                .expect("version")
+                .to_owned(),
+            source_commit: compatibility["release"]["source_commit"]
+                .as_str()
+                .expect("source")
+                .to_owned(),
+            build_id: compatibility["release"]["build_id"]
+                .as_str()
+                .expect("build")
+                .to_owned(),
+            executable_sha256: digest,
+        },
+        pid: expected_pid,
+        platform: native_platform(),
+        start_identity: expected_start_identity,
+    };
+    let committed = verify_readiness(&readiness, &expected)
+        .expect("matching the already-open child permits ownership commit");
+    assert_eq!(committed.process.pid, expected_pid);
 
     let host = ready["bind"]["host"].as_str().expect("bind host");
     let port = ready["bind"]["port"].as_u64().expect("bind port") as u16;
@@ -349,14 +516,8 @@ fn real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof() 
         .expect("health request");
 
     let output = server.finish();
-    assert!(!output
-        .stdout
-        .windows(SENTINEL.len())
-        .any(|bytes| bytes == SENTINEL.as_bytes()));
-    assert!(!output
-        .stderr
-        .windows(SENTINEL.len())
-        .any(|bytes| bytes == SENTINEL.as_bytes()));
+    assert_no_sentinels(&output.stdout);
+    assert_no_sentinels(&output.stderr);
     let deadline = Instant::now() + Duration::from_secs(2);
     while TcpStream::connect_timeout(&address, Duration::from_millis(20)).is_ok() {
         assert!(
@@ -367,23 +528,33 @@ fn real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof() 
 }
 
 #[cfg(target_os = "linux")]
-fn assert_native_start_identity(pid: u32, identity: &serde_json::Value) {
-    assert_eq!(identity["kind"], "linux-proc-start");
+fn native_platform() -> NativePlatform {
+    NativePlatform::Linux
+}
+
+#[cfg(target_os = "linux")]
+fn captured_native_start_identity(pid: u32) -> VerifiedStartIdentity {
     let boot_id =
         std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("kernel boot identity");
-    assert_eq!(identity["boot_id"], boot_id.trim());
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("open child stat");
     let after_name = &stat[stat.rfind(") ").expect("closed command field") + 2..];
     let ticks = after_name
         .split_ascii_whitespace()
         .nth(19)
         .expect("child start ticks");
-    assert_eq!(identity["ticks"], ticks);
+    VerifiedStartIdentity::Linux {
+        boot_id: boot_id.trim().to_owned(),
+        ticks: ticks.to_owned(),
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn assert_native_start_identity(pid: u32, identity: &serde_json::Value) {
-    assert_eq!(identity["kind"], "macos-proc-start");
+fn native_platform() -> NativePlatform {
+    NativePlatform::Macos
+}
+
+#[cfg(target_os = "macos")]
+fn captured_native_start_identity(pid: u32) -> VerifiedStartIdentity {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
     let size = std::mem::size_of::<libc::proc_bsdinfo>();
     // SAFETY: the exact native output buffer remains live for the complete call.
@@ -401,8 +572,10 @@ fn assert_native_start_identity(pid: u32, identity: &serde_json::Value) {
     );
     // SAFETY: the full structure was initialized by the successful call.
     let info = unsafe { info.assume_init() };
-    assert_eq!(identity["seconds"], info.pbi_start_tvsec.to_string());
-    assert_eq!(identity["microseconds"], info.pbi_start_tvusec);
+    VerifiedStartIdentity::Macos {
+        microseconds: info.pbi_start_tvusec as u32,
+        seconds: info.pbi_start_tvsec.to_string(),
+    }
 }
 
 #[test]
@@ -412,20 +585,14 @@ fn unsafe_store_refusal_emits_no_readiness_or_sentinel() {
     assert!(readiness.is_empty(), "store refusal emitted readiness");
     let output = server.finish();
     assert!(!output.status.success());
-    assert!(!output
-        .stdout
-        .windows(SENTINEL.len())
-        .any(|bytes| bytes == SENTINEL.as_bytes()));
-    assert!(!output
-        .stderr
-        .windows(SENTINEL.len())
-        .any(|bytes| bytes == SENTINEL.as_bytes()));
+    assert_no_sentinels(&output.stdout);
+    assert_no_sentinels(&output.stderr);
 }
 
 #[test]
 fn preselected_or_nonloopback_bind_refuses_before_readiness() {
-    for bind in ["127.0.0.1:8080", "0.0.0.0:0"] {
-        let mut server = SupervisedChild::spawn_config(0o700, false, Some(bind));
+    for bind in ["127.0.0.1:8080", "127.0.0.2:0", "0.0.0.0:0"] {
+        let mut server = SupervisedChild::spawn_config(0o700, false, Some(bind), None);
         assert!(server.readiness().is_empty(), "{bind} emitted readiness");
         let output = server.finish();
         assert!(!output.status.success());
@@ -433,8 +600,22 @@ fn preselected_or_nonloopback_bind_refuses_before_readiness() {
 }
 
 #[test]
+fn real_bind_refusal_after_store_validation_emits_no_readiness() {
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupied fixture listener");
+    let occupied_address = occupied.local_addr().expect("occupied fixture address");
+    let mut server = SupervisedChild::spawn_config(0o700, false, None, Some(occupied_address));
+    assert!(
+        server.readiness().is_empty(),
+        "a failed real bind emitted readiness"
+    );
+    let output = server.finish();
+    assert!(!output.status.success());
+    drop(occupied);
+}
+
+#[test]
 fn exact_unix_abi_refuses_missing_and_wrong_capabilities() {
-    let output = Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+    let output = exchange_command()
         .arg("--supervised")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -446,8 +627,9 @@ fn exact_unix_abi_refuses_missing_and_wrong_capabilities() {
         "readiness was redirected to stdout"
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("FD 3"));
+    assert_no_sentinels(&output.stderr);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+    let output = exchange_command()
         .args([
             OsStr::new("--supervised"),
             OsStr::new("--readiness-fd"),
@@ -457,22 +639,64 @@ fn exact_unix_abi_refuses_missing_and_wrong_capabilities() {
         .expect("arbitrary FD option process");
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
+    assert_no_sentinels(&output.stderr);
+
+    for arguments in [
+        vec!["--dev", "--supervised"],
+        vec!["junk", "--supervised"],
+        vec!["--supervisor-readiness-handle", "3"],
+        vec!["--supervisor-liveness-handle", "4"],
+        vec!["--supervisor-liveness-handle", "4", "--supervised"],
+        vec!["--supervised=true"],
+        vec!["--supervisor-readiness-handle=3"],
+        vec!["--supervisor-junk"],
+    ] {
+        let root = std::env::temp_dir().join(format!(
+            "flux-exchange-x128-mode-refusal-{}-{}",
+            std::process::id(),
+            unique_counter()
+        ));
+        let output = exchange_command()
+            .args(arguments)
+            .env("FLUX_EXCHANGE_STATE", &root)
+            .env("FLUX_EXCHANGE_BIND", "127.0.0.1:0")
+            .output()
+            .expect("closed supervised mode refusal");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_no_sentinels(&output.stderr);
+        assert!(!root.exists(), "malformed mode opened local state");
+    }
 }
 
 #[test]
-fn unix_abi_refuses_alias_wrong_direction_and_extra_inherited_fd() {
+fn unix_abi_refuses_alias_wrong_kind_direction_and_extra_inherited_fd() {
     fn refusal(mode: &str) -> std::process::Output {
         let readiness = PipeEnds::new();
         let liveness = PipeEnds::new();
         let extra = PipeEnds::new();
+        let null = std::fs::File::open("/dev/null").expect("non-pipe fixture");
+        use std::os::fd::AsRawFd;
         let (fd3, fd4) = match mode {
             "alias" => (
                 duplicate_high(readiness.write),
                 duplicate_high(readiness.read),
             ),
-            "wrong" => (
+            "fd3-wrong" => (
                 duplicate_high(readiness.read),
+                duplicate_high(liveness.read),
+            ),
+            "fd4-wrong" => (
+                duplicate_high(readiness.write),
                 duplicate_high(liveness.write),
+            ),
+            "fd3-nonpipe" => (
+                duplicate_high(null.as_raw_fd()),
+                duplicate_high(liveness.read),
+            ),
+            "fd4-nonpipe" => (
+                duplicate_high(readiness.write),
+                duplicate_high(null.as_raw_fd()),
             ),
             "extra" => (
                 duplicate_high(readiness.write),
@@ -481,7 +705,7 @@ fn unix_abi_refuses_alias_wrong_direction_and_extra_inherited_fd() {
             _ => unreachable!(),
         };
         let fd5 = (mode == "extra").then(|| duplicate_high(extra.read));
-        let mut command = Command::new(env!("CARGO_BIN_EXE_flux-exchange"));
+        let mut command = exchange_command();
         command
             .arg("--supervised")
             .stdout(Stdio::piped())
@@ -524,12 +748,16 @@ fn unix_abi_refuses_alias_wrong_direction_and_extra_inherited_fd() {
 
     for (mode, diagnostic) in [
         ("alias", "alias one pipe"),
-        ("wrong", "wrong direction"),
+        ("fd3-wrong", "readiness FD 3 has the wrong direction"),
+        ("fd4-wrong", "liveness FD 4 has the wrong direction"),
+        ("fd3-nonpipe", "readiness FD 3 is not a pipe"),
+        ("fd4-nonpipe", "liveness FD 4 is not a pipe"),
         ("extra", "unexpected inherited nonstandard FD 5"),
     ] {
         let output = refusal(mode);
         assert!(!output.status.success(), "{mode}");
         assert!(output.stdout.is_empty(), "{mode} wrote stdout readiness");
+        assert_no_sentinels(&output.stderr);
         assert!(
             String::from_utf8_lossy(&output.stderr).contains(diagnostic),
             "{mode}: {}",
@@ -539,13 +767,97 @@ fn unix_abi_refuses_alias_wrong_direction_and_extra_inherited_fd() {
 }
 
 #[test]
+fn unix_abi_refuses_each_missing_fd_and_does_not_discover_env_other_fd_or_stdout() {
+    fn missing(target: RawFd) -> std::process::Output {
+        let readiness = PipeEnds::new();
+        let liveness = PipeEnds::new();
+        let readiness_source = duplicate_high(readiness.write);
+        let liveness_source = duplicate_high(liveness.read);
+        let mut command = exchange_command();
+        command
+            .arg("--supervised")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // SAFETY: only async-signal-safe descriptor operations run before exec.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(readiness_source, 3) < 0 || libc::dup2(liveness_source, 4) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(target);
+                for fd in 5..256 {
+                    libc::close(fd);
+                }
+                Ok(())
+            });
+        }
+        let output = command.output().expect("one missing capability process");
+        for fd in [
+            readiness.read,
+            readiness.write,
+            liveness.read,
+            liveness.write,
+            readiness_source,
+            liveness_source,
+        ] {
+            close_fd(fd);
+        }
+        output
+    }
+
+    for target in [3, 4] {
+        let output = missing(target);
+        assert!(!output.status.success(), "missing FD {target}");
+        assert!(output.stdout.is_empty(), "missing FD {target} used stdout");
+        assert_no_sentinels(&output.stderr);
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("required supervisor FD {target} is absent")),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let other = PipeEnds::new();
+    let source = duplicate_high(other.write);
+    let mut command = exchange_command();
+    command
+        .arg("--supervised")
+        .env("FLUX_EXCHANGE_SUPERVISOR_READINESS_FD", "9")
+        .env("FLUX_EXCHANGE_SUPERVISOR_LIVENESS_FD", "10")
+        .stdout(Stdio::from(unsafe {
+            // SAFETY: this duplicate is independent from the descriptor retained for cleanup.
+            std::fs::File::from_raw_fd(libc::dup(source))
+        }))
+        .stderr(Stdio::piped());
+    // SAFETY: the closure moves the would-be readiness capability to an unrecognized FD only.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(source, 9) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::close(3);
+            libc::close(4);
+            Ok(())
+        });
+    }
+    let output = command.output().expect("non-ABI discovery process");
+    for fd in [other.read, other.write, source] {
+        close_fd(fd);
+    }
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "stdout became readiness");
+    assert_no_sentinels(&output.stderr);
+}
+
+#[test]
 fn compatibility_is_exact_and_never_opens_a_store_or_listener() {
     let root = std::env::temp_dir().join(format!(
         "flux-exchange-x128-compatibility-{}-{}",
         std::process::id(),
         unique_counter()
     ));
-    let output = Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+    let output = exchange_command()
         .args(["compatibility", "--json"])
         .env("FLUX_EXCHANGE_STATE", &root)
         .env("FLUX_EXCHANGE_BIND", "127.0.0.1:1")
@@ -553,17 +865,19 @@ fn compatibility_is_exact_and_never_opens_a_store_or_listener() {
         .expect("compatibility process");
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
+    assert_no_sentinels(&output.stdout);
     assert!(!root.exists(), "compatibility opened the configured store");
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("exact compatibility object");
     assert_eq!(value["schema"], "exchange.compatibility.v1");
 
-    let wrong = Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+    let wrong = exchange_command()
         .args(["compatibility", "--json", "extra"])
         .env("FLUX_EXCHANGE_STATE", &root)
         .output()
         .expect("invalid compatibility process");
     assert!(!wrong.status.success());
     assert!(wrong.stdout.is_empty());
+    assert_no_sentinels(&wrong.stderr);
     assert!(!root.exists());
 }

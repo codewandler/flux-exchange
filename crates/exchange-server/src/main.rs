@@ -32,7 +32,7 @@ mod routes;
 mod service_account;
 mod session;
 pub mod state;
-mod supervisor;
+use flux_exchange::supervisor;
 mod tenancy;
 mod traffic;
 mod workflow_runs;
@@ -233,7 +233,14 @@ fn main() -> ExitCode {
 
     // Capability validation and the native liveness thread precede both tracing/runtime setup and
     // every store/listener action. A wedged async executor therefore cannot outlive its supervisor.
-    let supervision = if arguments.first().is_some_and(|arg| arg == "--supervised") {
+    let mentions_supervision = arguments.iter().any(|argument| {
+        argument.to_str().is_some_and(|argument| {
+            argument == "--supervised"
+                || argument.starts_with("--supervised=")
+                || argument.starts_with("--supervisor-")
+        })
+    });
+    let supervision = if mentions_supervision {
         match supervisor::Supervision::discover(&arguments) {
             Ok(supervision) => Some(supervision),
             Err(refusal) => {
@@ -389,6 +396,34 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
 
     report_deployment(startup.deployment());
     report_surface();
+
+    #[cfg(feature = "supervisor-test-bind-refusal")]
+    if supervised {
+        if let Some(fixture) = std::env::var_os("FLUX_EXCHANGE_TEST_OCCUPIED_BIND") {
+            let fixture = fixture.to_str().ok_or_else(|| StartupRefusal::Supervised {
+                reason: "test occupied bind is not Unicode".to_owned(),
+            })?;
+            let fixture =
+                fixture
+                    .parse::<SocketAddr>()
+                    .map_err(|error| StartupRefusal::Supervised {
+                        reason: format!("test occupied bind is not a socket address: {error}"),
+                    })?;
+            // This invokes the same Tokio/OS bind path as the production listener. The feature is
+            // absent from release builds; the process fixture holds `fixture` open so this call
+            // returns the platform's real address-in-use refusal after composition completed.
+            let refused = TcpListener::bind(fixture).await.map_err(|source| {
+                StartupRefusal::BindUnavailable {
+                    bind: fixture,
+                    source,
+                }
+            })?;
+            drop(refused);
+            return Err(StartupRefusal::Supervised {
+                reason: "test occupied bind unexpectedly succeeded".to_owned(),
+            });
+        }
+    }
 
     let listener = TcpListener::bind(bind)
         .await
@@ -1106,7 +1141,12 @@ fn supervised_bind() -> Result<SocketAddr, StartupRefusal> {
             .parse()
             .expect("the supervised loopback bind literal is valid"),
     };
-    if !bind.ip().is_loopback() || bind.port() != 0 {
+    if !matches!(
+        bind.ip(),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            | std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+    ) || bind.port() != 0
+    {
         return Err(StartupRefusal::Supervised {
             reason: format!("{BIND_ENV} must be a literal loopback socket with port 0; got {bind}"),
         });

@@ -22,6 +22,88 @@ use windows_sys::Win32::System::Threading::{
     STARTUPINFOEXW, STARTUPINFOW,
 };
 
+use flux_exchange::supervisor::{
+    verify_readiness, ExpectedRelease, NativePlatform, ReadinessExpectation, VerifiedStartIdentity,
+};
+
+const SENTINELS: [(&str, &str); 6] = [
+    ("X128_CREDENTIAL_VALUE", "credential-secret-7c96d9"),
+    ("X128_SETTING_VALUE", "setting-value-7c96d9"),
+    ("X128_GRANT_BODY", "grant-body-7c96d9"),
+    (
+        "X128_SERVICE_ACCOUNT_VERIFIER",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ),
+    ("X128_SESSION_VALUE", "session-value-7c96d9"),
+    ("X128_CONTROL_CREDENTIAL", "control-credential-7c96d9"),
+];
+
+fn exchange_command() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+}
+
+fn assert_no_sentinels(bytes: &[u8]) {
+    for (_, sentinel) in SENTINELS {
+        assert!(!bytes
+            .windows(sentinel.len())
+            .any(|candidate| candidate == sentinel.as_bytes()));
+    }
+}
+
+fn seed_production_authority_stores(root: &std::path::Path) {
+    use exchange_host::{ConnectionSettings, Grants};
+
+    let tenant = exchange_host::Tenant::new("dev").expect("sentinel tenant");
+    let credential = exchange_host::CredentialStore::bind(root.join("credentials/store.txt"))
+        .expect("production credential store");
+    let reference =
+        exchange_host::CredentialRef::new("dev", "com.zendesk.api", "support", "api_token")
+            .expect("sentinel credential address");
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("sentinel store runtime")
+        .block_on(
+            credential
+                .secrets()
+                .put(&reference, &exchange_host::Secret::new(SENTINELS[0].1)),
+        )
+        .expect("production credential write");
+
+    let settings = exchange_host::SettingsStore::bind(root.join("settings/store.json"))
+        .expect("production settings store");
+    let declared = exchange_host::DeclaredSetting::parse("default", "endpoint.subdomain")
+        .expect("declared sentinel setting");
+    settings
+        .set(&tenant, "zendesk", &declared, SENTINELS[1].1)
+        .expect("production setting write");
+    let grants = exchange_host::GrantStore::bind(root.join("grants/store.json"))
+        .expect("production grant store");
+    let grant = exchange_host::Grant::for_connector(
+        SENTINELS[2].1,
+        exchange_host::Selector::at_most(exchange_host::Risk::Low),
+    );
+    grants
+        .set(&tenant, &[grant])
+        .expect("production grant write");
+
+    let service_accounts = serde_json::json!({
+        "version": 1,
+        "agents": {
+            (SENTINELS[3].1): {
+                "tenant": "dev",
+                "id": "sentinel-service",
+                "expires_at": 4_102_444_800_i64
+            }
+        }
+    });
+    exchange_host::write_private_state_file(
+        root.join("service-accounts/store.json"),
+        &serde_json::to_vec(&service_accounts).expect("service account fixture JSON"),
+    )
+    .expect("production Service Account verifier write");
+}
+
 struct NativeProcess {
     process: HANDLE,
     pid: u32,
@@ -37,6 +119,7 @@ impl NativeProcess {
             std::process::id(),
             unique_counter()
         ));
+        seed_production_authority_stores(&state_root);
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: std::ptr::null_mut(),
@@ -198,8 +281,10 @@ impl Drop for NativeProcess {
 #[test]
 fn real_windows_handle_list_readiness_identity_and_native_liveness() {
     let mut server = NativeProcess::spawn(false);
+    let expected_filetime = creation_filetime(server.process);
     let bytes = server.readiness();
     assert!(!bytes.is_empty());
+    assert_no_sentinels(&bytes);
     assert!(bytes.len() <= 16 * 1024);
     let ready: serde_json::Value = serde_json::from_slice(&bytes).expect("readiness object");
     assert_eq!(ready["process"]["pid"], server.pid);
@@ -209,15 +294,48 @@ fn real_windows_handle_list_readiness_identity_and_native_liveness() {
     );
     assert_eq!(
         ready["process"]["start_identity"]["filetime"],
-        creation_filetime(server.process).to_string()
+        expected_filetime.to_string()
     );
-    let compatibility = Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+    let compatibility = exchange_command()
         .args(["compatibility", "--json"])
         .output()
         .expect("compatibility process");
     let compatibility: serde_json::Value =
         serde_json::from_slice(&compatibility.stdout).expect("compatibility object");
     assert_eq!(ready["protocols"], compatibility["protocols"]);
+    let executable = std::fs::read(env!("CARGO_BIN_EXE_flux-exchange")).expect("executable bytes");
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(&executable)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let expected = ReadinessExpectation {
+        release: ExpectedRelease {
+            tag: compatibility["release"]["tag"]
+                .as_str()
+                .expect("tag")
+                .to_owned(),
+            version: compatibility["release"]["version"]
+                .as_str()
+                .expect("version")
+                .to_owned(),
+            source_commit: compatibility["release"]["source_commit"]
+                .as_str()
+                .expect("source")
+                .to_owned(),
+            build_id: compatibility["release"]["build_id"]
+                .as_str()
+                .expect("build")
+                .to_owned(),
+            executable_sha256: digest,
+        },
+        pid: server.pid,
+        platform: NativePlatform::Windows,
+        start_identity: VerifiedStartIdentity::Windows {
+            filetime: expected_filetime.to_string(),
+        },
+    };
+    verify_readiness(&bytes, &expected).expect("open child identity permits ownership commit");
     let address: SocketAddr = format!(
         "{}:{}",
         ready["bind"]["host"].as_str().expect("host"),
@@ -245,7 +363,8 @@ fn windows_supervisor_helper_process() {
     if std::env::var_os("X128_RUN_WINDOWS_SUPERVISOR_HELPER").is_none() {
         return;
     }
-    let mut server = NativeProcess::spawn(true);
+    let wedge = std::env::var_os("X128_WINDOWS_HELPER_WEDGE").is_some();
+    let mut server = NativeProcess::spawn(wedge);
     let readiness = server.readiness();
     println!(
         "X128_READY\t{}\t{}\t{}",
@@ -261,16 +380,28 @@ fn windows_supervisor_helper_process() {
 
 #[test]
 fn terminate_process_of_supervisor_kills_wedged_exchange_and_releases_port() {
-    let mut helper = Command::new(std::env::current_exe().expect("integration test executable"))
+    assert_terminate_supervisor(true);
+}
+
+#[test]
+fn terminate_process_of_supervisor_kills_responsive_exchange_and_releases_port() {
+    assert_terminate_supervisor(false);
+}
+
+fn assert_terminate_supervisor(wedge: bool) {
+    let mut command = Command::new(std::env::current_exe().expect("integration test executable"));
+    command
         .args([
             "--exact",
             "windows_supervisor_helper_process",
             "--nocapture",
         ])
         .env("X128_RUN_WINDOWS_SUPERVISOR_HELPER", "1")
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .expect("Windows supervisor helper");
+        .stdout(std::process::Stdio::piped());
+    if wedge {
+        command.env("X128_WINDOWS_HELPER_WEDGE", "1");
+    }
+    let mut helper = command.spawn().expect("Windows supervisor helper");
     let mut reader = std::io::BufReader::new(helper.stdout.take().expect("helper stdout"));
     let line = loop {
         let mut line = String::new();
@@ -332,6 +463,13 @@ fn terminate_process_of_supervisor_kills_wedged_exchange_and_releases_port() {
 fn malformed_windows_handle_flags_refuse_without_stdout_readiness() {
     for arguments in [
         vec!["--supervised"],
+        vec!["--dev", "--supervised"],
+        vec!["junk", "--supervised"],
+        vec!["--supervisor-readiness-handle"],
+        vec!["--supervisor-liveness-handle"],
+        vec!["--supervised=true"],
+        vec!["--supervisor-readiness-handle=1"],
+        vec!["--supervisor-junk"],
         vec![
             "--supervised",
             "--supervisor-readiness-handle",
@@ -353,14 +491,89 @@ fn malformed_windows_handle_flags_refuse_without_stdout_readiness() {
             "--supervisor-liveness-handle",
             "1",
         ],
+        vec![
+            "--supervised",
+            "--supervisor-liveness-handle",
+            "2",
+            "--supervisor-readiness-handle",
+            "1",
+        ],
+        vec![
+            "--supervisor-readiness-handle",
+            "1",
+            "--supervisor-liveness-handle",
+            "2",
+            "--supervised",
+        ],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
+        let root = std::env::temp_dir().join(format!(
+            "flux-exchange-x128-windows-mode-refusal-{}-{}",
+            std::process::id(),
+            unique_counter()
+        ));
+        let output = exchange_command()
             .args(arguments)
+            .env("FLUX_EXCHANGE_STATE", &root)
             .output()
             .expect("malformed ABI process");
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
+        assert_no_sentinels(&output.stderr);
+        assert!(!root.exists(), "malformed mode opened local state");
     }
+}
+
+#[test]
+fn environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities() {
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 1,
+    };
+    let mut readiness_read = std::ptr::null_mut();
+    let mut readiness_write = std::ptr::null_mut();
+    let mut liveness_read = std::ptr::null_mut();
+    let mut liveness_write = std::ptr::null_mut();
+    // These are inheritable pipe capabilities, but Rust's production process launcher does not put
+    // them in its explicit handle list. Numeric argv and similarly named environment inputs cannot
+    // turn an unlisted handle, stdout or the environment into the supervised ABI.
+    assert_ne!(
+        unsafe { CreatePipe(&mut readiness_read, &mut readiness_write, &attributes, 0) },
+        0
+    );
+    assert_ne!(
+        unsafe { CreatePipe(&mut liveness_read, &mut liveness_write, &attributes, 0) },
+        0
+    );
+    let output = exchange_command()
+        .args([
+            "--supervised",
+            "--supervisor-readiness-handle",
+            &(readiness_write as usize).to_string(),
+            "--supervisor-liveness-handle",
+            &(liveness_read as usize).to_string(),
+        ])
+        .env(
+            "FLUX_EXCHANGE_SUPERVISOR_READINESS_HANDLE",
+            (readiness_write as usize).to_string(),
+        )
+        .env(
+            "FLUX_EXCHANGE_SUPERVISOR_LIVENESS_HANDLE",
+            (liveness_read as usize).to_string(),
+        )
+        .output()
+        .expect("unlisted Windows capability process");
+    for handle in [
+        readiness_read,
+        readiness_write,
+        liveness_read,
+        liveness_write,
+    ] {
+        close(handle);
+    }
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "stdout became readiness");
+    assert_no_sentinels(&output.stderr);
 }
 
 fn current_environment(state_root: &PathBuf, wedge: bool) -> Vec<u16> {

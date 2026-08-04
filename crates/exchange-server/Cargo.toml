@@ -16,6 +16,9 @@ build = "build.rs"
 [features]
 # Process-only acceptance seam. Default/release binaries do not recognize a wedge control input.
 supervisor-test-wedge = []
+# Process-only acceptance seam. The fixture supplies an already occupied address so the production
+# listener path receives a real OS bind refusal after all stores and safety checks have opened.
+supervisor-test-bind-refusal = []
 
 [[bin]]
 name = "flux-exchange"
