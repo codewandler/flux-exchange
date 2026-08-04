@@ -1,7 +1,7 @@
 ---
 id: X-134
 title: "Publish owner-bound local onboarding without secret JSON"
-status: ready
+status: in-progress
 priority: 0
 epic: connections
 areas: [exchange-server, identity, connections, grants, protocol, tests, windows]
@@ -84,7 +84,11 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       bytes; `NEED_SECRETS.secrets` has 0..=64 entries, at most 64 secret frames and 1 MiB cumulative
       payload are accepted. The header has no
       flag field. Native byte-stream reads may split or coalesce bytes arbitrarily; the 12-byte header
-      and declared payload length delimit each successive FXLM frame. Only hosted transport binds
+      and declared payload length delimit each successive FXLM frame. The sole native prefix is the
+      Windows-only 16-byte `FXHA` Service Account writer attachment defined below. It is admitted
+      exactly once, immediately before MINT on that already owner-authenticated named-pipe
+      connection; it is not an FXLM frame, JSON member, opcode or ninth release protocol. Every
+      other native operation begins with `FXLM`. Only hosted transport binds
       message boundaries to frames: each reassembled WebSocket binary message contains exactly one
       complete FXLM frame and is at most 65,548 bytes. WebSocket fragmentation is transport-only;
       splitting one FXLM frame across messages is a truncated frame and coalescing frames in one
@@ -321,7 +325,9 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       Service Account mint remains
       `flux-exchange local service-account-mint --id <id> --expires-at <canonical-decimal>
       --writer-fd 5` on Unix or the same command with `--writer-handle <canonical-decimal>` on
-      Windows. No endpoint, tenant, credential address, program, cwd or arbitrary argument is
+      Windows. On Windows the helper validates that local argv HANDLE and clears inheritance, then
+      writes the exact `FXHA` attachment followed immediately by canonical MINT on one authenticated
+      connection. No endpoint, tenant, credential address, program, cwd or arbitrary argument is
       caller-selectable; the helper rederives the owner-private root/endpoint. Standard streams are
       null and the helper opens `/dev/tty` or the Windows console directly. Stdout/stderr are empty;
       exit 0 means one terminal receipt/error was written and closed, while exit 1 is the sole
@@ -399,10 +405,23 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       write-only pipe to the authenticated running server through one `SCM_RIGHTS` message. Exchange
       rejects `MSG_CTRUNC`, multiple descriptors and the wrong pipe kind/direction and sets
       `FD_CLOEXEC`. Windows launches the helper with a closed
-      `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, revalidates the helper process token SID, pins the process
-      and transfers the declared write HANDLE with `DuplicateHandle`; a native planted-handle canary
-      proves no unrelated inheritable handle arrived. No receiver claims to enumerate the complete
-      Windows process handle table.
+      `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` containing only the declared writer. The helper validates
+      and clears inheritance on that local argv HANDLE, then sends exactly one 16-byte attachment:
+      ASCII `FXHA`, version `1`, direction `1`, kind `1` (Service Account writer), one zero reserved
+      byte and the source-process HANDLE as a big-endian nonzero `u64`, immediately followed by MINT
+      on the same owner-authenticated named-pipe connection. The server obtains and pins that
+      connection's client PID and process-creation identity, revalidates owner SID and session, and
+      calls `DuplicateHandle` from that exact client process into itself. The duplicate is made
+      non-inheritable and must be a distinct writable `FILE_TYPE_PIPE` before MINT is dispatched.
+      Truncated attachment is `truncated_frame`; a second attachment or attachment before any opcode
+      other than MINT is `unexpected_frame`; an extra byte between attachment and MINT is
+      `invalid_frame`; wrong magic/version/direction/kind/reserved byte, zero or unrepresentable
+      HANDLE, PID/creation-identity change, another-process source, duplication failure, non-pipe or
+      unusable direction is `writer_invalid`. Every refusal closes every duplicate before mutation.
+      The source number never enters FXLM JSON, receipts, persistence, audit or logs. Neither side
+      reads remote argv, a PEB or undocumented process information, and no receiver enumerates the
+      process handle table. Native substitution, planted-handle and unrelated-inheritable-handle
+      canaries bind these rows.
 - [ ] `exchange.service-account-handoff.v1` is exactly one frame followed by EOF: ASCII `FXSA`,
       version byte `1`, direction byte `1` (Exchange to writer), two zero flag bytes, a big-endian
       `u32` length of `1..=512`, then opaque token bytes. Truncation, surplus bytes, a second frame,
