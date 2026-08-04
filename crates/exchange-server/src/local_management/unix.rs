@@ -17,11 +17,14 @@ use super::dispatcher::{expired_reply, native_frame_refusal, Transport};
 use super::service_account::OneShotWriter;
 use super::service_account_handoff::unix_transfer::{receive_initial_fd, UnixHandoffError};
 use super::{
-    deadline::{finalize_native_terminal, write_native_terminal},
+    deadline::{finalize_native_connection, write_native_terminal},
     ActiveSession, DeadlineController, Dispatcher, SessionAdvance, SessionBegin,
     TransactionCoordinator,
 };
 use crate::state::AppState;
+
+#[cfg(test)]
+use super::deadline::finalize_native_terminal;
 
 const RUN_DIRECTORY: &str = "run";
 const SOCKET_NAME: &str = "local-management-v1.sock";
@@ -45,6 +48,8 @@ pub(crate) struct LocalManagement {
     _lease: EndpointLease,
     expected_peer_uid: u32,
     dispatcher: Dispatcher,
+    #[cfg(test)]
+    deadline_override: Option<DeadlineController>,
 }
 
 impl LocalManagement {
@@ -167,6 +172,8 @@ impl LocalManagement {
                 _lease: lease,
                 expected_peer_uid: startup_euid,
                 dispatcher,
+                #[cfg(test)]
+                deadline_override: None,
             })
         })();
         if result.is_err() {
@@ -179,18 +186,25 @@ impl LocalManagement {
 
     /// Accept owner streams until shutdown. Peer authentication precedes the first byte read.
     pub(crate) async fn serve(self) {
+        #[cfg(test)]
+        let deadline_override = self.deadline_override.clone();
         loop {
             let Ok((stream, _)) = self.listener.accept().await else {
                 return;
             };
             let expected_peer_uid = self.expected_peer_uid;
             let dispatcher = self.dispatcher.clone();
+            #[cfg(test)]
+            let deadline_override = deadline_override.clone();
             tokio::spawn(async move {
                 if authenticate_peer(&stream, expected_peer_uid).is_ok() {
                     let owner = LocalOwner::authenticated();
                     let _closed_projection =
                         (owner.tenant, owner.principal, owner.user, owner.operator);
                     let mut stream = stream;
+                    #[cfg(test)]
+                    let deadline = deadline_override.unwrap_or_else(DeadlineController::start);
+                    #[cfg(not(test))]
                     let deadline = DeadlineController::start();
                     let mut initial = [0_u8; 65_548];
                     let received = deadline
@@ -203,12 +217,12 @@ impl LocalManagement {
                     let (writer, received) = match received {
                         Ok(Ok(received)) => received,
                         Ok(Err(_)) => {
-                            let _ = stream.shutdown().await;
+                            finalize_connection(&mut stream, None).await;
                             return;
                         }
                         Err(expired) => {
                             let (reply, _) = expired_reply(expired).into_parts();
-                            finalize_native_terminal(&mut stream, Some(&reply)).await;
+                            finalize_connection(&mut stream, Some(&reply)).await;
                             return;
                         }
                     };
@@ -223,7 +237,7 @@ impl LocalManagement {
                         .await
                     {
                         let (reply, _) = expired_reply(expired).into_parts();
-                        finalize_native_terminal(&mut stream, Some(&reply)).await;
+                        finalize_connection(&mut stream, Some(&reply)).await;
                     }
                 }
             });
@@ -234,6 +248,10 @@ impl LocalManagement {
     fn path(&self) -> &Path {
         &self.socket
     }
+}
+
+async fn finalize_connection(stream: &mut UnixStream, response: Option<&[u8]>) {
+    finalize_native_connection(stream, response).await;
 }
 
 impl Drop for LocalManagement {
@@ -730,8 +748,14 @@ mod tests {
     use std::os::unix::net::UnixStream as StdUnixStream;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use exchange_host::{
+        GrantReceiptId, GrantSelector, GrantStore, GrantTransactions as _, Tenant,
+    };
+
     use super::*;
+    use crate::audit::AuditJournal;
     use crate::local_management::codec::{Frame, Opcode};
+    use crate::local_management::{Expired, ReceiptIdentity, Unresolved};
 
     fn private_root(name: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -757,6 +781,48 @@ mod tests {
             .expect("test coordinator"),
         );
         Dispatcher::new(AppState::without_identity(), coordinator)
+    }
+
+    fn grant_dispatcher(root: &Path, seed: bool) -> (Dispatcher, GrantReceiptId) {
+        let store = exchange_host::CredentialStore::bind(root.join("test-credentials/store"))
+            .expect("one test credential store");
+        let coordinator = Arc::new(
+            TransactionCoordinator::bind(
+                root.join("test-coordinator/transactions.sqlite3"),
+                store.prepared_secrets(),
+            )
+            .expect("test coordinator"),
+        );
+        let audit = Arc::new(
+            AuditJournal::bind(root.join("test-audit/events.sqlite3")).expect("test audit"),
+        );
+        let grants =
+            Arc::new(GrantStore::bind(root.join("test-grants.json")).expect("grant store"));
+        let receipt = GrantReceiptId::from_protocol_bytes([0x61; 32]).expect("receipt");
+        if seed {
+            let tenant = Tenant::new(LOCAL_OWNER_TENANT).expect("owner tenant");
+            let selector: GrantSelector = serde_json::from_slice(
+                br#"{"effects_within":null,"idempotency":null,"max_risk":"low"}"#,
+            )
+            .expect("selector");
+            let candidate = grants
+                .preview(&tenant, "github", selector)
+                .expect("grant preview");
+            grants
+                .apply(
+                    &tenant,
+                    &candidate.candidate,
+                    candidate.revision,
+                    candidate.proposal_digest,
+                    receipt,
+                )
+                .expect("durable grant decision");
+        }
+        let state = AppState::without_identity()
+            .with_transaction_coordinator(coordinator.clone())
+            .with_audit(audit)
+            .with_grant_transactions(grants);
+        (Dispatcher::new(state, coordinator), receipt)
     }
 
     #[tokio::test]
@@ -855,7 +921,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!response.is_finished());
 
-        // More bytes do not replace the authentication-time anchor.
+        // More syntactically incomplete bytes do not replace the authentication-time anchor.
         tokio::io::AsyncWriteExt::write_all(&mut writer, &[1, 0, 0, 1])
             .await
             .expect("more partial header bytes");
@@ -865,7 +931,164 @@ mod tests {
         assert_eq!(response, crate::local_management::deadline_frame());
 
         server.abort();
+        let _ = server.await;
         let _ = std::fs::remove_dir_all(root);
+
+        let post_root = private_root("post-decision-deadline");
+        let (dispatcher, receipt) = grant_dispatcher(&post_root, true);
+        let deadline = DeadlineController::start();
+        let mut endpoint = LocalManagement::bind_at(&post_root, effective_uid(), dispatcher)
+            .expect("post-decision owner endpoint");
+        endpoint.deadline_override = Some(deadline.clone());
+        let path = endpoint.path().to_owned();
+        let server = tokio::spawn(endpoint.serve());
+        let stream = UnixStream::connect(path).await.expect("owner connection");
+        let (mut reader, mut writer) = stream.into_split();
+        tokio::task::yield_now().await;
+        let receipt_identity = ReceiptIdentity::from_protocol_bytes(receipt.protocol_bytes())
+            .expect("receipt identity");
+        deadline
+            .decided(receipt_identity, Unresolved::Store)
+            .expect("durable decision");
+        let response = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut bytes)
+                .await
+                .expect("post-decision response EOF");
+            bytes
+        });
+        tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"FX")
+            .await
+            .expect("post-decision partial traffic");
+        tokio::task::yield_now().await;
+        assert!(
+            !response.is_finished(),
+            "partial traffic cannot expire or reset the post-decision clock at 29 seconds"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let response = response.await.expect("post-decision response task");
+        let (expected, close_code) =
+            crate::local_management::expired_reply(Expired::PostDecision {
+                receipt: receipt_identity,
+                unresolved: Unresolved::Store,
+            })
+            .into_parts();
+        assert_eq!(close_code, 1000);
+        assert_eq!(
+            response, expected,
+            "native post-decision stream ends in EOF"
+        );
+        server.abort();
+        let _ = server.await;
+
+        let replay_root = private_root("post-decision-replay-endpoint");
+        let (dispatcher, reopened_receipt) = grant_dispatcher(&post_root, false);
+        assert_eq!(reopened_receipt, receipt);
+        let endpoint = LocalManagement::bind_at(&replay_root, effective_uid(), dispatcher)
+            .expect("restarted owner endpoint");
+        let path = endpoint.path().to_owned();
+        let server = tokio::spawn(endpoint.serve());
+        let mut stream = UnixStream::connect(path).await.expect("replay connection");
+        let query = format!(r#"{{"receipt_id":"{receipt}"}}"#);
+        let query = Frame::control(
+            Direction::ClientToServer,
+            Opcode::GrantQuery,
+            query.into_bytes(),
+        )
+        .expect("grant QUERY")
+        .encode();
+        tokio::io::AsyncWriteExt::write_all(&mut stream, &query)
+            .await
+            .expect("grant QUERY write");
+        tokio::io::AsyncWriteExt::shutdown(&mut stream)
+            .await
+            .expect("grant QUERY EOF");
+        let mut replayed = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut replayed)
+            .await
+            .expect("grant replay response EOF");
+        let replayed_text = String::from_utf8_lossy(&replayed);
+        assert!(replayed_text.contains(&receipt.to_string()));
+        assert!(replayed_text.contains("\"replayed\":true"));
+        server.abort();
+        let _ = server.await;
+
+        // Exercise the finalizer through a real native socket rather than only the generic duplex
+        // writer test. The peer deliberately leaves the send buffer full until the short frame
+        // attempt has elapsed; the server must still half-close and the peer must observe EOF.
+        let (mut terminal_writer, mut terminal_reader) =
+            UnixStream::pair().expect("terminal backpressure socket pair");
+        let oversized = vec![0x5a_u8; 2 * 1024 * 1024];
+        let oversized_len = oversized.len();
+        let terminal = tokio::spawn(async move {
+            finalize_native_terminal(&mut terminal_writer, Some(&oversized)).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !terminal.is_finished(),
+            "a two-megabyte frame must backpressure an unread Unix socket"
+        );
+        tokio::time::advance(std::time::Duration::from_millis(250)).await;
+        tokio::task::yield_now().await;
+        let mut partial = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut terminal_reader, &mut partial)
+            .await
+            .expect("backpressured Unix terminal EOF");
+        terminal.await.expect("bounded Unix terminal finalizer");
+        assert!(
+            partial.len() < oversized_len,
+            "the blocked Unix frame attempt must be abandoned before EOF"
+        );
+
+        // The cleanup primitive also remains bounded when the authenticated peer never stops
+        // writing. Nothing reads this request side: SHUT_RD must atomically discard queued bytes,
+        // reject the flood and preserve the canonical terminal response plus clean EOF.
+        let (mut flood_server, flood_client) =
+            UnixStream::pair().expect("terminal flood socket pair");
+        let (mut flood_reader, mut flood_writer) = flood_client.into_split();
+        let flood_bytes = [0x41_u8; 4096];
+        tokio::io::AsyncWriteExt::write_all(&mut flood_writer, &flood_bytes)
+            .await
+            .expect("queue adversarial bytes before read-half shutdown");
+        let flood = tokio::spawn(async move {
+            let mut writes = 1_usize;
+            loop {
+                match tokio::io::AsyncWriteExt::write_all(&mut flood_writer, &flood_bytes).await {
+                    Ok(()) => {
+                        writes += 1;
+                        tokio::task::yield_now().await;
+                    }
+                    Err(_) => return writes,
+                }
+            }
+        });
+        tokio::task::yield_now().await;
+        let deadline_response = crate::local_management::deadline_frame();
+        let expected_response = deadline_response.clone();
+        let terminal = tokio::spawn(async move {
+            finalize_native_connection(&mut flood_server, Some(&deadline_response)).await;
+        });
+        let mut received = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut flood_reader, &mut received)
+            .await
+            .expect("flooded peer terminal EOF");
+        assert_eq!(received, expected_response);
+        assert!(
+            !terminal.is_finished(),
+            "the connection remains retained while its inbound flood is bounded"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        terminal.await.expect("bounded flooded finalizer");
+        assert!(
+            flood.await.expect("flood task") > 0,
+            "the peer queued adversarial bytes before bounded read-half shutdown"
+        );
+
+        let _ = std::fs::remove_dir_all(replay_root);
+        let _ = std::fs::remove_dir_all(post_root);
     }
 
     #[test]

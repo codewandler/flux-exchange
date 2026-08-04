@@ -232,6 +232,16 @@ where
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    #[cfg(all(windows, feature = "native-deadline-test-seam"))]
+    if arguments == [OsStr::new("native-deadline-test-seam")] {
+        return match local_management::run_deadline_process_fixture() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     #[cfg(feature = "native-root-test-seam")]
     if arguments == [OsStr::new("native-root-test-seam")] {
         return match native_root::authenticated_account_state_root() {

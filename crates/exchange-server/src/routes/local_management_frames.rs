@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
 use axum::{Extension, Json};
 use exchange_host::Principal;
+use futures_util::{Sink as _, SinkExt as _};
 use serde_json::json;
 
 use super::{Access, Module, Route};
@@ -18,7 +19,13 @@ use crate::state::AppState;
 const PROTOCOL: &str = "exchange.local-management.v1";
 const MAX_MESSAGE_BYTES: usize = 65_548;
 const TERMINAL_FINALIZATION_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
-const TERMINAL_FRAME_ATTEMPT: std::time::Duration = std::time::Duration::from_millis(250);
+const TERMINAL_RESERVATION_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+// Axum's Tungstenite sink can retain a frame after a cancelled `send` flush. Keep enough
+// userspace capacity to enqueue one maximum FXLM frame and its close before either reaches TCP.
+const TERMINAL_ATOMIC_BUFFER: usize = MAX_MESSAGE_BYTES + 256;
+const TERMINAL_MAX_BUFFER: usize = TERMINAL_ATOMIC_BUFFER * 2;
+const _: () = assert!(TERMINAL_ATOMIC_BUFFER > MAX_MESSAGE_BYTES + 16);
+const _: () = assert!(TERMINAL_MAX_BUFFER > TERMINAL_ATOMIC_BUFFER + MAX_MESSAGE_BYTES + 16);
 
 pub(super) const MODULE: Module = Module {
     name: "local-management-frames",
@@ -92,6 +99,8 @@ async fn upgrade(
     // requires; traffic in `serve` never replaces this deadline.
     let deadline = DeadlineController::start();
     let mut response = upgrade
+        .write_buffer_size(TERMINAL_ATOMIC_BUFFER)
+        .max_write_buffer_size(TERMINAL_MAX_BUFFER)
         .protocols([PROTOCOL])
         .on_upgrade(move |socket| serve(socket, dispatcher, tenant, claim, deadline));
     response
@@ -255,17 +264,88 @@ async fn send_terminal(
 
 /// One fixed, non-configurable terminalization budget reserves time for the mandatory close.
 ///
-/// If the canonical FXLM frame backpressures, its short attempt is cancelled and the remainder is
-/// spent on the empty-reason close. This is deliberately separate from the logical-operation clock:
-/// at expiry that clock has no time left, but the protocol still requires a best-effort close.
+/// The canonical FXLM frame and empty-reason close are reserved atomically in a bounded userspace
+/// buffer before the one flush begins. This is deliberately separate from the logical-operation
+/// clock: at expiry that clock has no time left, but protocol finalization remains best effort.
 async fn finalize_terminal(socket: &mut WebSocket, response: Option<Vec<u8>>, code: u16) {
     let final_by = tokio::time::Instant::now() + TERMINAL_FINALIZATION_BUDGET;
-    if let Some(response) = response {
-        let frame_by = tokio::time::Instant::now() + TERMINAL_FRAME_ATTEMPT;
-        let _ =
-            tokio::time::timeout_at(frame_by, socket.send(Message::Binary(response.into()))).await;
+    let reserve_by = tokio::time::Instant::now() + TERMINAL_RESERVATION_BUDGET;
+    let Some(_reservation) = reserve_terminal(socket, response, code, reserve_by).await else {
+        return;
+    };
+
+    let flushing = socket.flush();
+    tokio::pin!(flushing);
+    let flushed = tokio::select! {
+        biased;
+        result = &mut flushing => result.is_ok(),
+        _ = tokio::time::sleep_until(final_by) => false,
+    };
+    if !flushed {
+        return;
     }
-    let _ = tokio::time::timeout_at(final_by, close(socket, code)).await;
+    let confirming = socket.recv();
+    tokio::pin!(confirming);
+    tokio::select! {
+        biased;
+        _ = &mut confirming => {}
+        _ = tokio::time::sleep_until(final_by) => {}
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminalReservation {
+    FrameAndClose,
+    CloseOnly,
+}
+
+async fn reserve_terminal(
+    socket: &mut WebSocket,
+    response: Option<Vec<u8>>,
+    code: u16,
+    reserve_by: tokio::time::Instant,
+) -> Option<TerminalReservation> {
+    if !sink_ready(socket, reserve_by).await {
+        return None;
+    }
+    let frame_reserved = if let Some(response) = response {
+        // `start_send` is synchronous. With the production upgrade's buffer contract, every
+        // admitted FXLM frame queues completely without I/O. An oversized adversarial frame can be
+        // rejected atomically and must leave the sink ready for close.
+        std::pin::Pin::new(&mut *socket)
+            .start_send(Message::Binary(response.into()))
+            .is_ok()
+    } else {
+        false
+    };
+    // Sink::start_send requires readiness before every item. For a reserved admitted frame this is
+    // immediately ready because no transport write has begun; after WriteBufferFull it proves the
+    // rejected frame left the bounded sink usable.
+    if !sink_ready(socket, reserve_by).await {
+        return None;
+    }
+    std::pin::Pin::new(&mut *socket)
+        .start_send(Message::Close(Some(CloseFrame {
+            code,
+            reason: "".into(),
+        })))
+        .ok()?;
+    Some(if frame_reserved {
+        TerminalReservation::FrameAndClose
+    } else {
+        TerminalReservation::CloseOnly
+    })
+}
+
+async fn sink_ready(socket: &mut WebSocket, reserve_by: tokio::time::Instant) -> bool {
+    let ready =
+        std::future::poll_fn(|context| std::pin::Pin::new(&mut *socket).poll_ready(context));
+    tokio::pin!(ready);
+    tokio::select! {
+        biased;
+        result = &mut ready => result.is_ok(),
+        _ = tokio::time::sleep_until(reserve_by) => false,
+    }
 }
 
 fn refusal(status: StatusCode, code: &'static str) -> Response {
@@ -353,6 +433,21 @@ mod tests {
         upgrade
             .protocols([PROTOCOL])
             .on_upgrade(move |socket| serve(socket, dispatcher, tenant, claim, deadline))
+    }
+
+    async fn backpressured_terminal_upgrade(
+        State(code): State<u16>,
+        upgrade: WebSocketUpgrade,
+    ) -> Response {
+        upgrade
+            // The real Tungstenite sink can hold a close but not this test's data frame. Its
+            // WriteBufferFull result is frame-atomic and leaves the close reservation untouched.
+            .write_buffer_size(1)
+            .max_write_buffer_size(128)
+            .protocols([PROTOCOL])
+            .on_upgrade(move |mut socket| async move {
+                finalize_terminal(&mut socket, Some(vec![0x5a; 4096]), code).await;
+            })
     }
 
     async fn test_socket(
@@ -637,5 +732,45 @@ mod tests {
         drop(credentials);
         drop(post_credentials);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hosted_backpressured_terminal_frame_reserves_the_required_close() {
+        for (path, code, expected) in [
+            ("/pre", close_code::POLICY, CloseCode::Policy),
+            ("/post", close_code::NORMAL, CloseCode::Normal),
+        ] {
+            let app = axum::Router::new()
+                .route(path, axum::routing::get(backpressured_terminal_upgrade))
+                .with_state(code);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("backpressure listener");
+            let address = listener.local_addr().expect("listener address");
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("backpressure server");
+            });
+            let mut socket = test_socket(address, path).await;
+            tokio::task::yield_now().await;
+
+            // Do not poll the client until the atomic reservation has run. The bounded sink must
+            // reject the data frame while retaining capacity for the close.
+            tokio::task::yield_now().await;
+            tokio::time::resume();
+            let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+                .await
+                .expect("bounded hosted terminal read")
+                .expect("hosted close item")
+                .expect("hosted close frame");
+            let ClientMessage::Close(Some(close)) = terminal else {
+                panic!("the abandoned terminal frame must not precede the reserved close: {terminal:?}");
+            };
+            assert_eq!(close.code, expected);
+            assert!(close.reason.is_empty());
+            server.abort();
+            tokio::time::pause();
+        }
     }
 }

@@ -22,6 +22,9 @@ supervisor-test-bind-refusal = []
 # Process-only acceptance seam. It reports the production account-derived root without creating
 # it, so native runners can poison inherited home variables and inspect the real binary decision.
 native-root-test-seam = []
+# Native CI only: run the production Windows endpoint with a paused monotonic clock from one
+# dedicated integration-test executable. Released binaries do not recognize this command.
+native-deadline-test-seam = ["tokio/test-util"]
 
 [[bin]]
 name = "flux-exchange"

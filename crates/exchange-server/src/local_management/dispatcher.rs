@@ -113,7 +113,7 @@ impl HostedReply {
 }
 
 /// Canonical pre-decision absolute-deadline outcome shared by native and hosted transports.
-#[cfg(test)]
+#[cfg(any(test, all(windows, feature = "native-deadline-test-seam")))]
 pub(crate) fn deadline_frame() -> Vec<u8> {
     error_frame(body("deadline_exceeded", 408, "refresh"))
 }

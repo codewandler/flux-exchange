@@ -36,11 +36,14 @@ use super::codec::{Direction, Frame, Opcode, StreamDecoder};
 use super::dispatcher::{expired_reply, native_frame_refusal, Transport};
 use super::service_account::{OneShotWriter, WriterRefusal};
 use super::{
-    deadline::{finalize_native_terminal, write_native_terminal},
+    deadline::{finalize_native_connection, write_native_terminal},
     ActiveSession, DeadlineController, Dispatcher, SessionAdvance, SessionBegin,
     TransactionCoordinator,
 };
 use crate::state::AppState;
+
+#[cfg(any(test, feature = "native-deadline-test-seam"))]
+use super::deadline::finalize_native_terminal;
 
 const PIPE_PREFIX: &str = r"\\.\pipe\flux-exchange-local-management-v1-";
 const MAX_FRAME_BYTES: u32 = 65_548;
@@ -138,7 +141,7 @@ impl WindowsEndpoint {
         .map_err(|_| WindowsEndpointRefusal::Bind)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "native-deadline-test-seam"))]
     fn pipe_name(&self) -> &str {
         &self.pipe_name
     }
@@ -318,6 +321,8 @@ pub(crate) struct LocalManagement {
     endpoint: WindowsEndpoint,
     dispatcher: Dispatcher,
     tenant: exchange_host::Tenant,
+    #[cfg(any(test, feature = "native-deadline-test-seam"))]
+    deadline_override: Option<DeadlineController>,
 }
 
 impl LocalManagement {
@@ -341,15 +346,24 @@ impl LocalManagement {
             endpoint,
             dispatcher,
             tenant,
+            #[cfg(any(test, feature = "native-deadline-test-seam"))]
+            deadline_override: None,
         }))
     }
 
     /// Accept authenticated owner operations until shutdown or an endpoint integrity refusal.
     pub(crate) async fn serve(mut self) {
+        #[cfg(any(test, feature = "native-deadline-test-seam"))]
+        let deadline_override = self.deadline_override.clone();
         loop {
             let Ok(mut connection) = self.endpoint.accept_authenticated().await else {
                 return;
             };
+            #[cfg(any(test, feature = "native-deadline-test-seam"))]
+            let deadline = deadline_override
+                .clone()
+                .unwrap_or_else(DeadlineController::start);
+            #[cfg(not(any(test, feature = "native-deadline-test-seam")))]
             let deadline = DeadlineController::start();
             if let Err(expired) = deadline
                 .race(dispatch_one(
@@ -361,8 +375,12 @@ impl LocalManagement {
                 .await
             {
                 let (reply, _) = expired_reply(expired).into_parts();
-                finalize_native_terminal(&mut connection.pipe, Some(&reply)).await;
+                finalize_native_connection(&mut connection.pipe, Some(&reply)).await;
             }
+            // DisconnectNamedPipe is the bounded Windows analogue of closing the Unix read half:
+            // it rejects raced client writes without a read loop and makes the completed server
+            // shutdown observable before this authenticated connection is dropped.
+            let _ = connection.pipe.disconnect();
             // The endpoint is rearmed only after both the pipe and its pinned client process have
             // been dropped, so no attachment can be associated with the next connection.
             drop(connection);
@@ -567,7 +585,7 @@ async fn refuse_attachment(
         write_native_terminal(stream, &frame.encode(), deadline).await;
         return Ok(());
     }
-    finalize_native_terminal(stream, None).await;
+    finalize_native_connection(stream, None).await;
     Ok(())
 }
 
@@ -884,11 +902,21 @@ fn owned_handle(raw: HANDLE) -> Option<OwnedHandle> {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "native-deadline-test-seam")]
+pub(crate) fn run_deadline_process_fixture() -> Result<(), String> {
+    tests::run_deadline_process_fixture()
+}
+
+#[cfg(any(test, feature = "native-deadline-test-seam"))]
+#[cfg_attr(not(test), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
+    use exchange_host::{
+        GrantReceiptId, GrantSelector, GrantStore, GrantTransactions as _, Tenant,
+    };
     use tokio::net::windows::named_pipe::ClientOptions;
     use windows_sys::Win32::Foundation::{
         GetLastError, LocalFree, ERROR_NO_TOKEN, ERROR_SUCCESS, HANDLE,
@@ -902,6 +930,262 @@ mod tests {
     };
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+
+    use crate::audit::AuditJournal;
+    use crate::local_management::codec::Opcode;
+    use crate::local_management::{Expired, ReceiptIdentity, Unresolved};
+
+    static ENDPOINT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn private_root(name: &str) -> std::path::PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!(
+            "flux-exchange-x135-windows-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("private test root");
+        root
+    }
+
+    fn test_dispatcher(root: &std::path::Path) -> Dispatcher {
+        let store = exchange_host::CredentialStore::bind(root.join("credentials/store"))
+            .expect("credential store");
+        let coordinator = Arc::new(
+            TransactionCoordinator::bind(
+                root.join("transactions/journal.sqlite3"),
+                store.prepared_secrets(),
+            )
+            .expect("transaction coordinator"),
+        );
+        Dispatcher::new(AppState::without_identity(), coordinator)
+    }
+
+    fn grant_dispatcher(root: &std::path::Path, seed: bool) -> (Dispatcher, GrantReceiptId) {
+        let store = exchange_host::CredentialStore::bind(root.join("credentials/store"))
+            .expect("credential store");
+        let coordinator = Arc::new(
+            TransactionCoordinator::bind(
+                root.join("transactions/journal.sqlite3"),
+                store.prepared_secrets(),
+            )
+            .expect("transaction coordinator"),
+        );
+        let audit =
+            Arc::new(AuditJournal::bind(root.join("audit/events.sqlite3")).expect("audit journal"));
+        let grants = Arc::new(GrantStore::bind(root.join("grants.json")).expect("grant store"));
+        let receipt = GrantReceiptId::from_protocol_bytes([0x71; 32]).expect("receipt");
+        if seed {
+            let tenant = Tenant::new("local").expect("tenant");
+            let selector: GrantSelector = serde_json::from_slice(
+                br#"{"effects_within":null,"idempotency":null,"max_risk":"low"}"#,
+            )
+            .expect("selector");
+            let candidate = grants
+                .preview(&tenant, "github", selector)
+                .expect("grant preview");
+            grants
+                .apply(
+                    &tenant,
+                    &candidate.candidate,
+                    candidate.revision,
+                    candidate.proposal_digest,
+                    receipt,
+                )
+                .expect("durable grant decision");
+        }
+        let state = AppState::without_identity()
+            .with_transaction_coordinator(coordinator.clone())
+            .with_audit(audit)
+            .with_grant_transactions(grants);
+        (Dispatcher::new(state, coordinator), receipt)
+    }
+
+    fn local_management(
+        dispatcher: Dispatcher,
+        deadline: DeadlineController,
+    ) -> (LocalManagement, String) {
+        let endpoint = WindowsEndpoint::bind().expect("owner endpoint");
+        let pipe_name = endpoint.pipe_name().to_owned();
+        (
+            LocalManagement {
+                endpoint,
+                dispatcher,
+                tenant: Tenant::new("local").expect("tenant"),
+                deadline_override: Some(deadline),
+            },
+            pipe_name,
+        )
+    }
+
+    async fn deadline_process_fixture() {
+        let _endpoint_guard = ENDPOINT_TEST_LOCK.lock().expect("endpoint test lock");
+
+        let root = private_root("predecision");
+        let deadline = DeadlineController::start();
+        let (local, pipe_name) = local_management(test_dispatcher(&root), deadline.clone());
+        let server = tokio::spawn(local.serve());
+        let client = ClientOptions::new().open(&pipe_name).expect("owner pipe");
+        let (mut reader, mut writer) = tokio::io::split(client);
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"FXLM")
+            .await
+            .expect("partial header");
+        let response = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut bytes)
+                .await
+                .expect("pre-decision response EOF");
+            bytes
+        });
+        tokio::time::advance(std::time::Duration::from_secs(299)).await;
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &[1, 0, 0, 1])
+            .await
+            .expect("partial traffic at 299 seconds");
+        tokio::task::yield_now().await;
+        assert!(!response.is_finished());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            response.await.expect("pre-decision response"),
+            crate::local_management::deadline_frame()
+        );
+        server.abort();
+        let _ = server.await;
+        let _ = std::fs::remove_dir_all(root);
+
+        let post_root = private_root("postdecision");
+        let (dispatcher, receipt) = grant_dispatcher(&post_root, true);
+        let receipt_identity = ReceiptIdentity::from_protocol_bytes(receipt.protocol_bytes())
+            .expect("receipt identity");
+        let deadline = DeadlineController::start();
+        let (local, pipe_name) = local_management(dispatcher, deadline.clone());
+        let server = tokio::spawn(local.serve());
+        let client = ClientOptions::new().open(&pipe_name).expect("owner pipe");
+        let (mut reader, mut writer) = tokio::io::split(client);
+        tokio::task::yield_now().await;
+        deadline
+            .decided(receipt_identity, Unresolved::Store)
+            .expect("durable decision");
+        let response = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut bytes)
+                .await
+                .expect("post-decision response EOF");
+            bytes
+        });
+        tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"FX")
+            .await
+            .expect("partial traffic at 29 seconds");
+        tokio::task::yield_now().await;
+        assert!(!response.is_finished());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let (expected, close_code) =
+            crate::local_management::expired_reply(Expired::PostDecision {
+                receipt: receipt_identity,
+                unresolved: Unresolved::Store,
+            })
+            .into_parts();
+        assert_eq!(close_code, 1000);
+        assert_eq!(
+            response.await.expect("post-decision response"),
+            expected,
+            "the Windows native stream ends in clean EOF"
+        );
+        server.abort();
+        let _ = server.await;
+
+        let replay_root = private_root("replay-endpoint");
+        let (dispatcher, reopened_receipt) = grant_dispatcher(&post_root, false);
+        assert_eq!(reopened_receipt, receipt);
+        let replay_deadline = DeadlineController::start();
+        let (local, pipe_name) = local_management(dispatcher, replay_deadline);
+        let server = tokio::spawn(local.serve());
+        let mut client = ClientOptions::new().open(&pipe_name).expect("replay pipe");
+        let query = format!(r#"{{"receipt_id":"{receipt}"}}"#);
+        let query = Frame::control(
+            Direction::ClientToServer,
+            Opcode::GrantQuery,
+            query.into_bytes(),
+        )
+        .expect("grant QUERY")
+        .encode();
+        tokio::io::AsyncWriteExt::write_all(&mut client, &query)
+            .await
+            .expect("grant QUERY write");
+        tokio::io::AsyncWriteExt::shutdown(&mut client)
+            .await
+            .expect("grant QUERY EOF");
+        let mut replayed = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut client, &mut replayed)
+            .await
+            .expect("grant replay EOF");
+        let replayed = String::from_utf8_lossy(&replayed);
+        assert!(replayed.contains(&receipt.to_string()));
+        assert!(replayed.contains("\"replayed\":true"));
+        server.abort();
+        let _ = server.await;
+
+        // A real named pipe with its production output buffer proves that a blocked terminal frame
+        // cannot consume the EOF reservation. The authenticated client is retained through the
+        // finalizer exactly as it is by `LocalManagement::serve`.
+        let mut endpoint = WindowsEndpoint::bind().expect("terminal endpoint");
+        let pipe_name = endpoint.pipe_name().to_owned();
+        let accepting = tokio::spawn(async move {
+            endpoint
+                .accept_authenticated()
+                .await
+                .expect("authenticated terminal pipe")
+        });
+        let mut terminal_reader = ClientOptions::new()
+            .open(&pipe_name)
+            .expect("terminal pipe client");
+        let mut terminal_connection = accepting.await.expect("terminal accept task");
+        let oversized = vec![0x5a_u8; 2 * 1024 * 1024];
+        let oversized_len = oversized.len();
+        let terminal = tokio::spawn(async move {
+            finalize_native_terminal(&mut terminal_connection.pipe, Some(&oversized)).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !terminal.is_finished(),
+            "a two-megabyte frame must backpressure an unread Windows pipe"
+        );
+        tokio::time::advance(std::time::Duration::from_millis(250)).await;
+        tokio::task::yield_now().await;
+        let mut partial = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut terminal_reader, &mut partial)
+            .await
+            .expect("backpressured Windows terminal EOF");
+        terminal.await.expect("bounded Windows terminal finalizer");
+        assert!(
+            partial.len() < oversized_len,
+            "the blocked Windows frame attempt must be abandoned before EOF"
+        );
+
+        let _ = std::fs::remove_dir_all(replay_root);
+        let _ = std::fs::remove_dir_all(post_root);
+    }
+
+    #[cfg(test)]
+    #[tokio::test(start_paused = true)]
+    async fn supervised_windows_local_management_deadlines_are_phase_exact() {
+        deadline_process_fixture().await;
+    }
+
+    #[cfg(feature = "native-deadline-test-seam")]
+    pub(super) fn run_deadline_process_fixture() -> Result<(), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(async {
+            tokio::time::pause();
+            deadline_process_fixture().await;
+        });
+        Ok(())
+    }
 
     #[test]
     fn sid_bytes_select_exact_lowerhex_pipe_name() {
@@ -1020,6 +1304,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_pipe_has_only_owner_and_system_in_a_protected_dacl() {
+        let _endpoint_guard = ENDPOINT_TEST_LOCK.lock().expect("endpoint test lock");
         let mut endpoint = WindowsEndpoint::bind().expect("startup TokenUser");
         assert!(endpoint.pipe_name().starts_with(PIPE_PREFIX));
         assert_eq!(endpoint.pipe_name().len(), PIPE_PREFIX.len() + 32);
@@ -1118,6 +1403,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_client_identity_is_pinned_before_source_handle_duplication() {
+        let _endpoint_guard = ENDPOINT_TEST_LOCK.lock().expect("endpoint test lock");
         let mut endpoint = WindowsEndpoint::bind().expect("startup TokenUser");
         let pipe_name = endpoint.pipe_name().to_owned();
         let accepting = endpoint.accept_authenticated();

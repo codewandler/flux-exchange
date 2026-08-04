@@ -208,6 +208,26 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p flux-exchange --test supervised_windows --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }}
 
+      - name: Prove the exact production Windows local-management deadline path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = 'supervised_windows_local_management_deadlines_are_phase_exact'
+          $list = cargo test -p flux-exchange --test local_management_windows_deadline --features native-deadline-test-seam --locked --target '${{ matrix.target }}' -- --list --format terse 2>&1 | Out-String
+          if (($list | Select-String -SimpleMatch "${name}: test" -AllMatches).Matches.Count -ne 1) {
+            Write-Error "the exact Windows deadline test was not listed exactly once`n$list"
+            exit 1
+          }
+          $result = cargo test -p flux-exchange --test local_management_windows_deadline --features native-deadline-test-seam --locked --target '${{ matrix.target }}' -- --exact $name --nocapture 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error $result
+            exit $LASTEXITCODE
+          }
+          if ($result -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out') {
+            Write-Error "the Windows deadline report was not one-passed/zero-ignored/zero-filtered`n$result"
+            exit 1
+          }
+
       - name: Exercise native Windows capability-kind and direction validation
         if: runner.os == 'Windows'
         run: cargo test -p flux-exchange --lib --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }} supervisor::tests::windows_validator_refuses_noninherited_nonpipe_and_each_wrong_direction

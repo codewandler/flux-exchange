@@ -4,7 +4,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::io::{AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
@@ -14,16 +14,63 @@ const TERMINAL_FINALIZATION_BUDGET: Duration = Duration::from_secs(1);
 const TERMINAL_FRAME_ATTEMPT: Duration = Duration::from_millis(250);
 
 /// Best-effort native terminal frame plus mandatory EOF under one separate fixed budget.
+#[cfg(any(test, all(windows, feature = "native-deadline-test-seam")))]
 pub(crate) async fn finalize_native_terminal<W>(writer: &mut W, response: Option<&[u8]>)
 where
     W: AsyncWrite + Unpin,
 {
     let final_by = Instant::now() + TERMINAL_FINALIZATION_BUDGET;
+    finalize_native_output(writer, response, final_by).await;
+}
+
+/// Finalize a full-duplex native connection while bounding adversarial inbound traffic.
+pub(crate) async fn finalize_native_connection<S>(stream: &mut S, response: Option<&[u8]>)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let final_by = Instant::now() + TERMINAL_FINALIZATION_BUDGET;
+    finalize_native_output(stream, response, final_by).await;
+
+    // Retain the read half after write shutdown so the peer observes EOF before a full-socket drop
+    // can turn unread request bytes into reset. The deadline branch is biased first: a continuously
+    // readable authenticated flood cannot keep this loop alive at the fixed boundary.
+    let mut bytes = [0_u8; 4096];
+    loop {
+        let read = stream.read(&mut bytes);
+        tokio::pin!(read);
+        let received = tokio::select! {
+            biased;
+            _ = tokio::time::sleep_until(final_by) => return,
+            result = &mut read => result,
+        };
+        match received {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
+}
+
+async fn finalize_native_output<W>(writer: &mut W, response: Option<&[u8]>, final_by: Instant)
+where
+    W: AsyncWrite + Unpin,
+{
     if let Some(response) = response {
         let frame_by = Instant::now() + TERMINAL_FRAME_ATTEMPT;
-        let _ = tokio::time::timeout_at(frame_by, writer.write_all(response)).await;
+        let write = writer.write_all(response);
+        tokio::pin!(write);
+        tokio::select! {
+            biased;
+            _ = &mut write => {}
+            _ = tokio::time::sleep_until(frame_by) => {}
+        }
     }
-    let _ = tokio::time::timeout_at(final_by, writer.shutdown()).await;
+    let shutdown = writer.shutdown();
+    tokio::pin!(shutdown);
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => {}
+        _ = tokio::time::sleep_until(final_by) => {}
+    }
 }
 
 /// Write an ordinary terminal frame within the operation cap, then reserve EOF separately.
@@ -32,10 +79,10 @@ pub(crate) async fn write_native_terminal<W>(
     response: &[u8],
     deadline: &DeadlineController,
 ) where
-    W: AsyncWrite + Unpin,
+    W: AsyncRead + AsyncWrite + Unpin,
 {
     let _ = deadline.race_response(writer.write_all(response)).await;
-    finalize_native_terminal(writer, None).await;
+    finalize_native_connection(writer, None).await;
 }
 
 trait MonotonicClock: Send + Sync {
