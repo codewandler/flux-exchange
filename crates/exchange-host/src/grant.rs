@@ -152,6 +152,7 @@ impl OperationFacts {
 /// the predicate. An operator who has explicitly denied one operation means it, and no metadata
 /// change should quietly re-admit it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Selector {
     /// Admit only operations at or below this risk.
     pub max_risk: Option<Risk>,
@@ -228,6 +229,7 @@ impl Selector {
 /// out — resolving the credential is the host's job, from the connection the grant points at, and a
 /// stolen token therefore yields a bounded set of *operations* rather than a vendor secret.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Grant {
     /// The connector this grant reaches. Never a wildcard: a grant that reached every connector
     /// would re-admit whatever the next connection added, without anyone deciding to.
@@ -259,6 +261,7 @@ impl Grant {
 /// One explicit inbound grant. Unlike outbound selectors, an inbound grant is a closed event set:
 /// a vendor-created discriminator value can never become a trigger label through a wildcard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InboundGrant {
     /// Connector catalogue id.
     pub connector: String,
@@ -510,11 +513,18 @@ pub use file::{GrantStore, GrantStoreError};
 /// protected-DACL checks keep that authority to the process identity and refuse unsafe existing
 /// metadata without repairing it.
 mod file {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::{Path, PathBuf};
     use std::sync::RwLock;
 
-    use super::{Grant, GrantRefusal, Grants};
+    use serde::{Deserialize, Serialize};
+
+    use super::{Grant, GrantRefusal, Grants, InboundGrant, Selector};
+    use crate::grant_cas::{
+        GrantApplyReceipt, GrantCandidate, GrantCandidateInbound, GrantPreview,
+        GrantProposalDigest, GrantReceiptId, GrantSelector, GrantTransactionRefusal,
+        GrantTransactions, StoreRevision,
+    };
     use crate::paths::{enclosing_working_tree, resolve};
     use crate::{private_fs, Tenant, GRANT_STORE_SETTING};
 
@@ -537,6 +547,49 @@ mod file {
     /// grant instead.
     type Held = BTreeMap<String, Vec<Grant>>;
 
+    const FORMAT: &str = "exchange.grant-store.v1";
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Versioned {
+        format: String,
+        tenants: BTreeMap<String, TenantRecord>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TenantRecord {
+        grants: Vec<Grant>,
+        receipts: Vec<ReceiptRecord>,
+        revision: StoreRevision,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ReceiptRecord {
+        connector: String,
+        proposal_digest: GrantProposalDigest,
+        receipt_id: GrantReceiptId,
+        revision: StoreRevision,
+    }
+
+    impl ReceiptRecord {
+        fn response(&self, replayed: bool) -> GrantApplyReceipt {
+            GrantApplyReceipt {
+                connector: self.connector.clone(),
+                receipt_id: self.receipt_id,
+                replayed,
+                revision: self.revision,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    enum Loaded {
+        Legacy(Held),
+        Versioned(Versioned),
+    }
+
     /// **What every tenant of this host may run, in one file.**
     ///
     /// Held in memory and written through on every change, for the reason
@@ -551,7 +604,7 @@ mod file {
     #[derive(Debug)]
     pub struct GrantStore {
         path: PathBuf,
-        held: RwLock<Held>,
+        held: RwLock<Loaded>,
     }
 
     impl GrantStore {
@@ -656,7 +709,7 @@ mod file {
         /// half-written store and an interrupted write leaves the previous one intact. The same
         /// shape the other two file stores use, and for the same reason: this file is small and
         /// rewriting it is cheaper than being able to corrupt it.
-        fn persist(&self, held: &Held) -> Result<(), GrantRefusal> {
+        fn persist_versioned(&self, held: &Versioned) -> Result<(), GrantRefusal> {
             let unwritable = |reason: String| GrantRefusal::Unwritable {
                 path: self.path.display().to_string(),
                 reason,
@@ -664,6 +717,11 @@ mod file {
 
             let encoded =
                 serde_json::to_vec_pretty(held).map_err(|error| unwritable(error.to_string()))?;
+            if encoded.len() > 1024 * 1024 {
+                return Err(unwritable(
+                    "the complete grant store exceeds its 1 MiB durable bound".to_owned(),
+                ));
+            }
             private_fs::write_atomic(&self.path, &encoded)
                 .map_err(|error| unwritable(error.to_string()))
         }
@@ -673,24 +731,254 @@ mod file {
     ///
     /// A file that is *there* and unreadable is a refusal. See [`GrantStore`]: there is deliberately
     /// no arm here that starts empty because parsing failed.
-    fn read(path: &Path) -> Result<Held, GrantStoreError> {
+    fn read(path: &Path) -> Result<Loaded, GrantStoreError> {
         let Some(raw) =
             private_fs::read(path, 1024 * 1024).map_err(|error| GrantStoreError::Unusable {
                 path: path.display().to_string(),
                 reason: error.to_string(),
             })?
         else {
-            return Ok(Held::new());
+            return Ok(Loaded::Legacy(Held::new()));
         };
 
         if raw.is_empty() {
-            return Ok(Held::new());
+            return Ok(Loaded::Legacy(Held::new()));
         }
 
-        serde_json::from_slice(&raw).map_err(|error| GrantStoreError::Unusable {
-            path: path.display().to_string(),
-            reason: error.to_string(),
-        })
+        let value: serde_json::Value =
+            serde_json::from_slice(&raw).map_err(|error| GrantStoreError::Unusable {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?;
+        if matches!(value.get("format"), Some(serde_json::Value::String(_))) {
+            let versioned: Versioned =
+                serde_json::from_value(value).map_err(|error| GrantStoreError::Unusable {
+                    path: path.display().to_string(),
+                    reason: error.to_string(),
+                })?;
+            validate_versioned(&versioned).map_err(|reason| GrantStoreError::Unusable {
+                path: path.display().to_string(),
+                reason,
+            })?;
+            Ok(Loaded::Versioned(versioned))
+        } else {
+            serde_json::from_value(value)
+                .map(Loaded::Legacy)
+                .map_err(|error| GrantStoreError::Unusable {
+                    path: path.display().to_string(),
+                    reason: error.to_string(),
+                })
+        }
+    }
+
+    fn validate_versioned(document: &Versioned) -> Result<(), String> {
+        if document.format != FORMAT {
+            return Err(format!(
+                "unsupported grant store format `{}`",
+                document.format
+            ));
+        }
+        for (tenant, record) in &document.tenants {
+            let mut digests = BTreeSet::new();
+            let mut receipt_ids = BTreeSet::new();
+            let mut prior_revision =
+                StoreRevision::new(1).expect("one is a nonzero store revision");
+            for receipt in &record.receipts {
+                if !digests.insert(receipt.proposal_digest) {
+                    return Err(format!("tenant `{tenant}` has a duplicate proposal digest"));
+                }
+                if !receipt_ids.insert(receipt.receipt_id) {
+                    return Err(format!(
+                        "tenant `{tenant}` has a duplicate receipt identity"
+                    ));
+                }
+                if receipt.revision <= prior_revision || receipt.revision > record.revision {
+                    return Err(format!(
+                        "tenant `{tenant}` has a receipt outside its monotonic revision history"
+                    ));
+                }
+                prior_revision = receipt.revision;
+            }
+        }
+        Ok(())
+    }
+
+    fn initialize(loaded: &Loaded, tenant: &Tenant) -> (Versioned, bool) {
+        match loaded {
+            Loaded::Legacy(legacy) => {
+                let mut tenants = legacy
+                    .iter()
+                    .map(|(tenant, grants)| {
+                        (
+                            tenant.clone(),
+                            TenantRecord {
+                                grants: grants.clone(),
+                                receipts: Vec::new(),
+                                revision: StoreRevision::new(1)
+                                    .expect("one is a nonzero store revision"),
+                            },
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                tenants
+                    .entry(tenant.as_str().to_owned())
+                    .or_insert_with(empty_record);
+                (
+                    Versioned {
+                        format: FORMAT.to_owned(),
+                        tenants,
+                    },
+                    true,
+                )
+            }
+            Loaded::Versioned(versioned) => {
+                let mut versioned = versioned.clone();
+                let changed = !versioned.tenants.contains_key(tenant.as_str());
+                versioned
+                    .tenants
+                    .entry(tenant.as_str().to_owned())
+                    .or_insert_with(empty_record);
+                (versioned, changed)
+            }
+        }
+    }
+
+    fn empty_record() -> TenantRecord {
+        TenantRecord {
+            grants: Vec::new(),
+            receipts: Vec::new(),
+            revision: StoreRevision::new(1).expect("one is a nonzero store revision"),
+        }
+    }
+
+    fn project(
+        grants: &[Grant],
+        connector: &str,
+        selector: GrantSelector,
+    ) -> Result<(GrantCandidate, Option<usize>), GrantTransactionRefusal> {
+        let provider = connector_catalog::provider(connector_catalog::ProviderKey::id(connector))
+            .ok_or(GrantTransactionRefusal::Unexpressible)?;
+        let selected = grants
+            .iter()
+            .enumerate()
+            .filter(|(_, grant)| grant.connector == connector)
+            .collect::<Vec<_>>();
+        if selected.len() > 1 {
+            return Err(GrantTransactionRefusal::Unexpressible);
+        }
+
+        let (inbound, position) = match selected.first() {
+            None => (Vec::new(), None),
+            Some((position, grant)) => {
+                if !grant.selector.allow_ids.is_empty() || !grant.selector.deny_ids.is_empty() {
+                    return Err(GrantTransactionRefusal::Unexpressible);
+                }
+                (
+                    project_inbound(provider, connector, &grant.inbound)?,
+                    Some(*position),
+                )
+            }
+        };
+        Ok((
+            GrantCandidate {
+                connector: connector.to_owned(),
+                inbound,
+                selector,
+            },
+            position,
+        ))
+    }
+
+    fn project_inbound(
+        provider: &connector_catalog::Provider,
+        connector: &str,
+        inbound: &[InboundGrant],
+    ) -> Result<Vec<GrantCandidateInbound>, GrantTransactionRefusal> {
+        if inbound.len() > 64 {
+            return Err(GrantTransactionRefusal::Unexpressible);
+        }
+        let mut bindings = BTreeSet::new();
+        let mut projected = Vec::with_capacity(inbound.len());
+        for entry in inbound {
+            if entry.connector != connector
+                || !bindings.insert(entry.binding.as_str())
+                || entry.events.is_empty()
+                || entry.events.len() > 256
+            {
+                return Err(GrantTransactionRefusal::Unexpressible);
+            }
+            let channel = provider
+                .channel(&entry.binding)
+                .ok_or(GrantTransactionRefusal::Unexpressible)?;
+            if entry
+                .events
+                .iter()
+                .any(|event| !channel.events.contains(&event.as_str()))
+            {
+                return Err(GrantTransactionRefusal::Unexpressible);
+            }
+            projected.push(GrantCandidateInbound {
+                binding: entry.binding.clone(),
+                events: entry.events.clone(),
+            });
+        }
+        Ok(projected)
+    }
+
+    fn validate_candidate(candidate: &GrantCandidate) -> Result<(), GrantTransactionRefusal> {
+        let provider =
+            connector_catalog::provider(connector_catalog::ProviderKey::id(&candidate.connector))
+                .ok_or(GrantTransactionRefusal::Unexpressible)?;
+        let reconstructed = candidate
+            .inbound
+            .iter()
+            .map(|entry| InboundGrant {
+                connector: candidate.connector.clone(),
+                binding: entry.binding.clone(),
+                events: entry.events.clone(),
+            })
+            .collect::<Vec<_>>();
+        let projected = project_inbound(provider, &candidate.connector, &reconstructed)?;
+        if projected != candidate.inbound {
+            return Err(GrantTransactionRefusal::Unexpressible);
+        }
+        if candidate
+            .selector
+            .effects_within
+            .as_ref()
+            .is_some_and(|effects| effects.len() > 3)
+        {
+            return Err(GrantTransactionRefusal::Unexpressible);
+        }
+        Ok(())
+    }
+
+    fn candidate_grant(candidate: &GrantCandidate) -> Grant {
+        Grant {
+            connector: candidate.connector.clone(),
+            selector: Selector {
+                max_risk: candidate.selector.max_risk,
+                effects_within: candidate.selector.effects_within.clone(),
+                idempotency: candidate.selector.idempotency,
+                allow_ids: BTreeSet::new(),
+                deny_ids: BTreeSet::new(),
+            },
+            inbound: candidate
+                .inbound
+                .iter()
+                .map(|entry| InboundGrant {
+                    connector: candidate.connector.clone(),
+                    binding: entry.binding.clone(),
+                    events: entry.events.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn transaction_refusal(refusal: GrantRefusal) -> GrantTransactionRefusal {
+        GrantTransactionRefusal::Store {
+            reason: refusal.to_string(),
+        }
     }
 
     impl Grants for GrantStore {
@@ -698,7 +986,13 @@ mod file {
             self.held
                 .read()
                 .ok()
-                .and_then(|held| held.get(tenant.as_str()).cloned())
+                .and_then(|held| match &*held {
+                    Loaded::Legacy(held) => held.get(tenant.as_str()).cloned(),
+                    Loaded::Versioned(held) => held
+                        .tenants
+                        .get(tenant.as_str())
+                        .map(|record| record.grants.clone()),
+                })
                 .unwrap_or_default()
         }
 
@@ -708,21 +1002,164 @@ mod file {
                 reason: "the store lock is poisoned".to_owned(),
             })?;
 
-            let previous = held.insert(tenant.as_str().to_owned(), grants.to_vec());
-
-            // Persisted under the same lock the map was changed under, and rolled back if the file
-            // will not take it: a store whose memory and file disagree would admit a call today
-            // that it refuses after a restart, which is the worst way for an authorisation decision
-            // to be wrong.
-            if let Err(refusal) = self.persist(&held) {
-                match previous {
-                    Some(previous) => held.insert(tenant.as_str().to_owned(), previous),
-                    None => held.remove(tenant.as_str()),
-                };
-                return Err(refusal);
-            }
+            let (mut versioned, _) = initialize(&held, tenant);
+            let record = versioned
+                .tenants
+                .get_mut(tenant.as_str())
+                .expect("initialization creates the tenant");
+            record.revision =
+                record
+                    .revision
+                    .checked_next()
+                    .ok_or_else(|| GrantRefusal::Unwritable {
+                        path: self.path.display().to_string(),
+                        reason: "the grant revision space is exhausted".to_owned(),
+                    })?;
+            record.grants = grants.to_vec();
+            self.persist_versioned(&versioned)?;
+            *held = Loaded::Versioned(versioned);
 
             Ok(())
+        }
+    }
+
+    impl GrantTransactions for GrantStore {
+        fn preview(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            selector: GrantSelector,
+        ) -> Result<GrantPreview, GrantTransactionRefusal> {
+            let mut held = self
+                .held
+                .write()
+                .map_err(|_| GrantTransactionRefusal::Store {
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            let (versioned, initialized) = initialize(&held, tenant);
+            if initialized {
+                self.persist_versioned(&versioned)
+                    .map_err(transaction_refusal)?;
+                *held = Loaded::Versioned(versioned.clone());
+            }
+            let record = versioned
+                .tenants
+                .get(tenant.as_str())
+                .expect("initialization creates the tenant");
+            let (candidate, _) = project(&record.grants, connector, selector)?;
+            let proposal_digest = candidate.proposal_digest(&record.revision)?;
+            Ok(GrantPreview {
+                candidate,
+                proposal_digest,
+                revision: record.revision,
+            })
+        }
+
+        fn apply(
+            &self,
+            tenant: &Tenant,
+            candidate: &GrantCandidate,
+            revision: StoreRevision,
+            proposal_digest: GrantProposalDigest,
+            receipt_id: GrantReceiptId,
+        ) -> Result<GrantApplyReceipt, GrantTransactionRefusal> {
+            validate_candidate(candidate)?;
+            if candidate.proposal_digest(&revision)? != proposal_digest {
+                return Err(GrantTransactionRefusal::DigestMismatch);
+            }
+
+            let mut held = self
+                .held
+                .write()
+                .map_err(|_| GrantTransactionRefusal::Store {
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            let (mut versioned, _) = initialize(&held, tenant);
+            let record = versioned
+                .tenants
+                .get_mut(tenant.as_str())
+                .expect("initialization creates the tenant");
+
+            if let Some(receipt) = record
+                .receipts
+                .iter()
+                .find(|receipt| receipt.proposal_digest == proposal_digest)
+            {
+                return Ok(receipt.response(true));
+            }
+            if record
+                .receipts
+                .iter()
+                .any(|receipt| receipt.receipt_id == receipt_id)
+            {
+                return Err(GrantTransactionRefusal::ReceiptConflict);
+            }
+            if record.revision != revision {
+                return Err(GrantTransactionRefusal::Stale {
+                    expected: revision,
+                    current: record.revision,
+                });
+            }
+
+            let (expected, position) = project(
+                &record.grants,
+                &candidate.connector,
+                candidate.selector.clone(),
+            )?;
+            if expected != *candidate {
+                return Err(GrantTransactionRefusal::Unexpressible);
+            }
+            let next = record
+                .revision
+                .checked_next()
+                .ok_or(GrantTransactionRefusal::RevisionExhausted)?;
+            let replacement = candidate_grant(candidate);
+            match position {
+                Some(position) => record.grants[position] = replacement,
+                None => record.grants.push(replacement),
+            }
+            let receipt = ReceiptRecord {
+                connector: candidate.connector.clone(),
+                proposal_digest,
+                receipt_id,
+                revision: next,
+            };
+            record.revision = next;
+            record.receipts.push(receipt.clone());
+
+            self.persist_versioned(&versioned)
+                .map_err(transaction_refusal)?;
+            *held = Loaded::Versioned(versioned);
+            Ok(receipt.response(false))
+        }
+
+        fn query(
+            &self,
+            tenant: &Tenant,
+            receipt_id: GrantReceiptId,
+        ) -> Result<Option<GrantApplyReceipt>, GrantTransactionRefusal> {
+            let mut held = self
+                .held
+                .write()
+                .map_err(|_| GrantTransactionRefusal::Store {
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            let (versioned, initialized) = initialize(&held, tenant);
+            if initialized {
+                self.persist_versioned(&versioned)
+                    .map_err(transaction_refusal)?;
+                *held = Loaded::Versioned(versioned.clone());
+            }
+            Ok(versioned
+                .tenants
+                .get(tenant.as_str())
+                .and_then(|record| {
+                    record
+                        .receipts
+                        .iter()
+                        .find(|receipt| receipt.receipt_id == receipt_id)
+                })
+                .map(|receipt| receipt.response(true)))
         }
     }
 

@@ -74,6 +74,7 @@ mod connections;
 // on Unix, process SID ownership and a protected owner-only DACL on Windows.
 mod credentials;
 mod grant;
+mod grant_cas;
 mod instances;
 mod invoke;
 mod lease;
@@ -168,6 +169,10 @@ pub use grant::{
     InboundGrant, InboundGranted, OperationFacts, Risk, Selector,
 };
 pub use grant::{GrantStore, GrantStoreError};
+pub use grant_cas::{
+    GrantApplyReceipt, GrantCandidate, GrantCandidateInbound, GrantPreview, GrantProposalDigest,
+    GrantReceiptId, GrantSelector, GrantTransactionRefusal, GrantTransactions, StoreRevision,
+};
 pub use instances::{
     ConnectionLabel, ConnectionRegistry, MemoryConnectionRegistry, NamedConnection, RegistryRefusal,
 };
