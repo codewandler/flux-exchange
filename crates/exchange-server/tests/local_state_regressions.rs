@@ -99,6 +99,10 @@ fn real_dev_flag_binds_the_complete_default_store_set() {
         refusal.contains("cannot listen on"),
         "startup did not reach the planted final bind after opening stores:\n{refusal}"
     );
+    assert!(
+        !root.join("run/local-management-v1.sock").exists(),
+        "--dev must never bind the owner-management endpoint"
+    );
     for absent_warning in [
         "no credential store is bound",
         "no channel store is bound",

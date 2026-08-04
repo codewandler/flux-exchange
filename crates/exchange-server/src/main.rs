@@ -465,6 +465,12 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
         .local_addr()
         .map_err(|source| StartupRefusal::BindUnavailable { bind, source })?;
 
+    #[cfg(unix)]
+    let local_management = local_management::LocalManagement::bind_for_mode(supervised)
+        .map_err(|reason| StartupRefusal::Supervised { reason })?;
+    #[cfg(unix)]
+    let local_management_task = local_management.map(|endpoint| tokio::spawn(endpoint.serve()));
+
     if let Some(supervision) = supervision {
         supervision
             .ready(local)
@@ -493,13 +499,19 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
         ),
     }
 
-    axum::serve(
+    let result = axum::serve(
         listener,
         routes::app_with_console(state, console.as_deref()),
     )
     .with_graceful_shutdown(stop_requested())
     .await
-    .map_err(|source| StartupRefusal::Serving { source })
+    .map_err(|source| StartupRefusal::Serving { source });
+    #[cfg(unix)]
+    if let Some(task) = local_management_task {
+        task.abort();
+        let _ = task.await;
+    }
+    result
 }
 
 /// Where the built console lives, if this deployment serves one.

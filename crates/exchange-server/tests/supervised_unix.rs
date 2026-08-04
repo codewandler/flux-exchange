@@ -1,4 +1,7 @@
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    feature = "native-root-test-seam"
+))]
 
 use std::ffi::OsStr;
 use std::io::{BufRead, Read, Write};
@@ -135,6 +138,13 @@ struct SupervisedChild {
     dynamic_authority_values: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum EndpointFixture {
+    Clean,
+    SymlinkRun,
+    StaleSocket,
+}
+
 impl SupervisedChild {
     fn spawn(root_mode: u32) -> Self {
         Self::spawn_with(root_mode, false)
@@ -144,11 +154,33 @@ impl SupervisedChild {
         Self::spawn_config(root_mode, wedge, None, None)
     }
 
+    fn spawn_endpoint_fixture(fixture: EndpointFixture, expected_peer_uid: Option<u32>) -> Self {
+        Self::spawn_config_full(0o700, false, None, None, fixture, expected_peer_uid)
+    }
+
     fn spawn_config(
         root_mode: u32,
         wedge: bool,
         bind: Option<&OsStr>,
         occupied_bind: Option<SocketAddr>,
+    ) -> Self {
+        Self::spawn_config_full(
+            root_mode,
+            wedge,
+            bind,
+            occupied_bind,
+            EndpointFixture::Clean,
+            None,
+        )
+    }
+
+    fn spawn_config_full(
+        root_mode: u32,
+        wedge: bool,
+        bind: Option<&OsStr>,
+        occupied_bind: Option<SocketAddr>,
+        endpoint_fixture: EndpointFixture,
+        expected_peer_uid: Option<u32>,
     ) -> Self {
         use std::os::unix::fs::PermissionsExt;
 
@@ -163,6 +195,22 @@ impl SupervisedChild {
         let dynamic_authority_values = seed_production_authority_stores(&root);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(root_mode))
             .expect("fixture root mode");
+        match endpoint_fixture {
+            EndpointFixture::Clean => {}
+            EndpointFixture::SymlinkRun => {
+                std::os::unix::fs::symlink(&root, root.join("run")).expect("planted run symlink");
+            }
+            EndpointFixture::StaleSocket => {
+                let run = root.join("run");
+                std::fs::create_dir(&run).expect("stale run directory");
+                std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700))
+                    .expect("owner-only stale run directory");
+                drop(
+                    std::os::unix::net::UnixListener::bind(run.join("local-management-v1.sock"))
+                        .expect("stale local-management socket"),
+                );
+            }
+        }
         let readiness = PipeEnds::new();
         let liveness = PipeEnds::new();
         let readiness_source = duplicate_high(readiness.write);
@@ -172,6 +220,7 @@ impl SupervisedChild {
         command
             .arg("--supervised")
             .env("FLUX_EXCHANGE_STATE", &root)
+            .env("FLUX_EXCHANGE_TEST_LOCAL_MANAGEMENT_ROOT", &root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if wedge {
@@ -184,6 +233,12 @@ impl SupervisedChild {
             command.env(
                 "FLUX_EXCHANGE_TEST_OCCUPIED_BIND",
                 occupied_bind.to_string(),
+            );
+        }
+        if let Some(expected_peer_uid) = expected_peer_uid {
+            command.env(
+                "FLUX_EXCHANGE_TEST_LOCAL_MANAGEMENT_PEER_UID",
+                expected_peer_uid.to_string(),
             );
         }
         // SAFETY: the closure uses only async-signal-safe descriptor operations before exec.
@@ -333,6 +388,124 @@ fn native_unix_target() -> &'static str {
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         platform => panic!("unsupported native release test platform {platform:?}"),
+    }
+}
+
+fn fxlm_frame(direction: u8, opcode: u16, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(12 + payload.len());
+    frame.extend_from_slice(b"FXLM");
+    frame.push(1);
+    frame.push(direction);
+    frame.extend_from_slice(&opcode.to_be_bytes());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+#[test]
+fn supervised_unix_binds_owner_authenticated_fxlm_before_readiness() {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::net::UnixStream;
+
+    let mut server = SupervisedChild::spawn(0o700);
+    let ready: serde_json::Value =
+        serde_json::from_slice(&server.readiness()).expect("readiness object");
+    let socket = server.state_root.join("run/local-management-v1.sock");
+    let run_metadata = std::fs::symlink_metadata(server.state_root.join("run"))
+        .expect("run existed when readiness was emitted");
+    let socket_metadata =
+        std::fs::symlink_metadata(&socket).expect("endpoint existed when readiness was emitted");
+    // SAFETY: geteuid has no pointer arguments or preconditions.
+    let euid = unsafe { libc::geteuid() };
+    assert_eq!(run_metadata.uid(), euid);
+    assert_eq!(run_metadata.permissions().mode() & 0o7777, 0o700);
+    assert!(socket_metadata.file_type().is_socket());
+    assert_eq!(socket_metadata.uid(), euid);
+    assert_eq!(socket_metadata.permissions().mode() & 0o7777, 0o600);
+
+    let request = fxlm_frame(1, 0x0007, br#"{"connector":"gitlab","selection":null}"#);
+    let mut stream = UnixStream::connect(&socket).expect("same-owner native connection");
+    for chunk in request.chunks(5) {
+        stream.write_all(chunk).expect("split FXLM stream write");
+    }
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("one logical operation EOF");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("closed FXLM response");
+    assert_eq!(
+        response,
+        fxlm_frame(
+            2,
+            0x7fff,
+            br#"{"code":"local_management_unavailable","commit":"none","retry":"operator","schema":"exchange.local-management-error.v1","status":503}"#,
+        )
+    );
+
+    let address = format!(
+        "{}:{}",
+        ready["bind"]["host"].as_str().expect("readiness host"),
+        ready["bind"]["port"].as_u64().expect("readiness port")
+    );
+    let mut http = TcpStream::connect(address).expect("loopback HTTP");
+    http.write_all(
+        b"GET /api/grants HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer local-owner\r\nConnection: close\r\n\r\n",
+    )
+    .expect("spoof attempt");
+    let mut http_response = String::new();
+    http.read_to_string(&mut http_response)
+        .expect("HTTP refusal");
+    assert!(
+        http_response.starts_with("HTTP/1.1 401"),
+        "loopback HTTP reproduced local-owner authority: {http_response}"
+    );
+
+    let output = server.finish();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn supervised_unix_rejects_an_injected_wrong_peer_before_reading() {
+    use std::os::unix::net::UnixStream;
+
+    // SAFETY: geteuid has no pointer arguments or preconditions.
+    let wrong_uid = unsafe { libc::geteuid() }.wrapping_add(1);
+    let mut server =
+        SupervisedChild::spawn_endpoint_fixture(EndpointFixture::Clean, Some(wrong_uid));
+    assert!(!server.readiness().is_empty());
+    let socket = server.state_root.join("run/local-management-v1.sock");
+    let mut stream = UnixStream::connect(socket).expect("connection reaches peer verifier");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("bounded peer refusal read");
+    let mut byte = [0_u8; 1];
+    assert_eq!(stream.read(&mut byte).expect("peer refusal EOF"), 0);
+    let output = server.finish();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn supervised_unix_refuses_planted_endpoint_metadata_without_repair() {
+    for fixture in [EndpointFixture::SymlinkRun, EndpointFixture::StaleSocket] {
+        let mut server = SupervisedChild::spawn_endpoint_fixture(fixture, None);
+        assert!(
+            server.readiness().is_empty(),
+            "planted endpoint emitted readiness"
+        );
+        let planted = match fixture {
+            EndpointFixture::SymlinkRun => server.state_root.join("run"),
+            EndpointFixture::StaleSocket => server.state_root.join("run/local-management-v1.sock"),
+            EndpointFixture::Clean => unreachable!("closed fixture list"),
+        };
+        assert!(
+            std::fs::symlink_metadata(&planted).is_ok(),
+            "Exchange removed planted metadata at {}",
+            planted.display()
+        );
+        let output = server.finish();
+        assert!(!output.status.success());
     }
 }
 
