@@ -37,6 +37,10 @@ fn key(label: &str) -> CredentialHeadKey {
     CredentialHeadKey::new("local", "github", label).expect("valid key")
 }
 
+fn image(root: &ScratchRoot) -> Vec<u8> {
+    fs::read(root.path().join("credential-heads-v1/image.json")).expect("read durable image")
+}
+
 #[test]
 fn legacy_migration_is_restart_stable_and_presence_independent() {
     let root = ScratchRoot::new("restart");
@@ -204,4 +208,161 @@ fn concurrent_compare_and_advance_has_one_winner() {
             .count(),
         1
     );
+}
+
+#[test]
+fn accepted_advance_is_exactly_once_and_stale_replay_is_restart_safe() {
+    let root = ScratchRoot::new("accepted-replay");
+    let key = key("primary");
+    let store =
+        CredentialHeadStore::migrate_legacy(root.path(), std::slice::from_ref(&key)).unwrap();
+    let initial = store.current(&key).unwrap();
+    let accepted = store.allocate_next(&key).unwrap();
+
+    store
+        .compare_and_advance(&key, &initial, accepted.clone())
+        .expect("accepted mutation advances exactly once");
+    drop(store);
+
+    let before_replay = image(&root);
+    let reopened = CredentialHeadStore::open(root.path()).expect("restart opens accepted image");
+    assert_eq!(reopened.current(&key).unwrap(), accepted);
+    assert!(matches!(
+        reopened.compare_and_advance(&key, &initial, accepted.clone()),
+        Err(CredentialHeadError::CompareFailed | CredentialHeadError::InvalidCandidate)
+    ));
+    assert_eq!(reopened.current(&key).unwrap(), accepted);
+    drop(reopened);
+
+    assert_eq!(image(&root), before_replay);
+    assert_eq!(
+        CredentialHeadStore::open(root.path())
+            .unwrap()
+            .current(&key)
+            .unwrap(),
+        accepted
+    );
+}
+
+#[test]
+fn stale_expected_head_refuses_without_publishing_its_fresh_candidate() {
+    let root = ScratchRoot::new("stale-candidate");
+    let key = key("primary");
+    let store =
+        CredentialHeadStore::migrate_legacy(root.path(), std::slice::from_ref(&key)).unwrap();
+    let stale = store.current(&key).unwrap();
+    let accepted = store.allocate_next(&key).unwrap();
+    store
+        .compare_and_advance(&key, &stale, accepted.clone())
+        .unwrap();
+    let rejected = store.allocate_next(&key).unwrap();
+    let before_replay = image(&root);
+
+    assert!(matches!(
+        store.compare_and_advance(&key, &stale, rejected.clone()),
+        Err(CredentialHeadError::CompareFailed)
+    ));
+    assert_eq!(store.current(&key).unwrap(), accepted);
+    drop(store);
+
+    assert_eq!(image(&root), before_replay);
+    let reopened = CredentialHeadStore::open(root.path()).unwrap();
+    assert_eq!(reopened.current(&key).unwrap(), accepted);
+    assert!(matches!(
+        reopened.compare_and_advance(&key, &accepted, rejected),
+        Ok(())
+    ));
+}
+
+#[test]
+fn retired_heads_remain_reserved_after_restart() {
+    let root = ScratchRoot::new("retired");
+    let key = key("primary");
+    let store =
+        CredentialHeadStore::migrate_legacy(root.path(), std::slice::from_ref(&key)).unwrap();
+    let initial = store.current(&key).unwrap();
+    let next = store.allocate_next(&key).unwrap();
+    store
+        .compare_and_advance(&key, &initial, next.clone())
+        .unwrap();
+    drop(store);
+
+    let reopened = CredentialHeadStore::open(root.path()).unwrap();
+    assert!(matches!(
+        reopened.compare_and_advance(&key, &next, initial),
+        Err(CredentialHeadError::InvalidCandidate)
+    ));
+    assert_eq!(reopened.current(&key).unwrap(), next);
+}
+
+#[test]
+fn independent_owner_roots_never_share_heads_or_mutations() {
+    let owner_a = ScratchRoot::new("owner-a");
+    let owner_b = ScratchRoot::new("owner-b");
+    let key = key("primary");
+    let store_a =
+        CredentialHeadStore::migrate_legacy(owner_a.path(), std::slice::from_ref(&key)).unwrap();
+    let store_b =
+        CredentialHeadStore::migrate_legacy(owner_b.path(), std::slice::from_ref(&key)).unwrap();
+    let initial_a = store_a.current(&key).unwrap();
+    let initial_b = store_b.current(&key).unwrap();
+    assert_ne!(initial_a, initial_b);
+
+    let next_a = store_a.allocate_next(&key).unwrap();
+    store_a
+        .compare_and_advance(&key, &initial_a, next_a.clone())
+        .unwrap();
+    drop(store_a);
+    drop(store_b);
+
+    assert_eq!(
+        CredentialHeadStore::open(owner_a.path())
+            .unwrap()
+            .current(&key)
+            .unwrap(),
+        next_a
+    );
+    assert_eq!(
+        CredentialHeadStore::open(owner_b.path())
+            .unwrap()
+            .current(&key)
+            .unwrap(),
+        initial_b
+    );
+}
+
+#[test]
+fn durable_head_image_has_only_value_free_identity_and_revision_state() {
+    let root = ScratchRoot::new("value-free");
+    let key = key("settings-only");
+    let store = CredentialHeadStore::migrate_legacy(root.path(), &[]).unwrap();
+    let head = store.allocate_new(&key).unwrap();
+    store.insert_new(key, head).unwrap();
+    drop(store);
+
+    let bytes = image(&root);
+    let document: serde_json::Value = serde_json::from_slice(&bytes).expect("canonical JSON image");
+    let object = document.as_object().expect("image object");
+    let mut members = object.keys().map(String::as_str).collect::<Vec<_>>();
+    members.sort_unstable();
+    assert_eq!(members, ["heads", "migration_complete", "schema"]);
+
+    let entry = object["heads"].as_array().unwrap()[0].as_object().unwrap();
+    let mut members = entry.keys().map(String::as_str).collect::<Vec<_>>();
+    members.sort_unstable();
+    assert_eq!(members, ["current", "key", "retired"]);
+    assert_eq!(entry["retired"], serde_json::json!([]));
+
+    let encoded = String::from_utf8(bytes).unwrap();
+    for forbidden in [
+        "secret",
+        "password",
+        "token",
+        "credential_present",
+        "credential_count",
+        "created_at",
+        "updated_at",
+    ] {
+        assert!(!encoded.contains(forbidden), "persisted {forbidden}");
+    }
 }
