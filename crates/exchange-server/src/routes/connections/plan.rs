@@ -1,24 +1,22 @@
 //! The declaration-driven labelled connection plan.
 //!
-//! This is deliberately a projection and an orchestrator, not another store. Field rows come from
-//! the connector catalogue, values are handed immediately to the existing connection/settings
-//! handlers, and the response is rebuilt from persisted state after every attempt.
+//! This is deliberately a value-free projection, not another store. Field rows come from the
+//! connector catalogue; owner-bound FXLM owns every connection and credential mutation.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{ConfigField, Provider};
 use exchange_host::{
     AuthorityState, AuthorityStatus, ConnectionLabel, DeclaredSetting, HostPinning, InstanceId,
-    TenantInstances,
+    Tenant,
 };
-use serde::de::{MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::*;
 
@@ -29,7 +27,7 @@ pub(super) fn read_route() -> MethodRouter<AppState> {
 }
 
 pub(super) fn write_route() -> MethodRouter<AppState> {
-    post(apply)
+    post(reject_secret_json)
 }
 
 pub(super) fn authority_route() -> MethodRouter<AppState> {
@@ -39,25 +37,10 @@ pub(super) fn authority_route() -> MethodRouter<AppState> {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Selection {
     name: Option<String>,
     version: Option<String>,
-}
-
-/// Secret values exist only in this request type and the existing credential request types.
-///
-/// No `Debug`, deliberately: adding `debug!(?body)` must remain a compile error.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Submission {
-    version: String,
-    name: String,
-    #[serde(default)]
-    current_name: Option<String>,
-    #[serde(default)]
-    values: SubmittedValues,
-    #[serde(default)]
-    expected_revisions: SubmittedValues,
 }
 
 #[derive(Deserialize)]
@@ -114,54 +97,17 @@ struct AuthorityTransition {
     revision: String,
 }
 
-/// A map that refuses duplicate JSON keys instead of accepting the last secret silently.
-#[derive(Default)]
-struct SubmittedValues(BTreeMap<String, String>);
-
-impl<'de> Deserialize<'de> for SubmittedValues {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct ValuesVisitor;
-
-        impl<'de> Visitor<'de> for ValuesVisitor {
-            type Value = SubmittedValues;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a map from unique published target ids to values")
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut values = BTreeMap::new();
-                while let Some((target, value)) = map.next_entry::<String, String>()? {
-                    if values.insert(target.clone(), value).is_some() {
-                        return Err(serde::de::Error::custom(format!(
-                            "target `{target}` occurs more than once"
-                        )));
-                    }
-                }
-                Ok(SubmittedValues(values))
-            }
-        }
-
-        deserializer.deserialize_map(ValuesVisitor)
-    }
-}
-
 #[derive(Clone, Serialize)]
 struct Plan {
-    version: &'static str,
     connector: &'static str,
-    vendor: &'static str,
+    credential_revision: Option<String>,
+    fields: Vec<FieldView>,
     labels: Vec<String>,
+    plan_revision: String,
     selection: Option<String>,
     state: PlanState,
-    fields: Vec<FieldView>,
-    apply: ApplyView,
+    vendor: &'static str,
+    version: &'static str,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -173,35 +119,31 @@ enum PlanState {
 
 #[derive(Clone, Serialize)]
 struct FieldView {
-    identity: String,
-    name: String,
-    service: Option<String>,
-    label: String,
-    help: String,
-    required: bool,
-    secret: bool,
-    input: String,
     aliases: Vec<String>,
-    binds: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     also_binds: Vec<String>,
-    provenance: &'static str,
-    routable: bool,
-    set: bool,
-    target: Option<TargetView>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    choices: Option<Vec<ChoiceView>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     authority: Option<AuthorityView>,
+    binds: Option<String>,
+    choices: Option<Vec<ChoiceView>>,
+    help: String,
+    identity: String,
+    input: String,
+    label: String,
+    name: String,
+    provenance: &'static str,
+    reason: Option<String>,
+    required: bool,
+    routable: bool,
+    secret: bool,
+    service: Option<String>,
+    set: Option<bool>,
+    target: Option<TargetView>,
 }
 
 #[derive(Clone, Serialize)]
 struct AuthorityView {
-    state: AuthorityViewState,
+    actions: Vec<&'static str>,
     revision: Option<String>,
-    actions: Option<AuthorityActions>,
+    state: AuthorityViewState,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -214,26 +156,9 @@ enum AuthorityViewState {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(untagged)]
-enum AuthorityActions {
-    Proposed {
-        approve: AuthorityAction,
-        revoke: AuthorityAction,
-    },
-    Approved {
-        revoke: AuthorityAction,
-    },
-}
-
-#[derive(Clone, Serialize)]
-struct AuthorityAction {
-    method: &'static str,
-    target: String,
-}
-
-#[derive(Clone, Serialize)]
 struct TargetView {
     id: String,
+    revision: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -242,55 +167,9 @@ struct ChoiceView {
     label: String,
 }
 
-#[derive(Clone, Serialize)]
-struct ApplyView {
-    method: &'static str,
-    target: String,
-    retry: &'static str,
-    compensation: [&'static str; 2],
-}
-
-#[derive(Serialize)]
-struct ApplyResponse {
-    outcome: ApplyOutcome,
-    steps: Vec<StepView>,
-    plan: Plan,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ApplyOutcome {
-    Complete,
-    Incomplete,
-    Refused,
-    Partial,
-}
-
-#[derive(Serialize)]
-struct StepView {
-    target: String,
-    outcome: StepOutcome,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    action: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    revision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    may_have_happened: Option<bool>,
-}
-
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum StepOutcome {
-    Applied,
-    Unchanged,
-    Refused,
-    Skipped,
-}
-
 #[derive(Clone)]
 enum Destination {
+    ConnectionLabel,
     Credential(String),
     Settings(Vec<DeclaredSetting>),
 }
@@ -312,7 +191,6 @@ struct DescribedField {
 struct ConnectionContext {
     labels: Vec<String>,
     selected_instance: Option<InstanceId>,
-    held_instances: Vec<InstanceId>,
 }
 
 async fn show(
@@ -321,811 +199,25 @@ async fn show(
     Path(connector): Path<String>,
     Query(query): Query<Selection>,
 ) -> Response {
-    if let Some(version) = query
-        .version
-        .as_deref()
-        .filter(|version| *version != VERSION)
-    {
-        return unsupported_version(version);
+    if query.version.as_deref() != Some(VERSION) {
+        return unsupported_version(query.version.as_deref().unwrap_or("missing"));
     }
     let Some(provider) = catalogued(&connector) else {
         return unknown_connector(&connector);
     };
-    match project(&state, &principal, provider, query.name.as_deref()).await {
-        Ok(plan) => Json(plan).into_response(),
-        Err(response) => response,
+    match project(&state, &principal, provider, query.name.as_deref()) {
+        Ok(plan) => canonical_plan_response(&plan),
+        Err(response) => *response,
     }
 }
 
-async fn apply(
-    State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Extension(request_id): Extension<RequestId>,
-    Path(connector): Path<String>,
-    Json(body): Json<Submission>,
-) -> Response {
-    if body.version != VERSION {
-        return unsupported_version(&body.version);
-    }
-    let Some(provider) = catalogued(&connector) else {
-        return unknown_connector(&connector);
-    };
-    // Every semantic refusal below embeds this persisted projection. A caller never has to infer
-    // whether a preflight failure wrote anything from a generic error body.
-    let unselected = match project(&state, &principal, provider, None).await {
-        Ok(plan) => plan,
-        Err(response) => return response,
-    };
-    let name = match ConnectionLabel::new(&body.name) {
-        Ok(name) => name,
-        Err(refusal) => {
-            return preflight_refused(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                refusal.to_string(),
-                &unselected,
-            )
-        }
-    };
-    let current_name = match body.current_name.as_deref() {
-        Some(current) => match ConnectionLabel::new(current) {
-            Ok(current) => Some(current),
-            Err(refusal) => {
-                return preflight_refused(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    refusal.to_string(),
-                    &unselected,
-                )
-            }
-        },
-        None => None,
-    };
-
-    // This read is the preflight boundary. No target, choice or rename is allowed to fail after a
-    // write merely because the whole request was not checked first.
-    let existing = current_name
-        .as_ref()
-        .map(ConnectionLabel::as_str)
-        .unwrap_or(name.as_str());
-    let exists = unselected.labels.iter().any(|label| label == existing);
-    if current_name.is_some() && !exists {
-        return preflight_refused(
-            StatusCode::NOT_FOUND,
-            format!(
-                "connection label `{existing}` is not held for `{}`",
-                provider.id
-            ),
-            &unselected,
-        );
-    }
-    if current_name
-        .as_ref()
-        .is_some_and(|current| current != &name)
-        && unselected.labels.iter().any(|label| label == name.as_str())
-    {
-        return preflight_refused(
-            StatusCode::CONFLICT,
-            format!("connection label `{}` already exists", name.as_str()),
-            &unselected,
-        );
-    }
-
-    let Some(settings_store) = state.settings() else {
-        return no_settings_store();
-    };
-    let descriptions = match describe_for(provider, settings_store.as_ref()) {
-        Ok(descriptions) => descriptions,
-        Err(refusal) => return settings_refused(&refusal),
-    };
-    let targets = match submission_targets(provider, &descriptions) {
-        Ok(targets) => targets,
-        Err(response) => return *response,
-    };
-    for (target, value) in &body.values.0 {
-        let Some(spec) = targets.iter().find(|candidate| candidate.id == *target) else {
-            return preflight_refused(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("`{target}` is not a routable target in this connection plan"),
-                &unselected,
-            );
-        };
-        if spec
-            .choices
-            .as_ref()
-            .is_some_and(|choices| !choices.iter().any(|choice| choice == value))
-        {
-            return preflight_refused(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("`{target}` must be one of its published choices"),
-                &unselected,
-            );
-        }
-    }
-
-    let mut expected_authority_revisions = BTreeMap::new();
-    for (target, revision) in &body.expected_revisions.0 {
-        let Some(spec) = targets.iter().find(|candidate| candidate.id == *target) else {
-            return preflight_refused(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("`{target}` is not a routable target in this connection plan"),
-                &unselected,
-            );
-        };
-        if !spec.custom_origin || !body.values.0.contains_key(target) {
-            return preflight_refused(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!(
-                    "`{target}` may name an expected revision only beside a submitted custom-origin value"
-                ),
-                &unselected,
-            );
-        }
-        let Some(revision) = canonical_revision(revision) else {
-            return preflight_refused(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("`{target}` has a non-canonical authority revision"),
-                &unselected,
-            );
-        };
-        expected_authority_revisions.insert(target.clone(), revision);
-    }
-
-    let existing_instance = if exists {
-        match invocation_instance(&state, &principal, provider, Some(existing)).await {
-            Ok(instance) => instance,
-            Err(response) => return response,
-        }
-    } else {
-        None
-    };
-    for target in targets
-        .iter()
-        .filter(|target| target.custom_origin && body.values.0.contains_key(&target.id))
-    {
-        let Destination::Settings(declared) = &target.destination else {
-            unreachable!("custom-origin targets are settings")
-        };
-        let expected = expected_authority_revisions.get(&target.id).copied();
-        let current = if exists {
-            match settings_store.authority_status_for_instance(
-                principal.tenant(),
-                provider.id,
-                existing_instance.as_ref(),
-                &declared[0],
-            ) {
-                Ok(status) => status.revision,
-                Err(refusal) => return authority_refused(&refusal),
-            }
-        } else {
-            None
-        };
-        if current != expected {
-            return preflight_refused(
-                StatusCode::CONFLICT,
-                match (current, expected) {
-                    (Some(current), None) => format!(
-                        "`{}` requires its current authority revision `{current}` for replacement",
-                        target.id
-                    ),
-                    (Some(current), Some(expected)) => format!(
-                        "`{}` authority revision conflict: expected `{expected}`, current `{current}`",
-                        target.id
-                    ),
-                    (None, Some(expected)) => format!(
-                        "`{}` has no authority proposal at expected revision `{expected}`",
-                        target.id
-                    ),
-                    (None, None) => unreachable!("equal revisions were handled above"),
-                },
-                &unselected,
-            );
-        }
-    }
-
-    let credential_targets: Vec<&TargetSpec> = targets
-        .iter()
-        .filter(|target| matches!(target.destination, Destination::Credential(_)))
-        .collect();
-    let setting_targets: Vec<&TargetSpec> = targets
-        .iter()
-        .filter(|target| matches!(target.destination, Destination::Settings(_)))
-        .collect();
-    if !exists
-        && credential_targets
-            .iter()
-            .all(|target| !body.values.0.contains_key(&target.id))
-    {
-        return preflight_refused(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            format!(
-                "a new `{}` connection requires at least one published credential target",
-                provider.id
-            ),
-            &unselected,
-        );
-    }
-
-    let mut steps = Vec::new();
-    let mut applied_any = false;
-    let mut stopped = false;
-    let mut refusal_status = None;
-    let mut new_connection_applied = false;
-    let mut rename_applied = false;
-    let working_label = existing.to_owned();
-
-    if exists {
-        for target in &credential_targets {
-            let Some(value) = body.values.0.get(&target.id) else {
-                steps.push(step(
-                    &target.id,
-                    StepOutcome::Unchanged,
-                    Some("the target was omitted and its existing value remains"),
-                ));
-                continue;
-            };
-            if stopped {
-                steps.push(step(
-                    &target.id,
-                    StepOutcome::Skipped,
-                    Some("an earlier step was refused"),
-                ));
-                continue;
-            }
-            let Destination::Credential(credential) = &target.destination else {
-                unreachable!("credential targets were filtered above")
-            };
-            let audit = match begin_audit(
-                &state,
-                &request_id,
-                &principal,
-                AuditAction::CredentialRotated,
-                AuditTarget::InstanceCredential {
-                    connector: provider.id.to_owned(),
-                    label: working_label.clone(),
-                    credential: credential.clone(),
-                },
-            ) {
-                Ok(audit) => audit,
-                Err(response) => {
-                    refusal_status = Some(response.status());
-                    stopped = true;
-                    steps.push(step(
-                        &target.id,
-                        StepOutcome::Refused,
-                        Some("audit preparation refused the credential write"),
-                    ));
-                    continue;
-                }
-            };
-            let response = supply_instance_credential(
-                &state,
-                &principal,
-                provider,
-                &working_label,
-                credential,
-                value,
-            )
-            .await;
-            let write_status = response.status();
-            let audit_failure = audit
-                .finish(&state, &request_id, &principal, write_status)
-                .err()
-                .map(|response| response.status());
-            if write_status.is_success() {
-                applied_any = true;
-                if let Some(status) = audit_failure {
-                    refusal_status = Some(status);
-                    stopped = true;
-                    steps.push(step(
-                        &target.id,
-                        StepOutcome::Applied,
-                        Some(
-                            "the credential write persisted, but audit finalization refused further execution",
-                        ),
-                    ));
-                } else {
-                    steps.push(step(&target.id, StepOutcome::Applied, None));
-                }
-            } else {
-                refusal_status = Some(audit_failure.unwrap_or(write_status));
-                stopped = true;
-                steps.push(step(
-                    &target.id,
-                    StepOutcome::Refused,
-                    Some(if audit_failure.is_some() {
-                        "the credential write was refused and its audit could not be finalized"
-                    } else {
-                        "the existing credential write surface refused this target"
-                    }),
-                ));
-            }
-        }
-    } else {
-        let credentials: BTreeMap<String, String> = credential_targets
-            .iter()
-            .filter_map(|target| {
-                let value = body.values.0.get(&target.id)?;
-                let Destination::Credential(credential) = &target.destination else {
-                    return None;
-                };
-                Some((credential.clone(), value.clone()))
-            })
-            .collect();
-        let audit = begin_audit(
-            &state,
-            &request_id,
-            &principal,
-            AuditAction::ConnectionCreated,
-            AuditTarget::ConnectionInstance {
-                connector: provider.id.to_owned(),
-                label: name.as_str().to_owned(),
-            },
-        );
-        match audit {
-            Err(response) => {
-                refusal_status = Some(response.status());
-                stopped = true;
-                let mut refusal_reported = false;
-                for target in &credential_targets {
-                    let submitted = body.values.0.contains_key(&target.id);
-                    let outcome = if submitted && !refusal_reported {
-                        refusal_reported = true;
-                        StepOutcome::Refused
-                    } else {
-                        StepOutcome::Skipped
-                    };
-                    let reason = if matches!(outcome, StepOutcome::Refused) {
-                        "audit preparation refused the atomic credential creation"
-                    } else if submitted {
-                        "an earlier submitted credential could not begin audited creation"
-                    } else {
-                        "the credential target was omitted from creation"
-                    };
-                    steps.push(step(&target.id, outcome, Some(reason)));
-                }
-            }
-            Ok(audit) => {
-                let response = create_instance(
-                    State(state.clone()),
-                    Extension(principal.clone()),
-                    Path((provider.id.to_owned(), name.as_str().to_owned())),
-                    Query(AcquisitionQuery::default()),
-                    Json(NewConnection {
-                        credentials,
-                        acquisition: None,
-                    }),
-                )
-                .await;
-                let write_status = response.status();
-                let audit_failure = audit
-                    .finish(&state, &request_id, &principal, write_status)
-                    .err()
-                    .map(|response| response.status());
-                if write_status.is_success() {
-                    applied_any = true;
-                    new_connection_applied = true;
-                    if let Some(status) = audit_failure {
-                        refusal_status = Some(status);
-                        stopped = true;
-                    }
-                    let mut audit_reason_reported = false;
-                    for target in &credential_targets {
-                        let submitted = body.values.0.contains_key(&target.id);
-                        let reason = if submitted
-                            && audit_failure.is_some()
-                            && !audit_reason_reported
-                        {
-                            audit_reason_reported = true;
-                            Some(
-                                "the credential set persisted, but audit finalization refused further execution",
-                            )
-                        } else if submitted {
-                            None
-                        } else {
-                            Some("the credential target was omitted from atomic creation")
-                        };
-                        steps.push(step(
-                            &target.id,
-                            if submitted {
-                                StepOutcome::Applied
-                            } else {
-                                StepOutcome::Skipped
-                            },
-                            reason,
-                        ));
-                    }
-                } else {
-                    refusal_status = Some(audit_failure.unwrap_or(write_status));
-                    stopped = true;
-                    let mut refusal_reported = false;
-                    for target in &credential_targets {
-                        let submitted = body.values.0.contains_key(&target.id);
-                        let outcome = if submitted && !refusal_reported {
-                            refusal_reported = true;
-                            StepOutcome::Refused
-                        } else {
-                            StepOutcome::Skipped
-                        };
-                        let reason = if matches!(outcome, StepOutcome::Refused) {
-                            if audit_failure.is_some() {
-                                "atomic credential creation was refused and its audit could not be finalized"
-                            } else {
-                                "the atomic credential creation was refused"
-                            }
-                        } else if submitted {
-                            "an earlier submitted credential was refused atomically"
-                        } else {
-                            "the credential target was omitted from creation"
-                        };
-                        steps.push(step(&target.id, outcome, Some(reason)));
-                    }
-                }
-            }
-        }
-    }
-
-    for target in &setting_targets {
-        let Some(value) = body.values.0.get(&target.id) else {
-            steps.push(step(
-                &target.id,
-                if exists {
-                    StepOutcome::Unchanged
-                } else {
-                    StepOutcome::Skipped
-                },
-                Some(if exists {
-                    "the target was omitted and its existing value remains"
-                } else {
-                    "the settings target was omitted from creation"
-                }),
-            ));
-            continue;
-        };
-        if stopped {
-            steps.push(step(
-                &target.id,
-                StepOutcome::Skipped,
-                Some("an earlier step was refused"),
-            ));
-            continue;
-        }
-        let Destination::Settings(settings) = &target.destination else {
-            unreachable!("setting targets were filtered above")
-        };
-        let mut target_applied = false;
-        let mut audit_refused = false;
-        let mut partial_reason = None;
-        let mut proposal_revision = None;
-        for setting in settings {
-            if target.custom_origin {
-                let instance =
-                    match invocation_instance(&state, &principal, provider, Some(&working_label))
-                        .await
-                    {
-                        Ok(instance) => instance,
-                        Err(response) => return response,
-                    };
-                let prepared = match settings_store.prepare_authority_proposal_for_instance(
-                    principal.tenant(),
-                    provider.id,
-                    instance.as_ref(),
-                    setting,
-                    value,
-                    expected_authority_revisions.get(&target.id).copied(),
-                ) {
-                    Ok(prepared) => prepared,
-                    Err(refusal) => {
-                        refusal_status = Some(authority_refused(&refusal).status());
-                        stopped = true;
-                        break;
-                    }
-                };
-                let revision = prepared.revision();
-                let audit = match begin_audit(
-                    &state,
-                    &request_id,
-                    &principal,
-                    AuditAction::SettingAuthorityProposed,
-                    AuditTarget::SettingAuthority {
-                        connector: provider.id.to_owned(),
-                        service: setting.service.clone(),
-                        field: setting.binds(),
-                        revision: revision.to_string(),
-                    },
-                ) {
-                    Ok(audit) => audit,
-                    Err(response) => {
-                        refusal_status = Some(response.status());
-                        stopped = true;
-                        audit_refused = true;
-                        break;
-                    }
-                };
-                let transition =
-                    match settings_store.commit_authority_proposal_for_instance(prepared) {
-                        Ok(transition) => transition,
-                        Err(refusal) => {
-                            let response = authority_refused(&refusal);
-                            let write_status = response.status();
-                            let audit_failure = audit
-                                .finish(&state, &request_id, &principal, write_status)
-                                .err()
-                                .map(|response| response.status());
-                            refusal_status = Some(audit_failure.unwrap_or(write_status));
-                            stopped = true;
-                            audit_refused = audit_failure.is_some();
-                            break;
-                        }
-                    };
-                proposal_revision = transition.revision;
-                applied_any = true;
-                target_applied = true;
-
-                let replacement_failed = match state.channels() {
-                    Some(channels) => channels
-                        .replace_authority(principal.tenant(), provider.id)
-                        .await
-                        .is_err(),
-                    None => false,
-                };
-                let audit_failure = audit
-                    .finish(&state, &request_id, &principal, StatusCode::OK)
-                    .err()
-                    .map(|response| response.status());
-                if replacement_failed || audit_failure.is_some() {
-                    refusal_status = Some(audit_failure.unwrap_or(StatusCode::SERVICE_UNAVAILABLE));
-                    stopped = true;
-                    audit_refused = audit_failure.is_some();
-                    partial_reason = Some(match (replacement_failed, audit_failure.is_some()) {
-                        (true, true) => {
-                            "the authority proposal persisted, but runtime replacement and audit finalization both refused completion"
-                        }
-                        (true, false) => {
-                            "the authority proposal persisted, but runtime replacement refused completion"
-                        }
-                        (false, true) => {
-                            "the authority proposal persisted, but audit finalization refused completion"
-                        }
-                        (false, false) => unreachable!("a partial authority proposal has a cause"),
-                    });
-                    break;
-                }
-                continue;
-            }
-
-            let audit = match begin_audit(
-                &state,
-                &request_id,
-                &principal,
-                AuditAction::SettingSet,
-                AuditTarget::InstanceSetting {
-                    connector: provider.id.to_owned(),
-                    label: working_label.clone(),
-                    service: setting.service.clone(),
-                    field: setting.binds(),
-                },
-            ) {
-                Ok(audit) => audit,
-                Err(response) => {
-                    refusal_status = Some(response.status());
-                    stopped = true;
-                    audit_refused = true;
-                    break;
-                }
-            };
-            let response = set_instance_setting(
-                State(state.clone()),
-                Extension(principal.clone()),
-                Path((
-                    provider.id.to_owned(),
-                    working_label.clone(),
-                    setting.service.clone(),
-                    setting.binds(),
-                )),
-                Json(SuppliedSetting {
-                    value: value.clone(),
-                }),
-            )
-            .await;
-            let write_status = response.status();
-            let audit_failure = audit
-                .finish(&state, &request_id, &principal, write_status)
-                .err()
-                .map(|response| response.status());
-            if write_status.is_success() {
-                applied_any = true;
-                target_applied = true;
-                if let Some(status) = audit_failure {
-                    refusal_status = Some(status);
-                    stopped = true;
-                    audit_refused = true;
-                    partial_reason = Some(
-                        "the setting write persisted, but audit finalization refused completion",
-                    );
-                    break;
-                }
-            } else {
-                refusal_status = Some(audit_failure.unwrap_or(write_status));
-                stopped = true;
-                audit_refused = audit_failure.is_some();
-                break;
-            }
-        }
-        if let (true, true, Some(partial_reason)) = (stopped, target_applied, partial_reason) {
-            steps.push(if target.custom_origin {
-                proposal_step(
-                    &target.id,
-                    proposal_revision.expect("a persisted proposal has a revision"),
-                    partial_reason,
-                )
-            } else {
-                step(&target.id, StepOutcome::Applied, Some(partial_reason))
-            });
-        } else if stopped {
-            steps.push(step(
-                &target.id,
-                StepOutcome::Refused,
-                Some(if audit_refused && target_applied {
-                    "one or more setting writes persisted before audit refused further execution"
-                } else if audit_refused {
-                    "audit preparation or finalization refused this settings target"
-                } else if target_applied {
-                    "one declared destination was applied before another destination refused"
-                } else {
-                    "the existing settings write surface refused this target"
-                }),
-            ));
-        } else {
-            let reason = descriptions
-                .iter()
-                .find(|description| description.target.as_ref().is_some_and(|spec| spec.id == target.id))
-                .is_some_and(|description| description.custom_origin)
-                .then_some("proposal persisted; explicit authority approval is required before runtime use");
-            steps.push(step(&target.id, StepOutcome::Applied, reason));
-        }
-    }
-
-    let rename_requested = exists && working_label != name.as_str();
-    if stopped && !exists && new_connection_applied {
-        steps.push(step(
-            "connection.name",
-            StepOutcome::Applied,
-            Some("the labelled connection persisted before a later step was refused"),
-        ));
-    } else if stopped && rename_requested {
-        steps.push(step(
-            "connection.name",
-            StepOutcome::Skipped,
-            Some("rename runs last and an earlier step was refused"),
-        ));
-    } else if stopped {
-        steps.push(step(
-            "connection.name",
-            if exists {
-                StepOutcome::Unchanged
-            } else {
-                StepOutcome::Skipped
-            },
-            Some(if exists {
-                "the submitted label already names this connection"
-            } else {
-                "atomic credential creation was refused before the label became durable"
-            }),
-        ));
-    } else if rename_requested {
-        let audit = begin_audit(
-            &state,
-            &request_id,
-            &principal,
-            AuditAction::ConnectionLabeled,
-            AuditTarget::ConnectionInstance {
-                connector: provider.id.to_owned(),
-                label: working_label.clone(),
-            },
-        );
-        match audit {
-            Err(response) => {
-                refusal_status = Some(response.status());
-                stopped = true;
-                steps.push(step(
-                    "connection.name",
-                    StepOutcome::Refused,
-                    Some("audit preparation refused the label rename"),
-                ));
-            }
-            Ok(audit) => {
-                let response = rename_instance(
-                    State(state.clone()),
-                    Extension(principal.clone()),
-                    Path((provider.id.to_owned(), working_label.clone())),
-                    Json(LabelBody {
-                        label: name.as_str().to_owned(),
-                    }),
-                )
-                .await;
-                let write_status = response.status();
-                let audit_failure = audit
-                    .finish(&state, &request_id, &principal, write_status)
-                    .err()
-                    .map(|response| response.status());
-                if write_status.is_success() {
-                    applied_any = true;
-                    rename_applied = true;
-                    if let Some(status) = audit_failure {
-                        refusal_status = Some(status);
-                        stopped = true;
-                        steps.push(step(
-                            "connection.name",
-                            StepOutcome::Applied,
-                            Some("the rename persisted, but audit finalization refused completion"),
-                        ));
-                    } else {
-                        steps.push(step("connection.name", StepOutcome::Applied, None));
-                    }
-                } else {
-                    refusal_status = Some(audit_failure.unwrap_or(write_status));
-                    stopped = true;
-                    steps.push(step(
-                        "connection.name",
-                        StepOutcome::Refused,
-                        Some(if audit_failure.is_some() {
-                            "the label rename was refused and its audit could not be finalized"
-                        } else {
-                            "the existing label registry refused the rename"
-                        }),
-                    ));
-                }
-            }
-        }
-    } else {
-        steps.push(step(
-            "connection.name",
-            if exists {
-                StepOutcome::Unchanged
-            } else {
-                StepOutcome::Applied
-            },
-            exists.then_some("the submitted label already names this connection"),
-        ));
-    }
-
-    let persisted_selection = if !exists && !new_connection_applied {
-        None
-    } else if stopped && rename_requested && !rename_applied {
-        Some(working_label.as_str())
-    } else {
-        Some(name.as_str())
-    };
-    let plan = match project(&state, &principal, provider, persisted_selection).await {
-        Ok(plan) => plan,
-        Err(response) => return response,
-    };
-    let outcome = if stopped && applied_any {
-        ApplyOutcome::Partial
-    } else if stopped {
-        ApplyOutcome::Refused
-    } else if matches!(plan.state, PlanState::Complete) {
-        ApplyOutcome::Complete
-    } else {
-        ApplyOutcome::Incomplete
-    };
-    let status = if matches!(outcome, ApplyOutcome::Partial) {
-        StatusCode::MULTI_STATUS
-    } else if matches!(outcome, ApplyOutcome::Refused) {
-        refusal_status.unwrap_or(StatusCode::UNPROCESSABLE_ENTITY)
-    } else {
-        StatusCode::OK
-    };
+async fn reject_secret_json() -> Response {
     (
-        status,
-        Json(ApplyResponse {
-            outcome,
-            steps,
-            plan,
-        }),
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        Json(json!({ "code": "secret_json_forbidden" })),
     )
         .into_response()
 }
-
 async fn approve_authority(
     state: State<AppState>,
     principal: Extension<Principal>,
@@ -1405,77 +497,6 @@ fn authority_refused(refusal: &SettingsRefusal) -> Response {
     }
 }
 
-/// Add or replace one declared credential on an already-held labelled connection.
-///
-/// The public rotation route deliberately remains replace-only. The composite plan needs this
-/// internal upsert because initial creation may omit a credential, while retry still has to fill
-/// that declared instance address.
-async fn supply_instance_credential(
-    state: &AppState,
-    principal: &Principal,
-    provider: &'static Provider,
-    label: &str,
-    credential: &str,
-    value: &str,
-) -> Response {
-    let Some(store) = state.credentials() else {
-        return no_store();
-    };
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
-        return change_in_flight(provider);
-    };
-    let selected = match invocation_instance(state, principal, provider, Some(label)).await {
-        Ok(selected) => selected,
-        Err(response) => return response,
-    };
-    let declared = declared_credentials(provider);
-    let declaration = declaration(provider, &declared);
-    let inventory = match inventory(store, principal.tenant(), &declaration).await {
-        Ok(inventory) => inventory,
-        Err(response) => return response,
-    };
-    let held_instances = inventory.ids();
-    let instances = TenantInstances::held(&held_instances, selected.as_ref());
-    let (reference, secret) =
-        match declaration.write_of_for(principal.tenant(), credential, value, instances) {
-            Ok(write) => write,
-            Err(refusal) => return connection_refused(&refusal),
-        };
-    if let Some(refusal) = managed_rotation_refusal(store, provider, &reference).await {
-        return refusal;
-    }
-    let replacing = match store.get(&reference).await {
-        Ok(current) => stored_bytes(&current),
-        Err(error) if error.is_not_found() => 0,
-        Err(error) => return store_failed(&error),
-    };
-    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
-        return allowance_change_in_flight(provider);
-    };
-    let held_bytes = match occupied(store, principal.tenant()).await {
-        Ok(bytes) => bytes,
-        Err(error) => return store_failed(&error),
-    };
-    if let Err(refusal) =
-        admit_tenant_occupancy(held_bytes.saturating_sub(replacing), stored_bytes(&secret))
-    {
-        return connection_refused(&refusal);
-    }
-    if let Err(error) = store.put(&reference, &secret).await {
-        return rotation_failed(provider, credential, &reference, &error);
-    }
-    if let Some(channels) = state.channels() {
-        channels.restart(principal.tenant(), provider.id);
-    }
-    Json(json!({
-        "connector": provider.id,
-        "label": label,
-        "credential": credential,
-        "address": address_path(&reference),
-    }))
-    .into_response()
-}
-
 enum StepAudit {
     Durable(crate::audit::Attempt),
     Ephemeral {
@@ -1528,30 +549,9 @@ fn begin_audit(
     }
 }
 
-fn step(target: &str, outcome: StepOutcome, reason: Option<&str>) -> StepView {
-    StepView {
-        target: target.to_owned(),
-        outcome,
-        reason: reason.map(str::to_owned),
-        action: None,
-        revision: None,
-        may_have_happened: None,
-    }
-}
-
-fn proposal_step(target: &str, revision: u64, reason: &str) -> StepView {
-    StepView {
-        target: target.to_owned(),
-        outcome: StepOutcome::Applied,
-        reason: Some(reason.to_owned()),
-        action: Some("proposed"),
-        revision: Some(revision.to_string()),
-        may_have_happened: Some(true),
-    }
-}
-
 fn same_target(left: &TargetSpec, right: &TargetSpec) -> bool {
     let same_destination = match (&left.destination, &right.destination) {
+        (Destination::ConnectionLabel, Destination::ConnectionLabel) => true,
         (Destination::Credential(left), Destination::Credential(right)) => left == right,
         (Destination::Settings(left), Destination::Settings(right)) => left == right,
         _ => false,
@@ -1559,7 +559,7 @@ fn same_target(left: &TargetSpec, right: &TargetSpec) -> bool {
     same_destination && left.choices == right.choices && left.custom_origin == right.custom_origin
 }
 
-fn submission_targets(
+fn projected_targets(
     provider: &Provider,
     described: &[DescribedField],
 ) -> Result<Vec<TargetSpec>, Box<Response>> {
@@ -1586,141 +586,476 @@ fn submission_targets(
     Ok(targets)
 }
 
-async fn project(
+fn project(
     state: &AppState,
     principal: &Principal,
     provider: &'static Provider,
     selection: Option<&str>,
-) -> Result<Plan, Response> {
-    let context = connection_context(state, principal, provider, selection).await?;
-    let settings = state.settings().ok_or_else(no_settings_store)?;
-    let described =
-        describe_for(provider, settings.as_ref()).map_err(|refusal| settings_refused(&refusal))?;
-    // A shared target is one browser control. Refuse an internally ambiguous declaration on GET
-    // as well as POST rather than publishing a plan the write side cannot honor.
-    submission_targets(provider, &described).map_err(|response| *response)?;
-    let credentials = state.credentials().ok_or_else(no_store)?;
-    let declared = declared_credentials(provider);
-    let declaration = declaration(provider, &declared);
-    let instance_selection =
-        TenantInstances::held(&context.held_instances, context.selected_instance.as_ref());
+) -> Result<Plan, Box<Response>> {
+    let context = connection_context(state, principal, provider, selection)?;
+    let settings = state
+        .settings()
+        .ok_or_else(|| Box::new(no_settings_store()))?;
+    let described = describe_for(provider, settings.as_ref())
+        .map_err(|refusal| Box::new(settings_refused(&refusal)))?;
+    projected_targets(provider, &described)?;
 
+    let name_target = TargetSpec {
+        id: "connection.name".to_owned(),
+        destination: Destination::ConnectionLabel,
+        choices: None,
+        custom_origin: false,
+    };
     let mut fields = Vec::with_capacity(described.len() + 1);
     fields.push(FieldView {
-        identity: "connection.name".to_owned(),
-        name: "name".to_owned(),
-        service: None,
-        label: "Connection name".to_owned(),
-        help: "A tenant-scoped label such as company, sandbox, or production.".to_owned(),
-        required: true,
-        secret: false,
-        input: "text".to_owned(),
         aliases: vec!["--name".to_owned()],
-        binds: None,
         also_binds: Vec::new(),
-        provenance: "exchange",
-        routable: true,
-        set: selection.is_some(),
-        target: Some(TargetView {
-            id: "connection.name".to_owned(),
-        }),
-        choices: None,
-        reason: None,
         authority: None,
+        binds: None,
+        choices: None,
+        help: "A tenant-scoped label such as company, sandbox, or production.".to_owned(),
+        identity: "connection.name".to_owned(),
+        input: "text".to_owned(),
+        label: "Connection name".to_owned(),
+        name: "name".to_owned(),
+        provenance: "exchange",
+        reason: None,
+        required: true,
+        routable: true,
+        secret: false,
+        service: None,
+        set: Some(selection.is_some()),
+        target: Some(
+            target_view(&name_target)
+                .map_err(|refusal| Box::new(internal_plan_refusal(refusal)))?,
+        ),
     });
 
     for mut field in described {
-        field.view.set = match (&field.target, selection) {
-            (_, None) | (None, _) => false,
-            (Some(target), Some(_)) => match &target.destination {
-                Destination::Credential(name) => {
-                    let reference = declaration
-                        .address_of_for(principal.tenant(), name, instance_selection)
-                        .map_err(|refusal| connection_refused(&refusal))?;
-                    match credentials.get(&reference).await {
-                        Ok(_) => true,
-                        Err(error) if error.is_not_found() => false,
-                        Err(error) => return Err(store_failed(&error)),
-                    }
-                }
-                Destination::Settings(declared) if field.custom_origin => {
-                    let status = settings
-                        .authority_status_for_instance(
-                            principal.tenant(),
-                            provider.id,
-                            context.selected_instance.as_ref(),
-                            &declared[0],
-                        )
-                        .map_err(|refusal| settings_refused(&refusal))?;
-                    let approved = status.state == AuthorityState::Approved;
-                    field.view.authority = Some(authority_view(
-                        provider.id,
-                        selection.expect("selected above"),
-                        &declared[0],
-                        status,
-                    ));
-                    approved
-                }
-                Destination::Settings(declared) => declared.iter().all(|setting| {
-                    settings.is_set_for_instance(
+        field.view.target = field
+            .target
+            .as_ref()
+            .map(target_view)
+            .transpose()
+            .map_err(|refusal| Box::new(internal_plan_refusal(refusal)))?;
+        if field.custom_origin {
+            let status = match (selection, field.target.as_ref()) {
+                (
+                    Some(_),
+                    Some(TargetSpec {
+                        destination: Destination::Settings(declared),
+                        ..
+                    }),
+                ) => settings
+                    .authority_status_for_instance(
                         principal.tenant(),
                         provider.id,
                         context.selected_instance.as_ref(),
-                        setting,
+                        &declared[0],
                     )
-                }),
-            },
-        };
-        if field.custom_origin && selection.is_none() {
-            field.view.authority = Some(AuthorityView {
-                state: AuthorityViewState::Unset,
-                revision: None,
-                actions: None,
-            });
+                    .map_err(|refusal| Box::new(settings_refused(&refusal)))?,
+                _ => AuthorityStatus {
+                    state: AuthorityState::Unset,
+                    revision: None,
+                    origin: None,
+                },
+            };
+            field.view.authority = Some(authority_view(status));
         }
+
+        field.view.set = if field.view.secret {
+            None
+        } else {
+            Some(match (&field.target, selection) {
+                (_, None) | (None, _) => false,
+                (Some(target), Some(_)) => match &target.destination {
+                    Destination::ConnectionLabel | Destination::Credential(_) => false,
+                    Destination::Settings(_) if field.custom_origin => {
+                        field.view.authority.as_ref().is_some_and(|authority| {
+                            matches!(authority.state, AuthorityViewState::Approved)
+                        })
+                    }
+                    Destination::Settings(declared) => declared.iter().all(|setting| {
+                        settings.is_set_for_instance(
+                            principal.tenant(),
+                            provider.id,
+                            context.selected_instance.as_ref(),
+                            setting,
+                        )
+                    }),
+                },
+            })
+        };
         fields.push(field.view);
     }
 
     validate_cli_aliases(&fields).map_err(|reason| {
-        refuse(
+        Box::new(refuse(
             StatusCode::BAD_GATEWAY,
             format!(
                 "connector `{}` cannot publish an unambiguous connection-plan alias set: {reason}",
                 provider.id
             ),
             json!({ "connector": provider.id }),
-        )
+        ))
     })?;
 
+    let credential_revision = selection.map(|label| {
+        credential_revision(
+            principal.tenant(),
+            provider.id,
+            label,
+            context.selected_instance.as_ref(),
+        )
+    });
+    validate_plan_shape(
+        &fields,
+        &context.labels,
+        selection,
+        credential_revision.as_deref(),
+    )
+    .map_err(|refusal| Box::new(internal_plan_refusal(refusal)))?;
     let complete = fields
         .iter()
         .filter(|field| field.required)
-        .all(|field| field.routable && field.set);
+        .all(|field| field.routable && (field.secret || field.set == Some(true)));
+    let plan_revision = plan_revision(provider, &fields)
+        .map_err(|refusal| Box::new(internal_plan_refusal(refusal)))?;
     Ok(Plan {
-        version: VERSION,
         connector: provider.id,
-        vendor: provider.vendor,
+        credential_revision,
+        fields,
         labels: context.labels,
+        plan_revision,
         selection: selection.map(str::to_owned),
         state: if complete {
             PlanState::Complete
         } else {
             PlanState::Incomplete
         },
-        fields,
-        apply: ApplyView {
-            method: "POST",
-            target: format!("/api/connections/{}/plan", provider.id),
-            retry: "Retry the same name and submitted targets; an existing label is edited and already-persisted targets are not recreated.",
-            compensation: [
-                "Unset settings through the existing labelled connection settings routes.",
-                "Remove the labelled connection through the existing instance route; Exchange never claims to roll back a committed store write.",
-            ],
-        },
+        vendor: provider.vendor,
+        version: VERSION,
     })
 }
 
-/// The v1 convenience spelling is derived only from the declaration's stable field name.
+fn validate_plan_shape(
+    fields: &[FieldView],
+    labels: &[String],
+    selection: Option<&str>,
+    credential_revision: Option<&str>,
+) -> Result<(), String> {
+    if fields.is_empty() || fields.len() > 128 {
+        return Err("connection plan field count is outside 1..=128".to_owned());
+    }
+    if labels.len() > 256
+        || labels.windows(2).any(|pair| pair[0] >= pair[1])
+        || labels
+            .iter()
+            .any(|label| ConnectionLabel::new(label).is_err())
+    {
+        return Err("connection plan labels are not a sorted unique bounded set".to_owned());
+    }
+    match (selection, credential_revision) {
+        (None, None) => {}
+        (Some(selected), Some(revision))
+            if labels.iter().any(|label| label == selected) && lower_hex_256_nonzero(revision) => {}
+        _ => {
+            return Err(
+                "connection plan selection and credential revision are inconsistent".to_owned(),
+            )
+        }
+    }
+
+    let mut identities = BTreeSet::new();
+    let mut aliases = BTreeSet::new();
+    let mut target_revisions = BTreeMap::<&str, &str>::new();
+    for field in fields {
+        if !plan_atom(&field.identity)
+            || !identities.insert(&field.identity)
+            || !plan_atom(&field.name)
+            || !plan_atom(&field.input)
+            || field
+                .service
+                .as_deref()
+                .is_some_and(|value| !plan_atom(value))
+            || field
+                .binds
+                .as_deref()
+                .is_some_and(|value| !plan_atom(value))
+            || field.help.len() > 2_048
+            || field.label.is_empty()
+            || field.label.len() > 2_048
+            || field
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.is_empty() || reason.len() > 2_048)
+        {
+            return Err(format!(
+                "connection plan field `{}` exceeds its string or identity bounds",
+                field.identity
+            ));
+        }
+        if field.aliases.len() > 64
+            || field
+                .aliases
+                .iter()
+                .any(|alias| alias.len() > 66 || !valid_cli_alias(alias) || !aliases.insert(alias))
+            || (field.secret && !field.aliases.is_empty())
+        {
+            return Err(format!(
+                "connection plan field `{}` has an invalid alias set",
+                field.identity
+            ));
+        }
+        let also_binds: BTreeSet<_> = field.also_binds.iter().collect();
+        if field.also_binds.len() > 64
+            || also_binds.len() != field.also_binds.len()
+            || field.also_binds.iter().any(|binds| !plan_atom(binds))
+        {
+            return Err(format!(
+                "connection plan field `{}` has invalid also-binds",
+                field.identity
+            ));
+        }
+        if let Some(choices) = &field.choices {
+            let values: BTreeSet<_> = choices.iter().map(|choice| &choice.value).collect();
+            if choices.is_empty()
+                || choices.len() > 256
+                || values.len() != choices.len()
+                || choices.iter().any(|choice| {
+                    choice.value.len() > 1_024
+                        || choice.label.is_empty()
+                        || choice.label.len() > 2_048
+                })
+            {
+                return Err(format!(
+                    "connection plan field `{}` has invalid choices",
+                    field.identity
+                ));
+            }
+        }
+        if field.routable != field.target.is_some()
+            || field.routable == field.reason.is_some()
+            || field.secret != field.set.is_none()
+        {
+            return Err(format!(
+                "connection plan field `{}` contradicts routing or live-set semantics",
+                field.identity
+            ));
+        }
+        if let Some(target) = &field.target {
+            if target.id.is_empty() || target.id.len() > 512 || !lower_hex_256(&target.revision) {
+                return Err(format!(
+                    "connection plan field `{}` has an invalid target",
+                    field.identity
+                ));
+            }
+            match target_revisions.insert(&target.id, &target.revision) {
+                Some(existing) if existing != target.revision => {
+                    return Err(format!(
+                        "connection plan target `{}` has conflicting revisions",
+                        target.id
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if let Some(authority) = &field.authority {
+            let valid = match authority.state {
+                AuthorityViewState::Unset => {
+                    authority.revision.is_none() && authority.actions.is_empty()
+                }
+                AuthorityViewState::Proposed => {
+                    authority
+                        .revision
+                        .as_deref()
+                        .is_some_and(canonical_revision_string)
+                        && authority.actions == ["approve", "revoke"]
+                }
+                AuthorityViewState::Approved => {
+                    authority
+                        .revision
+                        .as_deref()
+                        .is_some_and(canonical_revision_string)
+                        && authority.actions == ["revoke"]
+                }
+                AuthorityViewState::Revoked => {
+                    authority
+                        .revision
+                        .as_deref()
+                        .is_some_and(canonical_revision_string)
+                        && authority.actions.is_empty()
+                }
+            };
+            if !valid {
+                return Err(format!(
+                    "connection plan field `{}` has an invalid authority state",
+                    field.identity
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn plan_atom(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 512
+}
+
+fn lower_hex_256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn lower_hex_256_nonzero(value: &str) -> bool {
+    lower_hex_256(value) && value.bytes().any(|byte| byte != b'0')
+}
+
+fn canonical_revision_string(value: &str) -> bool {
+    canonical_revision(value).is_some()
+}
+
+fn target_view(target: &TargetSpec) -> Result<TargetView, String> {
+    Ok(TargetView {
+        id: target.id.clone(),
+        revision: target_revision(target)?,
+    })
+}
+
+fn target_revision(target: &TargetSpec) -> Result<String, String> {
+    let destination = match &target.destination {
+        Destination::ConnectionLabel => json!({"kind": "connection_label"}),
+        Destination::Credential(credential) => {
+            json!({"credential": credential, "kind": "credential"})
+        }
+        Destination::Settings(settings) => json!({
+            "kind": "settings",
+            "settings": settings
+                .iter()
+                .map(|setting| json!({
+                    "binds": setting.binds(),
+                    "service": setting.service,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    };
+    let input = json!({
+        "authority": target.custom_origin.then_some("custom_origin"),
+        "choices": target.choices,
+        "destination": destination,
+        "target": target.id,
+    });
+    domain_digest(
+        b"exchange.connection-plan.v2.target-revision",
+        &canonical_json(&input)?,
+    )
+}
+
+fn plan_revision(provider: &Provider, fields: &[FieldView]) -> Result<String, String> {
+    let fields = fields
+        .iter()
+        .map(|field| {
+            json!({
+                "aliases": field.aliases,
+                "also_binds": field.also_binds,
+                "authority": field.authority.as_ref().map(|_| "custom_origin"),
+                "binds": field.binds,
+                "choices": field.choices,
+                "help": field.help,
+                "identity": field.identity,
+                "input": field.input,
+                "label": field.label,
+                "name": field.name,
+                "provenance": field.provenance,
+                "reason": field.reason,
+                "required": field.required,
+                "secret": field.secret,
+                "service": field.service,
+                "target": field.target,
+            })
+        })
+        .collect::<Vec<_>>();
+    let input = json!({
+        "connector": provider.id,
+        "fields": fields,
+        "schema": VERSION,
+        "vendor": provider.vendor,
+    });
+    domain_digest(
+        b"exchange.connection-plan.v2.plan-revision",
+        &canonical_json(&input)?,
+    )
+}
+
+fn credential_revision(
+    tenant: &Tenant,
+    connector: &str,
+    label: &str,
+    instance: Option<&InstanceId>,
+) -> String {
+    // The head is deliberately independent of credential presence. X-134's coordinator replaces
+    // this legacy projection when it publishes a fresh head after a prepared credential commit.
+    let input = json!({
+        "connector": connector,
+        "instance": instance.map(InstanceId::as_str),
+        "label": label,
+        "tenant": tenant.as_str(),
+    });
+    let bytes = canonical_json(&input).expect("credential-head input is infallible");
+    domain_digest(
+        b"exchange.connection-plan.v2.legacy-credential-head",
+        &bytes,
+    )
+    .expect("SHA-256 output is infallible")
+}
+
+fn domain_digest(domain: &[u8], canonical: &[u8]) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(domain);
+    digest.update([0]);
+    digest.update(canonical);
+    let digest = digest.finalize();
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|_| "cannot encode SHA-256 plan revision".to_owned())?;
+    }
+    Ok(encoded)
+}
+
+fn canonical_json(value: &impl Serialize) -> Result<Vec<u8>, String> {
+    // Without serde_json's preserve_order feature Value uses a sorted map. These plan schemas use
+    // only strings, booleans, nulls and bounded integers, so rendering that tree is RFC 8785.
+    let value = serde_json::to_value(value)
+        .map_err(|error| format!("cannot construct canonical connection plan: {error}"))?;
+    serde_json::to_vec(&value)
+        .map_err(|error| format!("cannot serialize canonical connection plan: {error}"))
+}
+
+fn canonical_plan_response(plan: &Plan) -> Response {
+    match canonical_json(plan) {
+        Ok(bytes) if bytes.len() <= 65_536 => {
+            ([(header::CONTENT_TYPE, "application/json")], bytes).into_response()
+        }
+        Ok(_) => internal_plan_refusal(
+            "connection plan exceeds the exchange.connection-plan.v2 control bound".to_owned(),
+        ),
+        Err(refusal) => internal_plan_refusal(refusal),
+    }
+}
+
+fn internal_plan_refusal(reason: String) -> Response {
+    refuse(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        reason,
+        json!({"code": "internal_refusal"}),
+    )
+}
+
+/// The published convenience spelling is derived only from the declaration's stable field name.
 ///
 /// Connector declarations validate lower snake case before reaching the catalogue. Keeping this
 /// transformation beside the serialized field means clients consume aliases instead of inventing
@@ -1770,46 +1105,39 @@ fn validate_cli_aliases(fields: &[FieldView]) -> Result<(), String> {
     Ok(())
 }
 
-async fn connection_context(
+fn connection_context(
     state: &AppState,
     principal: &Principal,
     provider: &'static Provider,
     selection: Option<&str>,
-) -> Result<ConnectionContext, Response> {
-    let store = state.credentials().ok_or_else(no_store)?;
-    let registry = state.connection_registry().ok_or_else(no_registry)?;
-    let declared = declared_credentials(provider);
-    let declaration = declaration(provider, &declared);
-    let inventory = inventory(store, principal.tenant(), &declaration).await?;
+) -> Result<ConnectionContext, Box<Response>> {
+    let _credentials = state.credentials().ok_or_else(|| Box::new(no_store()))?;
+    let registry = state
+        .connection_registry()
+        .ok_or_else(|| Box::new(no_registry()))?;
     let entries = registry
         .entries(principal.tenant(), provider.id)
-        .map_err(|refusal| registry_refused(&refusal))?;
-    let sole_legacy = inventory.count() == 1 && !inventory.legacy.is_empty() && entries.len() == 1;
-    let valid: Vec<_> = entries
-        .into_iter()
-        .filter(|entry| inventory.holds(&entry.instance) || sole_legacy)
-        .collect();
-    let labels = valid
+        .map_err(|refusal| Box::new(registry_refused(&refusal)))?;
+    let mut labels: Vec<_> = entries
         .iter()
         .map(|entry| entry.label.as_str().to_owned())
         .collect();
+    labels.sort();
+    labels.dedup();
     let selected_instance = match selection {
         None => None,
         Some(selected) => {
-            let label =
-                ConnectionLabel::new(selected).map_err(|refusal| registry_refused(&refusal))?;
-            let Some(entry) = valid.iter().find(|entry| entry.label == label) else {
-                return Err(unknown_label(provider, &label));
+            let label = ConnectionLabel::new(selected)
+                .map_err(|refusal| Box::new(registry_refused(&refusal)))?;
+            let Some(entry) = entries.iter().find(|entry| entry.label == label) else {
+                return Err(Box::new(unknown_label(provider, &label)));
             };
-            inventory
-                .holds(&entry.instance)
-                .then(|| entry.instance.clone())
+            Some(entry.instance.clone())
         }
     };
     Ok(ConnectionContext {
         labels,
         selected_instance,
-        held_instances: inventory.ids(),
     })
 }
 
@@ -1877,8 +1205,11 @@ fn describe_with_policy(
                 also_binds: Vec::new(),
                 provenance: "provider.auth",
                 routable: true,
-                set: false,
-                target: Some(TargetView { id: target.clone() }),
+                set: None,
+                target: Some(TargetView {
+                    id: target.clone(),
+                    revision: String::new(),
+                }),
                 choices: None,
                 reason: None,
                 authority: None,
@@ -1974,6 +1305,7 @@ fn describe_config(
     };
     let target_view = target.as_ref().map(|target| TargetView {
         id: target.id.clone(),
+        revision: String::new(),
     });
     DescribedField {
         view: FieldView {
@@ -1997,7 +1329,7 @@ fn describe_config(
                 .collect(),
             provenance: "provider.config",
             routable: target.is_some(),
-            set: false,
+            set: (!secret).then_some(false),
             target: target_view,
             choices,
             reason,
@@ -2008,67 +1340,18 @@ fn describe_config(
     }
 }
 
-fn authority_view(
-    connector: &str,
-    label: &str,
-    declared: &DeclaredSetting,
-    status: AuthorityStatus,
-) -> AuthorityView {
+fn authority_view(status: AuthorityStatus) -> AuthorityView {
     let revision = status.revision.map(|revision| revision.to_string());
     let actions = match status.state {
-        AuthorityState::Proposed => revision.as_ref().map(|_| {
-            let target = format!(
-                "/api/connections/{}/instances/{}/settings/{}/{}/authority",
-                encode_segment(connector),
-                encode_segment(label),
-                encode_segment(&declared.service),
-                encode_segment(&declared.binds()),
-            );
-            AuthorityActions::Proposed {
-                approve: AuthorityAction {
-                    method: "PUT",
-                    target: target.clone(),
-                },
-                revoke: AuthorityAction {
-                    method: "DELETE",
-                    target,
-                },
-            }
-        }),
-        AuthorityState::Approved => revision.as_ref().map(|_| AuthorityActions::Approved {
-            revoke: AuthorityAction {
-                method: "DELETE",
-                target: format!(
-                    "/api/connections/{}/instances/{}/settings/{}/{}/authority",
-                    encode_segment(connector),
-                    encode_segment(label),
-                    encode_segment(&declared.service),
-                    encode_segment(&declared.binds()),
-                ),
-            },
-        }),
-        AuthorityState::Unset | AuthorityState::Revoked => None,
+        AuthorityState::Proposed => vec!["approve", "revoke"],
+        AuthorityState::Approved => vec!["revoke"],
+        AuthorityState::Unset | AuthorityState::Revoked => Vec::new(),
     };
     AuthorityView {
-        state: status.state.into(),
-        revision,
         actions,
+        revision,
+        state: status.state.into(),
     }
-}
-
-fn encode_segment(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut encoded = String::new();
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push('%');
-            encoded.push(char::from(HEX[(byte >> 4) as usize]));
-            encoded.push(char::from(HEX[(byte & 0xf) as usize]));
-        }
-    }
-    encoded
 }
 
 fn choices_for(
@@ -2121,25 +1404,11 @@ fn choice_values(choices: &Option<Vec<ChoiceView>>) -> Option<Vec<String>> {
         .map(|choices| choices.iter().map(|choice| choice.value.clone()).collect())
 }
 
-fn preflight_refused(status: StatusCode, reason: impl Into<String>, plan: &Plan) -> Response {
-    let reason = reason.into();
-    (
-        status,
-        Json(ApplyResponse {
-            outcome: ApplyOutcome::Refused,
-            steps: vec![step("request", StepOutcome::Refused, Some(&reason))],
-            plan: plan.clone(),
-        }),
-    )
-        .into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -2147,24 +1416,15 @@ mod tests {
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        async_trait, ChannelId, ChannelRecord, Channels, ConfigStore, ConnectionSettings,
-        CredentialRef, CredentialScope, CredentialStore, Field, MemoryChannels,
-        MemoryConnectionRegistry, PreparedAuthorityProposal, Secret, SecretBatch, SecretStore,
-        SettingsRefusal, SettingsStore, StoreError, Tenant,
+        ConnectionRegistry, ConnectionSettings, CredentialStore, MemoryConnectionRegistry, Secret,
+        SecretStore, SettingsStore, Tenant, TenantInstances,
     };
     use serde_json::{json, Value};
-    use tokio_util::sync::CancellationToken;
     use tower::Service;
 
-    use crate::audit::{Action, AuditJournal, Target};
-    use crate::channel::{
-        ChannelDeclarations, ChannelEventSink, ChannelPlacement, ChannelPlacementResolver,
-        ChannelRunError, ChannelRunner, ChannelStatus, ChannelSupervisor,
-    };
     use crate::dev_identity::DevIdentity;
 
     const ROSTER: &str = "user:alice@acme,user:bob@globex,service_account:worker@acme";
-    const SENTINEL: &str = "X125-SENTINEL-NOT-A-REAL-SECRET";
 
     struct Scratch(PathBuf);
 
@@ -2189,465 +1449,34 @@ mod tests {
         }
     }
 
-    struct FailOnceSettings {
-        inner: SettingsStore,
-        fail_at: usize,
-        calls: AtomicUsize,
-        failed: AtomicBool,
-    }
-
-    struct FailFirstCredentialBatch {
-        inner: Arc<dyn SecretStore>,
-        failed: AtomicBool,
-    }
-
-    #[derive(Clone)]
-    struct OriginCandidate {
-        provider: &'static Provider,
-        declared: DeclaredSetting,
-    }
-
-    fn origin_candidate() -> OriginCandidate {
-        connector_catalog::providers()
-            .iter()
-            .copied()
-            .find_map(|provider| {
-                (provider.id == "gitlab").then(|| OriginCandidate {
-                    provider,
-                    declared: DeclaredSetting::parse("default", "endpoint.origin")
-                        .expect("released GitLab origin"),
-                })
-            })
-            .expect("catalogue has the released GitLab origin declaration")
-    }
-
-    struct AuthoritySettings {
-        inner: SettingsStore,
-        break_audit_on_revoke: Option<Arc<AuditJournal>>,
-    }
-
-    impl AuthoritySettings {
-        fn new(path: &Path, _candidate: OriginCandidate) -> Self {
-            Self {
-                inner: SettingsStore::bind(path).expect("settings store"),
-                break_audit_on_revoke: None,
-            }
-        }
-    }
-
-    impl ConfigStore for AuthoritySettings {
-        fn get(
-            &self,
-            tenant: &str,
-            provider: &str,
-            service: &str,
-            field: Field<'_>,
-        ) -> Option<String> {
-            self.inner.get(tenant, provider, service, field)
-        }
-
-        fn resolve_for_instance(
-            &self,
-            tenant: &str,
-            provider: &str,
-            instance: Option<&InstanceId>,
-            service: &str,
-            field: Field<'_>,
-        ) -> Option<exchange_host::ConfigValue> {
-            self.inner
-                .resolve_for_instance(tenant, provider, instance, service, field)
-        }
-    }
-
-    impl ConnectionSettings for AuthoritySettings {
-        fn set(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            declared: &DeclaredSetting,
-            value: &str,
-        ) -> Result<(), SettingsRefusal> {
-            self.set_for_instance(tenant, connector, None, declared, value)
-        }
-
-        fn set_for_instance(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            instance: Option<&InstanceId>,
-            declared: &DeclaredSetting,
-            value: &str,
-        ) -> Result<(), SettingsRefusal> {
-            self.inner
-                .set_for_instance(tenant, connector, instance, declared, value)
-        }
-
-        fn clear(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            declared: &DeclaredSetting,
-        ) -> Result<bool, SettingsRefusal> {
-            self.clear_for_instance(tenant, connector, None, declared)
-        }
-
-        fn clear_for_instance(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            instance: Option<&InstanceId>,
-            declared: &DeclaredSetting,
-        ) -> Result<bool, SettingsRefusal> {
-            self.inner
-                .clear_for_instance(tenant, connector, instance, declared)
-        }
-
-        fn is_set(&self, tenant: &Tenant, connector: &str, declared: &DeclaredSetting) -> bool {
-            self.is_set_for_instance(tenant, connector, None, declared)
-        }
-
-        fn is_set_for_instance(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            instance: Option<&InstanceId>,
-            declared: &DeclaredSetting,
-        ) -> bool {
-            self.inner
-                .is_set_for_instance(tenant, connector, instance, declared)
-        }
-
-        fn held_bytes(&self, tenant: &Tenant) -> usize {
-            self.inner.held_bytes(tenant)
-        }
-
-        fn is_custom_origin(&self, connector: &str, declared: &DeclaredSetting) -> bool {
-            self.inner.is_custom_origin(connector, declared)
-        }
-
-        fn authority_status_for_instance(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            instance: Option<&InstanceId>,
-            declared: &DeclaredSetting,
-        ) -> Result<AuthorityStatus, SettingsRefusal> {
-            self.inner
-                .authority_status_for_instance(tenant, connector, instance, declared)
-        }
-
-        fn prepare_authority_proposal_for_instance(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            instance: Option<&InstanceId>,
-            declared: &DeclaredSetting,
-            value: &str,
-            expected_revision: Option<u64>,
-        ) -> Result<PreparedAuthorityProposal, SettingsRefusal> {
-            self.inner.prepare_authority_proposal_for_instance(
-                tenant,
-                connector,
-                instance,
-                declared,
-                value,
-                expected_revision,
-            )
-        }
-
-        fn commit_authority_proposal_for_instance(
-            &self,
-            prepared: PreparedAuthorityProposal,
-        ) -> Result<AuthorityStatus, SettingsRefusal> {
-            self.inner.commit_authority_proposal_for_instance(prepared)
-        }
-
-        fn approve_authority_for_instance(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            instance: Option<&InstanceId>,
-            declared: &DeclaredSetting,
-            revision: u64,
-        ) -> Result<AuthorityStatus, SettingsRefusal> {
-            self.inner
-                .approve_authority_for_instance(tenant, connector, instance, declared, revision)
-        }
-
-        fn revoke_authority_for_instance(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            instance: Option<&InstanceId>,
-            declared: &DeclaredSetting,
-            revision: u64,
-        ) -> Result<AuthorityStatus, SettingsRefusal> {
-            let status = self
-                .inner
-                .revoke_authority_for_instance(tenant, connector, instance, declared, revision)?;
-            if let Some(audit) = &self.break_audit_on_revoke {
-                audit.refuse_writes_for_test();
-            }
-            Ok(status)
-        }
-    }
-
-    #[async_trait]
-    impl SecretStore for FailFirstCredentialBatch {
-        async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
-            self.inner.get(reference).await
-        }
-
-        async fn put(&self, reference: &CredentialRef, secret: &Secret) -> Result<(), StoreError> {
-            self.inner.put(reference, secret).await
-        }
-
-        async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
-            self.inner.delete(reference).await
-        }
-
-        async fn references(
-            &self,
-            scope: &CredentialScope,
-        ) -> Result<Vec<CredentialRef>, StoreError> {
-            self.inner.references(scope).await
-        }
-
-        async fn apply(&self, batch: &SecretBatch) -> Result<(), StoreError> {
-            if !self.failed.swap(true, Ordering::SeqCst) {
-                return Err(StoreError::Unreachable {
-                    path: "test credential batch".to_owned(),
-                    reason: "the first batch is refused deliberately".to_owned(),
-                });
-            }
-            self.inner.apply(batch).await
-        }
-    }
-
-    impl FailOnceSettings {
-        fn new(path: &Path, fail_at: usize) -> Self {
-            Self {
-                inner: SettingsStore::bind(path).expect("settings store"),
-                fail_at,
-                calls: AtomicUsize::new(0),
-                failed: AtomicBool::new(false),
-            }
-        }
-    }
-
-    impl ConfigStore for FailOnceSettings {
-        fn get(
-            &self,
-            tenant: &str,
-            provider: &str,
-            service: &str,
-            field: Field<'_>,
-        ) -> Option<String> {
-            self.inner.get(tenant, provider, service, field)
-        }
-
-        fn get_for_instance(
-            &self,
-            tenant: &str,
-            provider: &str,
-            instance: Option<&InstanceId>,
-            service: &str,
-            field: Field<'_>,
-        ) -> Option<String> {
-            self.inner
-                .get_for_instance(tenant, provider, instance, service, field)
-        }
-    }
-
-    impl ConnectionSettings for FailOnceSettings {
-        fn set(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            declared: &DeclaredSetting,
-            value: &str,
-        ) -> Result<(), SettingsRefusal> {
-            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            if call == self.fail_at && !self.failed.swap(true, Ordering::SeqCst) {
-                return Err(SettingsRefusal::Unwritable {
-                    path: "test-settings".to_owned(),
-                    reason: "the test requested one refusal".to_owned(),
-                });
-            }
-            self.inner.set(tenant, connector, declared, value)
-        }
-
-        fn clear(
-            &self,
-            tenant: &Tenant,
-            connector: &str,
-            declared: &DeclaredSetting,
-        ) -> Result<bool, SettingsRefusal> {
-            self.inner.clear(tenant, connector, declared)
-        }
-
-        fn is_set(&self, tenant: &Tenant, connector: &str, declared: &DeclaredSetting) -> bool {
-            self.inner.is_set(tenant, connector, declared)
-        }
-
-        fn held_bytes(&self, tenant: &Tenant) -> usize {
-            self.inner.held_bytes(tenant)
-        }
-    }
-
     struct Harness {
         app: Router,
+        credentials: Arc<dyn SecretStore>,
         registry: Arc<MemoryConnectionRegistry>,
-        audit: Arc<AuditJournal>,
         _scratch: Scratch,
     }
 
-    fn harness(fail_setting_at: usize) -> Harness {
+    fn harness() -> Harness {
         let scratch = Scratch::new();
-        let credentials = CredentialStore::bind(scratch.join("credentials")).expect("credentials");
-        harness_with_credentials(scratch, credentials.secrets(), fail_setting_at)
-    }
-
-    fn harness_with_credentials(
-        scratch: Scratch,
-        credentials: Arc<dyn SecretStore>,
-        fail_setting_at: usize,
-    ) -> Harness {
-        let settings: Arc<dyn ConnectionSettings> = Arc::new(FailOnceSettings::new(
-            &scratch.join("settings.json"),
-            fail_setting_at,
-        ));
+        let credentials =
+            CredentialStore::bind(scratch.join("credentials")).expect("credential store");
+        let settings: Arc<dyn ConnectionSettings> =
+            Arc::new(SettingsStore::bind(scratch.join("settings.json")).expect("settings store"));
         let registry = Arc::new(MemoryConnectionRegistry::default());
-        let audit =
-            Arc::new(AuditJournal::bind(scratch.join("audit/events.sqlite")).expect("audit"));
+        let ordinary = credentials.secrets();
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("roster"),
         ))
         .with_operator_policy(crate::operator::OperatorPolicy::one("alice"))
-        .with_credentials(credentials)
+        .with_credentials(ordinary.clone())
         .with_settings(settings)
-        .with_connection_registry(registry.clone())
-        .with_audit(audit.clone());
+        .with_connection_registry(registry.clone());
         Harness {
             app: super::super::super::app(state),
+            credentials: ordinary,
             registry,
-            audit,
             _scratch: scratch,
         }
-    }
-
-    fn authority_harness(candidate: OriginCandidate) -> Harness {
-        let scratch = Scratch::new();
-        let credentials = CredentialStore::bind(scratch.join("credentials")).expect("credentials");
-        let settings: Arc<dyn ConnectionSettings> = Arc::new(AuthoritySettings::new(
-            &scratch.join("settings.json"),
-            candidate,
-        ));
-        let registry = Arc::new(MemoryConnectionRegistry::default());
-        let audit =
-            Arc::new(AuditJournal::bind(scratch.join("audit/events.sqlite")).expect("audit"));
-        let state = AppState::with_development_identity(Arc::new(
-            DevIdentity::from_roster(ROSTER).expect("roster"),
-        ))
-        .with_operator_policy(crate::operator::OperatorPolicy::one("alice"))
-        .with_credentials(credentials.secrets())
-        .with_settings(settings)
-        .with_connection_registry(registry.clone())
-        .with_audit(audit.clone());
-        Harness {
-            app: super::super::super::app(state),
-            registry,
-            audit,
-            _scratch: scratch,
-        }
-    }
-
-    struct NoChannelDeclarations;
-    impl ChannelDeclarations for NoChannelDeclarations {
-        fn events(&self, _: &str, _: &str) -> Option<BTreeSet<String>> {
-            None
-        }
-    }
-
-    struct NoChannelPlacement;
-    impl ChannelPlacementResolver for NoChannelPlacement {
-        fn resolve(&self, _: &ChannelRecord) -> Result<ChannelPlacement, ChannelRunError> {
-            Err(ChannelRunError::NoPlacement)
-        }
-    }
-
-    struct NoChannelRunner;
-    #[async_trait]
-    impl ChannelRunner for NoChannelRunner {
-        async fn run(
-            &self,
-            _: ChannelRecord,
-            _: ChannelPlacement,
-            _: Arc<dyn ChannelEventSink>,
-            _: CancellationToken,
-        ) -> Result<(), ChannelRunError> {
-            unreachable!("placement refusal prevents the runner")
-        }
-    }
-
-    fn authority_harness_with_channel(
-        candidate: OriginCandidate,
-    ) -> (
-        Harness,
-        Arc<ChannelSupervisor>,
-        ChannelId,
-        Arc<AuthoritySettings>,
-    ) {
-        let scratch = Scratch::new();
-        let credentials = CredentialStore::bind(scratch.join("credentials")).expect("credentials");
-        let registry = Arc::new(MemoryConnectionRegistry::default());
-        let audit =
-            Arc::new(AuditJournal::bind(scratch.join("audit/events.sqlite")).expect("audit"));
-        let mut settings =
-            AuthoritySettings::new(&scratch.join("settings.json"), candidate.clone());
-        settings.break_audit_on_revoke = Some(audit.clone());
-        let settings = Arc::new(settings);
-        let records = Arc::new(MemoryChannels::default());
-        let channel_id = ChannelId::new("ch_origin").expect("channel id");
-        records
-            .set(
-                ChannelRecord::new(
-                    channel_id.clone(),
-                    Tenant::new("acme").expect("tenant"),
-                    candidate.provider.id,
-                    InstanceId::parse("11111111-1111-4111-8111-111111111111").expect("instance"),
-                    "events",
-                    ["changed".to_owned()].into_iter().collect(),
-                )
-                .expect("channel record"),
-            )
-            .expect("persist channel");
-        let supervisor = ChannelSupervisor::new(
-            records,
-            Arc::new(NoChannelDeclarations),
-            Arc::new(NoChannelPlacement),
-            Arc::new(NoChannelRunner),
-        );
-        let state = AppState::with_development_identity(Arc::new(
-            DevIdentity::from_roster(ROSTER).expect("roster"),
-        ))
-        .with_operator_policy(crate::operator::OperatorPolicy::one("alice"))
-        .with_credentials(credentials.secrets())
-        .with_settings(settings.clone())
-        .with_connection_registry(registry.clone())
-        .with_audit(audit.clone())
-        .with_channels(supervisor.clone());
-        (
-            Harness {
-                app: super::super::super::app(state),
-                registry,
-                audit,
-                _scratch: scratch,
-            },
-            supervisor,
-            channel_id,
-            settings,
-        )
     }
 
     async fn call(
@@ -2657,6 +1486,19 @@ mod tests {
         path: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
+        let encoded = body.map(|body| body.to_string().into_bytes());
+        let (status, bytes) = call_raw(app, handle, method, path, encoded).await;
+        let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    async fn call_raw(
+        app: &Router,
+        handle: &str,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+    ) -> (StatusCode, Vec<u8>) {
         let mut service = app.clone().into_service::<Body>();
         std::future::poll_fn(|cx| service.poll_ready(cx))
             .await
@@ -2668,7 +1510,7 @@ mod tests {
         let request = match body {
             Some(body) => request
                 .header(CONTENT_TYPE, "application/json")
-                .body(Body::from(body.to_string())),
+                .body(Body::from(body)),
             None => request.body(Body::empty()),
         }
         .expect("request");
@@ -2677,21 +1519,7 @@ mod tests {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
-        let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-        (status, body)
-    }
-
-    fn assert_nonapplied_steps_have_reasons(response: &Value) {
-        for step in response["steps"].as_array().expect("step array") {
-            if step["outcome"] != "applied" {
-                assert!(
-                    step["reason"]
-                        .as_str()
-                        .is_some_and(|reason| !reason.is_empty()),
-                    "non-applied step has no reason: {step}"
-                );
-            }
-        }
+        (status, bytes.to_vec())
     }
 
     #[test]
@@ -2911,7 +1739,7 @@ mod tests {
     }
 
     #[test]
-    fn every_provider_credential_has_a_submission_target() {
+    fn every_provider_credential_has_a_projected_target() {
         for provider in connector_catalog::providers() {
             let described = describe(provider).expect("shipped declarations are readable");
             let targets: BTreeSet<_> = described
@@ -2969,16 +1797,6 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_submitted_targets_are_refused_during_deserialization() {
-        let body = r#"{"version":"exchange.connection-plan.v1","name":"company","values":{"credential.example.token":"first","credential.example.token":"second"}}"#;
-        let refusal = match serde_json::from_str::<Submission>(body) {
-            Ok(_) => panic!("a duplicate target was accepted"),
-            Err(refusal) => refusal,
-        };
-        assert!(refusal.to_string().contains("occurs more than once"));
-    }
-
-    #[test]
     fn metadata_poor_credentials_use_operation_alternatives_for_requiredness() {
         let slack = catalogued("slack").expect("slack");
         let described = describe(slack).expect("slack declarations");
@@ -3013,775 +1831,297 @@ mod tests {
         }
     }
 
-    /// The browser fixture and the production serializer are one v1 contract, not two similar
-    /// documents maintained in different trees. Values deliberately differ; the wire vocabulary,
-    /// optional-member coverage and generic shared-target shape may not.
     #[tokio::test]
-    async fn shared_browser_fixture_matches_the_production_plan_wire_shape() {
-        fn keys(value: &Value) -> BTreeSet<String> {
-            value
-                .as_object()
-                .expect("a JSON object")
+    async fn v2_plan_is_closed_and_every_nullable_field_is_explicit() {
+        let harness = harness();
+        let path = "/api/connections/jira/plan?version=exchange.connection-plan.v2";
+        let (status, plan) = call(&harness.app, "alice", Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(
+            plan.as_object()
+                .expect("closed plan object")
                 .keys()
-                .cloned()
-                .collect()
-        }
-
-        fn key_union(values: &[Value]) -> BTreeSet<String> {
-            values.iter().flat_map(keys).collect()
-        }
-
-        fn key_intersection(values: &[Value]) -> BTreeSet<String> {
-            let mut values = values.iter();
-            let mut intersection = values.next().map(keys).expect("at least one value");
-            for value in values {
-                intersection.retain(|key| keys(value).contains(key));
-            }
-            intersection
-        }
-
-        let fixture: Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../tests/fixtures/exchange-connection-plan-v1/connection-plan.v1.json"
-        )))
-        .expect("the committed browser fixture is JSON");
-        assert_eq!(fixture["version"], VERSION);
-        let fixture_fields = fixture["fields"]
-            .as_array()
-            .expect("fixture fields")
-            .clone();
-        for field in &fixture_fields {
-            let expected = if field["secret"] == json!(true) {
-                json!([])
-            } else {
-                json!([canonical_cli_alias(
-                    field["name"].as_str().expect("fixture field name")
-                )])
-            };
-            assert_eq!(field["aliases"], expected, "fixture field: {field}");
-        }
-
-        let harness = harness(usize::MAX);
-        let mut live_plans = Vec::new();
-        let mut live_fields = Vec::new();
-        for provider in connector_catalog::providers() {
-            let (status, plan) = call(
-                &harness.app,
-                "alice",
-                Method::GET,
-                &format!("/api/connections/{}/plan", provider.id),
-                None,
-            )
-            .await;
-            assert_eq!(status, StatusCode::OK, "{}: {plan}", provider.id);
-            live_fields.extend(
-                plan["fields"]
-                    .as_array()
-                    .expect("served fields")
-                    .iter()
-                    .cloned(),
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "connector",
+                "credential_revision",
+                "fields",
+                "labels",
+                "plan_revision",
+                "selection",
+                "state",
+                "vendor",
+                "version",
+            ])
+        );
+        assert_eq!(plan["credential_revision"], Value::Null);
+        assert!(plan["plan_revision"]
+            .as_str()
+            .is_some_and(|revision| revision.len() == 64));
+        for field in plan["fields"].as_array().expect("plan fields") {
+            assert_eq!(
+                field
+                    .as_object()
+                    .expect("closed field object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([
+                    "aliases",
+                    "also_binds",
+                    "authority",
+                    "binds",
+                    "choices",
+                    "help",
+                    "identity",
+                    "input",
+                    "label",
+                    "name",
+                    "provenance",
+                    "reason",
+                    "required",
+                    "routable",
+                    "secret",
+                    "service",
+                    "set",
+                    "target",
+                ]),
+                "{field}"
             );
-            live_plans.push(plan);
+            if field["secret"] == true {
+                assert_eq!(field["set"], Value::Null, "{field}");
+            } else {
+                assert!(field["set"].is_boolean(), "{field}");
+            }
+            if let Some(target) = field["target"].as_object() {
+                assert_eq!(
+                    target.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+                    BTreeSet::from(["id", "revision"])
+                );
+            }
         }
 
-        // Released 0.18 policies remain dormant. Exercise the same projection with a generic
-        // typed policy so the shared fixture's authority member is checked rather than ignored.
-        let (authority_provider, authority_declared) = connector_catalog::providers()
-            .iter()
-            .find_map(|provider| {
-                declared_settings(provider)
-                    .ok()?
-                    .into_iter()
-                    .find_map(|declared| {
-                        matches!(
-                            host_pinning(provider, &declared),
-                            HostPinning::WholeAuthority(_)
-                        )
-                        .then_some((*provider, declared))
-                    })
-            })
-            .expect("catalogue has a whole-authority declaration");
-        assert!(describe(authority_provider)
-            .expect("production description")
-            .iter()
-            .all(|field| !field.custom_origin));
-        let mut authority_field =
-            describe_with_policy(authority_provider, |connector, declared| {
-                connector == authority_provider.id && declared == &authority_declared
-            })
-            .expect("typed-policy description")
-            .into_iter()
-            .find(|field| field.custom_origin)
-            .expect("active custom-origin row")
-            .view;
-        authority_field.authority = Some(authority_view(
-            authority_provider.id,
-            "production",
-            &authority_declared,
-            AuthorityStatus {
-                state: AuthorityState::Proposed,
-                revision: Some(42),
-                origin: None,
-            },
-        ));
-        assert_eq!(
-            authority_field.aliases,
-            [canonical_cli_alias(&authority_field.name)]
-        );
-        assert_eq!(
-            fixture_fields
-                .iter()
-                .find(|field| field.get("authority").is_some())
-                .expect("fixture authority row")["aliases"],
-            json!(["--custom-origin"])
-        );
-        live_fields.push(serde_json::to_value(authority_field).expect("authority wire row"));
-
-        assert_eq!(keys(&fixture), keys(&live_plans[0]));
-        assert_eq!(keys(&fixture["apply"]), keys(&live_plans[0]["apply"]));
-        assert_eq!(key_union(&fixture_fields), key_union(&live_fields));
-        assert_eq!(
-            key_intersection(&fixture_fields),
-            key_intersection(&live_fields)
-        );
-
-        let fixture_targets: Vec<Value> = fixture_fields
-            .iter()
-            .filter_map(|field| field.get("target"))
-            .filter(|target| !target.is_null())
-            .cloned()
-            .collect();
-        let live_targets: Vec<Value> = live_fields
-            .iter()
-            .filter_map(|field| field.get("target"))
-            .filter(|target| !target.is_null())
-            .cloned()
-            .collect();
-        assert!(fixture_targets
-            .iter()
-            .all(|target| keys(target) == keys(&live_targets[0])));
-
-        let fixture_choices: Vec<Value> = fixture_fields
-            .iter()
-            .filter_map(|field| field.get("choices").and_then(Value::as_array))
-            .flatten()
-            .cloned()
-            .collect();
-        let live_choices: Vec<Value> = live_fields
-            .iter()
-            .filter_map(|field| field.get("choices").and_then(Value::as_array))
-            .flatten()
-            .cloned()
-            .collect();
-        assert!(!fixture_choices.is_empty());
-        assert!(!live_choices.is_empty());
-        assert!(
-            fixture_choices
-                .iter()
-                .chain(&live_choices)
-                .all(|choice| keys(choice)
-                    == BTreeSet::from(["label".to_owned(), "value".to_owned()]))
-        );
-
-        let provenance = |fields: &[Value]| -> BTreeSet<String> {
-            fields
-                .iter()
-                .filter_map(|field| field["provenance"].as_str().map(str::to_owned))
-                .collect()
-        };
-        let expected = BTreeSet::from([
-            "exchange".to_owned(),
-            "provider.auth".to_owned(),
-            "provider.config".to_owned(),
-        ]);
-        assert_eq!(provenance(&fixture_fields), expected);
-        assert_eq!(provenance(&live_fields), expected);
-
-        let has_shared_target = |fields: &[Value]| {
-            let mut seen = BTreeSet::new();
-            fields.iter().any(|field| {
-                field["target"]["id"]
-                    .as_str()
-                    .is_some_and(|target| !seen.insert(target))
-            })
-        };
-        assert!(has_shared_target(&fixture_fields));
-        assert!(live_plans
-            .iter()
-            .any(|plan| has_shared_target(plan["fields"].as_array().expect("served fields"))));
+        let (status, bytes) = call_raw(&harness.app, "alice", Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(bytes, serde_json::to_vec(&plan).expect("canonical plan"));
+        assert!(!bytes.ends_with(b"\n"));
     }
 
     #[tokio::test]
-    async fn custom_origin_plan_requires_revisioned_operator_approval_and_revocation() {
-        let candidate = origin_candidate();
-        let provider = candidate.provider;
-        let declared = candidate.declared.clone();
-        let credential = provider.auth[0].name;
-        let harness = authority_harness(candidate);
-        let plan_path = format!("/api/connections/{}/plan", provider.id);
+    async fn selected_plan_head_and_state_do_not_encode_secret_presence() {
+        let harness = harness();
+        let provider = catalogued("jira").expect("jira");
+        let tenant = Tenant::new("acme").expect("tenant");
+        let label = ConnectionLabel::new("company").expect("label");
+        let instance = InstanceId::parse("11111111-1111-4111-8111-111111111111").expect("instance");
+        harness
+            .registry
+            .assign(&tenant, provider.id, &label, &instance)
+            .expect("held label");
+        let path = "/api/connections/jira/plan?version=exchange.connection-plan.v2&name=company";
 
-        for (method, path, body) in [
-            (Method::GET, format!("{plan_path}?version=future"), None),
-            (
-                Method::POST,
-                "/api/connections/not-a-connector/plan".to_owned(),
-                Some(json!({"version":"future","name":"production","values":{}})),
-            ),
-            (
-                Method::PUT,
-                "/api/connections/not-a-connector/instances/production/settings/default/endpoint.custom_origin/authority".to_owned(),
-                Some(json!({"version":"future","revision":"1"})),
-            ),
-        ] {
-            let (status, response) = call(&harness.app, "alice", method, &path, body).await;
-            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-            assert_eq!(response, json!({
-                "code":"unsupported_connection_plan_version",
-                "requested":"future",
-                "supported":VERSION,
-            }));
-        }
-
-        let setting_target = format!("setting.{}.{}", declared.service, declared.binds());
-        let credential_target = format!("credential.{credential}");
-        let (status, response) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            &plan_path,
-            Some(json!({
-                "version": VERSION,
-                "name": "production",
-                "values": {
-                    credential_target: SENTINEL,
-                    setting_target.clone(): "https://custom.example.test"
-                }
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{response}");
-        let step = response["steps"]
-            .as_array()
-            .expect("steps")
-            .iter()
-            .find(|step| step["target"] == setting_target)
-            .expect("authority step");
-        assert_eq!(
-            step["reason"],
-            "proposal persisted; explicit authority approval is required before runtime use"
-        );
-
-        let (status, plan) = call(
-            &harness.app,
-            "alice",
-            Method::GET,
-            &format!("{plan_path}?name=production"),
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{plan}");
-        let field = plan["fields"]
+        let (status, absent) = call(&harness.app, "alice", Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::OK, "{absent}");
+        let head = absent["credential_revision"]
+            .as_str()
+            .expect("selected credential head");
+        assert_eq!(head.len(), 64);
+        assert_ne!(head, "0".repeat(64));
+        assert!(absent["fields"]
             .as_array()
             .expect("fields")
             .iter()
-            .find(|field| field["target"]["id"] == setting_target)
-            .expect("authority field");
-        assert_eq!(field["set"], false);
-        assert_eq!(field["authority"]["state"], "proposed");
-        assert_eq!(field["authority"]["revision"], "1");
-        let target = format!(
-            "/api/connections/{}/instances/production/settings/{}/{}/authority",
-            provider.id,
-            declared.service,
-            declared.binds()
+            .filter(|field| field["secret"] == true)
+            .all(|field| field["set"].is_null()));
+
+        let credentials = declared_credentials(provider);
+        let declaration = declaration(provider, &credentials);
+        let held = vec![instance.clone()];
+        let reference = declaration
+            .address_of_for(
+                &tenant,
+                provider.auth[0].name,
+                TenantInstances::held(&held, Some(&instance)),
+            )
+            .expect("credential address");
+        let sentinel = "X134-SECRET-PRESENCE-MUST-NOT-TRAVEL";
+        harness
+            .credentials
+            .put(&reference, &Secret::new(sentinel))
+            .await
+            .expect("store secret");
+
+        let (status, present) = call(&harness.app, "alice", Method::GET, path, None).await;
+        assert_eq!(status, StatusCode::OK, "{present}");
+        assert_eq!(present, absent);
+        assert!(!present.to_string().contains(sentinel));
+    }
+
+    #[test]
+    fn static_revision_preimages_include_reason_but_exclude_live_facts() {
+        let provider = catalogued("jira").expect("jira");
+        let target = TargetSpec {
+            id: "setting.default.endpoint.site".to_owned(),
+            destination: Destination::Settings(vec![DeclaredSetting::parse(
+                "default",
+                "endpoint.site",
+            )
+            .expect("setting")]),
+            choices: None,
+            custom_origin: false,
+        };
+        let first_target = target_revision(&target).expect("target revision");
+        let expected_input = br#"{"authority":null,"choices":null,"destination":{"kind":"settings","settings":[{"binds":"endpoint.site","service":"default"}]},"target":"setting.default.endpoint.site"}"#;
+        assert_eq!(
+            canonical_json(&json!({
+                "authority": Value::Null,
+                "choices": Value::Null,
+                "destination": {
+                    "kind": "settings",
+                    "settings": [{"binds":"endpoint.site","service":"default"}]
+                },
+                "target": "setting.default.endpoint.site",
+            }))
+            .expect("target preimage input"),
+            expected_input
         );
         assert_eq!(
-            field["authority"]["actions"]["approve"],
-            json!({"method":"PUT","target":target})
+            first_target,
+            "45ec877ab7fc252feef8700c75d96d158e6a48353b986eb360ae16594c64d5b9"
+        );
+        let mut changed_target = target.clone();
+        changed_target.choices = Some(vec!["one".to_owned()]);
+        assert_ne!(
+            target_revision(&changed_target).expect("changed target revision"),
+            first_target
         );
 
-        let (status, inspected) = call(&harness.app, "alice", Method::GET, &target, None).await;
-        assert_eq!(status, StatusCode::OK, "{inspected}");
+        let mut field = FieldView {
+            aliases: vec!["--site".to_owned()],
+            also_binds: Vec::new(),
+            authority: None,
+            binds: Some("endpoint.site".to_owned()),
+            choices: None,
+            help: "Site".to_owned(),
+            identity: "config.default.site".to_owned(),
+            input: "text".to_owned(),
+            label: "Site".to_owned(),
+            name: "site".to_owned(),
+            provenance: "provider.config",
+            reason: Some("static refusal one".to_owned()),
+            required: true,
+            routable: false,
+            secret: false,
+            service: Some("default".to_owned()),
+            set: Some(false),
+            target: None,
+        };
+        let original = plan_revision(provider, &[field.clone()]).expect("plan revision");
+        field.set = Some(true);
         assert_eq!(
-            inspected,
-            json!({
-                "version":VERSION,
-                "connector":provider.id,
-                "label":"production",
-                "service":declared.service,
-                "field":declared.binds(),
-                "authority":{
-                    "state":"proposed",
-                    "revision":"1",
-                    "origin":"https://custom.example.test"
-                }
-            })
+            plan_revision(provider, &[field.clone()]).expect("live-set revision"),
+            original
         );
-        for caller in ["bob", "worker"] {
-            let (status, refused) = call(&harness.app, caller, Method::GET, &target, None).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{caller}: {refused}");
-            assert!(!refused.to_string().contains("custom.example.test"));
+        field.reason = Some("static refusal two".to_owned());
+        assert_ne!(
+            plan_revision(provider, &[field]).expect("changed-reason revision"),
+            original
+        );
+    }
+
+    #[test]
+    fn authority_wire_states_are_the_four_closed_value_free_objects() {
+        for (state, revision, expected) in [
+            (
+                AuthorityState::Unset,
+                None,
+                json!({"actions":[],"revision":null,"state":"unset"}),
+            ),
+            (
+                AuthorityState::Proposed,
+                Some(7),
+                json!({"actions":["approve","revoke"],"revision":"7","state":"proposed"}),
+            ),
+            (
+                AuthorityState::Approved,
+                Some(8),
+                json!({"actions":["revoke"],"revision":"8","state":"approved"}),
+            ),
+            (
+                AuthorityState::Revoked,
+                Some(9),
+                json!({"actions":[],"revision":"9","state":"revoked"}),
+            ),
+        ] {
+            let view = authority_view(AuthorityStatus {
+                state,
+                revision,
+                origin: None,
+            });
+            assert_eq!(serde_json::to_value(view).expect("authority"), expected);
         }
+    }
 
-        let (status, stale_replacement) = call(
+    #[tokio::test]
+    async fn plan_read_requires_v2_and_a_human_principal() {
+        let harness = harness();
+        for path in [
+            "/api/connections/jira/plan",
+            "/api/connections/jira/plan?version=exchange.connection-plan.v1",
+        ] {
+            let (status, _) = call(&harness.app, "alice", Method::GET, path, None).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+        }
+        let (status, _) = call(
             &harness.app,
             "alice",
-            Method::POST,
-            &plan_path,
-            Some(json!({
-                "version": VERSION,
-                "name": "production",
-                "values": { setting_target.clone(): "https://replacement.example.test" },
-                "expected_revisions": { setting_target.clone(): "99" }
-            })),
+            Method::GET,
+            "/api/connections/jira/plan?version=exchange.connection-plan.v2&extra=1",
+            None,
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT, "{stale_replacement}");
-
-        let transition = json!({"version":VERSION,"revision":"1"});
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = call(
             &harness.app,
             "worker",
-            Method::PUT,
-            &target,
-            Some(transition.clone()),
+            Method::GET,
+            "/api/connections/jira/plan?version=exchange.connection-plan.v2",
+            None,
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        let (status, approved) = call(
+        let (status, _) = call(
             &harness.app,
-            "alice",
-            Method::PUT,
-            &target,
-            Some(transition.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{approved}");
-        assert_eq!(
-            approved,
-            json!({
-                "version":VERSION,
-                "connector":provider.id,
-                "label":"production",
-                "service":declared.service,
-                "field":declared.binds(),
-                "action":"approved",
-                "authority":{"state":"approved","revision":"1"}
-            })
-        );
-        let (_, approved_plan) = call(
-            &harness.app,
-            "alice",
+            "bob",
             Method::GET,
-            &format!("{plan_path}?name=production"),
+            "/api/connections/jira/plan?version=exchange.connection-plan.v2",
             None,
         )
         .await;
-        let approved_field = approved_plan["fields"]
-            .as_array()
-            .expect("fields")
-            .iter()
-            .find(|field| field["target"]["id"] == setting_target)
-            .expect("authority field");
-        assert_eq!(approved_field["set"], true);
-        assert_eq!(approved_field["authority"]["state"], "approved");
-        assert_eq!(
-            approved_field["authority"]["actions"],
-            json!({"revoke":{"method":"DELETE","target":target}})
-        );
-        let (status, stale) = call(
-            &harness.app,
-            "alice",
-            Method::DELETE,
-            &target,
-            Some(json!({"version":VERSION,"revision":"2"})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(stale["code"], "stale_origin_revision");
-        let (status, revoked) = call(
-            &harness.app,
-            "alice",
-            Method::DELETE,
-            &target,
-            Some(transition),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{revoked}");
-        assert_eq!(
-            revoked,
-            json!({
-                "version":VERSION,
-                "connector":provider.id,
-                "label":"production",
-                "service":declared.service,
-                "field":declared.binds(),
-                "action":"revoked",
-                "authority":{"state":"revoked","revision":"1"}
-            })
-        );
-        let (_, revoked_plan) = call(
-            &harness.app,
-            "alice",
-            Method::GET,
-            &format!("{plan_path}?name=production"),
-            None,
-        )
-        .await;
-        let revoked_field = revoked_plan["fields"]
-            .as_array()
-            .expect("fields")
-            .iter()
-            .find(|field| field["target"]["id"] == setting_target)
-            .expect("authority field");
-        assert_eq!(revoked_field["set"], false);
-        assert_eq!(revoked_field["authority"]["state"], "revoked");
-        assert_eq!(revoked_field["authority"]["actions"], Value::Null);
-        let setting_path = target.strip_suffix("/authority").expect("setting route");
-        let (status, _) = call(&harness.app, "alice", Method::DELETE, setting_path, None).await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
-        let (status, unset) = call(
-            &harness.app,
-            "alice",
-            Method::PUT,
-            &target,
-            Some(json!({"version":VERSION,"revision":"1"})),
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(unset["code"], "origin_not_proposed");
-
-        let records = harness
-            .audit
-            .by_actor("acme", "user", "alice", 100)
-            .expect("audit records");
-        assert!(records.iter().any(|record| {
-            record.action == Action::SettingAuthorityApproved
-                && record.target
-                    == Target::SettingAuthority {
-                        connector: provider.id.to_owned(),
-                        service: declared.service.clone(),
-                        field: declared.binds(),
-                        revision: "1".to_owned(),
-                    }
-        }));
-        assert!(records.iter().any(|record| {
-            record.action == Action::SettingAuthorityRevoked
-                && record.target
-                    == Target::SettingAuthority {
-                        connector: provider.id.to_owned(),
-                        service: declared.service.clone(),
-                        field: declared.binds(),
-                        revision: "1".to_owned(),
-                    }
-        }));
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn persisted_revocation_restarts_channels_before_audit_finalization_can_refuse() {
-        let candidate = origin_candidate();
-        let provider = candidate.provider;
-        let declared = candidate.declared.clone();
-        let credential = provider.auth[0].name;
-        let (harness, supervisor, channel_id, _settings) =
-            authority_harness_with_channel(candidate);
-        let target = format!(
-            "/api/connections/{}/instances/production/settings/{}/{}/authority",
-            provider.id,
-            declared.service,
-            declared.binds()
-        );
-        let (status, response) = call(
+    async fn legacy_secret_json_is_refused_before_mutation_or_reflection() {
+        let harness = harness();
+        let sentinel = "X134-LEGACY-SECRET-SENTINEL";
+        let (status, refusal) = call(
             &harness.app,
             "alice",
             Method::POST,
-            &format!("/api/connections/{}/plan", provider.id),
+            "/api/connections/jira/plan",
             Some(json!({
-                "version":VERSION,
-                "name":"production",
-                "values":{
-                    (format!("credential.{credential}")):SENTINEL,
-                    (format!("setting.{}.{}", declared.service, declared.binds())):"https://custom.example.test"
-                }
-            })),
-        ).await;
-        assert_eq!(status, StatusCode::MULTI_STATUS, "{response}");
-        let transition = json!({"version":VERSION,"revision":"1"});
-        let (status, response) = call(
-            &harness.app,
-            "alice",
-            Method::PUT,
-            &target,
-            Some(transition.clone()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::MULTI_STATUS, "{response}");
-
-        supervisor.stop(&channel_id);
-        assert_eq!(supervisor.status(&channel_id), ChannelStatus::Stopped);
-        let (status, partial) = call(
-            &harness.app,
-            "alice",
-            Method::DELETE,
-            &target,
-            Some(transition),
-        )
-        .await;
-        assert_eq!(status, StatusCode::MULTI_STATUS, "{partial}");
-        assert_eq!(partial["outcome"], "partial");
-        assert_eq!(partial["may_have_happened"], true);
-        assert_eq!(partial["action"], "revoked");
-        assert_eq!(partial["authority"]["revision"], "1");
-        assert_eq!(partial["authority"]["state"], "revoked");
-        assert_ne!(
-            supervisor.status(&channel_id),
-            ChannelStatus::Stopped,
-            "persisted revocation must synchronously restart the stored channel before audit completion"
-        );
-    }
-
-    #[tokio::test]
-    async fn persisted_authority_proposal_reports_revisioned_partial_audit_outcome() {
-        let candidate = origin_candidate();
-        let provider = candidate.provider;
-        let declared = candidate.declared.clone();
-        let credential = provider.auth[0].name;
-        let harness = authority_harness(candidate);
-        let plan_path = format!("/api/connections/{}/plan", provider.id);
-        let (status, created) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            &plan_path,
-            Some(json!({
-                "version":VERSION,
-                "name":"production",
-                "values":{(format!("credential.{credential}")):SENTINEL}
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{created}");
-
-        rusqlite::Connection::open(harness.audit.path())
-            .expect("open audit database")
-            .execute_batch(
-                "CREATE TRIGGER fail_x125_origin_audit_finish BEFORE UPDATE ON audit_records \
-                 BEGIN SELECT RAISE(FAIL, 'deliberate authority audit finish refusal'); END;",
-            )
-            .expect("install audit finish refusal");
-        let target = format!("setting.{}.{}", declared.service, declared.binds());
-        let (status, partial) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            &plan_path,
-            Some(json!({
-                "version":VERSION,
-                "name":"production",
-                "values":{target.clone():"https://partial.example.test"},
-                "expected_revisions":{}
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::MULTI_STATUS, "{partial}");
-        assert_eq!(partial["outcome"], "partial");
-        let step = partial["steps"]
-            .as_array()
-            .expect("steps")
-            .iter()
-            .find(|step| step["target"] == target)
-            .expect("proposal step");
-        assert_eq!(step["outcome"], "applied");
-        assert_eq!(step["action"], "proposed");
-        assert_eq!(step["revision"], "1");
-        assert_eq!(step["may_have_happened"], true);
-        assert_eq!(partial["plan"]["state"], "complete");
-        assert!(!partial.to_string().contains("partial.example.test"));
-    }
-
-    #[tokio::test]
-    async fn operator_plan_reports_partial_persistence_and_retry_resumes_the_same_instance() {
-        let harness = harness(2);
-        let values = json!({
-            "credential.jira.api_token": SENTINEL,
-            "setting.default.endpoint.site": "acme",
-            "setting.default.username.jira.api_token": "alice@example.test"
-        });
-        let body = || {
-            json!({
-                "version": VERSION,
+                "version": "exchange.connection-plan.v1",
                 "name": "company",
-                "values": values.clone(),
-            })
-        };
-
-        let (status, partial) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/jira/plan",
-            Some(body()),
+                "values": {"credential.jira.api_token": sentinel}
+            })),
         )
         .await;
-        assert_eq!(status, StatusCode::MULTI_STATUS, "{partial}");
-        assert_eq!(partial["outcome"], "partial");
-        assert_eq!(partial["plan"]["state"], "incomplete");
-        assert_nonapplied_steps_have_reasons(&partial);
-        assert!(partial["steps"].as_array().is_some_and(|steps| {
-            steps.iter().any(|step| {
-                step["target"] == "setting.default.endpoint.site" && step["outcome"] == "applied"
-            }) && steps.iter().any(|step| {
-                step["target"] == "setting.default.username.jira.api_token"
-                    && step["outcome"] == "refused"
-            })
-        }));
-        assert!(!partial.to_string().contains(SENTINEL), "{partial}");
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{refusal}");
+        assert_eq!(refusal, json!({"code":"secret_json_forbidden"}));
+        assert!(!refusal.to_string().contains(sentinel));
 
-        let tenant = Tenant::new("acme").expect("tenant");
-        let first = harness
-            .registry
-            .entries(&tenant, "jira")
-            .expect("labels after partial");
-        assert_eq!(first.len(), 1);
-
-        let (status, complete) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/jira/plan",
-            Some(body()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{complete}");
-        assert_eq!(complete["outcome"], "complete");
-        assert_eq!(complete["plan"]["state"], "complete");
-        assert_nonapplied_steps_have_reasons(&complete);
-        assert!(!complete.to_string().contains(SENTINEL), "{complete}");
-        let retried = harness
-            .registry
-            .entries(&tenant, "jira")
-            .expect("labels after retry");
-        assert_eq!(retried.len(), 1);
-        assert_eq!(retried[0].instance, first[0].instance);
-
-        let supplier = harness
-            .audit
-            .latest_credential_supplier("acme", "jira", "jira.api_token", Some("company"))
-            .expect("supplier query")
-            .expect("supplier evidence");
-        assert_eq!(supplier.action, Action::CredentialRotated);
-        assert!(!serde_json::to_string(&supplier)
-            .expect("audit json")
-            .contains(SENTINEL));
-
-        let renamed = json!({
-            "version": VERSION,
-            "name": "production",
-            "current_name": "company",
-            "values": {}
-        });
-        let (status, renamed) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/jira/plan",
-            Some(renamed),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{renamed}");
-        assert_eq!(renamed["plan"]["selection"], "production");
-        assert!(!renamed.to_string().contains(first[0].instance.as_str()));
-        let after_rename = harness
-            .registry
-            .entries(&tenant, "jira")
-            .expect("renamed label");
-        assert_eq!(after_rename[0].instance, first[0].instance);
-    }
-
-    #[tokio::test]
-    async fn retry_can_add_an_omitted_credential_without_changing_the_instance() {
-        let harness = harness(usize::MAX);
-        let create = json!({
-            "version": VERSION,
-            "name": "company",
-            "values": {"credential.slack.bot_token": SENTINEL}
-        });
-        let (status, created) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/slack/plan",
-            Some(create),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{created}");
-        let tenant = Tenant::new("acme").expect("tenant");
-        let before = harness
-            .registry
-            .entries(&tenant, "slack")
-            .expect("created label");
-        assert_eq!(before.len(), 1);
-
-        let add = json!({
-            "version": VERSION,
-            "name": "company",
-            "values": {"credential.slack.signing_secret": "SECOND-SENTINEL"}
-        });
-        let (status, added) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/slack/plan",
-            Some(add),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{added}");
-        assert_nonapplied_steps_have_reasons(&added);
-        let after = harness
-            .registry
-            .entries(&tenant, "slack")
-            .expect("retained label");
-        assert_eq!(after.len(), 1);
-        assert_eq!(after[0].instance, before[0].instance);
-        let signing = added["plan"]["fields"]
-            .as_array()
-            .expect("fields")
-            .iter()
-            .find(|field| field["target"]["id"] == "credential.slack.signing_secret")
-            .expect("signing-secret row");
-        assert_eq!(signing["set"], true);
-        assert!(!added.to_string().contains("SECOND-SENTINEL"));
-    }
-
-    #[tokio::test]
-    async fn refused_new_credential_batch_returns_a_fresh_unselected_plan_and_rolls_back_label() {
-        let scratch = Scratch::new();
-        let credentials = CredentialStore::bind(scratch.join("credentials")).expect("credentials");
-        let failing: Arc<dyn SecretStore> = Arc::new(FailFirstCredentialBatch {
-            inner: credentials.secrets(),
-            failed: AtomicBool::new(false),
-        });
-        let harness = harness_with_credentials(scratch, failing, usize::MAX);
-        let body = || {
-            json!({
-                "version": VERSION,
-                "name": "company",
-                "values": {"credential.jira.api_token": SENTINEL}
-            })
-        };
-        let (status, refused) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/jira/plan",
-            Some(body()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
-        assert_eq!(refused["outcome"], "refused");
-        assert_eq!(refused["plan"]["selection"], Value::Null);
-        assert_eq!(refused["plan"]["labels"], json!([]));
-        assert_nonapplied_steps_have_reasons(&refused);
         let tenant = Tenant::new("acme").expect("tenant");
         assert!(harness
             .registry
@@ -3789,173 +2129,16 @@ mod tests {
             .expect("registry after refusal")
             .is_empty());
 
-        let (status, retried) = call(
+        let (status, bytes) = call_raw(
             &harness.app,
             "alice",
             Method::POST,
             "/api/connections/jira/plan",
-            Some(body()),
+            Some(format!("not-json:{sentinel}:%58%31%33%34:WDEzNA==").into_bytes()),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{retried}");
-        assert_eq!(retried["plan"]["selection"], "company");
-    }
-
-    #[tokio::test]
-    async fn audit_finish_failure_reports_the_write_that_survived_as_partial() {
-        let harness = harness(usize::MAX);
-        rusqlite::Connection::open(harness.audit.path())
-            .expect("open audit database")
-            .execute_batch(
-                "CREATE TRIGGER fail_x125_audit_finish BEFORE UPDATE ON audit_records \
-                 BEGIN SELECT RAISE(FAIL, 'deliberate audit finish refusal'); END;",
-            )
-            .expect("install audit finish refusal");
-        let body = json!({
-            "version": VERSION,
-            "name": "company",
-            "values": {"credential.jira.api_token": SENTINEL}
-        });
-        let (status, partial) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/jira/plan",
-            Some(body),
-        )
-        .await;
-        assert_eq!(status, StatusCode::MULTI_STATUS, "{partial}");
-        assert_eq!(partial["outcome"], "partial");
-        assert_eq!(partial["plan"]["selection"], "company");
-        assert_nonapplied_steps_have_reasons(&partial);
-        assert!(partial["steps"].as_array().is_some_and(|steps| steps
-            .iter()
-            .any(|step| step["target"] == "credential.jira.api_token"
-                && step["outcome"] == "applied")));
-        assert!(!partial.to_string().contains(SENTINEL));
-    }
-
-    #[tokio::test]
-    async fn audit_begin_failure_is_a_structured_refusal_before_any_write() {
-        let harness = harness(usize::MAX);
-        rusqlite::Connection::open(harness.audit.path())
-            .expect("open audit database")
-            .execute_batch(
-                "CREATE TRIGGER fail_x125_audit_begin BEFORE INSERT ON audit_records \
-                 WHEN NEW.outcome = 'attempted' \
-                 BEGIN SELECT RAISE(FAIL, 'deliberate audit begin refusal'); END;",
-            )
-            .expect("make audit begin unavailable");
-        let body = json!({
-            "version": VERSION,
-            "name": "company",
-            "values": {"credential.jira.api_token": SENTINEL}
-        });
-        let (status, refused) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/jira/plan",
-            Some(body),
-        )
-        .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
-        assert_eq!(refused["outcome"], "refused");
-        assert_eq!(refused["plan"]["selection"], Value::Null);
-        assert_nonapplied_steps_have_reasons(&refused);
-        let tenant = Tenant::new("acme").expect("tenant");
-        assert!(harness
-            .registry
-            .entries(&tenant, "jira")
-            .expect("registry after audit refusal")
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn human_plan_reads_are_value_free_and_derive_the_tenant_from_the_principal() {
-        let harness = harness(usize::MAX);
-        let (status, applied) = call(
-            &harness.app,
-            "alice",
-            Method::POST,
-            "/api/connections/jira/plan",
-            Some(json!({
-                "version": VERSION,
-                "name": "company",
-                "values": {"credential.jira.api_token": SENTINEL}
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{applied}");
-
-        let (status, acme) = call(
-            &harness.app,
-            "alice",
-            Method::GET,
-            "/api/connections/jira/plan",
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{acme}");
-        assert_eq!(acme["labels"], json!(["company"]));
-
-        let (status, refusal) = call(
-            &harness.app,
-            "bob",
-            Method::POST,
-            "/api/connections/jira/plan",
-            Some(json!({
-                "version": VERSION,
-                "name": "other",
-                "values": {"credential.jira.api_token": SENTINEL}
-            })),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
-
-        // Bob is a resolved human but not a configured operator. His plan is derived from his
-        // own tenant and cannot disclose Alice's label or a value Alice supplied.
-        let (status, globex) = call(
-            &harness.app,
-            "bob",
-            Method::GET,
-            "/api/connections/jira/plan",
-            None,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{globex}");
-        assert_eq!(globex["labels"], json!([]));
-        assert!(!globex.to_string().contains(SENTINEL));
-    }
-
-    #[tokio::test]
-    async fn service_account_receives_neither_plan_nor_authority_surface() {
-        let harness = harness(usize::MAX);
-        for (method, path, body) in [
-            (Method::GET, "/api/connections/jira/plan", None),
-            (
-                Method::POST,
-                "/api/connections/jira/plan",
-                Some(json!({
-                    "version": VERSION,
-                    "name": "company",
-                    "values": {"credential.jira.api_token": SENTINEL}
-                })),
-            ),
-            (
-                Method::GET,
-                "/api/connections/jira/instances/company/settings/default/endpoint.site/authority",
-                None,
-            ),
-            (
-                Method::PUT,
-                "/api/connections/jira/instances/company/settings/default/endpoint.site/authority",
-                Some(json!({"version": VERSION, "revision": "1"})),
-            ),
-        ] {
-            let (status, refusal) = call(&harness.app, "worker", method, path, body).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
-            assert!(!refusal.to_string().contains(SENTINEL));
-        }
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(bytes, br#"{"code":"secret_json_forbidden"}"#);
+        assert!(!String::from_utf8_lossy(&bytes).contains(sentinel));
     }
 }
