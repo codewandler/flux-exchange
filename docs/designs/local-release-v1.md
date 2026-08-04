@@ -69,6 +69,64 @@ implement and revalidate these owner-bound local-management, direct-secret and o
 Account handoff bytes before X-126 publishes. The first public release cannot omit a field, add an
 unknown ninth field or reuse an existing identity for changed semantics.
 
+### Prepared credential transaction ownership
+
+`connector-secrets` owns the prepared credential representation, terminal ledger, inclusive
+retired-through fence and native lifetime lease. Exchange owns only its value-free coordinator
+journal, metadata/audit roll-forward and durable allocation of non-zero generations plus unique
+192-bit nonces. It constructs the opaque 256-bit transaction id through the released provider API;
+Flux never chooses, parses, orders, generates or logs either component.
+
+Exchange composes only the released object-safe five-method `PreparedSecretStore` port: `prepare`,
+`state`, `commit`, `abort` and acknowledged-generation `reclaim`. Public
+`Absent|Prepared|Committed` state, same-digest replay, abort-before-prepare tombstones, one prepared
+slot, cross-id abort fencing, 4096-terminal/1-MiB capacity without eviction, retired generations and
+outcome-uncertain I/O are exactly the C-515 provider contract. Exchange acknowledges `reclaim(G)`
+only after every transaction through `G` is terminal and no journal recovery, receipt recovery or
+same-proposal replay can query its provider outcome. Reclaim removes no credential; a timer, count
+threshold or opaque-id ordering is not acknowledgement.
+
+Exchange opens the registry-resolved `codewandler-connector-secrets` 0.20.0 FileStore before its own
+recovery/readiness and retains that same object for the server lifetime. Its exclusive native
+writer/recovery lease covers open-time read, recovery and cleanup; a second 0.20 opener refuses,
+abrupt exit releases the lease and no process repairs, replaces or reaps it. All 0.19 writers are
+quiesced before the first 0.20 open. C-515 proves child-crash recovery and lease contention/release
+natively on all five release targets before X-134 consumes its checksummed crates.io artifact.
+
+The provider conformance fixture exhaustively maps successful public states and every payload-free
+`Unsupported`, `Busy`, `DigestMismatch`, `TransactionIdReused`, `NotPrepared`, `AlreadyCommitted`,
+`Retired`, `Capacity`, `InvalidBatch` and `Backend` outcome to one closed onboarding
+code/status/retry/commit tuple. Before Exchange's durable decision provider I/O uncertainty is
+resolved through state; after the decision it is `query_receipt`/`same_proposal`, recovery repeats
+commit and never aborts or edits the proposal. Canonical positive fixtures use non-zero generations
+and valid unique nonces.
+
+### Publication readiness is derived from the tagged tree
+
+Binary and crates.io tag workflows share one permanent fail-closed readiness check. It has no
+network access, Cargo execution, environment override, mutable marker or credential-based bypass.
+It accepts only when the tagged tree directly selects one registry/checksummed
+`codewandler-connector-secrets` 0.20.0; no obsolete channel, manifest, compatibility or readiness v1
+producer remains; no tracked `tests/fixtures/exchange-release-v1/` candidate remains; and the v2
+fixture-set manifest exactly inventories and authenticates its recursive files. Canonical positives
+retain `exchange.release-trust.v1` while channel, manifest, compatibility and readiness are v2 and
+carry exactly the eight protocols above. The v2 inventory also retains every trust-v1 refusal case
+and X-128's nine native cases mapped to fourteen exact native test bindings.
+
+The check is the first post-checkout action of the local-release preflight and crates.io workflow,
+before secrets, metadata, downloads, builds, artifacts, tokens or release mutation. The publish-mode
+crate script repeats it before metadata or network access; dry-run remains available. CI exercises a
+synthetic self-test while X-134 is blocked, and repository checks enforce presence and ordering at
+all three seams. Its ordinary mode becomes green only because X-134's actual released dependency,
+production identities and regenerated fixtures satisfy the contract—never because an operator sets
+a flag. All five binary jobs depend on that preflight, so one refusal closes the entire joint tag
+boundary.
+
+The release chain is strictly `connectors/C-515 -> exchange/X-134 -> exchange/X-126`: first the
+five-target C-515 evidence and checksummed 0.20.0 registry artifact, then X-134's implementation and
+provider fixtures, then regenerated candidate-bound v2 release evidence and public X-126
+verification.
+
 ### HTTP v1 compatible-change policy
 
 The four HTTP v1 identities are strict wire identities, not an additive schema promise. A change is

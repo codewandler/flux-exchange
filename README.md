@@ -297,10 +297,12 @@ runbook does not treat a staged workflow as proof that the production channel is
 `--supervised` is a separate machine-only launch mode for the Flux
 local supervisor. It accepts only an OS-selected loopback port (`FLUX_EXCHANGE_BIND` may be absent
 or exactly `127.0.0.1:0` or `[::1]:0`) and emits one bounded canonical
-`exchange.supervisor-ready.v1` object after every store/safety check and the one listener bind have
-succeeded. The record goes only to the inherited one-shot readiness capability; stdout and stderr
-remain ordinary process output, the HTTP listener carries application traffic, and later control is
-not part of this channel.
+readiness object after every store/safety check and the one listener bind have succeeded. Current
+main emits the fixture-tested but unpublished `exchange.supervisor-ready.v1`; the first public local
+release is blocked until X-134 changes only its schema/inventory to
+`exchange.supervisor-ready.v2` with all eight final protocols. The record goes only to the inherited
+one-shot readiness capability; stdout and stderr remain ordinary process output, the HTTP listener
+carries application traffic, and later control is not part of this channel.
 
 On Unix the complete ABI is `flux-exchange --supervised`: FD 3 is the readiness pipe's write end and
 FD 4 is the liveness pipe's read end, with no other inherited nonstandard descriptor. On Windows the

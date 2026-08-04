@@ -19,8 +19,10 @@ const PROTOCOLS = [
   'exchange.effective-catalogue-response.v1',
   'exchange.invoke-request.v1',
   'exchange.invoke-response.v1',
-  'exchange.connection-plan.v1',
-  'exchange.supervisor-ready.v1',
+  'exchange.connection-plan.v2',
+  'exchange.local-management.v1',
+  'exchange.service-account-handoff.v1',
+  'exchange.supervisor-ready.v2',
 ]
 
 function releaseSource() {
@@ -57,9 +59,17 @@ test('the public release page states the complete portable release contract', ()
     'X-134',
     'implementation evidence',
     'credential-handoff',
+    'content-derived publication preflight',
+    'The v2/eight-protocol schema shown above is the first public contract',
+    'currently implemented six-protocol schema remains unpublished implementation evidence',
   ]) {
     assert.ok(source.includes(required), `${RELEASE_PAGE} does not explain ${required}`)
   }
+
+  assert.ok(
+    !source.includes('The six-protocol schema shown above'),
+    `${RELEASE_PAGE} contradicts the displayed first-public v2/eight-protocol object`
+  )
 })
 
 test('the public release page is reachable from every themed page', () => {
@@ -98,6 +108,7 @@ test('the operator runbook names delegated secret inputs without claiming they e
     'no `local-release` environment',
     'X-134',
     'implementation evidence',
+    'content-derived preflight',
     'credential-handoff',
   ]) {
     assert.ok(runbook.includes(required), `operator runbook does not state ${required}`)

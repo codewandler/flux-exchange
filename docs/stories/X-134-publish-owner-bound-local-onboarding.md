@@ -125,13 +125,14 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       before body decoding or mutation. No other method, path, query, header or response shape can
       select a secret target, creation, rotation, acquisition or mint operation.
 - [ ] The verified `flux-exchange` executable owns local TTY/browser secret input. Flux may supply
-      connector, label, exact plan/target revision and non-secret transaction metadata, but does not
-      read, proxy, inherit, log or render the bytes and cannot redirect the helper to another
-      endpoint, tenant, credential address or instance. This is a testable software/dataflow
-      invariant, not an OS isolation claim against a malicious same-user debugger.
+      connector, label and exact plan/target revision, but never supplies, chooses, parses or orders
+      the provider transaction identity. Flux does not read, proxy, inherit, log or render the bytes
+      and cannot redirect the helper to another endpoint, tenant, credential address or instance.
+      This is a testable software/dataflow invariant, not an OS isolation claim against a malicious
+      same-user debugger.
 - [ ] The exact helper grammar is provider-fixtured and closed. Vendor input is
-      `flux-exchange local vendor-secret --connector <id> --label <label> --plan-revision <revision>
-      --transaction-id <64-lowerhex>`; Service Account mint is
+      `flux-exchange local vendor-secret --connector <id> --label <label> --plan-revision
+      <revision>`; Service Account mint is
       `flux-exchange local service-account-mint --id <id> --expires-at <canonical-decimal>
       --writer-fd 5` on Unix or the same command with `--writer-handle <canonical-decimal>` on
       Windows. No endpoint, tenant, credential address, program, cwd or arbitrary argument is
@@ -139,10 +140,37 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       directly. Stdout/stderr and exit status are bounded and value-free.
 - [ ] Supervised local connect uses one Exchange-server transaction coordinator, not the current plan
       handler's separate writes, `partial` outcome or an Exchange-owned credential database. It
-      consumes released connectors C-515 through `Arc<dyn PreparedSecretStore>`: prepare durably
-      stages the checked `SecretBatch` invisibly inside `connector-secrets`; state is only
-      `Absent|Prepared|Committed`; commit/abort/query are idempotent. Exchange never inspects
+      registry-resolves released `codewandler-connector-secrets` 0.20.0 with its crates.io checksum
+      and consumes C-515 through `Arc<dyn PreparedSecretStore>`. The only provider operations are
+      `prepare`, `state`, `commit`, `abort` and `reclaim`; Exchange cannot emulate them with point
+      writes. Prepare durably stages the checked `SecretBatch` invisibly inside
+      `connector-secrets`; public state is only `Absent|Prepared|Committed`. Same-id/same-digest
+      prepare returns its existing prepared or committed state without inspecting the supplied
+      batch; a different digest refuses. Repeated commit of committed state and repeated abort of an
+      aborted tombstone are idempotent; abort of committed returns `AlreadyCommitted`, and commit or
+      prepare after abort returns `TransactionIdReused`. Aborted ids remain internal terminal
+      tombstones reported as absent, and reclaimed ids return `Retired`. Exchange never inspects
       crate-private mutations, staged paths or values and never persists a credential byte.
+- [ ] Exchange durably allocates every provider transaction id in its value-free journal root as one
+      non-zero generation followed by a unique 192-bit nonce and treats the resulting 256 bits as
+      opaque outside the provider API. Generation zero, wrap and nonce reuse refuse. It acknowledges
+      `reclaim(G)` only after every transaction through `G` is terminal and no journal, recovery,
+      receipt query or same-proposal replay can ask the provider about those generations. No timer,
+      ledger pressure, count threshold or ordering over an opaque id permits reclamation.
+- [ ] The coordinator preserves C-515's bounded state machine rather than weakening it: one prepared
+      slot reserves ordinary mutations; abort-before-prepare durably fences delayed prepare; a
+      cross-id abort that would rewrite the ledger while another id is prepared returns `Busy`; the
+      4096-terminal-record and 1 MiB bounds return `Capacity` without eviction, and abort of an
+      unseen id at capacity returns `Capacity` without mutation; successful prepare has already
+      staged the complete next image, so commit has no later deterministic validation failure.
+      Provider `Busy`, `DigestMismatch`, `TransactionIdReused`, `NotPrepared`,
+      `AlreadyCommitted`, `Retired`, `Capacity`, `InvalidBatch`, `Unsupported` and `Backend` map to
+      one exhaustively fixtured closed value-free code/status/retry/commit tuple beside successful
+      `Absent|Prepared|Committed` outcomes. Before the durable decision every provider refusal uses
+      `commit=none`; provider I/O failure is outcome-uncertain until `state` resolves it. After
+      Exchange's durable commit decision uncertainty uses `commit=query_receipt` and
+      `retry=same_proposal`; recovery queries state and repeats commit, never aborts, re-prepares or
+      edits the proposal.
 - [ ] The connect proposal digest is SHA-256 over canonical non-secret connector, label, plan
       revision, ordered target identities, settings and the ordered collection of every `(authority
       target identity, canonical revision)` pair. It excludes secret bytes, lengths, hashes,
@@ -196,8 +224,12 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
       (`x86_64-pc-windows-msvc`). Every row runs root poisoning, owner endpoint/TCP adversary, real
       TTY/console input, handoff closure plus an extra-capability canary, crash injection before and
       after connect commit, restart receipt replay, concurrent grant CAS, four-form sentinel scans
-      and existing native X-128 tests. Cross-compilation, fixture parsing or another architecture is
-      not evidence.
+      and existing native X-128 tests. The registry-resolved 0.20.0 FileStore holds C-515's exclusive
+      lifetime writer/recovery lease throughout each native process test; a second opener refuses,
+      abrupt exit releases it, and no test repairs, replaces or reaps the lease. Exchange opens that
+      one store before recovery/readiness and retains the same object for the server lifetime. Every
+      0.19 writer is quiesced before the first 0.20 open. Cross-compilation, fixture parsing or
+      another architecture is not evidence.
 - [ ] X-126's story Acceptance and dependency graph plus `docs/designs/local-release-v1.md` are
       amended/superseded by this contract PR into the v2 provider contract. Operator/user
       documentation and
@@ -212,10 +244,10 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
 
 - Cross-repository authority:
   `../flux-roadmap/decisions/0007-local-onboarding-uses-owner-bound-capabilities.md` at roadmap
-  commit `ced7426`.
-- External implementation dependency: connectors C-515 and its released `connector-secrets`
-  prepared-transaction version. X-134 remains blocked and no code wave starts from an unmerged or
-  unpublished provider port.
+  commit `daf80d5`.
+- External implementation dependency: connectors C-515 and the checksummed crates.io release of
+  `codewandler-connector-secrets` 0.20.0. X-134 remains blocked and no code wave starts from an
+  unmerged provider port, unpublished commit, path/git dependency or unmatched lockfile resolution.
 - This story owns provider bytes and fixtures. Flux C-509 owns the receiving credential writer,
   owner-only Flux store, opaque resolver, management/runtime client split, CLI projection, concrete
   write approval and retry suppression. Exchange fixtures may use a test sink but never certify
