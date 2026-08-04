@@ -263,11 +263,12 @@ implements its manager in C-510.
   padded RFC 4648 base64 of the complete unencrypted minisign secret-key file bytes. This story
   creates or configures none of them and stays in progress until explicitly authorized external
   provisioning and a real public verifier run.
-- 2026-08-04: Accepted Roadmap Decision 0007 makes the current exact six-protocol schema
-  implementation evidence only. The next unused tag is `v0.18.0`, whose push would irreversibly
-  start both five-target binary and crates.io publication; neither that joint operator boundary nor
-  the trust ceremony/stable update may occur until canonical X-134 implements and revalidates the
-  final local-management and credential-handoff compatibility schema.
+- 2026-08-04: Roadmap Decisions 0004 and 0007, frozen at `22a8754`, make the current exact
+  six-protocol v1 schema implementation evidence only. The next unused tag is `v0.18.0`, whose push
+  would irreversibly start both five-target binary and crates.io publication; neither that joint
+  operator boundary nor the trust ceremony, public release, or stable-head update may occur until
+  canonical X-134 implements and revalidates release-channel, manifest, compatibility and readiness
+  v2, connection-plan v2, local-management v1 and service-account-handoff v1.
 
 ## Notes
 
