@@ -30,10 +30,14 @@ try {
         $priorState = $env:FLUX_EXCHANGE_STATE
         $priorBind = $env:FLUX_EXCHANGE_BIND
         $priorUser = $env:USER
+        $priorNoColor = $env:NO_COLOR
+        $priorCargoColor = $env:CARGO_TERM_COLOR
         try {
             $env:FLUX_EXCHANGE_STATE = $stateRoot
             $env:FLUX_EXCHANGE_BIND = "127.0.0.1:0"
             $env:USER = "windows-acl-fixture"
+            $env:NO_COLOR = "1"
+            $env:CARGO_TERM_COLOR = "never"
             $process = Start-Process -FilePath $binary -ArgumentList "--dev" -PassThru `
                 -RedirectStandardOutput $stdout -RedirectStandardError $stderr
             return $process
@@ -42,6 +46,8 @@ try {
             $env:FLUX_EXCHANGE_STATE = $priorState
             $env:FLUX_EXCHANGE_BIND = $priorBind
             $env:USER = $priorUser
+            $env:NO_COLOR = $priorNoColor
+            $env:CARGO_TERM_COLOR = $priorCargoColor
         }
     }
 
