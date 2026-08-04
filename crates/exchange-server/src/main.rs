@@ -20,7 +20,7 @@ pub mod channel;
 mod connection_guard;
 pub mod credential_acquisition;
 mod dev_identity;
-mod entropy;
+pub use flux_exchange::entropy;
 mod execution;
 mod local_identity;
 mod local_state;
@@ -29,7 +29,7 @@ mod oidc;
 mod operator;
 pub mod protocol;
 mod routes;
-mod service_account;
+pub use flux_exchange::service_account;
 mod session;
 pub mod state;
 use flux_exchange::supervisor;
@@ -251,6 +251,12 @@ fn main() -> ExitCode {
     } else {
         None
     };
+    if supervision.is_some() {
+        if let Err(refusal) = supervised_bind() {
+            eprintln!("refusing supervised startup: {refusal}");
+            return ExitCode::FAILURE;
+        }
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1137,9 +1143,14 @@ fn supervised_bind() -> Result<SocketAddr, StartupRefusal> {
                 value: configured,
                 source,
             })?,
-        Err(_) => "127.0.0.1:0"
+        Err(std::env::VarError::NotPresent) => "127.0.0.1:0"
             .parse()
             .expect("the supervised loopback bind literal is valid"),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(StartupRefusal::Supervised {
+                reason: format!("{BIND_ENV} is not Unicode"),
+            });
+        }
     };
     if !matches!(
         bind.ip(),

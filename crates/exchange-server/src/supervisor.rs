@@ -789,12 +789,6 @@ fn discover_capabilities(
     arguments: &[std::ffi::OsString],
 ) -> Result<(ReadyWriter, LivenessReader), String> {
     use std::os::windows::io::FromRawHandle;
-    use windows_sys::Win32::Foundation::{
-        GetHandleInformation, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileType, ReadFile, WriteFile, FILE_TYPE_PIPE,
-    };
 
     let expected = [
         "--supervised",
@@ -816,81 +810,93 @@ fn discover_capabilities(
         return Err("supervisor readiness and liveness HANDLE values are identical".to_owned());
     }
 
-    fn validate(handle: HANDLE, read: bool, name: &str) -> Result<(), String> {
-        let mut inherited = 0_u32;
-        // SAFETY: output storage is valid and the numeric capability is only observed.
-        if unsafe { GetHandleInformation(handle, &mut inherited) } == 0
-            || inherited & HANDLE_FLAG_INHERIT == 0
-        {
-            return Err(format!(
-                "supervisor {name} HANDLE is absent or not inherited"
-            ));
-        }
-        // SAFETY: the call only identifies the validated inherited handle.
-        if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
-            return Err(format!("supervisor {name} HANDLE is not a pipe"));
-        }
-        let mut transferred = 0_u32;
-        // A zero-byte operation returns immediately but still validates the handle's access mask.
-        // SAFETY: no buffer is accessed for a zero-byte operation and the output count is valid.
-        let usable = unsafe {
-            if read {
-                ReadFile(
-                    handle,
-                    std::ptr::null_mut(),
-                    0,
-                    &mut transferred,
-                    std::ptr::null_mut(),
-                )
-            } else {
-                WriteFile(
-                    handle,
-                    std::ptr::null(),
-                    0,
-                    &mut transferred,
-                    std::ptr::null_mut(),
-                )
-            }
-        };
-        // SAFETY: the opposite zero-byte operation likewise carries no payload and cannot block.
-        let opposite_usable = unsafe {
-            if read {
-                WriteFile(
-                    handle,
-                    std::ptr::null(),
-                    0,
-                    &mut transferred,
-                    std::ptr::null_mut(),
-                )
-            } else {
-                ReadFile(
-                    handle,
-                    std::ptr::null_mut(),
-                    0,
-                    &mut transferred,
-                    std::ptr::null_mut(),
-                )
-            }
-        };
-        if usable == 0 || opposite_usable != 0 {
-            return Err(format!("supervisor {name} HANDLE has the wrong direction"));
-        }
-        // SAFETY: clearing inheritance on the discovered capability cannot widen authority.
-        if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
-            return Err(format!(
-                "cannot protect supervisor {name} HANDLE from child processes"
-            ));
-        }
-        Ok(())
-    }
-
-    validate(readiness, false, "readiness")?;
-    validate(liveness, true, "liveness")?;
+    validate_windows_handle(readiness, false, "readiness")?;
+    validate_windows_handle(liveness, true, "liveness")?;
     // SAFETY: the two distinct validated HANDLE capabilities transfer ownership exactly once.
     let readiness = unsafe { std::fs::File::from_raw_handle(readiness.cast()) };
     // SAFETY: as above for liveness.
     let liveness = unsafe { std::fs::File::from_raw_handle(liveness.cast()) };
     Ok((ReadyWriter(readiness), LivenessReader(liveness)))
+}
+
+#[cfg(windows)]
+fn validate_windows_handle(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    read: bool,
+    name: &str,
+) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{
+        GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileType, ReadFile, WriteFile, FILE_TYPE_PIPE,
+    };
+
+    let mut inherited = 0_u32;
+    // SAFETY: output storage is valid and the numeric capability is only observed.
+    if unsafe { GetHandleInformation(handle, &mut inherited) } == 0
+        || inherited & HANDLE_FLAG_INHERIT == 0
+    {
+        return Err(format!(
+            "supervisor {name} HANDLE is absent or not inherited"
+        ));
+    }
+    // SAFETY: the call only identifies the validated inherited handle.
+    if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
+        return Err(format!("supervisor {name} HANDLE is not a pipe"));
+    }
+    let mut transferred = 0_u32;
+    // A zero-byte operation returns immediately but still validates the handle's access mask.
+    // SAFETY: no buffer is accessed for a zero-byte operation and the output count is valid.
+    let usable = unsafe {
+        if read {
+            ReadFile(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                &mut transferred,
+                std::ptr::null_mut(),
+            )
+        } else {
+            WriteFile(
+                handle,
+                std::ptr::null(),
+                0,
+                &mut transferred,
+                std::ptr::null_mut(),
+            )
+        }
+    };
+    // SAFETY: the opposite zero-byte operation likewise carries no payload and cannot block.
+    let opposite_usable = unsafe {
+        if read {
+            WriteFile(
+                handle,
+                std::ptr::null(),
+                0,
+                &mut transferred,
+                std::ptr::null_mut(),
+            )
+        } else {
+            ReadFile(
+                handle,
+                std::ptr::null_mut(),
+                0,
+                &mut transferred,
+                std::ptr::null_mut(),
+            )
+        }
+    };
+    if usable == 0 || opposite_usable != 0 {
+        return Err(format!("supervisor {name} HANDLE has the wrong direction"));
+    }
+    // SAFETY: clearing inheritance on the discovered capability cannot widen authority.
+    if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
+        return Err(format!(
+            "cannot protect supervisor {name} HANDLE from child processes"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1080,9 +1086,11 @@ mod tests {
 
     #[test]
     fn closed_readiness_serializer_has_no_authority_value_slot() {
+        let _closed_emitter: fn(Supervision, SocketAddr) -> Result<(), String> = Supervision::ready;
         // These represent the six value classes the production server can hold or receive. The
+        // emitter consumes only its validated capability plus the actual socket address, and the
         // readiness serializer accepts only `VerifiedReadiness`; unlike a map or flattened state
-        // object, that closed construction has no field through which any of them can enter.
+        // object, neither has a state/store input through which any of them can enter.
         let authority_values = [
             "credential-secret-7c96d9",
             "setting-value-7c96d9",
@@ -1297,6 +1305,83 @@ mod tests {
             parse_decimal("18446744073709551615", u64::MAX, false),
             Ok(u64::MAX)
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_validator_refuses_noninherited_nonpipe_and_each_wrong_direction() {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+        };
+        use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+        use windows_sys::Win32::System::Pipes::CreatePipe;
+
+        fn pipe() -> (HANDLE, HANDLE) {
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: std::ptr::null_mut(),
+                bInheritHandle: 1,
+            };
+            let mut read = std::ptr::null_mut();
+            let mut write = std::ptr::null_mut();
+            // SAFETY: output pointers and security attributes remain live for the call.
+            assert_ne!(
+                unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) },
+                0
+            );
+            (read, write)
+        }
+
+        fn inheritable(handle: HANDLE, inherited: bool) {
+            // SAFETY: only the inheritance bit of this owned fixture handle changes.
+            assert_ne!(
+                unsafe {
+                    SetHandleInformation(
+                        handle,
+                        HANDLE_FLAG_INHERIT,
+                        if inherited { HANDLE_FLAG_INHERIT } else { 0 },
+                    )
+                },
+                0
+            );
+        }
+
+        let (read, write) = pipe();
+        assert!(validate_windows_handle(write, false, "readiness").is_ok());
+        inheritable(write, true);
+        assert!(validate_windows_handle(read, true, "liveness").is_ok());
+
+        inheritable(read, true);
+        assert!(validate_windows_handle(read, false, "readiness")
+            .expect_err("read end is not readiness")
+            .contains("wrong direction"));
+        inheritable(write, true);
+        assert!(validate_windows_handle(write, true, "liveness")
+            .expect_err("write end is not liveness")
+            .contains("wrong direction"));
+
+        inheritable(write, false);
+        assert!(validate_windows_handle(write, false, "readiness")
+            .expect_err("noninherited handle")
+            .contains("not inherited"));
+
+        let null = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("NUL")
+            .expect("non-pipe Windows fixture");
+        let null_handle = null.as_raw_handle().cast();
+        inheritable(null_handle, true);
+        assert!(validate_windows_handle(null_handle, false, "readiness")
+            .expect_err("non-pipe handle")
+            .contains("not a pipe"));
+
+        // SAFETY: the two pipe handles are owned by this fixture and closed once.
+        unsafe {
+            CloseHandle(read);
+            CloseHandle(write);
+        }
     }
 
     #[cfg(target_os = "linux")]

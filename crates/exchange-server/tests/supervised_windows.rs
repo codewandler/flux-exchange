@@ -50,7 +50,15 @@ fn assert_no_sentinels(bytes: &[u8]) {
     }
 }
 
-fn seed_production_authority_stores(root: &std::path::Path) {
+fn assert_no_authority_values(bytes: &[u8], values: &[String]) {
+    for value in values {
+        assert!(!bytes
+            .windows(value.len())
+            .any(|candidate| candidate == value.as_bytes()));
+    }
+}
+
+fn seed_production_authority_stores(root: &std::path::Path) -> Vec<String> {
     use exchange_host::{ConnectionSettings, Grants};
 
     let tenant = exchange_host::Tenant::new("dev").expect("sentinel tenant");
@@ -87,21 +95,36 @@ fn seed_production_authority_stores(root: &std::path::Path) {
         .set(&tenant, &[grant])
         .expect("production grant write");
 
-    let service_accounts = serde_json::json!({
-        "version": 1,
-        "agents": {
-            (SENTINELS[3].1): {
-                "tenant": "dev",
-                "id": "sentinel-service",
-                "expires_at": 4_102_444_800_i64
-            }
-        }
-    });
-    exchange_host::write_private_state_file(
-        root.join("service-accounts/store.json"),
-        &serde_json::to_vec(&service_accounts).expect("service account fixture JSON"),
+    let service_account_path = root.join("service-accounts/store.json");
+    let service_accounts =
+        flux_exchange::service_account::ServiceAccountStore::open(&service_account_path)
+            .expect("production Service Account store");
+    let minted = service_accounts
+        .mint(
+            &exchange_host::Principal::new(
+                exchange_host::PrincipalKind::User,
+                "sentinel-user",
+                tenant,
+            ),
+            "sentinel-service",
+            flux_exchange::service_account::Expiry {
+                as_of: 1_800_000_000,
+                expires_at: 1_800_000_001,
+            },
+        )
+        .expect("production Service Account mint");
+    let token = minted.token.as_str().to_owned();
+    drop(service_accounts);
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(service_account_path).expect("persisted Service Account store"),
     )
-    .expect("production Service Account verifier write");
+    .expect("production Service Account JSON");
+    let verifier = stored["agents"]
+        .as_object()
+        .and_then(|agents| agents.keys().next())
+        .expect("persisted Service Account verifier")
+        .to_owned();
+    vec![token, verifier]
 }
 
 struct NativeProcess {
@@ -110,6 +133,7 @@ struct NativeProcess {
     readiness: HANDLE,
     liveness: HANDLE,
     state_root: PathBuf,
+    dynamic_authority_values: Vec<String>,
 }
 
 impl NativeProcess {
@@ -119,7 +143,7 @@ impl NativeProcess {
             std::process::id(),
             unique_counter()
         ));
-        seed_production_authority_stores(&state_root);
+        let dynamic_authority_values = seed_production_authority_stores(&state_root);
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: std::ptr::null_mut(),
@@ -185,6 +209,10 @@ impl NativeProcess {
         let mut startup = STARTUPINFOEXW::default();
         startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
         startup.lpAttributeList = attribute_list;
+        // Deliberately no STARTF_USESTDHANDLES: Windows requires redirected standard handles to be
+        // inherited, which would add them to this complete HANDLE_LIST and violate the exact-two
+        // supervisor ABI. The ordinary-startup fixture below exercises real stdout/stderr capture
+        // over these same production store values; supervised output remains readiness-only.
         let mut process = PROCESS_INFORMATION::default();
         // SAFETY: all pointers reference live, correctly sized Windows structures and mutable
         // nul-terminated UTF-16 buffers. The explicit handle list is exactly the two capabilities.
@@ -219,6 +247,7 @@ impl NativeProcess {
             readiness: readiness_read,
             liveness: liveness_write,
             state_root,
+            dynamic_authority_values,
         }
     }
 
@@ -243,6 +272,7 @@ impl NativeProcess {
             bytes.extend_from_slice(&buffer[..read as usize]);
         }
         close(std::mem::replace(&mut self.readiness, std::ptr::null_mut()));
+        assert_no_authority_values(&bytes, &self.dynamic_authority_values);
         bytes
     }
 
@@ -251,6 +281,26 @@ impl NativeProcess {
             close(self.liveness);
             self.liveness = std::ptr::null_mut();
         }
+    }
+
+    fn send_liveness_byte(&self) {
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+        let byte = [0x5a_u8; 1];
+        let mut written = 0_u32;
+        // SAFETY: the buffer/output count are live and this is the owned liveness write handle.
+        assert_ne!(
+            unsafe {
+                WriteFile(
+                    self.liveness,
+                    byte.as_ptr().cast(),
+                    1,
+                    &mut written,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(written, 1);
     }
 
     fn wait_dead(&self) {
@@ -359,6 +409,15 @@ fn windows_tokio_wedge_still_dies_through_native_liveness() {
 }
 
 #[test]
+fn windows_liveness_byte_exits_without_waiting_for_eof() {
+    let mut server = NativeProcess::spawn(false);
+    let bytes = server.readiness();
+    assert!(!bytes.is_empty());
+    server.send_liveness_byte();
+    server.wait_dead();
+}
+
+#[test]
 fn windows_supervisor_helper_process() {
     if std::env::var_os("X128_RUN_WINDOWS_SUPERVISOR_HELPER").is_none() {
         return;
@@ -397,12 +456,14 @@ fn assert_terminate_supervisor(wedge: bool) {
             "--nocapture",
         ])
         .env("X128_RUN_WINDOWS_SUPERVISOR_HELPER", "1")
-        .stdout(std::process::Stdio::piped());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     if wedge {
         command.env("X128_WINDOWS_HELPER_WEDGE", "1");
     }
     let mut helper = command.spawn().expect("Windows supervisor helper");
     let mut reader = std::io::BufReader::new(helper.stdout.take().expect("helper stdout"));
+    let mut helper_stderr = helper.stderr.take().expect("helper stderr");
     let line = loop {
         let mut line = String::new();
         assert_ne!(reader.read_line(&mut line).expect("helper output"), 0);
@@ -433,6 +494,13 @@ fn assert_terminate_supervisor(wedge: bool) {
         0
     );
     assert!(!helper.wait().expect("helper status").success());
+    let mut remaining_stdout = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut remaining_stdout).expect("captured helper stdout");
+    let mut captured_stderr = Vec::new();
+    std::io::Read::read_to_end(&mut helper_stderr, &mut captured_stderr)
+        .expect("captured helper stderr");
+    assert_no_sentinels(&remaining_stdout);
+    assert_no_sentinels(&captured_stderr);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         // SYNCHRONIZE is sufficient to observe termination without opening any PID-named authority.
@@ -481,6 +549,27 @@ fn malformed_windows_handle_flags_refuse_without_stdout_readiness() {
             "--supervised",
             "--supervisor-readiness-handle",
             "01",
+            "--supervisor-liveness-handle",
+            "2",
+        ],
+        vec![
+            "--supervised",
+            "--supervisor-readiness-handle",
+            "+1",
+            "--supervisor-liveness-handle",
+            "2",
+        ],
+        vec![
+            "--supervised",
+            "--supervisor-readiness-handle",
+            "-1",
+            "--supervisor-liveness-handle",
+            "2",
+        ],
+        vec![
+            "--supervised",
+            "--supervisor-readiness-handle",
+            "18446744073709551616",
             "--supervisor-liveness-handle",
             "2",
         ],
@@ -574,6 +663,32 @@ fn environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities
     assert!(!output.status.success());
     assert!(output.stdout.is_empty(), "stdout became readiness");
     assert_no_sentinels(&output.stderr);
+}
+
+#[test]
+fn ordinary_startup_over_the_same_authority_stores_captures_value_free_logs() {
+    let root = std::env::temp_dir().join(format!(
+        "flux-exchange-x128-windows-log-capture-{}-{}",
+        std::process::id(),
+        unique_counter()
+    ));
+    let dynamic_authority_values = seed_production_authority_stores(&root);
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupied log fixture");
+    let occupied_address = occupied.local_addr().expect("occupied log address");
+    let output = exchange_command()
+        .arg("--dev")
+        .env("USER", "sentinel-user")
+        .env("FLUX_EXCHANGE_STATE", &root)
+        .env("FLUX_EXCHANGE_BIND", occupied_address.to_string())
+        .output()
+        .expect("ordinary startup log capture");
+    assert!(!output.status.success());
+    assert_no_sentinels(&output.stdout);
+    assert_no_sentinels(&output.stderr);
+    assert_no_authority_values(&output.stdout, &dynamic_authority_values);
+    assert_no_authority_values(&output.stderr, &dynamic_authority_values);
+    drop(occupied);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 fn current_environment(state_root: &PathBuf, wedge: bool) -> Vec<u16> {

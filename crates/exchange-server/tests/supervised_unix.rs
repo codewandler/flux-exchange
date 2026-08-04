@@ -31,7 +31,7 @@ fn exchange_command() -> Command {
     Command::new(env!("CARGO_BIN_EXE_flux-exchange"))
 }
 
-fn seed_production_authority_stores(root: &std::path::Path) {
+fn seed_production_authority_stores(root: &std::path::Path) -> Vec<String> {
     use exchange_host::{ConnectionSettings, Grants};
 
     let tenant = exchange_host::Tenant::new("dev").expect("sentinel tenant");
@@ -69,21 +69,36 @@ fn seed_production_authority_stores(root: &std::path::Path) {
         .set(&tenant, &[grant])
         .expect("production grant write");
 
-    let service_accounts = serde_json::json!({
-        "version": 1,
-        "agents": {
-            (SENTINELS[3].1): {
-                "tenant": "dev",
-                "id": "sentinel-service",
-                "expires_at": 4_102_444_800_i64
-            }
-        }
-    });
-    exchange_host::write_private_state_file(
-        root.join("service-accounts/store.json"),
-        &serde_json::to_vec(&service_accounts).expect("service account fixture JSON"),
+    let service_account_path = root.join("service-accounts/store.json");
+    let service_accounts =
+        flux_exchange::service_account::ServiceAccountStore::open(&service_account_path)
+            .expect("production Service Account store");
+    let minted = service_accounts
+        .mint(
+            &exchange_host::Principal::new(
+                exchange_host::PrincipalKind::User,
+                "sentinel-user",
+                tenant,
+            ),
+            "sentinel-service",
+            flux_exchange::service_account::Expiry {
+                as_of: 1_800_000_000,
+                expires_at: 1_800_000_001,
+            },
+        )
+        .expect("production Service Account mint");
+    let token = minted.token.as_str().to_owned();
+    drop(service_accounts);
+    let stored: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(service_account_path).expect("persisted Service Account store"),
     )
-    .expect("production Service Account verifier write");
+    .expect("production Service Account JSON");
+    let verifier = stored["agents"]
+        .as_object()
+        .and_then(|agents| agents.keys().next())
+        .expect("persisted Service Account verifier")
+        .to_owned();
+    vec![token, verifier]
 }
 
 struct PipeEnds {
@@ -117,6 +132,7 @@ struct SupervisedChild {
     readiness_read: RawFd,
     liveness_write: RawFd,
     state_root: PathBuf,
+    dynamic_authority_values: Vec<String>,
 }
 
 impl SupervisedChild {
@@ -131,7 +147,7 @@ impl SupervisedChild {
     fn spawn_config(
         root_mode: u32,
         wedge: bool,
-        bind: Option<&str>,
+        bind: Option<&OsStr>,
         occupied_bind: Option<SocketAddr>,
     ) -> Self {
         use std::os::unix::fs::PermissionsExt;
@@ -144,7 +160,7 @@ impl SupervisedChild {
         std::fs::create_dir(&root).expect("private state fixture root");
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
             .expect("private fixture root before authority writes");
-        seed_production_authority_stores(&root);
+        let dynamic_authority_values = seed_production_authority_stores(&root);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(root_mode))
             .expect("fixture root mode");
         let readiness = PipeEnds::new();
@@ -192,6 +208,7 @@ impl SupervisedChild {
             readiness_read: readiness.read,
             liveness_write: liveness.write,
             state_root: root,
+            dynamic_authority_values,
         }
     }
 
@@ -205,7 +222,9 @@ impl SupervisedChild {
             file.read_to_end(&mut bytes).expect("readiness pipe read");
             bytes
         });
-        reader.join().expect("readiness reader")
+        let bytes = reader.join().expect("readiness reader");
+        assert_no_authority_values(&bytes, &self.dynamic_authority_values);
+        bytes
     }
 
     fn close_liveness(&mut self) {
@@ -260,6 +279,8 @@ impl SupervisedChild {
         };
         assert_no_sentinels(&output.stdout);
         assert_no_sentinels(&output.stderr);
+        assert_no_authority_values(&output.stdout, &self.dynamic_authority_values);
+        assert_no_authority_values(&output.stderr, &self.dynamic_authority_values);
         output
     }
 }
@@ -345,6 +366,17 @@ fn assert_no_sentinels(bytes: &[u8]) {
                 .windows(sentinel.len())
                 .any(|candidate| candidate == sentinel.as_bytes()),
             "captured a value-shaped sentinel"
+        );
+    }
+}
+
+fn assert_no_authority_values(bytes: &[u8], values: &[String]) {
+    for value in values {
+        assert!(
+            !bytes
+                .windows(value.len())
+                .any(|candidate| candidate == value.as_bytes()),
+            "captured a dynamic authority value"
         );
     }
 }
@@ -592,11 +624,64 @@ fn unsafe_store_refusal_emits_no_readiness_or_sentinel() {
 #[test]
 fn preselected_or_nonloopback_bind_refuses_before_readiness() {
     for bind in ["127.0.0.1:8080", "127.0.0.2:0", "0.0.0.0:0"] {
-        let mut server = SupervisedChild::spawn_config(0o700, false, Some(bind), None);
+        let mut server = SupervisedChild::spawn_config(0o700, false, Some(OsStr::new(bind)), None);
         assert!(server.readiness().is_empty(), "{bind} emitted readiness");
         let output = server.finish();
         assert!(!output.status.success());
     }
+}
+
+#[test]
+fn non_unicode_supervised_bind_refuses_before_state_or_readiness() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let bind = std::ffi::OsString::from_vec(vec![0xff]);
+    let root = std::env::temp_dir().join(format!(
+        "flux-exchange-x128-nonunicode-bind-{}-{}",
+        std::process::id(),
+        unique_counter()
+    ));
+    let readiness = PipeEnds::new();
+    let liveness = PipeEnds::new();
+    let readiness_source = duplicate_high(readiness.write);
+    let liveness_source = duplicate_high(liveness.read);
+    let mut command = exchange_command();
+    command
+        .arg("--supervised")
+        .env("FLUX_EXCHANGE_STATE", &root)
+        .env("FLUX_EXCHANGE_BIND", bind)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // SAFETY: the closure uses only async-signal-safe descriptor operations before exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup2(readiness_source, 3) < 0 || libc::dup2(liveness_source, 4) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for fd in 5..256 {
+                libc::close(fd);
+            }
+            Ok(())
+        });
+    }
+    let child = command.spawn().expect("non-Unicode bind refusal process");
+    close_fd(readiness.write);
+    close_fd(liveness.read);
+    close_fd(readiness_source);
+    close_fd(liveness_source);
+    // SAFETY: ownership of the readiness read descriptor moves to this file exactly once.
+    let mut ready = unsafe { std::fs::File::from_raw_fd(readiness.read) };
+    let mut readiness_bytes = Vec::new();
+    ready
+        .read_to_end(&mut readiness_bytes)
+        .expect("refusal readiness EOF");
+    close_fd(liveness.write);
+    let output = child.wait_with_output().expect("non-Unicode bind output");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(readiness_bytes.is_empty());
+    assert_no_sentinels(&output.stderr);
+    assert!(!root.exists(), "invalid bind opened local state");
 }
 
 #[test]
@@ -649,6 +734,11 @@ fn exact_unix_abi_refuses_missing_and_wrong_capabilities() {
         vec!["--supervisor-liveness-handle", "4", "--supervised"],
         vec!["--supervised=true"],
         vec!["--supervisor-readiness-handle=3"],
+        vec!["--supervisor-liveness-handle=4"],
+        vec![
+            "--supervisor-liveness-handle=4",
+            "--supervisor-readiness-handle=3",
+        ],
         vec!["--supervisor-junk"],
     ] {
         let root = std::env::temp_dir().join(format!(
@@ -870,6 +960,26 @@ fn compatibility_is_exact_and_never_opens_a_store_or_listener() {
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("exact compatibility object");
     assert_eq!(value["schema"], "exchange.compatibility.v1");
+    let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repository)
+        .output()
+        .expect("worktree source commit");
+    assert!(source.status.success());
+    assert_eq!(
+        value["release"]["source_commit"],
+        String::from_utf8(source.stdout)
+            .expect("UTF-8 source commit")
+            .trim()
+    );
+    assert!(
+        value["release"]["build_id"]
+            .as_str()
+            .expect("build id")
+            .starts_with("dev-"),
+        "development builds carry an explicit worktree-derived identity"
+    );
 
     let wrong = exchange_command()
         .args(["compatibility", "--json", "extra"])
