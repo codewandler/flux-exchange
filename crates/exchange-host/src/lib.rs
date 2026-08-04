@@ -170,8 +170,9 @@ pub use grant::{
 };
 pub use grant::{GrantStore, GrantStoreError};
 pub use grant_cas::{
-    GrantApplyReceipt, GrantCandidate, GrantCandidateInbound, GrantPreview, GrantProposalDigest,
-    GrantReceiptId, GrantSelector, GrantTransactionRefusal, GrantTransactions, StoreRevision,
+    GrantApplyReceipt, GrantCandidate, GrantCandidateInbound, GrantDecisionObserver, GrantPreview,
+    GrantProposalDigest, GrantReceiptId, GrantSelector, GrantTransactionRefusal, GrantTransactions,
+    StoreRevision,
 };
 pub use instances::{
     ConnectionLabel, ConnectionRegistry, MemoryConnectionRegistry, NamedConnection,

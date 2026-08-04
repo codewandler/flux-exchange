@@ -321,6 +321,29 @@ pub struct GrantApplyReceipt {
     pub revision: StoreRevision,
 }
 
+/// Value-free observation of the one-way durable grant decision boundary.
+pub trait GrantDecisionObserver {
+    /// Called immediately before the first durable write; `false` must prevent that write.
+    fn starting(&mut self, receipt_id: GrantReceiptId) -> bool;
+
+    /// Called once the receipt is durable or a byte-identical durable replay is discovered.
+    fn decided(&mut self, receipt_id: GrantReceiptId);
+}
+
+impl<Starting, Decided> GrantDecisionObserver for (Starting, Decided)
+where
+    Starting: FnMut(GrantReceiptId) -> bool,
+    Decided: FnMut(GrantReceiptId),
+{
+    fn starting(&mut self, receipt_id: GrantReceiptId) -> bool {
+        self.0(receipt_id)
+    }
+
+    fn decided(&mut self, receipt_id: GrantReceiptId) {
+        self.1(receipt_id);
+    }
+}
+
 /// Why preview, CAS apply or receipt query refused. Every variant is value-free.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GrantTransactionRefusal {
@@ -344,6 +367,9 @@ pub enum GrantTransactionRefusal {
     /// A caller-supplied receipt id is already occupied by another proposal.
     #[error("the grant receipt identity is already occupied")]
     ReceiptConflict,
+    /// The caller's absolute pre-decision budget closed before the durable write started.
+    #[error("the grant decision deadline elapsed before the durable write started")]
+    DecisionExpired,
     /// The durable store could not be read or atomically replaced.
     #[error("the grant transaction store is unavailable: {reason}")]
     Store {
@@ -375,8 +401,10 @@ pub trait GrantTransactions: Send + Sync {
     /// Apply while exposing the first instant at which this receipt is durably queryable.
     ///
     /// The default preserves compatibility for non-file implementations. Durable production
-    /// stores override this method and call `decided` immediately after fsync (or immediately on a
-    /// byte-identical replay), before publishing later in-memory or audit projections.
+    /// stores override this method and call `starting` immediately before the first durable write,
+    /// then `decided` immediately after fsync (or immediately on a byte-identical replay), before
+    /// publishing later in-memory or audit projections. Returning `false` from `starting` must
+    /// prevent the durable write.
     fn apply_observed(
         &self,
         tenant: &Tenant,
@@ -384,10 +412,13 @@ pub trait GrantTransactions: Send + Sync {
         revision: StoreRevision,
         proposal_digest: GrantProposalDigest,
         receipt_id: GrantReceiptId,
-        decided: &mut dyn FnMut(GrantReceiptId),
+        observer: &mut dyn GrantDecisionObserver,
     ) -> Result<GrantApplyReceipt, GrantTransactionRefusal> {
+        if !observer.starting(receipt_id) {
+            return Err(GrantTransactionRefusal::DecisionExpired);
+        }
         let receipt = self.apply(tenant, candidate, revision, proposal_digest, receipt_id)?;
-        decided(receipt.receipt_id);
+        observer.decided(receipt.receipt_id);
         Ok(receipt)
     }
 

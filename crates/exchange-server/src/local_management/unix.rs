@@ -17,8 +17,9 @@ use super::dispatcher::{expired_reply, Transport};
 use super::service_account::OneShotWriter;
 use super::service_account_handoff::unix_transfer::{receive_initial_fd, UnixHandoffError};
 use super::{
-    deadline::finalize_native_terminal, ActiveSession, DeadlineController, Dispatcher,
-    SessionAdvance, SessionBegin, TransactionCoordinator,
+    deadline::{finalize_native_terminal, write_native_terminal},
+    ActiveSession, DeadlineController, Dispatcher, SessionAdvance, SessionBegin,
+    TransactionCoordinator,
 };
 use crate::state::AppState;
 
@@ -513,7 +514,7 @@ async fn dispatch_one(
         } else {
             let received = stream.read(&mut bytes).await?;
             if received != 0 && decoder.push(&bytes[..received]).is_err() {
-                if let Some(session) = &active {
+                if let Some(session) = active.as_mut() {
                     session.abort().await;
                 }
                 return Ok(());
@@ -523,7 +524,7 @@ async fn dispatch_one(
         if received == 0 {
             let _ = decoder.finish();
             if deadline.may_abort() {
-                if let Some(session) = &active {
+                if let Some(session) = active.as_mut() {
                     session.abort().await;
                 }
             }
@@ -533,7 +534,7 @@ async fn dispatch_one(
             Ok(frame) => frame,
             Err(_) => {
                 if deadline.may_abort() {
-                    if let Some(session) = &active {
+                    if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }
@@ -545,14 +546,7 @@ async fn dispatch_one(
                     SessionAdvance::Awaiting => {}
                     SessionAdvance::Terminal(reply) => {
                         let (response, _) = reply.into_parts();
-                        deadline
-                            .race_response(stream.write_all(&response))
-                            .await
-                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
-                        deadline
-                            .race_response(stream.shutdown())
-                            .await
-                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
+                        write_native_terminal(stream, &response, deadline).await;
                         return Ok(());
                     }
                 }
@@ -571,14 +565,7 @@ async fn dispatch_one(
                 {
                     SessionBegin::Terminal(reply) => {
                         let (response, _) = reply.into_parts();
-                        deadline
-                            .race_response(stream.write_all(&response))
-                            .await
-                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
-                        deadline
-                            .race_response(stream.shutdown())
-                            .await
-                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
+                        write_native_terminal(stream, &response, deadline).await;
                         return Ok(());
                     }
                     SessionBegin::Active { response, session } => {

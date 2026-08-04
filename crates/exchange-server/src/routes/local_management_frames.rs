@@ -112,7 +112,7 @@ async fn serve(
         match deadline.race(socket.recv()).await {
             Err(expired) => {
                 if deadline.may_abort() {
-                    if let Some(session) = &active {
+                    if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }
@@ -154,7 +154,10 @@ async fn serve(
                             send_terminal(&mut socket, response, code, &deadline).await;
                             return;
                         }
-                        SessionBegin::Active { response, session } => {
+                        SessionBegin::Active {
+                            response,
+                            mut session,
+                        } => {
                             if deadline
                                 .race_response(socket.send(Message::Binary(response.into())))
                                 .await
@@ -172,7 +175,7 @@ async fn serve(
             }
             Ok(Some(Ok(Message::Binary(_)))) => {
                 if deadline.may_abort() {
-                    if let Some(session) = &active {
+                    if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }
@@ -183,7 +186,7 @@ async fn serve(
             }
             Ok(Some(Ok(Message::Text(_)))) => {
                 if deadline.may_abort() {
-                    if let Some(session) = &active {
+                    if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }
@@ -194,7 +197,7 @@ async fn serve(
             }
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => {
                 if deadline.may_abort() {
-                    if let Some(session) = &active {
+                    if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }
@@ -203,7 +206,7 @@ async fn serve(
             Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {}
             Ok(Some(Err(_))) => {
                 if deadline.may_abort() {
-                    if let Some(session) = &active {
+                    if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }

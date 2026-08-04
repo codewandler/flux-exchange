@@ -36,8 +36,9 @@ use super::codec::{Direction, Frame, Opcode, StreamDecoder};
 use super::dispatcher::{expired_reply, Transport};
 use super::service_account::{OneShotWriter, WriterRefusal};
 use super::{
-    deadline::finalize_native_terminal, ActiveSession, DeadlineController, Dispatcher,
-    SessionAdvance, SessionBegin, TransactionCoordinator,
+    deadline::{finalize_native_terminal, write_native_terminal},
+    ActiveSession, DeadlineController, Dispatcher, SessionAdvance, SessionBegin,
+    TransactionCoordinator,
 };
 use crate::state::AppState;
 
@@ -452,14 +453,14 @@ async fn dispatch_one(
         if received == 0 {
             let _ = decoder.finish();
             if deadline.may_abort() {
-                if let Some(session) = &active {
+                if let Some(session) = active.as_mut() {
                     session.abort().await;
                 }
             }
             return Ok(());
         }
         if !used_initial && decoder.push(&bytes[..received]).is_err() {
-            if let Some(session) = &active {
+            if let Some(session) = active.as_mut() {
                 session.abort().await;
             }
             return Ok(());
@@ -468,7 +469,7 @@ async fn dispatch_one(
             Ok(frame) => frame,
             Err(_) => {
                 if deadline.may_abort() {
-                    if let Some(session) = &active {
+                    if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }
@@ -480,14 +481,7 @@ async fn dispatch_one(
                     SessionAdvance::Awaiting => {}
                     SessionAdvance::Terminal(reply) => {
                         let (response, _) = reply.into_parts();
-                        deadline
-                            .race_response(connection.pipe.write_all(&response))
-                            .await
-                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
-                        deadline
-                            .race_response(connection.pipe.shutdown())
-                            .await
-                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+                        write_native_terminal(&mut connection.pipe, &response, deadline).await;
                         return Ok(());
                     }
                 }
@@ -504,14 +498,7 @@ async fn dispatch_one(
                 {
                     SessionBegin::Terminal(reply) => {
                         let (response, _) = reply.into_parts();
-                        deadline
-                            .race_response(connection.pipe.write_all(&response))
-                            .await
-                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
-                        deadline
-                            .race_response(connection.pipe.shutdown())
-                            .await
-                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+                        write_native_terminal(&mut connection.pipe, &response, deadline).await;
                         return Ok(());
                     }
                     SessionBegin::Active { response, session } => {

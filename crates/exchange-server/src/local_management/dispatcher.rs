@@ -99,7 +99,7 @@ impl ActiveSession {
         }
     }
 
-    pub(crate) async fn abort(&self) {
+    pub(crate) async fn abort(&mut self) {
         if self.deadline.may_abort() {
             self.ceremony.abort().await;
         }
@@ -113,21 +113,33 @@ impl HostedReply {
 }
 
 /// Canonical pre-decision absolute-deadline outcome shared by native and hosted transports.
+#[cfg(test)]
 pub(crate) fn deadline_frame() -> Vec<u8> {
     error_frame(body("deadline_exceeded", 408, "refresh"))
 }
 
 /// Terminal deadline outcome selected from the durable phase at the exact expiry boundary.
 pub(crate) fn expired_reply(expired: Expired) -> HostedReply {
+    hosted_frame(expired_frame(expired))
+}
+
+fn expired_frame(expired: Expired) -> Frame {
     match expired {
-        Expired::PreDecision => HostedReply {
-            bytes: deadline_frame(),
-            close_code: 1008,
-        },
+        Expired::PreDecision => refusal("deadline_exceeded", 408, "refresh"),
         Expired::PostDecision {
             receipt,
             unresolved,
-        } => hosted_frame(postdeadline_refusal(receipt, unresolved)),
+        } => postdeadline_refusal(receipt, unresolved),
+    }
+}
+
+fn worker_internal_refusal(deadline: &DeadlineController) -> Frame {
+    if let Some(receipt) = deadline.decision_receipt() {
+        deadline.unresolved(Unresolved::Internal);
+        postdeadline_refusal(receipt, Unresolved::Internal)
+    } else {
+        deadline.terminal();
+        refusal("internal_refusal", 500, "operator")
     }
 }
 
@@ -265,8 +277,19 @@ impl Dispatcher {
             let Some(payload) = request.control_payload() else {
                 return refusal("unexpected_frame", 422, "never");
             };
-            let response =
-                grant.handle_with_deadline(tenant, request.opcode() as u16, payload, deadline);
+            let grant = grant.clone();
+            let tenant = tenant.clone();
+            let payload = payload.to_vec();
+            let opcode = request.opcode() as u16;
+            let worker_deadline = deadline.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                grant.handle_with_deadline(&tenant, opcode, &payload, &worker_deadline)
+            });
+            let response = match deadline.race(worker).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(_)) => return worker_internal_refusal(deadline),
+                Err(expired) => return expired_frame(expired),
+            };
             let opcode = Opcode::try_from(response.opcode())
                 .expect("grant ceremonies return only closed FXLM opcodes");
             return Frame::control(
@@ -303,14 +326,20 @@ impl Dispatcher {
             let Some(payload) = request.control_payload() else {
                 return refusal("unexpected_frame", 422, "never");
             };
-            let actor = Principal::new(PrincipalKind::User, "local-owner", tenant.clone());
-            let response = ceremony.handle_with_deadline(
-                &actor,
-                request.opcode() as u16,
-                payload,
-                writer,
-                deadline,
-            );
+            let ceremony = ceremony.clone();
+            let tenant = tenant.clone();
+            let payload = payload.to_vec();
+            let opcode = request.opcode() as u16;
+            let worker_deadline = deadline.clone();
+            let worker = tokio::task::spawn_blocking(move || {
+                let actor = Principal::new(PrincipalKind::User, "local-owner", tenant);
+                ceremony.handle_with_deadline(&actor, opcode, &payload, writer, &worker_deadline)
+            });
+            let response = match deadline.race(worker).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(_)) => return worker_internal_refusal(deadline),
+                Err(expired) => return expired_frame(expired),
+            };
             let opcode = Opcode::try_from(response.opcode())
                 .expect("Service Account ceremonies return only closed FXLM opcodes");
             return Frame::control(
@@ -496,11 +525,169 @@ fn error_frame(error: ErrorBody) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Barrier, Mutex};
 
-    use exchange_host::{CredentialScope, CredentialStore, SecretBatch, SecretProposalDigest};
+    use exchange_host::{
+        CredentialScope, CredentialStore, GrantApplyReceipt, GrantCandidate, GrantDecisionObserver,
+        GrantPreview, GrantProposalDigest, GrantSelector, GrantStore, GrantTransactionRefusal,
+        GrantTransactions, SecretBatch, SecretProposalDigest,
+    };
 
     use super::*;
+    use crate::local_management::service_account::{
+        MintOutcome, MintPort, MintPortRefusal, MintRequest, ReceiptId as MintReceiptId,
+        TokenHandoff, WriterRefusal,
+    };
     use crate::local_management::transaction::TransactionKind;
+
+    struct BlockingGrantPort {
+        inner: Arc<GrantStore>,
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+        decision_first: bool,
+    }
+
+    impl GrantTransactions for BlockingGrantPort {
+        fn preview(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            selector: GrantSelector,
+        ) -> Result<GrantPreview, GrantTransactionRefusal> {
+            self.inner.preview(tenant, connector, selector)
+        }
+
+        fn apply(
+            &self,
+            tenant: &Tenant,
+            candidate: &GrantCandidate,
+            revision: StoreRevision,
+            proposal_digest: GrantProposalDigest,
+            receipt_id: GrantReceiptId,
+        ) -> Result<GrantApplyReceipt, GrantTransactionRefusal> {
+            self.inner
+                .apply(tenant, candidate, revision, proposal_digest, receipt_id)
+        }
+
+        fn apply_observed(
+            &self,
+            tenant: &Tenant,
+            candidate: &GrantCandidate,
+            revision: StoreRevision,
+            proposal_digest: GrantProposalDigest,
+            receipt_id: GrantReceiptId,
+            observer: &mut dyn GrantDecisionObserver,
+        ) -> Result<GrantApplyReceipt, GrantTransactionRefusal> {
+            if !self.decision_first {
+                self.entered.wait();
+                self.release.wait();
+            }
+            if !observer.starting(receipt_id) {
+                return Err(GrantTransactionRefusal::DecisionExpired);
+            }
+            if self.decision_first {
+                self.entered.wait();
+                self.release.wait();
+            }
+            let receipt =
+                self.inner
+                    .apply(tenant, candidate, revision, proposal_digest, receipt_id)?;
+            observer.decided(receipt.receipt_id);
+            Ok(receipt)
+        }
+
+        fn query(
+            &self,
+            tenant: &Tenant,
+            receipt_id: GrantReceiptId,
+        ) -> Result<Option<GrantApplyReceipt>, GrantTransactionRefusal> {
+            self.inner.query(tenant, receipt_id)
+        }
+    }
+
+    struct CommittedGrantAudit;
+
+    impl GrantAudit for CommittedGrantAudit {
+        fn commit(
+            &self,
+            _tenant: &Tenant,
+            _connector: &str,
+            _revision: StoreRevision,
+            _receipt_id: GrantReceiptId,
+        ) -> Result<(), GrantAuditUnavailable> {
+            Ok(())
+        }
+    }
+
+    struct BlockingMintPort {
+        entered: Arc<Barrier>,
+        release: Arc<Barrier>,
+        decision_first: bool,
+        committed: Mutex<Option<(String, MintReceiptId)>>,
+    }
+
+    impl MintPort for BlockingMintPort {
+        fn mint(
+            &self,
+            _actor: &Principal,
+            _request: &MintRequest,
+            _receipt_id: MintReceiptId,
+            _handoff: &mut dyn TokenHandoff,
+        ) -> Result<MintOutcome, MintPortRefusal> {
+            Err(MintPortRefusal::Internal)
+        }
+
+        fn mint_observed(
+            &self,
+            _actor: &Principal,
+            request: &MintRequest,
+            receipt_id: MintReceiptId,
+            _handoff: &mut dyn TokenHandoff,
+            starting: &mut dyn FnMut(MintReceiptId) -> bool,
+            decided: &mut dyn FnMut(MintReceiptId),
+        ) -> Result<MintOutcome, MintPortRefusal> {
+            if !self.decision_first {
+                self.entered.wait();
+                self.release.wait();
+            }
+            if !starting(receipt_id.clone()) {
+                return Err(MintPortRefusal::DecisionExpired);
+            }
+            if self.decision_first {
+                self.entered.wait();
+                self.release.wait();
+            }
+            let id = request.id().to_owned();
+            *self.committed.lock().expect("mint result") = Some((id.clone(), receipt_id.clone()));
+            decided(receipt_id.clone());
+            Ok(MintOutcome::Committed { id, receipt_id })
+        }
+
+        fn query(
+            &self,
+            _tenant: &Tenant,
+            receipt_id: &MintReceiptId,
+        ) -> Result<Option<MintOutcome>, MintPortRefusal> {
+            Ok(self
+                .committed
+                .lock()
+                .expect("mint result")
+                .as_ref()
+                .filter(|(_, held)| held == receipt_id)
+                .map(|(id, held)| MintOutcome::Replay {
+                    id: id.clone(),
+                    receipt_id: held.clone(),
+                }))
+        }
+    }
+
+    struct UnusedWriter;
+
+    impl OneShotWriter for UnusedWriter {
+        fn write_once(self: Box<Self>, _frame: &[u8]) -> Result<(), WriterRefusal> {
+            Err(WriterRefusal::Closed)
+        }
+    }
 
     fn request(opcode: Opcode, payload: &[u8]) -> Vec<u8> {
         Frame::control(Direction::ClientToServer, opcode, payload.to_vec())
@@ -574,13 +761,15 @@ mod tests {
                 proposal,
             )
             .expect("pre-decision allocation");
-        let before_session = ActiveSession {
+        let deadline = DeadlineController::start();
+        let mut before_session = ActiveSession {
             ceremony: ActiveCeremony::abort_probe(
                 before,
                 coordinator.clone(),
                 AppState::without_identity(),
+                deadline.clone(),
             ),
-            deadline: DeadlineController::start(),
+            deadline,
         };
         before_session.abort().await;
         assert!(
@@ -616,11 +805,12 @@ mod tests {
                 Unresolved::Store,
             )
             .expect("deadline decision");
-        let after_session = ActiveSession {
+        let mut after_session = ActiveSession {
             ceremony: ActiveCeremony::abort_probe(
                 after,
                 coordinator.clone(),
                 AppState::without_identity(),
+                deadline.clone(),
             ),
             deadline,
         };
@@ -644,6 +834,392 @@ mod tests {
 
         drop(coordinator);
         drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_store_decisions_at_299_and_300_select_the_only_safe_phase() {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!(
+            "flux-exchange-x135-real-decision-boundary-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("private test root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only test root");
+        }
+        let store = CredentialStore::bind(root.join("credentials/store"))
+            .expect("retained credential store");
+        let coordinator = Arc::new(
+            TransactionCoordinator::bind(
+                root.join("transactions/journal.sqlite3"),
+                store.prepared_secrets(),
+            )
+            .expect("transaction coordinator"),
+        );
+        let proposal = SecretProposalDigest::from_protocol_bytes([13; 32]);
+        let batch = SecretBatch::new(
+            CredentialScope::new("local", "example.test").expect("test credential scope"),
+        );
+
+        let inflight = coordinator
+            .allocate_for_tenant(
+                TransactionKind::Connect,
+                "local",
+                "test",
+                "inflight-299",
+                proposal,
+            )
+            .expect("in-flight allocation");
+        coordinator
+            .prepare(inflight, &batch)
+            .await
+            .expect("in-flight prepare");
+        let inflight_deadline = DeadlineController::start();
+        tokio::time::advance(std::time::Duration::from_secs(299)).await;
+        inflight_deadline
+            .begin_decision(
+                ReceiptIdentity::from_protocol_bytes(inflight.receipt_id().protocol_bytes())
+                    .expect("nonzero receipt"),
+                Unresolved::Store,
+            )
+            .expect("durable write starts before the boundary");
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        coordinator
+            .decide_commit(inflight)
+            .expect("in-flight decision reaches the journal at the boundary");
+        inflight_deadline
+            .decided(
+                ReceiptIdentity::from_protocol_bytes(inflight.receipt_id().protocol_bytes())
+                    .expect("nonzero receipt"),
+                Unresolved::Store,
+            )
+            .expect("outcome-uncertain write rolls forward");
+        coordinator
+            .commit(inflight)
+            .await
+            .expect("in-flight decision commits");
+
+        let late = coordinator
+            .allocate_for_tenant(
+                TransactionKind::Connect,
+                "local",
+                "test",
+                "not-started-300",
+                proposal,
+            )
+            .expect("late allocation");
+        coordinator
+            .prepare(late, &batch)
+            .await
+            .expect("late prepare");
+        let late_deadline = DeadlineController::start();
+        tokio::time::advance(std::time::Duration::from_secs(300)).await;
+        assert!(
+            late_deadline
+                .begin_decision(
+                    ReceiptIdentity::from_protocol_bytes(late.receipt_id().protocol_bytes())
+                        .expect("nonzero receipt"),
+                    Unresolved::Store,
+                )
+                .is_err(),
+            "a durable write not started by 300 seconds is refused"
+        );
+        coordinator
+            .abort_before_decision(late)
+            .await
+            .expect("late operation remains safely abortable");
+
+        drop(coordinator);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn allocated_ceremony_drop_tombstones_only_until_the_decision_guard_disarms() {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!(
+            "flux-exchange-x135-cancellation-guard-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("private test root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only test root");
+        }
+        let store = CredentialStore::bind(root.join("credentials/store"))
+            .expect("retained credential store");
+        let coordinator = Arc::new(
+            TransactionCoordinator::bind(
+                root.join("transactions/journal.sqlite3"),
+                store.prepared_secrets(),
+            )
+            .expect("transaction coordinator"),
+        );
+        let proposal = SecretProposalDigest::from_protocol_bytes([17; 32]);
+        let batch = SecretBatch::new(
+            CredentialScope::new("local", "example.test").expect("test credential scope"),
+        );
+
+        for (label, prepared) in [
+            ("begin-drop", false),
+            ("prepare-drop", true),
+            ("secret-drop", false),
+        ] {
+            let allocation = coordinator
+                .allocate_for_tenant(TransactionKind::Connect, "local", "test", label, proposal)
+                .expect("guarded allocation");
+            if prepared {
+                coordinator
+                    .prepare(allocation, &batch)
+                    .await
+                    .expect("prepared row");
+            }
+            let deadline = DeadlineController::start();
+            let ceremony = ActiveCeremony::abort_probe(
+                allocation,
+                coordinator.clone(),
+                AppState::without_identity(),
+                deadline,
+            );
+            drop(ceremony);
+            for _ in 0..32 {
+                if coordinator
+                    .proposal_state_for_tenant(
+                        TransactionKind::Connect,
+                        "local",
+                        "test",
+                        label,
+                        proposal,
+                    )
+                    .expect("guard state")
+                    .is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                coordinator
+                    .proposal_state_for_tenant(
+                        TransactionKind::Connect,
+                        "local",
+                        "test",
+                        label,
+                        proposal,
+                    )
+                    .expect("tombstoned state")
+                    .is_none(),
+                "dropping {label} must tombstone the pre-decision allocation"
+            );
+        }
+
+        let decided = coordinator
+            .allocate_for_tenant(
+                TransactionKind::Connect,
+                "local",
+                "test",
+                "commit-drop",
+                proposal,
+            )
+            .expect("decision allocation");
+        coordinator
+            .prepare(decided, &batch)
+            .await
+            .expect("decision prepare");
+        let deadline = DeadlineController::start();
+        let mut ceremony = ActiveCeremony::abort_probe(
+            decided,
+            coordinator.clone(),
+            AppState::without_identity(),
+            deadline.clone(),
+        );
+        deadline
+            .begin_decision(
+                ReceiptIdentity::from_protocol_bytes(decided.receipt_id().protocol_bytes())
+                    .expect("nonzero receipt"),
+                Unresolved::Store,
+            )
+            .expect("decision starts");
+        coordinator
+            .decide_commit(decided)
+            .expect("durable decision");
+        ceremony.disarm_abort_probe();
+        deadline
+            .decided(
+                ReceiptIdentity::from_protocol_bytes(decided.receipt_id().protocol_bytes())
+                    .expect("nonzero receipt"),
+                Unresolved::Store,
+            )
+            .expect("decision observed");
+        drop(ceremony);
+        assert!(matches!(
+            coordinator
+                .proposal_state_for_tenant(
+                    TransactionKind::Connect,
+                    "local",
+                    "test",
+                    "commit-drop",
+                    proposal,
+                )
+                .expect("post-decision state"),
+            Some(crate::local_management::transaction::ProposalState::Active)
+        ));
+        coordinator
+            .commit(decided)
+            .await
+            .expect("post-decision drop retains roll-forward");
+
+        drop(coordinator);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blocked_grant_and_mint_ports_do_not_block_the_deadline_runtime() {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!(
+            "flux-exchange-x135-blocked-ports-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("private test root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only test root");
+        }
+        let tenant = Tenant::new("local").expect("tenant");
+        let grants = Arc::new(GrantStore::bind(root.join("grants.json")).expect("grant store"));
+        let selector: GrantSelector = serde_json::from_slice(
+            br#"{"effects_within":null,"idempotency":null,"max_risk":"low"}"#,
+        )
+        .expect("selector");
+        let candidate = grants
+            .preview(&tenant, "github", selector)
+            .expect("grant preview");
+        let candidate_bytes = serde_json::to_vec(&candidate).expect("candidate bytes");
+
+        let grant_entered = Arc::new(Barrier::new(2));
+        let grant_release = Arc::new(Barrier::new(2));
+        let grant_port = Arc::new(BlockingGrantPort {
+            inner: grants.clone(),
+            entered: grant_entered.clone(),
+            release: grant_release.clone(),
+            decision_first: false,
+        });
+        let grant = GrantCeremony::new(grant_port, Arc::new(CommittedGrantAudit));
+        let deadline = DeadlineController::start();
+        let worker_deadline = deadline.clone();
+        let worker_tenant = tenant.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            grant.handle_with_deadline(
+                &worker_tenant,
+                super::super::grant::APPLY_OPCODE,
+                &candidate_bytes,
+                &worker_deadline,
+            )
+        });
+        let raced_deadline = deadline.clone();
+        let raced = tokio::spawn(async move { raced_deadline.race(worker).await });
+        tokio::task::yield_now().await;
+        grant_entered.wait();
+        tokio::time::advance(std::time::Duration::from_secs(300)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            raced.await.expect("grant runtime"),
+            Err(Expired::PreDecision)
+        ));
+        grant_release.wait();
+        for _ in 0..32 {
+            if grants
+                .preview(
+                    &tenant,
+                    "github",
+                    serde_json::from_slice(
+                        br#"{"effects_within":null,"idempotency":null,"max_risk":"low"}"#,
+                    )
+                    .expect("selector"),
+                )
+                .expect("unchanged preview")
+                .revision
+                == StoreRevision::new(1).expect("revision")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            grants
+                .preview(
+                    &tenant,
+                    "github",
+                    serde_json::from_slice(
+                        br#"{"effects_within":null,"idempotency":null,"max_risk":"low"}"#,
+                    )
+                    .expect("selector"),
+                )
+                .expect("unchanged preview")
+                .revision,
+            StoreRevision::new(1).expect("revision"),
+            "the released worker must observe the expired start and skip the grant write"
+        );
+
+        let mint_entered = Arc::new(Barrier::new(2));
+        let mint_release = Arc::new(Barrier::new(2));
+        let mint_port = Arc::new(BlockingMintPort {
+            entered: mint_entered.clone(),
+            release: mint_release.clone(),
+            decision_first: true,
+            committed: Mutex::new(None),
+        });
+        let mint = ServiceAccountCeremony::with_receipts(mint_port.clone(), [0x55; 32]);
+        let actor = Principal::new(PrincipalKind::User, "local-owner", tenant.clone());
+        let deadline = DeadlineController::start();
+        let worker_deadline = deadline.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            mint.handle_with_deadline(
+                &actor,
+                crate::local_management::service_account::MINT_OPCODE,
+                br#"{"expires_at":"4070908800","id":"runtime"}"#,
+                Some(Box::new(UnusedWriter)),
+                &worker_deadline,
+            )
+        });
+        let raced_deadline = deadline.clone();
+        let raced = tokio::spawn(async move { raced_deadline.race(worker).await });
+        tokio::task::yield_now().await;
+        mint_entered.wait();
+        tokio::time::advance(std::time::Duration::from_secs(300)).await;
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            raced.await.expect("mint runtime"),
+            Err(Expired::PostDecision {
+                unresolved: Unresolved::Store,
+                ..
+            })
+        ));
+        mint_release.wait();
+        for _ in 0..32 {
+            if mint_port.committed.lock().expect("mint result").is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            mint_port.committed.lock().expect("mint result").is_some(),
+            "post-decision mint work must detach and become queryable"
+        );
+
+        drop(grants);
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -521,8 +521,8 @@ mod file {
 
     use super::{Grant, GrantRefusal, Grants, InboundGrant, Selector};
     use crate::grant_cas::{
-        GrantApplyReceipt, GrantCandidate, GrantCandidateInbound, GrantPreview,
-        GrantProposalDigest, GrantReceiptId, GrantSelector, GrantTransactionRefusal,
+        GrantApplyReceipt, GrantCandidate, GrantCandidateInbound, GrantDecisionObserver,
+        GrantPreview, GrantProposalDigest, GrantReceiptId, GrantSelector, GrantTransactionRefusal,
         GrantTransactions, StoreRevision,
     };
     use crate::paths::{enclosing_working_tree, resolve};
@@ -1069,7 +1069,7 @@ mod file {
                 revision,
                 proposal_digest,
                 receipt_id,
-                &mut |_| {},
+                &mut (|_| true, |_| {}),
             )
         }
 
@@ -1080,7 +1080,7 @@ mod file {
             revision: StoreRevision,
             proposal_digest: GrantProposalDigest,
             receipt_id: GrantReceiptId,
-            decided: &mut dyn FnMut(GrantReceiptId),
+            observer: &mut dyn GrantDecisionObserver,
         ) -> Result<GrantApplyReceipt, GrantTransactionRefusal> {
             validate_candidate(candidate)?;
             if candidate.proposal_digest(&revision)? != proposal_digest {
@@ -1104,7 +1104,7 @@ mod file {
                 .iter()
                 .find(|receipt| receipt.proposal_digest == proposal_digest)
             {
-                decided(receipt.receipt_id);
+                observer.decided(receipt.receipt_id);
                 return Ok(receipt.response(true));
             }
             if record
@@ -1147,9 +1147,12 @@ mod file {
             record.revision = next;
             record.receipts.push(receipt.clone());
 
+            if !observer.starting(receipt.receipt_id) {
+                return Err(GrantTransactionRefusal::DecisionExpired);
+            }
             self.persist_versioned(&versioned)
                 .map_err(transaction_refusal)?;
-            decided(receipt.receipt_id);
+            observer.decided(receipt.receipt_id);
             *held = Loaded::Versioned(versioned);
             Ok(receipt.response(false))
         }

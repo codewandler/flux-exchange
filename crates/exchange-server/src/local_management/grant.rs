@@ -172,7 +172,21 @@ impl GrantCeremony {
             Err(()) => return refusal(Refusal::Internal),
         };
         let invariant = Cell::new(false);
-        let mut decided = |receipt: GrantReceiptId| {
+        let started = Cell::new(false);
+        let start_refused = Cell::new(false);
+        let starting = |receipt: GrantReceiptId| match deadline
+            .begin_decision(grant_receipt(receipt), Unresolved::Store)
+        {
+            Ok(()) => {
+                started.set(true);
+                true
+            }
+            Err(()) => {
+                start_refused.set(true);
+                false
+            }
+        };
+        let decided = |receipt: GrantReceiptId| {
             if deadline
                 .decided(grant_receipt(receipt), Unresolved::Audit)
                 .is_err()
@@ -180,18 +194,27 @@ impl GrantCeremony {
                 invariant.set(true);
             }
         };
+        let mut observer = (starting, decided);
         match self.grants.apply_observed(
             tenant,
             &request.candidate,
             request.revision,
             request.proposal_digest,
             receipt,
-            &mut decided,
+            &mut observer,
         ) {
             Ok(receipt) if invariant.get() => {
                 postdecision_refusal("internal_refusal", 500, receipt.receipt_id)
             }
             Ok(receipt) => self.audited_receipt(tenant, receipt, deadline),
+            Err(GrantTransactionRefusal::DecisionExpired) if start_refused.get() => {
+                deadline.terminal();
+                refusal(Refusal::Deadline)
+            }
+            Err(_error) if started.get() => {
+                let _ = deadline.decided(grant_receipt(receipt), Unresolved::Store);
+                postdecision_refusal("store_unavailable", 503, receipt)
+            }
             Err(error) => {
                 deadline.terminal();
                 refusal(Refusal::from(error))
@@ -335,6 +358,7 @@ enum Refusal {
     Stale,
     DigestMismatch,
     Store,
+    Deadline,
     Internal,
 }
 
@@ -347,6 +371,7 @@ impl From<GrantTransactionRefusal> for Refusal {
             GrantTransactionRefusal::RevisionExhausted | GrantTransactionRefusal::Store { .. } => {
                 Self::Store
             }
+            GrantTransactionRefusal::DecisionExpired => Self::Deadline,
             GrantTransactionRefusal::ReceiptConflict => Self::Internal,
         }
     }
@@ -362,6 +387,7 @@ impl Refusal {
             Self::Stale => ("grant_stale", 409, "refresh"),
             Self::DigestMismatch => ("grant_digest_mismatch", 409, "refresh"),
             Self::Store => ("store_unavailable", 503, "operator"),
+            Self::Deadline => ("deadline_exceeded", 408, "refresh"),
             Self::Internal => ("internal_refusal", 500, "operator"),
         }
     }

@@ -363,6 +363,31 @@ pub enum DurableMintError<E> {
     StoreUnavailable,
     /// Entropy or an impossible receipt collision refused the operation.
     Internal,
+    /// The absolute pre-decision budget closed before the atomic replacement started.
+    DecisionExpired,
+}
+
+/// Value-free observation of the atomic verifier-and-receipt decision boundary.
+pub trait DurableMintObserver {
+    /// Called immediately before the atomic durable replacement; `false` prevents the write.
+    fn starting(&mut self, receipt_id: [u8; 32]) -> bool;
+
+    /// Called once the receipt is durable or a byte-identical replay is discovered.
+    fn decided(&mut self, receipt_id: [u8; 32]);
+}
+
+impl<Starting, Decided> DurableMintObserver for (Starting, Decided)
+where
+    Starting: FnMut([u8; 32]) -> bool,
+    Decided: FnMut([u8; 32]),
+{
+    fn starting(&mut self, receipt_id: [u8; 32]) -> bool {
+        self.0(receipt_id)
+    }
+
+    fn decided(&mut self, receipt_id: [u8; 32]) {
+        self.1(receipt_id);
+    }
 }
 
 /// A Service Account as the management API may list it.
@@ -624,14 +649,22 @@ impl ServiceAccountStore {
         receipt_id: [u8; 32],
         handoff: impl FnOnce(&ServiceAccountToken) -> Result<(), E>,
     ) -> Result<DurableMintOutcome, DurableMintError<E>> {
-        self.mint_with_receipt_observed(minted_by, id, expiry, receipt_id, handoff, |_| {})
+        self.mint_with_receipt_observed(
+            minted_by,
+            id,
+            expiry,
+            receipt_id,
+            handoff,
+            &mut (|_| true, |_| {}),
+        )
     }
 
     /// Mint while exposing the exact durable decision instant to the local protocol controller.
     ///
-    /// The observer runs immediately after the atomic store replacement is durable, before the
-    /// in-memory projection changes. A byte-identical replay invokes it when the retained receipt
-    /// is discovered. It receives only the opaque receipt identity.
+    /// The observer runs immediately before the atomic store replacement and can refuse it without
+    /// touching durable state, then runs again immediately after the replacement is durable,
+    /// before the in-memory projection changes. A byte-identical replay reports only the retained
+    /// decision. Both observations receive only the opaque receipt identity.
     pub fn mint_with_receipt_observed<E>(
         &self,
         minted_by: &Principal,
@@ -639,7 +672,7 @@ impl ServiceAccountStore {
         expiry: Expiry,
         receipt_id: [u8; 32],
         handoff: impl FnOnce(&ServiceAccountToken) -> Result<(), E>,
-        decided: impl FnOnce([u8; 32]),
+        observer: &mut dyn DurableMintObserver,
     ) -> Result<DurableMintOutcome, DurableMintError<E>> {
         if minted_by.kind() != PrincipalKind::User {
             return Err(DurableMintError::InvalidRequest);
@@ -665,7 +698,7 @@ impl ServiceAccountStore {
         {
             let existing_receipt_id =
                 decode_receipt_id(existing_id).map_err(|_| DurableMintError::Internal)?;
-            decided(existing_receipt_id);
+            observer.decided(existing_receipt_id);
             return Ok(DurableMintOutcome::Replay {
                 id: existing_receipt.id.clone(),
                 receipt_id: existing_receipt_id,
@@ -710,9 +743,12 @@ impl ServiceAccountStore {
                 state: MintTerminalState::Committed,
             },
         );
+        if !observer.starting(receipt_id) {
+            return Err(DurableMintError::DecisionExpired);
+        }
         self.write(&candidate)
             .map_err(|_| DurableMintError::StoreUnavailable)?;
-        decided(receipt_id);
+        observer.decided(receipt_id);
         *state = candidate;
 
         Ok(DurableMintOutcome::Committed { id, receipt_id })

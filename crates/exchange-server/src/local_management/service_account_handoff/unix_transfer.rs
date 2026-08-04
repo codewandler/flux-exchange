@@ -110,6 +110,7 @@ impl OneShotWriter for ReceivedWriter {
 ///
 /// `bytes` receives the FXLM bytes carried by the same stream message. It must be nonempty because
 /// SCM_RIGHTS is attached to real protocol bytes, never to an invented marker opcode or payload.
+#[cfg(test)]
 pub(in crate::local_management) fn receive_writer(
     stream: &UnixStream,
     expected_uid: u32,
@@ -126,6 +127,7 @@ pub(in crate::local_management) fn receive_writer(
 /// Every native operation uses this first read so absence of a descriptor remains a valid input
 /// for non-MINT frames. A descriptor on any other opcode stays observable to the dispatcher and is
 /// refused there instead of being silently closed and treating the request as descriptor-free.
+#[cfg(test)]
 pub(in crate::local_management) fn receive_initial(
     stream: &UnixStream,
     expected_uid: u32,

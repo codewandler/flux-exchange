@@ -238,6 +238,7 @@ pub(crate) enum MintPortRefusal {
     WriterInvalid,
     WriterClosed,
     StoreUnavailable,
+    DecisionExpired,
     Internal,
 }
 
@@ -257,11 +258,18 @@ pub(crate) trait MintPort: Send + Sync {
         request: &MintRequest,
         receipt_id: ReceiptId,
         handoff: &mut dyn TokenHandoff,
+        starting: &mut dyn FnMut(ReceiptId) -> bool,
         decided: &mut dyn FnMut(ReceiptId),
     ) -> Result<MintOutcome, MintPortRefusal> {
         let outcome = self.mint(actor, request, receipt_id, handoff)?;
         match &outcome {
-            MintOutcome::Committed { receipt_id, .. } | MintOutcome::Replay { receipt_id, .. } => {
+            MintOutcome::Committed { receipt_id, .. } => {
+                if !starting(receipt_id.clone()) {
+                    return Err(MintPortRefusal::DecisionExpired);
+                }
+                decided(receipt_id.clone());
+            }
+            MintOutcome::Replay { receipt_id, .. } => {
                 decided(receipt_id.clone());
             }
         }
@@ -305,7 +313,14 @@ impl MintPort for RetainedMintPort {
         receipt_id: ReceiptId,
         handoff: &mut dyn TokenHandoff,
     ) -> Result<MintOutcome, MintPortRefusal> {
-        self.mint_observed(actor, request, receipt_id, handoff, &mut |_| {})
+        self.mint_observed(
+            actor,
+            request,
+            receipt_id,
+            handoff,
+            &mut |_| true,
+            &mut |_| {},
+        )
     }
 
     fn mint_observed(
@@ -314,12 +329,24 @@ impl MintPort for RetainedMintPort {
         request: &MintRequest,
         receipt_id: ReceiptId,
         handoff: &mut dyn TokenHandoff,
+        starting: &mut dyn FnMut(ReceiptId) -> bool,
         decided: &mut dyn FnMut(ReceiptId),
     ) -> Result<MintOutcome, MintPortRefusal> {
         let as_of = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| MintPortRefusal::Internal)?;
         let as_of = i64::try_from(as_of.as_secs()).map_err(|_| MintPortRefusal::Internal)?;
+        let mut observer = (
+            |bytes| match ReceiptId::from_bytes(bytes) {
+                Some(receipt) => starting(receipt),
+                None => false,
+            },
+            |bytes| {
+                if let Some(receipt) = ReceiptId::from_bytes(bytes) {
+                    decided(receipt);
+                }
+            },
+        );
         let outcome = self.store.mint_with_receipt_observed(
             actor,
             request.id(),
@@ -329,11 +356,7 @@ impl MintPort for RetainedMintPort {
             },
             receipt_id.bytes(),
             |token| handoff.write_token(token),
-            |bytes| {
-                if let Some(receipt) = ReceiptId::from_bytes(bytes) {
-                    decided(receipt);
-                }
-            },
+            &mut observer,
         );
         match outcome {
             Ok(DurableMintOutcome::Committed { id, receipt_id }) => Ok(MintOutcome::Committed {
@@ -349,6 +372,7 @@ impl MintPort for RetainedMintPort {
             Err(DurableMintError::Handoff(refusal)) => Err(refusal),
             Err(DurableMintError::StoreUnavailable) => Err(MintPortRefusal::StoreUnavailable),
             Err(DurableMintError::Internal) => Err(MintPortRefusal::Internal),
+            Err(DurableMintError::DecisionExpired) => Err(MintPortRefusal::DecisionExpired),
         }
     }
 
@@ -460,11 +484,26 @@ impl ServiceAccountCeremony {
             Ok(receipt) => receipt,
             Err(()) => return refusal(Refusal::Internal),
         };
+        let decision_receipt = receipt_id.clone();
         let mut handoff = FxsaHandoff {
             writer: Some(writer),
             written: false,
         };
         let invariant = Cell::new(false);
+        let started = Cell::new(false);
+        let start_refused = Cell::new(false);
+        let mut starting = |receipt: ReceiptId| match deadline
+            .begin_decision(service_account_receipt(&receipt), Unresolved::Store)
+        {
+            Ok(()) => {
+                started.set(true);
+                true
+            }
+            Err(()) => {
+                start_refused.set(true);
+                false
+            }
+        };
         let mut decided = |receipt: ReceiptId| {
             if deadline
                 .decided(service_account_receipt(&receipt), Unresolved::Store)
@@ -473,10 +512,14 @@ impl ServiceAccountCeremony {
                 invariant.set(true);
             }
         };
-        match self
-            .port
-            .mint_observed(actor, &request, receipt_id, &mut handoff, &mut decided)
-        {
+        match self.port.mint_observed(
+            actor,
+            &request,
+            receipt_id,
+            &mut handoff,
+            &mut starting,
+            &mut decided,
+        ) {
             Ok(MintOutcome::Committed { id: _, receipt_id }) if invariant.get() => {
                 refusal_with_receipt(Refusal::Internal, receipt_id)
             }
@@ -492,6 +535,17 @@ impl ServiceAccountCeremony {
                 receipt(id, receipt_id, true)
             }
             Ok(_) => refusal(Refusal::Internal),
+            Err(MintPortRefusal::DecisionExpired) if start_refused.get() => {
+                deadline.terminal();
+                refusal(Refusal::Deadline)
+            }
+            Err(_error) if started.get() => {
+                let _ = deadline.decided(
+                    service_account_receipt(&decision_receipt),
+                    Unresolved::Store,
+                );
+                refusal_with_receipt(Refusal::Store, decision_receipt)
+            }
             Err(error) => refusal(Refusal::from(error)),
         }
     }
@@ -620,6 +674,7 @@ enum Refusal {
     WriterInvalid,
     WriterClosed,
     Store,
+    Deadline,
     Internal,
 }
 
@@ -631,6 +686,7 @@ impl From<MintPortRefusal> for Refusal {
             MintPortRefusal::WriterInvalid => Self::WriterInvalid,
             MintPortRefusal::WriterClosed => Self::WriterClosed,
             MintPortRefusal::StoreUnavailable => Self::Store,
+            MintPortRefusal::DecisionExpired => Self::Deadline,
             MintPortRefusal::Internal => Self::Internal,
         }
     }
@@ -645,6 +701,7 @@ impl Refusal {
             Self::WriterInvalid => ("writer_invalid", 400, "never"),
             Self::WriterClosed => ("writer_closed", 409, "operator"),
             Self::Store => ("store_unavailable", 503, "operator"),
+            Self::Deadline => ("deadline_exceeded", 408, "refresh"),
             Self::Internal => ("internal_refusal", 500, "operator"),
         }
     }

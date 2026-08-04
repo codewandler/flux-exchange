@@ -26,6 +26,18 @@ where
     let _ = tokio::time::timeout_at(final_by, writer.shutdown()).await;
 }
 
+/// Write an ordinary terminal frame within the operation cap, then reserve EOF separately.
+pub(crate) async fn write_native_terminal<W>(
+    writer: &mut W,
+    response: &[u8],
+    deadline: &DeadlineController,
+) where
+    W: AsyncWrite + Unpin,
+{
+    let _ = deadline.race_response(writer.write_all(response)).await;
+    finalize_native_terminal(writer, None).await;
+}
+
 trait MonotonicClock: Send + Sync {
     fn now(&self) -> Instant;
 }
@@ -273,6 +285,23 @@ impl DeadlineController {
             *self.phase.lock().expect("deadline phase lock"),
             Phase::PreDecision { .. }
         )
+    }
+
+    /// Return the opaque receipt retained by an in-flight, decided or terminal post-decision phase.
+    pub(crate) fn decision_receipt(&self) -> Option<ReceiptIdentity> {
+        match *self.phase.lock().expect("deadline phase lock") {
+            Phase::DecisionInFlight { receipt, .. }
+            | Phase::PostDecision { receipt, .. }
+            | Phase::Terminal {
+                expired: Expired::PostDecision { receipt, .. },
+                ..
+            } => Some(receipt),
+            Phase::PreDecision { .. }
+            | Phase::Terminal {
+                expired: Expired::PreDecision,
+                ..
+            } => None,
+        }
     }
 
     /// Bound the terminal response write by the unchanged phase deadline.

@@ -237,6 +237,7 @@ impl Ceremony {
             targets,
             Some(claim),
             Some(tenant_claim),
+            deadline,
         )
         .await
     }
@@ -385,6 +386,7 @@ impl Ceremony {
             targets,
             Some(claim),
             None,
+            deadline,
         )
         .await
     }
@@ -399,6 +401,7 @@ impl Ceremony {
         targets: SecretTargets,
         claim: Option<Claim>,
         tenant_claim: Option<Claim>,
+        deadline: &DeadlineController,
     ) -> BeginOutcome {
         let allocation = match self.coordinator.allocate_for_tenant(
             kind,
@@ -412,10 +415,12 @@ impl Ceremony {
                 return BeginOutcome::Terminal(refusal("store_unavailable", 503, "operator"));
             }
         };
+        let mut cancellation =
+            CeremonyCancellation::new(allocation, self.coordinator.clone(), deadline.clone());
         let publication_bytes = match serde_json::to_vec(&publication) {
             Ok(bytes) => bytes,
             Err(_) => {
-                let _ = self.coordinator.abort_before_decision(allocation).await;
+                cancellation.abort().await;
                 return BeginOutcome::Terminal(refusal("internal_refusal", 500, "operator"));
             }
         };
@@ -424,7 +429,7 @@ impl Ceremony {
             .attach_publication(allocation, &publication_bytes)
             .is_err()
         {
-            let _ = self.coordinator.abort_before_decision(allocation).await;
+            cancellation.abort().await;
             return BeginOutcome::Terminal(refusal("store_unavailable", 503, "operator"));
         }
         let mut active = ActiveCeremony {
@@ -436,6 +441,7 @@ impl Ceremony {
             prepared: false,
             publication,
             state: self.state.clone(),
+            cancellation,
             _claim: claim,
             _tenant_claim: tenant_claim,
         };
@@ -445,10 +451,7 @@ impl Ceremony {
                 .prepare(active.allocation, &active.batch)
                 .await
             {
-                let _ = active
-                    .coordinator
-                    .abort_before_decision(active.allocation)
-                    .await;
+                active.abort().await;
                 return BeginOutcome::Terminal(coordinator_refusal(error));
             }
             active.prepared = true;
@@ -593,6 +596,7 @@ pub(super) struct ActiveCeremony {
     prepared: bool,
     publication: Publication,
     state: AppState,
+    cancellation: CeremonyCancellation,
     _claim: Option<Claim>,
     _tenant_claim: Option<Claim>,
 }
@@ -603,13 +607,14 @@ impl ActiveCeremony {
         allocation: Allocation,
         coordinator: Arc<TransactionCoordinator>,
         state: AppState,
+        deadline: DeadlineController,
     ) -> Self {
         let scope = CredentialScope::new("local", "example.test")
             .expect("the fixed abort-probe credential scope is valid");
         Self {
             allocation,
             batch: SecretBatch::new(scope),
-            coordinator,
+            coordinator: coordinator.clone(),
             expected: Vec::new(),
             next_ordinal: 1,
             prepared: false,
@@ -626,9 +631,15 @@ impl ActiveCeremony {
                 tenant: "local".to_owned(),
             },
             state,
+            cancellation: CeremonyCancellation::new(allocation, coordinator.clone(), deadline),
             _claim: None,
             _tenant_claim: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn disarm_abort_probe(&mut self) {
+        self.cancellation.disarm();
     }
 
     pub(super) async fn accept(
@@ -681,7 +692,9 @@ impl ActiveCeremony {
             self.abort().await;
             return AdvanceOutcome::Terminal(refusal("deadline_exceeded", 408, "refresh"));
         }
-        if self.coordinator.decide_commit(self.allocation).is_err() {
+        let decision = self.coordinator.decide_commit(self.allocation);
+        self.cancellation.disarm();
+        if decision.is_err() {
             let _ = deadline.decided(receipt_identity(receipt), Unresolved::Store);
             return AdvanceOutcome::Terminal(post_refusal("store_unavailable", 503, receipt));
         }
@@ -761,11 +774,68 @@ impl ActiveCeremony {
         AdvanceOutcome::Awaiting
     }
 
-    pub(super) async fn abort(&self) {
-        let _ = self
+    pub(super) async fn abort(&mut self) {
+        self.cancellation.abort().await;
+    }
+}
+
+/// One fail-closed tombstone guard armed from allocation until the durable decision boundary.
+struct CeremonyCancellation {
+    allocation: Allocation,
+    coordinator: Arc<TransactionCoordinator>,
+    deadline: DeadlineController,
+    armed: bool,
+}
+
+impl CeremonyCancellation {
+    fn new(
+        allocation: Allocation,
+        coordinator: Arc<TransactionCoordinator>,
+        deadline: DeadlineController,
+    ) -> Self {
+        Self {
+            allocation,
+            coordinator,
+            deadline,
+            armed: true,
+        }
+    }
+
+    async fn abort(&mut self) {
+        if !self.armed || !self.deadline.may_abort() {
+            return;
+        }
+        if self
             .coordinator
             .abort_before_decision(self.allocation)
-            .await;
+            .await
+            .is_ok()
+        {
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CeremonyCancellation {
+    fn drop(&mut self) {
+        if !self.armed || !self.deadline.may_abort() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let allocation = self.allocation;
+        let coordinator = self.coordinator.clone();
+        let deadline = self.deadline.clone();
+        runtime.spawn(async move {
+            if deadline.may_abort() {
+                let _ = coordinator.abort_before_decision(allocation).await;
+            }
+        });
     }
 }
 

@@ -39,6 +39,7 @@ impl HandoffFrame {
     }
 
     /// The opaque bytes for the already-authorized receiving store.
+    #[cfg(test)]
     pub(super) fn token(&self) -> &[u8] {
         &self.token
     }
