@@ -50,6 +50,10 @@ _Everything this platform does can only be seen on `127.0.0.1`. The getting-star
 ## Backlog
 - [X-51 — A broken doc link fails the build instead of hiding among twenty others](X-51-a-broken-doc-link-is-visible.md) · found by X-48, 2026-08-01: `cargo doc --workspace --no-deps` emits ~20 unresolved intra-doc link warnings and is not in the gate, so a genuinely broken link in new code is invisible
 
+### Apps
+- [X-131 — Validate Datasource.kind against published connector datasource members](X-131-validate-datasource-kind-against-published-members.md) · Decision 0006 — put_datasource refuses a kind that is not a published connector datasource member reference; gated on the upstream connector surface
+- [X-132 — Serve the tenant Datasource read seam](X-132-serve-the-tenant-datasource-read-seam.md) · Decision 0006, Milestones 2–3 — schema/list/get for a bound Datasource execute as admitted operations; Exchange-minted opaque cursors, grants stay metadata selectors
+
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-21 — A half connection is distinguishable from a deliberately partial one](X-21-half-connection-visibility.md) · raised by X-18's implementor, 2026-08-01: GET answers 200 for a connection whose delete failed half way, which reads as 'connected' — but a connector may legitimately hold a subset of what it declares, so the two render identically and telling them apart needs a record this module deliberately does not keep
 - [X-50 — A connector that needs no credential can actually be connected](X-50-a-connector-that-needs-nothing-can-be-connected.md) · found adjacent to X-49, 2026-08-01: the console disables Connect for a connector that declares no credentials — a state X-46 made reachable and X-49 pinned the *render* of, but nobody can act on it
@@ -67,6 +71,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-118 — Make leases own rich runtime resources](X-118-make-leases-own-runtime-resources.md) · Milestone 3 — acquire/renew/release ownership for stateful connector resources; no dependency from the effective catalogue or one-shot HTTP invoke
 - [X-119 — Install and attest connector runtime artifacts](X-119-install-and-attest-runtime-artifacts.md) · Exchange installs digest-pinned connector artifacts from the connector/Exchange pipeline; Flux supplies substrate but distributes no official plugin artifact
 - [X-120 — Prove migrated rich connectors through local Exchange](X-120-prove-rich-connectors-end-to-end.md) · release gate accumulates HTTP, plugin/process, socket and container migration fixtures through local single-tenant Exchange; hosted isolation remains X-116
+- [X-133 — Publish the effective-catalogue datasources section](X-133-publish-the-effective-catalogue-datasources-section.md) · Decision 0006 — the X-113 effective catalogue grows a datasources section under the same forbidden-authority-field refusal rules as operations
 
 ## Done
 - [X-01 — The HTTP surface (epic)](X-01-serve-epic.md) · EPIC — turn the binary that prints a matrix into a service. Nothing here is blocked: the surface needs no flux-coupled crate
@@ -174,6 +179,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-127 — Persist local Exchange state safely on every Flux platform](X-127-persist-local-state-on-every-flux-platform.md) · Milestone 1 — a five-target binary is support only when every credential-bearing local workflow persists safely and survives restart on that target
 - [X-128 — Emit one trusted readiness record for a supervised Exchange](X-128-emit-one-supervisor-readiness-record.md) · Milestone 1 — Flux owns a child only after that exact process reports its bound address and compiled identity over a dedicated one-shot channel
 - [X-129 — Bind local-release protocol identities to the delivered HTTP wire](X-129-bind-release-protocol-ids-to-the-http-wire.md) · Milestone 1 — compatibility advertises exact tested HTTP wire identities, never placeholders or a package-version guess
+- [X-130 — Adopt the Decision 0006 datasource vocabulary](X-130-adopt-the-decision-0006-datasource-vocabulary.md) · Milestone 0 — resolve the concepts table's last ambiguous owner cell and point the audit's upstream gap at chartered connector work
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
