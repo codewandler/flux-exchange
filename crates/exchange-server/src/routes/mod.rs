@@ -38,7 +38,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{any, MethodRouter};
 use axum::{Json, Router};
 use exchange_host::{IdentityError, PrincipalKind};
-use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing::warn;
@@ -330,7 +329,9 @@ pub(super) fn rate_limited(refusal: crate::traffic::TrafficRefusal) -> Response 
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(header::RETRY_AFTER, retry_after)],
-        Json(json!({ "error": "this host is at its request limit; retry later" })),
+        Json(crate::protocol::ErrorBody::new(
+            "this host is at its request limit; retry later",
+        )),
     )
         .into_response()
 }
@@ -837,7 +838,7 @@ fn presented(request: &Request) -> Option<(&str, Carrier)> {
 
 /// A refusal as the caller sees it: a status and a reason, never a value.
 fn refuse(status: StatusCode, reason: &str) -> Response {
-    (status, Json(json!({ "error": reason }))).into_response()
+    (status, Json(crate::protocol::ErrorBody::new(reason))).into_response()
 }
 
 /// Refuse a resolved caller that lacks deployment operator authority.
@@ -877,7 +878,7 @@ mod tests {
         Deployment, Grant, GrantRefusal, Grants, OperationFacts, Principal, PrincipalKind, Secret,
         SecretStore, StoreError, Tenant,
     };
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use tower::Service;
 
     /// Drive one anonymous `GET` through a fully assembled app and report what it answered.

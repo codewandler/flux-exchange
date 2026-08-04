@@ -475,7 +475,7 @@ async fn exchange_http_v1_request_outcomes_match_the_checked_provider_fixture() 
             crate::protocol::decode_effective_catalogue(response.to_string().as_bytes())
                 .expect("the production response satisfies the provider decoder");
         }
-        if status == StatusCode::OK && case.id.starts_with("invoke-") {
+        if case.id.starts_with("invoke-") {
             crate::protocol::decode_invoke_response(
                 status.as_u16(),
                 response.to_string().as_bytes(),

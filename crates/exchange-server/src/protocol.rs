@@ -47,6 +47,26 @@ const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 const BOUNDED_DIAGNOSTIC: &str =
     "invocation refused; the provider diagnostic exceeded the exchange.api.v1 bound";
 
+/// The production refusal shared by authentication, malformed input, limits and unavailable ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ErrorBody {
+    error: String,
+}
+
+impl ErrorBody {
+    pub(crate) fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_bounded_and_value_free(&self) -> bool {
+        self.error.len() <= MAX_DIAGNOSTIC_BYTES && !credential_shaped(&self.error)
+    }
+}
+
 /// One closed machine-readable invocation refusal on the v1 route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -99,6 +119,14 @@ impl InvocationRefusalBody {
             }
             && self.message.len() <= MAX_DIAGNOSTIC_BYTES
             && !credential_shaped(&self.message)
+            && self
+                .operation
+                .as_deref()
+                .is_none_or(|value| !credential_shaped(value))
+            && self
+                .supply_at
+                .as_deref()
+                .is_none_or(|value| !credential_shaped(value))
     }
 }
 
@@ -142,22 +170,102 @@ impl From<&InvokeRefusal> for InvocationRefusalCode {
 pub(crate) enum InvokeResponse {
     Success(Invocation),
     Refusal(InvocationRefusalBody),
+    Error(ErrorBody),
+    Connection(ConnectionSelectionRefusal),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ConnectionSelectionRefusal {
+    UnknownLabel(UnknownLabelRefusal),
+    Coded(CodedConnectionRefusal),
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UnknownLabelRefusal {
+    connector: String,
+    label: String,
+    error: String,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodedConnectionRefusal {
+    connector: String,
+    code: ConnectionSelectionCode,
+    error: String,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConnectionSelectionCode {
+    Disconnected,
+    AmbiguousConnection,
+}
+
+#[cfg(test)]
+impl ConnectionSelectionRefusal {
+    fn admits_status(&self, status: u16) -> bool {
+        match self {
+            Self::UnknownLabel(body) => {
+                status == 404
+                    && !body.label.is_empty()
+                    && !credential_shaped(&body.connector)
+                    && !credential_shaped(&body.label)
+                    && body.error.len() <= MAX_DIAGNOSTIC_BYTES
+                    && !credential_shaped(&body.error)
+            }
+            Self::Coded(body) => {
+                status == 409
+                    && !credential_shaped(&body.connector)
+                    && body.error.len() <= MAX_DIAGNOSTIC_BYTES
+                    && !credential_shaped(&body.error)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 pub(crate) fn decode_invoke_response(status: u16, bytes: &[u8]) -> Result<InvokeResponse, String> {
     reject_duplicate_members(bytes)?;
     match status {
-        200 => serde_json::from_slice::<Invocation>(bytes)
-            .map(InvokeResponse::Success)
-            .map_err(|error| error.to_string()),
+        200 => {
+            let invocation: Invocation =
+                serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+            if credential_shaped(&invocation.operation)
+                || credential_shaped(&invocation.content)
+                || invocation.view.as_deref().is_some_and(credential_shaped)
+            {
+                return Err("invocation success contains a credential-shaped value".to_owned());
+            }
+            Ok(InvokeResponse::Success(invocation))
+        }
         403 | 404 | 409 | 422 | 502 => {
-            let body: InvocationRefusalBody =
+            if let Ok(body) = serde_json::from_slice::<InvocationRefusalBody>(bytes) {
+                if !body.admits_status(status) {
+                    return Err("invocation refusal status and body disagree".to_owned());
+                }
+                return Ok(InvokeResponse::Refusal(body));
+            }
+            let body: ConnectionSelectionRefusal =
                 serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
             if !body.admits_status(status) {
-                return Err("invocation refusal status and body disagree".to_owned());
+                return Err("connection-selection refusal status and body disagree".to_owned());
             }
-            Ok(InvokeResponse::Refusal(body))
+            Ok(InvokeResponse::Connection(body))
+        }
+        400 | 401 | 429 | 503 => {
+            let body: ErrorBody =
+                serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+            if !body.is_bounded_and_value_free() {
+                return Err("invocation error body exceeds its value-free bound".to_owned());
+            }
+            Ok(InvokeResponse::Error(body))
         }
         _ => Err(format!(
             "status {status} is not an exchange.invoke-response.v1 outcome"
@@ -170,6 +278,8 @@ fn encode_invoke_response(response: &InvokeResponse) -> Result<Vec<u8>, serde_js
     match response {
         InvokeResponse::Success(invocation) => serde_json::to_vec(invocation),
         InvokeResponse::Refusal(refusal) => serde_json::to_vec(refusal),
+        InvokeResponse::Error(error) => serde_json::to_vec(error),
+        InvokeResponse::Connection(connection) => serde_json::to_vec(connection),
     }
 }
 
@@ -228,8 +338,33 @@ pub(crate) fn decode_effective_catalogue(
         {
             return Err("effective operation null/omission rules changed".to_owned());
         }
+        let schema = object["input_schema"]
+            .as_object()
+            .ok_or_else(|| "effective operation input_schema must be an object".to_owned())?;
+        let schema_keys = schema.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        let properties = schema["properties"].as_object();
+        let required = schema["required"].as_array();
+        if schema_keys != BTreeSet::from(["properties", "required", "type"])
+            || schema["type"] != serde_json::Value::String("object".to_owned())
+            || properties.is_none()
+            || !required.is_some_and(|required| {
+                let names = required.iter().filter_map(serde_json::Value::as_str);
+                let names = names.collect::<BTreeSet<_>>();
+                names.len() == required.len()
+                    && properties.is_some_and(|properties| {
+                        names.iter().all(|name| properties.contains_key(*name))
+                    })
+            })
+            || !properties.is_some_and(|properties| {
+                properties
+                    .values()
+                    .all(|property| property.as_object().is_some_and(|value| !value.is_empty()))
+            })
+        {
+            return Err("effective operation input_schema object contract changed".to_owned());
+        }
     }
-    if contains_authority_axis(&value) {
+    if contains_authority_axis(&value) || contains_sensitive_value(&value) {
         return Err("effective catalogue contains a caller authority axis".to_owned());
     }
     let decoded: crate::routes::catalogue::view::EffectiveCatalogue =
@@ -258,12 +393,25 @@ fn contains_authority_axis(value: &serde_json::Value) -> bool {
 }
 
 #[cfg(test)]
+fn contains_sensitive_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => credential_shaped(value),
+        serde_json::Value::Array(values) => values.iter().any(contains_sensitive_value),
+        serde_json::Value::Object(values) => values.values().any(contains_sensitive_value),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
 fn credential_shaped(value: &str) -> bool {
     [
         "Bearer ",
         "password=",
         "token=",
         "secret=",
+        "credential://",
+        "https://attacker.example",
+        "/tenants/attacker/",
         "quiggle-marrow-plimth-42",
     ]
     .iter()
@@ -403,6 +551,12 @@ mod tests {
         ] {
             assert!(decode_invoke_response(200, changed).is_err());
         }
+        for field in ["operation", "content", "view"] {
+            let mut changed: serde_json::Value =
+                serde_json::from_slice(invocation).expect("success fixture");
+            changed[field] = serde_json::json!("quiggle-marrow-plimth-42");
+            assert!(decode_invoke_response(200, changed.to_string().as_bytes()).is_err());
+        }
     }
 
     #[test]
@@ -452,6 +606,15 @@ mod tests {
         let mut changed = value.clone();
         changed["operations"][0]["connection"] = serde_json::json!(false);
         mutations.push(changed);
+        let mut changed = value.clone();
+        changed["operations"][0]["input_schema"] = serde_json::Value::Null;
+        mutations.push(changed);
+        let mut changed = value.clone();
+        changed["operations"][0]["input_schema"]["required"] = serde_json::json!(null);
+        mutations.push(changed);
+        let mut changed = value.clone();
+        changed["operations"][0]["description"] = serde_json::json!("quiggle-marrow-plimth-42");
+        mutations.push(changed);
         let mut changed = value;
         changed["operations"][0]["input_schema"]["endpoint"] =
             serde_json::json!("https://attacker.example");
@@ -495,6 +658,12 @@ mod tests {
             "supply_at": null,
         });
         assert!(decode_invoke_response(502, unbounded.to_string().as_bytes()).is_err());
+        for field in ["operation", "message", "supply_at"] {
+            let mut changed: serde_json::Value =
+                serde_json::from_slice(accepted).expect("refusal fixture");
+            changed[field] = serde_json::json!("quiggle-marrow-plimth-42");
+            assert!(decode_invoke_response(502, changed.to_string().as_bytes()).is_err());
+        }
     }
 
     #[derive(Deserialize)]
@@ -509,7 +678,74 @@ mod tests {
     struct InventoryFile {
         name: String,
         sha256: String,
-        expected: String,
+        expected: ExpectedOutcome,
+    }
+
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum ExpectedOutcome {
+        #[serde(rename = "authentication_401")]
+        Authentication401,
+        #[serde(rename = "connection_selection_404")]
+        ConnectionSelection404,
+        #[serde(rename = "connection_selection_409")]
+        ConnectionSelection409,
+        EffectiveCatalogueAccepted,
+        RetryableTransportRefusalAccepted,
+        InvocationSuccessAccepted,
+        #[serde(rename = "malformed_request_400")]
+        MalformedRequest400,
+        #[serde(rename = "no_invoker_503")]
+        NoInvoker503,
+        #[serde(rename = "registry_unavailable_503")]
+        RegistryUnavailable503,
+        RequestCaseOutcomesChecked,
+        #[serde(rename = "store_unavailable_503")]
+        StoreUnavailable503,
+        #[serde(rename = "traffic_429")]
+        Traffic429,
+    }
+
+    impl ExpectedOutcome {
+        fn validate(self, bytes: &[u8]) {
+            let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+            match self {
+                Self::EffectiveCatalogueAccepted => {
+                    let decoded =
+                        decode_effective_catalogue(bytes).expect("effective outcome accepts");
+                    assert_eq!(
+                        serde_json::to_vec(&decoded).expect("production serializer"),
+                        bytes
+                    );
+                }
+                Self::RequestCaseOutcomesChecked => {
+                    let _: Requests = serde_json::from_slice(bytes).expect("typed request cases");
+                }
+                other => {
+                    let status = match other {
+                        Self::InvocationSuccessAccepted => 200,
+                        Self::MalformedRequest400 => 400,
+                        Self::Authentication401 => 401,
+                        Self::ConnectionSelection404 => 404,
+                        Self::ConnectionSelection409 => 409,
+                        Self::Traffic429 => 429,
+                        Self::RetryableTransportRefusalAccepted => 502,
+                        Self::NoInvoker503
+                        | Self::RegistryUnavailable503
+                        | Self::StoreUnavailable503 => 503,
+                        Self::EffectiveCatalogueAccepted | Self::RequestCaseOutcomesChecked => {
+                            unreachable!("handled above")
+                        }
+                    };
+                    let decoded =
+                        decode_invoke_response(status, bytes).expect("declared response outcome");
+                    assert_eq!(
+                        encode_invoke_response(&decoded).expect("production serializer"),
+                        bytes
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -533,18 +769,25 @@ mod tests {
         let mut declared = BTreeSet::from(["inventory.json".to_owned()]);
         for file in &inventory.files {
             assert!(declared.insert(file.name.clone()), "duplicate fixture name");
-            assert!(!file.expected.is_empty(), "{} has no outcome", file.name);
             let bytes = std::fs::read(directory.join(&file.name)).expect("declared fixture");
-            let digest = Sha256::digest(bytes)
+            let digest = Sha256::digest(&bytes)
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
             assert_eq!(digest, file.sha256, "{}", file.name);
+            file.expected.validate(&bytes);
         }
         assert_eq!(
             actual, declared,
             "every fixture must be covered by the inventory"
         );
+
+        let mut invalid: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(directory.join("inventory.json")).expect("fixture inventory"),
+        )
+        .expect("inventory value");
+        invalid["files"][0]["expected"] = serde_json::json!("anything_nonempty");
+        assert!(serde_json::from_value::<Inventory>(invalid).is_err());
     }
 
     #[test]

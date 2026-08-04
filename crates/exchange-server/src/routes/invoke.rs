@@ -68,6 +68,7 @@
 //! Zendesk `404` into a host error would destroy the distinction between "the vendor said no" and
 //! "we could not ask", which is the distinction this whole surface exists to keep.
 
+use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -125,9 +126,17 @@ async fn run(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Path(operation): Path<String>,
-    Query(query): Query<InvocationQuery>,
-    Json(params): Json<Value>,
+    query: Result<Query<InvocationQuery>, QueryRejection>,
+    params: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return malformed("invocation query"),
+    };
+    let Json(params) = match params {
+        Ok(params) => params,
+        Err(_) => return malformed("invocation JSON body"),
+    };
     if let Some(workflow) = operation
         .strip_prefix("workflow.")
         .and_then(|operation| operation.strip_suffix(".run"))
@@ -205,6 +214,16 @@ async fn run(
             refuse(refusal)
         }
     }
+}
+
+fn malformed(part: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(crate::protocol::ErrorBody::new(format!(
+            "malformed {part}; the request was not dispatched"
+        ))),
+    )
+        .into_response()
 }
 
 /// Render a refusal: a status, a stable label, and the two facts a caller cannot derive.
@@ -286,15 +305,13 @@ fn supply_at(refusal: &InvokeRefusal) -> Option<String> {
 pub(super) fn no_invoker() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "error": format!(
-                "this host runs no operations: it needs a credential store ({}) to resolve a \
+        Json(crate::protocol::ErrorBody::new(format!(
+            "this host runs no operations: it needs a credential store ({}) to resolve a \
                  credential with and a grant store ({}) to admit an operation from, and it is \
                  missing at least one of them",
-                crate::routes::connections::STORE_SETTING,
-                GRANT_SETTING,
-            ),
-        })),
+            crate::routes::connections::STORE_SETTING,
+            GRANT_SETTING,
+        ))),
     )
         .into_response()
 }
@@ -307,7 +324,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{header, Request as HttpRequest};
-    use tower::Service;
+    use tower::{Service, ServiceExt};
 
     use crate::dev_identity::DevIdentity;
     use crate::traffic::Traffic;
@@ -352,6 +369,46 @@ mod tests {
 
     struct TwoGithubInstances {
         references: Vec<exchange_host::CredentialRef>,
+    }
+
+    struct UnavailableStore;
+
+    #[exchange_host::async_trait]
+    impl exchange_host::SecretStore for UnavailableStore {
+        async fn get(
+            &self,
+            reference: &exchange_host::CredentialRef,
+        ) -> Result<exchange_host::Secret, exchange_host::StoreError> {
+            Err(exchange_host::StoreError::Unreachable {
+                path: exchange_host::address_path(reference),
+                reason: "fixture unavailable".to_owned(),
+            })
+        }
+
+        async fn put(
+            &self,
+            _: &exchange_host::CredentialRef,
+            _: &exchange_host::Secret,
+        ) -> Result<(), exchange_host::StoreError> {
+            unreachable!("no test here writes a credential")
+        }
+
+        async fn delete(
+            &self,
+            _: &exchange_host::CredentialRef,
+        ) -> Result<(), exchange_host::StoreError> {
+            unreachable!("no test here destroys a credential")
+        }
+
+        async fn references(
+            &self,
+            _: &exchange_host::CredentialScope,
+        ) -> Result<Vec<exchange_host::CredentialRef>, exchange_host::StoreError> {
+            Err(exchange_host::StoreError::Unreachable {
+                path: "tenants/acme".to_owned(),
+                reason: "fixture unavailable".to_owned(),
+            })
+        }
     }
 
     #[exchange_host::async_trait]
@@ -456,6 +513,11 @@ mod tests {
         post_json_with_forwarded_for(state, path, body, None).await
     }
 
+    fn assert_v1_refusal(status: StatusCode, body: &Value) {
+        crate::protocol::decode_invoke_response(status.as_u16(), body.to_string().as_bytes())
+            .expect("production refusal satisfies exchange.invoke-response.v1");
+    }
+
     async fn post_json_with_forwarded_for(
         state: AppState,
         path: &str,
@@ -522,6 +584,30 @@ mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
+    #[tokio::test]
+    async fn a_malformed_json_body_is_a_closed_v1_400_refusal() {
+        let response =
+            super::super::app(identified().with_invoker(invoker_holding(all_of_github())))
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/api/operations/github-repo-get/invoke")
+                        .header(header::AUTHORIZATION, "Bearer triage-bot")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{"))
+                        .expect("request"),
+                )
+                .await
+                .expect("router infallible");
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("bounded body");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        crate::protocol::decode_invoke_response(status.as_u16(), &bytes)
+            .expect("malformed body satisfies exchange.invoke-response.v1");
+    }
+
     /// A composition that bound no credential store refuses rather than running unauthenticated,
     /// and names the setting an operator has to set.
     #[tokio::test]
@@ -534,6 +620,7 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_v1_refusal(status, &body);
         assert!(
             body["error"]
                 .as_str()
@@ -576,10 +663,9 @@ mod tests {
             post_json(state.clone(), path, json!({})).await.0,
             StatusCode::NOT_FOUND
         );
-        assert_eq!(
-            post_json(state, path, json!({})).await.0,
-            StatusCode::TOO_MANY_REQUESTS
-        );
+        let (status, body) = post_json(state, path, json!({})).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_v1_refusal(status, &body);
     }
 
     #[tokio::test]
@@ -660,6 +746,7 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::CONFLICT);
+        assert_v1_refusal(status, &body);
         assert_eq!(body["code"], "disconnected");
         assert_eq!(body["connector"], "github");
     }
@@ -824,5 +911,28 @@ mod tests {
                 .contains(first.as_str()),
             "the host-resolved UUID must be the address used: {body}",
         );
+    }
+
+    #[tokio::test]
+    async fn unavailable_registry_and_store_are_closed_v1_503_refusals() {
+        let params = json!({ "owner": "codewandler", "repo": "flux-exchange" });
+        let (status, body) = post_json(
+            identified().with_invoker(invoker_holding(all_of_github())),
+            "/api/operations/github-repo-get/invoke?connection=prod",
+            params.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_v1_refusal(status, &body);
+
+        let credentials: Arc<dyn exchange_host::SecretStore> = Arc::new(UnavailableStore);
+        let (status, body) = post_json(
+            identified().with_invoker(invoker_over(credentials)),
+            "/api/operations/github-repo-get/invoke",
+            params,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_v1_refusal(status, &body);
     }
 }

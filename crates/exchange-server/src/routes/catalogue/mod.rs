@@ -49,6 +49,7 @@
 //! The effective route is deliberately unlike that directory: it reads per-tenant connection and
 //! grant state and therefore sits behind the same resolved-principal boundary as invocation.
 
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -126,8 +127,17 @@ struct EffectiveQuery {}
 async fn effective(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
-    Query(_query): Query<EffectiveQuery>,
+    query: Result<Query<EffectiveQuery>, QueryRejection>,
 ) -> Response {
+    if query.is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::protocol::ErrorBody::new(
+                "malformed effective-catalogue query",
+            )),
+        )
+            .into_response();
+    }
     let Some(invoker) = state.invoker() else {
         return super::invoke::no_invoker();
     };

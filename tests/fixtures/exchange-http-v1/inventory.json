@@ -1,9 +1,17 @@
 {
   "schema": "exchange.http-fixtures.v1",
   "files": [
+    {"name":"authentication-401.json","sha256":"6e2b44a56ca15cd21c102bbe76cf5308bfcd6863f12fa220416c33b9834b187b","expected":"authentication_401"},
+    {"name":"connection-selection-404.json","sha256":"21a4abc3f445749408344558d0e2b51b2b6ef1002c1b343c277984e763951184","expected":"connection_selection_404"},
+    {"name":"connection-selection-409.json","sha256":"8172cef07f8c7d986844c7a77324510a586411e850c31fe829038ffd2b11b9fc","expected":"connection_selection_409"},
     {"name":"effective-catalogue-response.json","sha256":"593455777ecc62d038af1b2e005f8c5268837d040300882bf2ae06a987e8e715","expected":"effective_catalogue_accepted"},
     {"name":"invoke-refusal.json","sha256":"c1c0a6ad73708df32dacaa9525c129becf91ed1600300adecffb163533aa3b06","expected":"retryable_transport_refusal_accepted"},
     {"name":"invoke-success.json","sha256":"60fb00cd4d38c05067636b3e2a1b40ae7e362a1892a76f92a48c12c002db5931","expected":"invocation_success_accepted"},
-    {"name":"requests.json","sha256":"cefa7a1bba65f791a607fbac4ba1c1f033f1c421edcb4a7709d6f580fe04b2eb","expected":"request_case_outcomes_checked"}
+    {"name":"malformed-request-400.json","sha256":"bb2ee014a1beb6fbebb6968ecb017c57fc34fa14ed348f8771b3deb08d4a2c8e","expected":"malformed_request_400"},
+    {"name":"no-invoker-503.json","sha256":"92693a46921f0a0fffe3b3a8cf3f45fc59d4eaa25f7729f7ed57df2bd4bbcd16","expected":"no_invoker_503"},
+    {"name":"registry-unavailable-503.json","sha256":"ece71838f88320be3e0e992077cce5de2eafe8aab0b3caef649dcedffe34e207","expected":"registry_unavailable_503"},
+    {"name":"requests.json","sha256":"cefa7a1bba65f791a607fbac4ba1c1f033f1c421edcb4a7709d6f580fe04b2eb","expected":"request_case_outcomes_checked"},
+    {"name":"store-unavailable-503.json","sha256":"a07083e9901e6c1e0cf625e90885258c102d0644cd420aa1130b08d32a723a93","expected":"store_unavailable_503"},
+    {"name":"traffic-429.json","sha256":"a9d6d783fda236588ca6a6876155afef2df0e400ae88ed7e376cfa6c053ab928","expected":"traffic_429"}
   ]
 }
