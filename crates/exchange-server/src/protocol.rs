@@ -45,7 +45,16 @@ pub const INVOKE_RESPONSE_V1: ProtocolId = ProtocolId::new("exchange.invoke-resp
 
 const MAX_DIAGNOSTIC_BYTES: usize = 4096;
 const BOUNDED_DIAGNOSTIC: &str =
-    "invocation refused; the provider diagnostic exceeded the exchange.api.v1 bound";
+    "request refused; diagnostic omitted by the exchange.invoke-response.v1 bound";
+
+fn bounded_diagnostic(error: impl Into<String>) -> String {
+    let error = error.into();
+    if error.len() <= MAX_DIAGNOSTIC_BYTES && !credential_shaped(&error) {
+        error
+    } else {
+        BOUNDED_DIAGNOSTIC.to_owned()
+    }
+}
 
 /// The production refusal shared by authentication, malformed input, limits and unavailable ports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,7 +96,7 @@ pub(crate) struct WorkflowRunRefusalBody {
 impl WorkflowRunRefusalBody {
     pub(crate) fn new(error: impl Into<String>, run: impl Into<String>) -> Self {
         Self {
-            error: error.into(),
+            error: bounded_diagnostic(error),
             run: run.into(),
         }
     }
@@ -103,7 +112,7 @@ pub(crate) struct WorkflowLookupRefusalBody {
 impl WorkflowLookupRefusalBody {
     pub(crate) fn new(error: impl Into<String>, current_revision: Option<u64>) -> Self {
         Self {
-            error: error.into(),
+            error: bounded_diagnostic(error),
             current_revision,
         }
     }
@@ -112,7 +121,7 @@ impl WorkflowLookupRefusalBody {
 impl ErrorBody {
     pub(crate) fn new(error: impl Into<String>) -> Self {
         Self {
-            error: error.into(),
+            error: bounded_diagnostic(error),
         }
     }
 
@@ -136,14 +145,9 @@ pub(crate) struct InvocationRefusalBody {
 
 impl InvocationRefusalBody {
     pub(crate) fn from_refusal(refusal: &InvokeRefusal, supply_at: Option<String>) -> Self {
-        let message = refusal.to_string();
-        // A diagnostic is not request authority. Replacing an over-bound diagnostic with a fixed
-        // refusal preserves the outcome while preventing an upstream error from widening the wire.
-        let message = if message.len() <= MAX_DIAGNOSTIC_BYTES {
-            message
-        } else {
-            BOUNDED_DIAGNOSTIC.to_owned()
-        };
+        // A diagnostic is not request authority. Replacing an over-bound or credential-shaped
+        // diagnostic with a fixed refusal preserves the outcome without widening the wire.
+        let message = bounded_diagnostic(refusal.to_string());
         Self {
             refusal: InvocationRefusalCode::from(refusal),
             operation: refusal.operation().map(str::to_owned),
@@ -327,7 +331,10 @@ pub(crate) fn decode_invoke_response(status: u16, bytes: &[u8]) -> Result<Invoke
                 return Ok(InvokeResponse::Connection(body));
             }
             if let Ok(body) = serde_json::from_slice::<WorkflowConnectionRefusalBody>(bytes) {
-                if status != 422 || credential_shaped(&body.message) {
+                if status != 422
+                    || body.message.len() > MAX_DIAGNOSTIC_BYTES
+                    || credential_shaped(&body.message)
+                {
                     return Err("workflow connection refusal status and body disagree".to_owned());
                 }
                 return Ok(InvokeResponse::WorkflowConnection(body));
@@ -335,6 +342,8 @@ pub(crate) fn decode_invoke_response(status: u16, bytes: &[u8]) -> Result<Invoke
             if let Ok(body) = serde_json::from_slice::<WorkflowRunRefusalBody>(bytes) {
                 if !matches!(status, 403 | 409 | 422 | 502)
                     || body.run.is_empty()
+                    || body.run.len() > 128
+                    || body.error.len() > MAX_DIAGNOSTIC_BYTES
                     || credential_shaped(&body.error)
                     || credential_shaped(&body.run)
                 {
@@ -349,7 +358,10 @@ pub(crate) fn decode_invoke_response(status: u16, bytes: &[u8]) -> Result<Invoke
                 return Ok(InvokeResponse::Error(body));
             }
             if let Ok(body) = serde_json::from_slice::<WorkflowLookupRefusalBody>(bytes) {
-                if !matches!(status, 404 | 409 | 422) || credential_shaped(&body.error) {
+                if !matches!(status, 404 | 409 | 422)
+                    || body.error.len() > MAX_DIAGNOSTIC_BYTES
+                    || credential_shaped(&body.error)
+                {
                     return Err("workflow lookup refusal status and body disagree".to_owned());
                 }
                 return Ok(InvokeResponse::WorkflowLookup(body));
@@ -364,7 +376,10 @@ pub(crate) fn decode_invoke_response(status: u16, bytes: &[u8]) -> Result<Invoke
                 return Ok(InvokeResponse::Error(body));
             }
             if let Ok(body) = serde_json::from_slice::<WorkflowLookupRefusalBody>(bytes) {
-                if status != 503 || credential_shaped(&body.error) {
+                if status != 503
+                    || body.error.len() > MAX_DIAGNOSTIC_BYTES
+                    || credential_shaped(&body.error)
+                {
                     return Err("workflow lookup refusal status and body disagree".to_owned());
                 }
                 return Ok(InvokeResponse::WorkflowLookup(body));
@@ -510,7 +525,6 @@ fn contains_sensitive_value(value: &serde_json::Value) -> bool {
     }
 }
 
-#[cfg(test)]
 fn credential_shaped(value: &str) -> bool {
     [
         "Bearer ",
@@ -771,6 +785,59 @@ mod tests {
                 serde_json::from_slice(accepted).expect("refusal fixture");
             changed[field] = serde_json::json!("quiggle-marrow-plimth-42");
             assert!(decode_invoke_response(502, changed.to_string().as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn every_production_error_constructor_applies_one_value_free_diagnostic_bound() {
+        for diagnostic in [
+            "x".repeat(MAX_DIAGNOSTIC_BYTES + 1),
+            "quiggle-marrow-plimth-42".to_owned(),
+        ] {
+            let bodies = [
+                (
+                    503,
+                    serde_json::to_vec(&ErrorBody::new(&diagnostic)).expect("generic error"),
+                ),
+                (
+                    403,
+                    serde_json::to_vec(&WorkflowRunRefusalBody::new(
+                        &diagnostic,
+                        "01J00000000000000000000000",
+                    ))
+                    .expect("workflow run error"),
+                ),
+                (
+                    404,
+                    serde_json::to_vec(&WorkflowLookupRefusalBody::new(&diagnostic, None))
+                        .expect("workflow lookup error"),
+                ),
+            ];
+            for (status, bytes) in bodies {
+                assert!(!String::from_utf8_lossy(&bytes).contains(&diagnostic));
+                let decoded = decode_invoke_response(status, &bytes)
+                    .expect("production bounded body satisfies its decoder");
+                assert_eq!(encode_invoke_response(&decoded).expect("encode"), bytes);
+            }
+        }
+
+        for (status, raw) in [
+            (
+                403,
+                serde_json::json!({
+                    "error": "x".repeat(MAX_DIAGNOSTIC_BYTES + 1),
+                    "run": "01J00000000000000000000000",
+                }),
+            ),
+            (
+                404,
+                serde_json::json!({
+                    "error": "x".repeat(MAX_DIAGNOSTIC_BYTES + 1),
+                    "current_revision": null,
+                }),
+            ),
+        ] {
+            assert!(decode_invoke_response(status, raw.to_string().as_bytes()).is_err());
         }
     }
 

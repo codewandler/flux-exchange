@@ -713,6 +713,13 @@ mod tests {
             "01J00000000000000000000000",
         ))
         .await;
+
+        let response = run_store_refusal(format!("{}quiggle-marrow-plimth-42", "x".repeat(4097)));
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("quiggle-marrow-plimth-42"));
+        crate::protocol::decode_invoke_response(status.as_u16(), &bytes)
+            .expect("run-store refusal is bounded before serialization");
     }
 
     #[tokio::test]
