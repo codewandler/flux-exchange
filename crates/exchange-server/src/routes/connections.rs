@@ -3328,6 +3328,9 @@ async fn set_setting(
     let Some(setting) = DeclaredSetting::parse(&service, &field) else {
         return unreadable_field(provider, &service, &field);
     };
+    if store.is_custom_origin(provider.id, &setting) {
+        return custom_origin_plan_required(provider, &setting);
+    }
 
     // **Every decision is the store's, and there is deliberately no second copy of one here.**
     //
@@ -3383,7 +3386,17 @@ async fn clear_setting(
         Err(refusal) => settings_refused(&refusal),
         Ok(false) => nothing_to_clear(provider, &setting),
         Ok(true) => {
-            if let Some(channels) = state.channels() {
+            if store.is_custom_origin(provider.id, &setting) {
+                if let Some(channels) = state.channels() {
+                    if channels
+                        .replace_authority(principal.tenant(), provider.id)
+                        .await
+                        .is_err()
+                    {
+                        return authority_clear_partial(provider, None, &setting);
+                    }
+                }
+            } else if let Some(channels) = state.channels() {
                 channels.restart(principal.tenant(), provider.id);
             }
             StatusCode::NO_CONTENT.into_response()
@@ -3459,6 +3472,9 @@ async fn set_instance_setting(
     let Some(setting) = DeclaredSetting::parse(&service, &field) else {
         return unreadable_field(provider, &service, &field);
     };
+    if store.is_custom_origin(provider.id, &setting) {
+        return custom_origin_plan_required(provider, &setting);
+    }
     if let Err(refusal) = store.set_for_instance(
         principal.tenant(),
         provider.id,
@@ -3496,12 +3512,55 @@ async fn clear_instance_setting(
         Err(refusal) => settings_refused(&refusal),
         Ok(false) => nothing_to_clear(provider, &setting),
         Ok(true) => {
-            if let Some(channels) = state.channels() {
+            if store.is_custom_origin(provider.id, &setting) {
+                if let Some(channels) = state.channels() {
+                    if channels
+                        .replace_authority(principal.tenant(), provider.id)
+                        .await
+                        .is_err()
+                    {
+                        return authority_clear_partial(provider, Some(&label), &setting);
+                    }
+                }
+            } else if let Some(channels) = state.channels() {
                 channels.restart(principal.tenant(), provider.id);
             }
             StatusCode::NO_CONTENT.into_response()
         }
     }
+}
+
+fn custom_origin_plan_required(provider: &'static Provider, setting: &DeclaredSetting) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        "operator-approved origins may only be proposed through the revision-checked connection plan",
+        json!({
+            "connector": provider.id,
+            "service": setting.service,
+            "field": setting.binds(),
+            "code": "connection_plan_required",
+        }),
+    )
+}
+
+fn authority_clear_partial(
+    provider: &'static Provider,
+    label: Option<&str>,
+    setting: &DeclaredSetting,
+) -> Response {
+    (
+        StatusCode::MULTI_STATUS,
+        Json(json!({
+            "connector": provider.id,
+            "label": label,
+            "service": setting.service,
+            "field": setting.binds(),
+            "action": "cleared",
+            "outcome": "partial",
+            "may_have_happened": true,
+        })),
+    )
+        .into_response()
 }
 
 /// One setting as a caller sees it: where it belongs and whether it is supplied. Never its value.
@@ -7950,6 +8009,37 @@ mod tests {
             "zendesk",
             &subdomain,
         ));
+    }
+
+    #[tokio::test]
+    async fn direct_setting_write_cannot_bypass_revisioned_origin_proposal() {
+        let (app, _credentials, settings, _scratch) = configurable_app();
+        let declared =
+            DeclaredSetting::parse("default", "endpoint.origin").expect("released GitLab origin");
+
+        let (status, refused) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/gitlab/settings/default/endpoint.origin",
+            Some(json!({ "value": "https://gitlab.internal.example" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert_eq!(refused["code"], "connection_plan_required");
+        assert!(!refused.to_string().contains("gitlab.internal.example"));
+        assert_eq!(
+            settings
+                .authority_status_for_instance(
+                    &Tenant::new("acme").expect("tenant"),
+                    "gitlab",
+                    None,
+                    &declared,
+                )
+                .expect("authority status")
+                .state,
+            exchange_host::AuthorityState::Unset,
+        );
     }
 
     /// **The exfiltration path, refused at the surface a caller can actually reach.**

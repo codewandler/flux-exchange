@@ -70,6 +70,7 @@ pub enum Action {
     ConnectionRemoved,
     SettingSet,
     SettingCleared,
+    SettingAuthorityProposed,
     SettingAuthorityApproved,
     SettingAuthorityRevoked,
     GrantsReplaced,
@@ -95,6 +96,7 @@ impl Action {
             Self::ConnectionRemoved => "connection_removed",
             Self::SettingSet => "setting_set",
             Self::SettingCleared => "setting_cleared",
+            Self::SettingAuthorityProposed => "setting_authority_proposed",
             Self::SettingAuthorityApproved => "setting_authority_approved",
             Self::SettingAuthorityRevoked => "setting_authority_revoked",
             Self::GrantsReplaced => "grants_replaced",
@@ -658,6 +660,7 @@ impl AuditJournal {
                 | Action::CredentialRotated
                 | Action::CredentialRefreshed
                 | Action::ConnectionRemoved
+                | Action::SettingAuthorityProposed
                 | Action::SettingAuthorityApproved
                 | Action::SettingAuthorityRevoked,
                 Outcome::Succeeded,
@@ -1303,6 +1306,7 @@ mod tests {
             )
             .expect("credential change evidence");
         for (request, action) in [
+            ("origin-proposed", Action::SettingAuthorityProposed),
             ("origin-approved", Action::SettingAuthorityApproved),
             ("origin-revoked", Action::SettingAuthorityRevoked),
         ] {
@@ -1346,7 +1350,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("count");
-            assert_eq!(count, 6);
+            assert_eq!(count, 7);
         }
         drop(journal);
 
@@ -1371,7 +1375,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count");
-        assert_eq!(count, 7, "the flood policy re-arms after its window");
+        assert_eq!(count, 8, "the flood policy re-arms after its window");
     }
 
     #[test]

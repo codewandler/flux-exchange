@@ -169,12 +169,11 @@ pub const MAX_SETTING_VALUE_BYTES: usize = 1024;
 /// configuration lives here in the first place — see this module's documentation.
 pub const MAX_TENANT_SETTINGS_BYTES: usize = 16 * 1024;
 
-/// Dormant policy seam for catalogue-declared custom origins.
+/// Policy seam for catalogue-declared custom origins.
 ///
-/// Connector catalogue 0.18 has no typed custom-origin declaration, so the production binding
-/// installs no policy and every whole-authority field keeps refusing. A future composition may
-/// supply an implementation only from the released typed declaration; tests use an explicit
-/// fixture policy without turning a connector id or field name into production policy.
+/// The production binding derives this only from released typed declarations. Tests use an
+/// explicit fixture policy to exercise policy-change refusals without turning a connector id or
+/// field name into another production policy source.
 trait CustomOriginPolicy: Send + Sync {
     /// The released rule for this exact declaration, including its grammar and normalization.
     fn rule(&self, connector: &str, declared: &DeclaredSetting) -> Option<&dyn CustomOriginRule>;
@@ -196,22 +195,9 @@ struct NormalizedOrigin {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "the released 0.18 catalogue keeps production policy dormant; synthetic policy tests both refusals until the published typed adapter lands"
-)]
 enum OriginPolicyRefusal {
     UnsupportedScheme,
     Malformed,
-}
-
-#[derive(Debug)]
-struct DormantCustomOriginPolicy;
-
-impl CustomOriginPolicy for DormantCustomOriginPolicy {
-    fn rule(&self, _: &str, _: &DeclaredSetting) -> Option<&dyn CustomOriginRule> {
-        None
-    }
 }
 
 /// Value-free lifecycle state for one custom-origin setting.
@@ -1380,14 +1366,13 @@ mod file {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, RwLock};
 
-    use connector_pack::{ConfigStore, Field};
+    use connector_pack::{ConfigStore, ConfigValue, Configuration, Field, Rehearsal};
     use serde::{Deserialize, Serialize};
 
     use super::{
         admit_tenant_settings, AuthorityState, AuthorityStatus, ConnectionSettings,
-        CustomOriginPolicy, CustomOriginRule, DeclaredSetting, DormantCustomOriginPolicy,
-        InstanceId, NormalizedOrigin, OriginPolicyRefusal, PreparedAuthorityProposal,
-        SettingsRefusal, MAX_SETTING_VALUE_BYTES,
+        CustomOriginPolicy, CustomOriginRule, DeclaredSetting, InstanceId, NormalizedOrigin,
+        OriginPolicyRefusal, PreparedAuthorityProposal, SettingsRefusal, MAX_SETTING_VALUE_BYTES,
     };
     use crate::paths::{enclosing_working_tree, resolve};
     use crate::Tenant;
@@ -1404,6 +1389,174 @@ mod file {
     /// Written with `$HOME` rather than expanded: nothing here reads the environment, and a refusal
     /// that quoted this machine's home directory would be a refusal that had already made a choice.
     const EXAMPLE_PATH: &str = "$HOME/.local/share/flux-exchange/settings";
+
+    /// Released operator-approved origin declarations, validated by the pack that executes them.
+    struct CatalogueCustomOriginPolicy {
+        rules: BTreeMap<(String, DeclaredSetting), CatalogueOriginRule>,
+    }
+
+    struct CatalogueOriginRule {
+        provider: String,
+        service: String,
+        field: String,
+        rehearsal: Rehearsal,
+    }
+
+    impl CatalogueCustomOriginPolicy {
+        fn read() -> Result<Self, String> {
+            let mut rules = BTreeMap::new();
+            for provider in connector_catalog::providers() {
+                for field in provider.config {
+                    match field.approval {
+                        connector_catalog::Approval::None => continue,
+                        connector_catalog::Approval::Operator => {}
+                    }
+                    if field.secret || field.format != "origin" || !field.also_binds.is_empty() {
+                        return Err(format!(
+                            "connector `{}` field `{}` declares an unsupported operator-approval shape",
+                            provider.id, field.name
+                        ));
+                    }
+                    let declared =
+                        DeclaredSetting::parse(field.service, field.binds).ok_or_else(|| {
+                            format!(
+                                "connector `{}` field `{}` has an unreadable binds target",
+                                provider.id, field.name
+                            )
+                        })?;
+                    if declared.kind != super::SettingKind::Endpoint || declared.name != field.name
+                    {
+                        return Err(format!(
+                            "connector `{}` field `{}` does not bind its own endpoint name",
+                            provider.id, field.name
+                        ));
+                    }
+                    let verify = provider.verify.ok_or_else(|| {
+                        format!(
+                            "connector `{}` declares an operator-approved origin without a verification operation",
+                            provider.id
+                        )
+                    })?;
+                    let operation = provider
+                        .operations
+                        .iter()
+                        .find(|operation| operation.id == verify && operation.service == field.service)
+                        .ok_or_else(|| {
+                            format!(
+                                "connector `{}` verification operation does not belong to origin service `{}`",
+                                provider.id, field.service
+                            )
+                        })?;
+                    let rehearsal = Rehearsal::of(
+                        operation.id,
+                        provider.id,
+                        operation.service,
+                        operation.flux,
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "connector `{}` verification operation cannot validate its origin: {error}",
+                            provider.id
+                        )
+                    })?;
+                    if !rehearsal
+                        .endpoint_variables()
+                        .iter()
+                        .any(|variable| variable == field.name)
+                    {
+                        return Err(format!(
+                            "connector `{}` verification operation does not consume origin field `{}`",
+                            provider.id, field.name
+                        ));
+                    }
+                    rules.insert(
+                        (provider.id.to_owned(), declared),
+                        CatalogueOriginRule {
+                            provider: provider.id.to_owned(),
+                            service: field.service.to_owned(),
+                            field: field.name.to_owned(),
+                            rehearsal,
+                        },
+                    );
+                }
+            }
+            Ok(Self { rules })
+        }
+    }
+
+    impl CustomOriginPolicy for CatalogueCustomOriginPolicy {
+        fn rule(
+            &self,
+            connector: &str,
+            declared: &DeclaredSetting,
+        ) -> Option<&dyn CustomOriginRule> {
+            self.rules
+                .get(&(connector.to_owned(), declared.clone()))
+                .map(|rule| rule as &dyn CustomOriginRule)
+        }
+    }
+
+    struct CandidateOrigin {
+        provider: String,
+        service: String,
+        field: String,
+        value: String,
+    }
+
+    impl ConfigStore for CandidateOrigin {
+        fn get(
+            &self,
+            tenant: &str,
+            provider: &str,
+            service: &str,
+            field: Field<'_>,
+        ) -> Option<String> {
+            self.resolve_for_instance(tenant, provider, None, service, field)
+                .map(|resolved| resolved.value().to_owned())
+        }
+
+        fn resolve_for_instance(
+            &self,
+            _tenant: &str,
+            provider: &str,
+            _instance: Option<&InstanceId>,
+            service: &str,
+            field: Field<'_>,
+        ) -> Option<ConfigValue> {
+            (provider == self.provider
+                && service == self.service
+                && matches!(field, Field::Endpoint(name) if name == self.field))
+            .then(|| ConfigValue::operator_approved(self.value.clone()))
+        }
+    }
+
+    impl CustomOriginRule for CatalogueOriginRule {
+        fn normalize(&self, value: &str) -> Result<NormalizedOrigin, OriginPolicyRefusal> {
+            let configuration = Configuration::new(
+                Arc::new(CandidateOrigin {
+                    provider: self.provider.clone(),
+                    service: self.service.clone(),
+                    field: self.field.clone(),
+                    value: value.to_owned(),
+                }),
+                "validation",
+            )
+            .map_err(|_| OriginPolicyRefusal::Malformed)?;
+            self.rehearsal
+                .request(&configuration, &serde_json::json!({}))
+                .map_err(|_| {
+                    if value.starts_with("https://") {
+                        OriginPolicyRefusal::Malformed
+                    } else {
+                        OriginPolicyRefusal::UnsupportedScheme
+                    }
+                })?;
+            Ok(NormalizedOrigin {
+                setting_value: value.to_owned(),
+                origin: value.to_owned(),
+            })
+        }
+    }
 
     /// One tenant's connections, one connector's services, one service's values.
     ///
@@ -1559,11 +1712,18 @@ mod file {
         /// [`SettingsStoreError::Unresolvable`] when the path cannot be made absolute at all; and
         /// [`SettingsStoreError::Unusable`] when the file cannot be created or parsed.
         pub fn bind(path: impl AsRef<Path>) -> Result<Self, SettingsStoreError> {
-            Self::bind_with_custom_origin_policy(path, Arc::new(DormantCustomOriginPolicy))
+            let requested = path.as_ref();
+            let policy = CatalogueCustomOriginPolicy::read().map_err(|reason| {
+                SettingsStoreError::Unusable {
+                    path: requested.display().to_string(),
+                    reason: format!("released custom-origin policy is unreadable: {reason}"),
+                }
+            })?;
+            Self::bind_with_custom_origin_policy(path, Arc::new(policy))
         }
 
-        /// Internal construction seam. Catalogue 0.18 production calls this only with the dormant
-        /// policy; unit tests exercise lifecycle storage with a synthetic policy in this module.
+        /// Internal construction seam. Production derives policy from the released catalogue;
+        /// unit tests can replace it to prove policy-change and persistence refusals.
         fn bind_with_custom_origin_policy(
             path: impl AsRef<Path>,
             custom_origins: Arc<dyn CustomOriginPolicy>,
@@ -2273,6 +2433,18 @@ mod file {
             service: &str,
             field: Field<'_>,
         ) -> Option<String> {
+            self.resolve_for_instance(tenant, provider, instance, service, field)
+                .map(|resolved| resolved.value().to_owned())
+        }
+
+        fn resolve_for_instance(
+            &self,
+            tenant: &str,
+            provider: &str,
+            instance: Option<&InstanceId>,
+            service: &str,
+            field: Field<'_>,
+        ) -> Option<ConfigValue> {
             let binds = binds_of(field);
             let connector_key = match instance {
                 Some(instance) => format!("{provider}@{}", instance.as_str()),
@@ -2317,7 +2489,9 @@ mod file {
                                     normalized.origin == origin.origin
                                         && normalized.setting_value == origin.value
                                 })
-                                .map(|normalized| normalized.setting_value)
+                                .map(|normalized| {
+                                    ConfigValue::operator_approved(normalized.setting_value)
+                                })
                         }
                         StoredValue::Origin(_) | StoredValue::Ordinary(_) => None,
                     };
@@ -2330,11 +2504,11 @@ mod file {
                 if !super::host_pinning(catalogued, &declared).admits(&value) {
                     return None;
                 }
-                return Some(value);
+                return Some(ConfigValue::proposed(value));
             }
 
             match stored {
-                StoredValue::Ordinary(value) => Some(value),
+                StoredValue::Ordinary(value) => Some(ConfigValue::proposed(value)),
                 StoredValue::Origin(_) => None,
             }
         }
@@ -3212,6 +3386,87 @@ mod file {
         fn bind(path: &Path) -> SettingsStore {
             SettingsStore::bind_with_custom_origin_policy(path, Arc::new(TestPolicy))
                 .expect("test policy store")
+        }
+
+        #[test]
+        fn released_catalogue_origin_is_the_production_authority_policy() {
+            let scratch = Scratch::new("released-policy");
+            let path = scratch.0.join("settings");
+            let tenant = Tenant::new("acme").expect("tenant");
+            let declared = DeclaredSetting::parse("default", "endpoint.origin")
+                .expect("GitLab origin declaration");
+            let store = Arc::new(SettingsStore::bind(&path).expect("production settings store"));
+            let provider =
+                connector_catalog::provider(connector_catalog::ProviderKey::id("gitlab"))
+                    .expect("GitLab provider");
+            let verify = provider
+                .operations
+                .iter()
+                .find(|operation| Some(operation.id) == provider.verify)
+                .expect("GitLab verification operation");
+            let rehearsal = Rehearsal::of(verify.id, provider.id, verify.service, verify.flux)
+                .expect("released verification operation");
+            let configuration =
+                Configuration::new(store.clone(), "acme").expect("tenant-bound configuration");
+
+            assert!(store.is_custom_origin("gitlab", &declared));
+            assert!(matches!(
+                store.propose_authority_for_instance(
+                    &tenant,
+                    "gitlab",
+                    None,
+                    &declared,
+                    "http://gitlab.internal.example",
+                    None,
+                ),
+                Err(SettingsRefusal::OriginSchemeUnsupported { .. })
+            ));
+
+            let proposal = store
+                .propose_authority_for_instance(
+                    &tenant,
+                    "gitlab",
+                    None,
+                    &declared,
+                    "https://gitlab.internal.example:8443",
+                    None,
+                )
+                .expect("proposal");
+            let revision = proposal.revision.expect("revision");
+            assert_eq!(
+                store.get("acme", "gitlab", "default", Field::Endpoint("origin")),
+                None,
+                "a proposal must not reach connector-pack"
+            );
+            assert!(rehearsal
+                .request(&configuration, &serde_json::json!({}))
+                .is_err());
+
+            store
+                .approve_authority_for_instance(&tenant, "gitlab", None, &declared, revision)
+                .expect("approval");
+            let resolved = store
+                .resolve_for_instance("acme", "gitlab", None, "default", Field::Endpoint("origin"))
+                .expect("approved value");
+            assert_eq!(resolved.value(), "https://gitlab.internal.example:8443");
+            assert!(resolved.is_operator_approved());
+            assert_eq!(
+                rehearsal
+                    .request(&configuration, &serde_json::json!({}))
+                    .expect("approved request projection")
+                    .url,
+                "https://gitlab.internal.example:8443/api/v4/user"
+            );
+
+            store
+                .revoke_authority_for_instance(&tenant, "gitlab", None, &declared, revision)
+                .expect("revocation");
+            assert!(store
+                .resolve_for_instance("acme", "gitlab", None, "default", Field::Endpoint("origin"),)
+                .is_none());
+            assert!(rehearsal
+                .request(&configuration, &serde_json::json!({}))
+                .is_err());
         }
 
         fn proposal_revision(

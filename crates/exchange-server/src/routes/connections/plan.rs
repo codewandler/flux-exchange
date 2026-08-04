@@ -793,9 +793,105 @@ async fn apply(
         };
         let mut target_applied = false;
         let mut audit_refused = false;
-        let mut audit_finalization_refused = false;
+        let mut partial_reason = None;
         let mut proposal_revision = None;
         for setting in settings {
+            if target.custom_origin {
+                let instance =
+                    match invocation_instance(&state, &principal, provider, Some(&working_label))
+                        .await
+                    {
+                        Ok(instance) => instance,
+                        Err(response) => return response,
+                    };
+                let prepared = match settings_store.prepare_authority_proposal_for_instance(
+                    principal.tenant(),
+                    provider.id,
+                    instance.as_ref(),
+                    setting,
+                    value,
+                    expected_authority_revisions.get(&target.id).copied(),
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(refusal) => {
+                        refusal_status = Some(authority_refused(&refusal).status());
+                        stopped = true;
+                        break;
+                    }
+                };
+                let revision = prepared.revision();
+                let audit = match begin_audit(
+                    &state,
+                    &request_id,
+                    &principal,
+                    AuditAction::SettingAuthorityProposed,
+                    AuditTarget::SettingAuthority {
+                        connector: provider.id.to_owned(),
+                        service: setting.service.clone(),
+                        field: setting.binds(),
+                        revision: revision.to_string(),
+                    },
+                ) {
+                    Ok(audit) => audit,
+                    Err(response) => {
+                        refusal_status = Some(response.status());
+                        stopped = true;
+                        audit_refused = true;
+                        break;
+                    }
+                };
+                let transition =
+                    match settings_store.commit_authority_proposal_for_instance(prepared) {
+                        Ok(transition) => transition,
+                        Err(refusal) => {
+                            let response = authority_refused(&refusal);
+                            let write_status = response.status();
+                            let audit_failure = audit
+                                .finish(&state, &request_id, &principal, write_status)
+                                .err()
+                                .map(|response| response.status());
+                            refusal_status = Some(audit_failure.unwrap_or(write_status));
+                            stopped = true;
+                            audit_refused = audit_failure.is_some();
+                            break;
+                        }
+                    };
+                proposal_revision = transition.revision;
+                applied_any = true;
+                target_applied = true;
+
+                let replacement_failed = match state.channels() {
+                    Some(channels) => channels
+                        .replace_authority(principal.tenant(), provider.id)
+                        .await
+                        .is_err(),
+                    None => false,
+                };
+                let audit_failure = audit
+                    .finish(&state, &request_id, &principal, StatusCode::OK)
+                    .err()
+                    .map(|response| response.status());
+                if replacement_failed || audit_failure.is_some() {
+                    refusal_status = Some(audit_failure.unwrap_or(StatusCode::SERVICE_UNAVAILABLE));
+                    stopped = true;
+                    audit_refused = audit_failure.is_some();
+                    partial_reason = Some(match (replacement_failed, audit_failure.is_some()) {
+                        (true, true) => {
+                            "the authority proposal persisted, but runtime replacement and audit finalization both refused completion"
+                        }
+                        (true, false) => {
+                            "the authority proposal persisted, but runtime replacement refused completion"
+                        }
+                        (false, true) => {
+                            "the authority proposal persisted, but audit finalization refused completion"
+                        }
+                        (false, false) => unreachable!("a partial authority proposal has a cause"),
+                    });
+                    break;
+                }
+                continue;
+            }
+
             let audit = match begin_audit(
                 &state,
                 &request_id,
@@ -816,47 +912,20 @@ async fn apply(
                     break;
                 }
             };
-            let response = if target.custom_origin {
-                let instance =
-                    match invocation_instance(&state, &principal, provider, Some(&working_label))
-                        .await
-                    {
-                        Ok(instance) => instance,
-                        Err(response) => return response,
-                    };
-                match settings_store.propose_authority_for_instance(
-                    principal.tenant(),
-                    provider.id,
-                    instance.as_ref(),
-                    setting,
-                    value,
-                    expected_authority_revisions.get(&target.id).copied(),
-                ) {
-                    Ok(status) => {
-                        proposal_revision = status.revision;
-                        if let Some(channels) = state.channels() {
-                            channels.restart(principal.tenant(), provider.id);
-                        }
-                        StatusCode::OK.into_response()
-                    }
-                    Err(refusal) => authority_refused(&refusal),
-                }
-            } else {
-                set_instance_setting(
-                    State(state.clone()),
-                    Extension(principal.clone()),
-                    Path((
-                        provider.id.to_owned(),
-                        working_label.clone(),
-                        setting.service.clone(),
-                        setting.binds(),
-                    )),
-                    Json(SuppliedSetting {
-                        value: value.clone(),
-                    }),
-                )
-                .await
-            };
+            let response = set_instance_setting(
+                State(state.clone()),
+                Extension(principal.clone()),
+                Path((
+                    provider.id.to_owned(),
+                    working_label.clone(),
+                    setting.service.clone(),
+                    setting.binds(),
+                )),
+                Json(SuppliedSetting {
+                    value: value.clone(),
+                }),
+            )
+            .await;
             let write_status = response.status();
             let audit_failure = audit
                 .finish(&state, &request_id, &principal, write_status)
@@ -869,7 +938,9 @@ async fn apply(
                     refusal_status = Some(status);
                     stopped = true;
                     audit_refused = true;
-                    audit_finalization_refused = true;
+                    partial_reason = Some(
+                        "the setting write persisted, but audit finalization refused completion",
+                    );
                     break;
                 }
             } else {
@@ -879,19 +950,15 @@ async fn apply(
                 break;
             }
         }
-        if stopped && target_applied && audit_finalization_refused {
+        if let (true, true, Some(partial_reason)) = (stopped, target_applied, partial_reason) {
             steps.push(if target.custom_origin {
                 proposal_step(
                     &target.id,
                     proposal_revision.expect("a persisted proposal has a revision"),
-                    "the authority proposal persisted, but audit finalization refused completion",
+                    partial_reason,
                 )
             } else {
-                step(
-                    &target.id,
-                    StepOutcome::Applied,
-                    Some("the setting write persisted, but audit finalization refused completion"),
-                )
+                step(&target.id, StepOutcome::Applied, Some(partial_reason))
             });
         } else if stopped {
             steps.push(step(
@@ -1233,11 +1300,16 @@ async fn transition_authority(
             return response;
         }
     };
-    // Persisted authority invalidates the runtime snapshot immediately. Audit finalization can
-    // refuse independently, but it must not leave a pre-revocation channel alive.
-    if let Some(channels) = state.channels() {
-        channels.restart(principal.tenant(), provider.id);
-    }
+    // Persisted authority invalidates the runtime snapshot immediately. Cancellation alone is not
+    // acknowledgment: the response waits until every old projection terminates before any new
+    // projection can observe the changed authority.
+    let replacement_failed = match state.channels() {
+        Some(channels) => channels
+            .replace_authority(principal.tenant(), provider.id)
+            .await
+            .is_err(),
+        None => false,
+    };
     let revision = transition
         .revision
         .expect("transition has revision")
@@ -1246,10 +1318,10 @@ async fn transition_authority(
         state: transition.state.into(),
         revision,
     };
-    if audit
+    let audit_failed = audit
         .finish(&state, &request_id, &principal, StatusCode::OK)
-        .is_err()
-    {
+        .is_err();
+    if replacement_failed || audit_failed {
         return (
             StatusCode::MULTI_STATUS,
             Json(AuthorityPartialResponse {
@@ -2069,8 +2141,8 @@ mod tests {
     use std::fs::DirBuilder;
     use std::os::unix::fs::DirBuilderExt as _;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use axum::body::Body;
     use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -2079,8 +2151,8 @@ mod tests {
     use exchange_host::{
         async_trait, ChannelId, ChannelRecord, Channels, ConfigStore, ConnectionSettings,
         CredentialRef, CredentialScope, CredentialStore, Field, MemoryChannels,
-        MemoryConnectionRegistry, Secret, SecretBatch, SecretStore, SettingsRefusal, SettingsStore,
-        StoreError, Tenant,
+        MemoryConnectionRegistry, PreparedAuthorityProposal, Secret, SecretBatch, SecretStore,
+        SettingsRefusal, SettingsStore, StoreError, Tenant,
     };
     use serde_json::{json, Value};
     use tokio_util::sync::CancellationToken;
@@ -2145,46 +2217,26 @@ mod tests {
             .iter()
             .copied()
             .find_map(|provider| {
-                (!provider.auth.is_empty()).then_some(())?;
-                declared_settings(provider)
-                    .ok()?
-                    .into_iter()
-                    .find_map(|declared| {
-                        matches!(
-                            host_pinning(provider, &declared),
-                            HostPinning::WholeAuthority(_)
-                        )
-                        .then_some(OriginCandidate { provider, declared })
-                    })
+                (provider.id == "gitlab").then(|| OriginCandidate {
+                    provider,
+                    declared: DeclaredSetting::parse("default", "endpoint.origin")
+                        .expect("released GitLab origin"),
+                })
             })
-            .expect("catalogue has an authenticated whole-authority declaration")
+            .expect("catalogue has the released GitLab origin declaration")
     }
 
     struct AuthoritySettings {
         inner: SettingsStore,
-        candidate: OriginCandidate,
-        status: Mutex<AuthorityStatus>,
-        next_revision: AtomicU64,
         break_audit_on_revoke: Option<Arc<AuditJournal>>,
     }
 
     impl AuthoritySettings {
-        fn new(path: &Path, candidate: OriginCandidate) -> Self {
+        fn new(path: &Path, _candidate: OriginCandidate) -> Self {
             Self {
                 inner: SettingsStore::bind(path).expect("settings store"),
-                candidate,
-                status: Mutex::new(AuthorityStatus {
-                    state: AuthorityState::Unset,
-                    revision: None,
-                    origin: None,
-                }),
-                next_revision: AtomicU64::new(1),
                 break_audit_on_revoke: None,
             }
-        }
-
-        fn matches(&self, connector: &str, declared: &DeclaredSetting) -> bool {
-            connector == self.candidate.provider.id && declared == &self.candidate.declared
         }
     }
 
@@ -2197,6 +2249,18 @@ mod tests {
             field: Field<'_>,
         ) -> Option<String> {
             self.inner.get(tenant, provider, service, field)
+        }
+
+        fn resolve_for_instance(
+            &self,
+            tenant: &str,
+            provider: &str,
+            instance: Option<&InstanceId>,
+            service: &str,
+            field: Field<'_>,
+        ) -> Option<exchange_host::ConfigValue> {
+            self.inner
+                .resolve_for_instance(tenant, provider, instance, service, field)
         }
     }
 
@@ -2219,18 +2283,8 @@ mod tests {
             declared: &DeclaredSetting,
             value: &str,
         ) -> Result<(), SettingsRefusal> {
-            if self.matches(connector, declared) {
-                let revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
-                *self.status.lock().expect("authority status") = AuthorityStatus {
-                    state: AuthorityState::Proposed,
-                    revision: Some(revision),
-                    origin: Some(format!("https://{value}")),
-                };
-                Ok(())
-            } else {
-                self.inner
-                    .set_for_instance(tenant, connector, instance, declared, value)
-            }
+            self.inner
+                .set_for_instance(tenant, connector, instance, declared, value)
         }
 
         fn clear(
@@ -2249,19 +2303,8 @@ mod tests {
             instance: Option<&InstanceId>,
             declared: &DeclaredSetting,
         ) -> Result<bool, SettingsRefusal> {
-            if self.matches(connector, declared) {
-                let mut status = self.status.lock().expect("authority status");
-                let existed = status.revision.is_some();
-                *status = AuthorityStatus {
-                    state: AuthorityState::Unset,
-                    revision: None,
-                    origin: None,
-                };
-                Ok(existed)
-            } else {
-                self.inner
-                    .clear_for_instance(tenant, connector, instance, declared)
-            }
+            self.inner
+                .clear_for_instance(tenant, connector, instance, declared)
         }
 
         fn is_set(&self, tenant: &Tenant, connector: &str, declared: &DeclaredSetting) -> bool {
@@ -2275,12 +2318,8 @@ mod tests {
             instance: Option<&InstanceId>,
             declared: &DeclaredSetting,
         ) -> bool {
-            if self.matches(connector, declared) {
-                self.status.lock().expect("authority status").state == AuthorityState::Approved
-            } else {
-                self.inner
-                    .is_set_for_instance(tenant, connector, instance, declared)
-            }
+            self.inner
+                .is_set_for_instance(tenant, connector, instance, declared)
         }
 
         fn held_bytes(&self, tenant: &Tenant) -> usize {
@@ -2288,130 +2327,73 @@ mod tests {
         }
 
         fn is_custom_origin(&self, connector: &str, declared: &DeclaredSetting) -> bool {
-            self.matches(connector, declared)
+            self.inner.is_custom_origin(connector, declared)
         }
 
         fn authority_status_for_instance(
             &self,
-            _tenant: &Tenant,
+            tenant: &Tenant,
             connector: &str,
-            _instance: Option<&InstanceId>,
+            instance: Option<&InstanceId>,
             declared: &DeclaredSetting,
         ) -> Result<AuthorityStatus, SettingsRefusal> {
-            if !self.matches(connector, declared) {
-                return Err(SettingsRefusal::AuthorityUnsupported {
-                    connector: connector.to_owned(),
-                    setting: declared.binds(),
-                });
-            }
-            Ok(self.status.lock().expect("authority status").clone())
+            self.inner
+                .authority_status_for_instance(tenant, connector, instance, declared)
         }
 
-        fn propose_authority_for_instance(
+        fn prepare_authority_proposal_for_instance(
             &self,
-            _tenant: &Tenant,
+            tenant: &Tenant,
             connector: &str,
-            _instance: Option<&InstanceId>,
+            instance: Option<&InstanceId>,
             declared: &DeclaredSetting,
             value: &str,
             expected_revision: Option<u64>,
+        ) -> Result<PreparedAuthorityProposal, SettingsRefusal> {
+            self.inner.prepare_authority_proposal_for_instance(
+                tenant,
+                connector,
+                instance,
+                declared,
+                value,
+                expected_revision,
+            )
+        }
+
+        fn commit_authority_proposal_for_instance(
+            &self,
+            prepared: PreparedAuthorityProposal,
         ) -> Result<AuthorityStatus, SettingsRefusal> {
-            if !self.matches(connector, declared) {
-                return Err(SettingsRefusal::AuthorityUnsupported {
-                    connector: connector.to_owned(),
-                    setting: declared.binds(),
-                });
-            }
-            let mut status = self.status.lock().expect("authority status");
-            if status.revision != expected_revision {
-                return match (expected_revision, status.revision) {
-                    (None, Some(current)) => Err(SettingsRefusal::AuthorityRevisionRequired {
-                        connector: connector.to_owned(),
-                        setting: declared.binds(),
-                        current,
-                    }),
-                    (Some(expected), Some(current)) => {
-                        Err(SettingsRefusal::AuthorityRevisionConflict {
-                            connector: connector.to_owned(),
-                            setting: declared.binds(),
-                            expected,
-                            current,
-                        })
-                    }
-                    (Some(_), None) => Err(SettingsRefusal::AuthorityUnset {
-                        connector: connector.to_owned(),
-                        setting: declared.binds(),
-                    }),
-                    (None, None) => unreachable!("equal revisions were handled above"),
-                };
-            }
-            let revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
-            *status = AuthorityStatus {
-                state: AuthorityState::Proposed,
-                revision: Some(revision),
-                origin: Some(format!("https://{value}")),
-            };
-            Ok(status.clone())
+            self.inner.commit_authority_proposal_for_instance(prepared)
         }
 
         fn approve_authority_for_instance(
             &self,
-            _tenant: &Tenant,
+            tenant: &Tenant,
             connector: &str,
-            _instance: Option<&InstanceId>,
+            instance: Option<&InstanceId>,
             declared: &DeclaredSetting,
             revision: u64,
         ) -> Result<AuthorityStatus, SettingsRefusal> {
-            self.transition(connector, declared, revision, AuthorityState::Approved)
+            self.inner
+                .approve_authority_for_instance(tenant, connector, instance, declared, revision)
         }
 
         fn revoke_authority_for_instance(
             &self,
-            _tenant: &Tenant,
+            tenant: &Tenant,
             connector: &str,
-            _instance: Option<&InstanceId>,
+            instance: Option<&InstanceId>,
             declared: &DeclaredSetting,
             revision: u64,
         ) -> Result<AuthorityStatus, SettingsRefusal> {
-            let status = self.transition(connector, declared, revision, AuthorityState::Revoked)?;
+            let status = self
+                .inner
+                .revoke_authority_for_instance(tenant, connector, instance, declared, revision)?;
             if let Some(audit) = &self.break_audit_on_revoke {
                 audit.refuse_writes_for_test();
             }
             Ok(status)
-        }
-    }
-
-    impl AuthoritySettings {
-        fn transition(
-            &self,
-            connector: &str,
-            declared: &DeclaredSetting,
-            revision: u64,
-            state: AuthorityState,
-        ) -> Result<AuthorityStatus, SettingsRefusal> {
-            if !self.matches(connector, declared) {
-                return Err(SettingsRefusal::AuthorityUnsupported {
-                    connector: connector.to_owned(),
-                    setting: declared.binds(),
-                });
-            }
-            let mut status = self.status.lock().expect("authority status");
-            let Some(current) = status.revision else {
-                return Err(SettingsRefusal::AuthorityUnset {
-                    connector: connector.to_owned(),
-                    setting: declared.binds(),
-                });
-            };
-            if current != revision {
-                return Err(SettingsRefusal::AuthorityRevisionConflict {
-                    connector: connector.to_owned(),
-                    setting: declared.binds(),
-                    expected: revision,
-                    current,
-                });
-            }
-            status.state = state;
-            Ok(status.clone())
         }
     }
 
@@ -2905,6 +2887,7 @@ mod tests {
             format: "text",
             required: true,
             default: None,
+            approval: connector_catalog::Approval::None,
             secret: true,
             docs_url: None,
             binds: "endpoint.site",
@@ -3276,7 +3259,7 @@ mod tests {
                 "name": "production",
                 "values": {
                     credential_target: SENTINEL,
-                    setting_target.clone(): "custom.example.test"
+                    setting_target.clone(): "https://custom.example.test"
                 }
             })),
         )
@@ -3353,7 +3336,7 @@ mod tests {
             Some(json!({
                 "version": VERSION,
                 "name": "production",
-                "values": { setting_target.clone(): "replacement.example.test" },
+                "values": { setting_target.clone(): "https://replacement.example.test" },
                 "expected_revisions": { setting_target.clone(): "99" }
             })),
         )
@@ -3505,7 +3488,8 @@ mod tests {
         let provider = candidate.provider;
         let declared = candidate.declared.clone();
         let credential = provider.auth[0].name;
-        let (harness, supervisor, channel_id, settings) = authority_harness_with_channel(candidate);
+        let (harness, supervisor, channel_id, _settings) =
+            authority_harness_with_channel(candidate);
         let target = format!(
             "/api/connections/{}/instances/production/settings/{}/{}/authority",
             provider.id,
@@ -3522,11 +3506,11 @@ mod tests {
                 "name":"production",
                 "values":{
                     (format!("credential.{credential}")):SENTINEL,
-                    (format!("setting.{}.{}", declared.service, declared.binds())):"custom.example.test"
+                    (format!("setting.{}.{}", declared.service, declared.binds())):"https://custom.example.test"
                 }
             })),
         ).await;
-        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(status, StatusCode::MULTI_STATUS, "{response}");
         let transition = json!({"version":VERSION,"revision":"1"});
         let (status, response) = call(
             &harness.app,
@@ -3536,7 +3520,7 @@ mod tests {
             Some(transition.clone()),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(status, StatusCode::MULTI_STATUS, "{response}");
 
         supervisor.stop(&channel_id);
         assert_eq!(supervisor.status(&channel_id), ChannelStatus::Stopped);
@@ -3553,14 +3537,11 @@ mod tests {
         assert_eq!(partial["may_have_happened"], true);
         assert_eq!(partial["action"], "revoked");
         assert_eq!(partial["authority"]["revision"], "1");
+        assert_eq!(partial["authority"]["state"], "revoked");
         assert_ne!(
             supervisor.status(&channel_id),
             ChannelStatus::Stopped,
             "persisted revocation must synchronously restart the stored channel before audit completion"
-        );
-        assert_eq!(
-            settings.status.lock().expect("authority status").state,
-            AuthorityState::Revoked,
         );
     }
 
@@ -3602,7 +3583,7 @@ mod tests {
             Some(json!({
                 "version":VERSION,
                 "name":"production",
-                "values":{target.clone():"partial.example.test"},
+                "values":{target.clone():"https://partial.example.test"},
                 "expected_revisions":{}
             })),
         )
@@ -3619,7 +3600,7 @@ mod tests {
         assert_eq!(step["action"], "proposed");
         assert_eq!(step["revision"], "1");
         assert_eq!(step["may_have_happened"], true);
-        assert_eq!(partial["plan"]["state"], "incomplete");
+        assert_eq!(partial["plan"]["state"], "complete");
         assert!(!partial.to_string().contains("partial.example.test"));
     }
 
