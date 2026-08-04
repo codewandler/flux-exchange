@@ -36,8 +36,8 @@ use super::codec::{Direction, Frame, Opcode, StreamDecoder};
 use super::dispatcher::{expired_reply, Transport};
 use super::service_account::{OneShotWriter, WriterRefusal};
 use super::{
-    ActiveSession, DeadlineController, Dispatcher, SessionAdvance, SessionBegin,
-    TransactionCoordinator,
+    deadline::finalize_native_terminal, ActiveSession, DeadlineController, Dispatcher,
+    SessionAdvance, SessionBegin, TransactionCoordinator,
 };
 use crate::state::AppState;
 
@@ -360,10 +360,7 @@ impl LocalManagement {
                 .await
             {
                 let (reply, _) = expired_reply(expired).into_parts();
-                let _ = deadline
-                    .race_response(connection.pipe.write_all(&reply))
-                    .await;
-                let _ = deadline.race_response(connection.pipe.shutdown()).await;
+                finalize_native_terminal(&mut connection.pipe, Some(&reply)).await;
             }
             // The endpoint is rearmed only after both the pipe and its pinned client process have
             // been dropped, so no attachment can be associated with the next connection.

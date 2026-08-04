@@ -17,8 +17,8 @@ use super::dispatcher::{expired_reply, Transport};
 use super::service_account::OneShotWriter;
 use super::service_account_handoff::unix_transfer::{receive_initial_fd, UnixHandoffError};
 use super::{
-    ActiveSession, DeadlineController, Dispatcher, SessionAdvance, SessionBegin,
-    TransactionCoordinator,
+    deadline::finalize_native_terminal, ActiveSession, DeadlineController, Dispatcher,
+    SessionAdvance, SessionBegin, TransactionCoordinator,
 };
 use crate::state::AppState;
 
@@ -207,8 +207,7 @@ impl LocalManagement {
                         }
                         Err(expired) => {
                             let (reply, _) = expired_reply(expired).into_parts();
-                            let _ = deadline.race_response(stream.write_all(&reply)).await;
-                            let _ = deadline.race_response(stream.shutdown()).await;
+                            finalize_native_terminal(&mut stream, Some(&reply)).await;
                             return;
                         }
                     };
@@ -223,8 +222,7 @@ impl LocalManagement {
                         .await
                     {
                         let (reply, _) = expired_reply(expired).into_parts();
-                        let _ = deadline.race_response(stream.write_all(&reply)).await;
-                        let _ = deadline.race_response(stream.shutdown()).await;
+                        finalize_native_terminal(&mut stream, Some(&reply)).await;
                     }
                 }
             });

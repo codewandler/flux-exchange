@@ -4,11 +4,27 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::io::{AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
 const PRE_DECISION_BUDGET: Duration = Duration::from_secs(300);
 const POST_DECISION_BUDGET: Duration = Duration::from_secs(30);
+const TERMINAL_FINALIZATION_BUDGET: Duration = Duration::from_secs(1);
+const TERMINAL_FRAME_ATTEMPT: Duration = Duration::from_millis(250);
+
+/// Best-effort native terminal frame plus mandatory EOF under one separate fixed budget.
+pub(crate) async fn finalize_native_terminal<W>(writer: &mut W, response: Option<&[u8]>)
+where
+    W: AsyncWrite + Unpin,
+{
+    let final_by = Instant::now() + TERMINAL_FINALIZATION_BUDGET;
+    if let Some(response) = response {
+        let frame_by = Instant::now() + TERMINAL_FRAME_ATTEMPT;
+        let _ = tokio::time::timeout_at(frame_by, writer.write_all(response)).await;
+    }
+    let _ = tokio::time::timeout_at(final_by, writer.shutdown()).await;
+}
 
 trait MonotonicClock: Send + Sync {
     fn now(&self) -> Instant;
@@ -55,6 +71,11 @@ enum Phase {
     PreDecision {
         expires_at: Instant,
     },
+    DecisionInFlight {
+        expires_at: Instant,
+        receipt: ReceiptIdentity,
+        unresolved: Unresolved,
+    },
     PostDecision {
         expires_at: Instant,
         receipt: ReceiptIdentity,
@@ -62,6 +83,7 @@ enum Phase {
     },
     Terminal {
         expires_at: Instant,
+        expired: Expired,
     },
 }
 
@@ -102,6 +124,43 @@ impl DeadlineController {
         }
     }
 
+    /// Arm a durable write before it starts, while the pre-decision refusal is still safe.
+    pub(crate) fn begin_decision(
+        &self,
+        receipt: ReceiptIdentity,
+        unresolved: Unresolved,
+    ) -> Result<(), ()> {
+        let now = self.clock.now();
+        let mut phase = self.phase.lock().expect("deadline phase lock");
+        match &mut *phase {
+            Phase::PreDecision { expires_at } if now >= *expires_at => return Err(()),
+            Phase::PreDecision { expires_at } => {
+                *phase = Phase::DecisionInFlight {
+                    expires_at: *expires_at,
+                    receipt,
+                    unresolved,
+                };
+            }
+            Phase::DecisionInFlight {
+                receipt: held,
+                unresolved: held_unresolved,
+                ..
+            } if *held == receipt => {
+                *held_unresolved = unresolved;
+            }
+            Phase::DecisionInFlight { unresolved, .. } | Phase::PostDecision { unresolved, .. } => {
+                *unresolved = Unresolved::Internal;
+                drop(phase);
+                self.notify();
+                return Err(());
+            }
+            Phase::Terminal { .. } => return Err(()),
+        }
+        drop(phase);
+        self.notify();
+        Ok(())
+    }
+
     /// Transition immediately after durable decision fsync or receipt discovery.
     pub(crate) fn decided(
         &self,
@@ -110,7 +169,22 @@ impl DeadlineController {
     ) -> Result<(), ()> {
         let mut phase = self.phase.lock().expect("deadline phase lock");
         match &mut *phase {
+            Phase::PreDecision { expires_at } if self.clock.now() >= *expires_at => {
+                return Err(());
+            }
             Phase::PreDecision { .. } => {
+                let expires_at = self
+                    .clock
+                    .now()
+                    .checked_add(POST_DECISION_BUDGET)
+                    .unwrap_or_else(|| self.clock.now());
+                *phase = Phase::PostDecision {
+                    expires_at,
+                    receipt,
+                    unresolved,
+                };
+            }
+            Phase::DecisionInFlight { receipt: held, .. } if *held == receipt => {
                 let expires_at = self
                     .clock
                     .now()
@@ -129,7 +203,7 @@ impl DeadlineController {
             } if *held == receipt => {
                 *held_unresolved = unresolved;
             }
-            Phase::PostDecision { unresolved, .. } => {
+            Phase::DecisionInFlight { unresolved, .. } | Phase::PostDecision { unresolved, .. } => {
                 *unresolved = Unresolved::Internal;
                 drop(phase);
                 self.notify();
@@ -145,25 +219,50 @@ impl DeadlineController {
     /// Refine the value-free post-decision work class without resetting its deadline.
     pub(crate) fn unresolved(&self, unresolved: Unresolved) {
         let mut phase = self.phase.lock().expect("deadline phase lock");
-        if let Phase::PostDecision {
-            unresolved: held, ..
-        } = &mut *phase
-        {
-            *held = unresolved;
-            drop(phase);
-            self.notify();
+        match &mut *phase {
+            Phase::DecisionInFlight {
+                unresolved: held, ..
+            }
+            | Phase::PostDecision {
+                unresolved: held, ..
+            } => {
+                *held = unresolved;
+                drop(phase);
+                self.notify();
+            }
+            Phase::PreDecision { .. } | Phase::Terminal { .. } => {}
         }
     }
 
     pub(crate) fn terminal(&self) {
         let mut phase = self.phase.lock().expect("deadline phase lock");
-        let expires_at = match *phase {
-            Phase::PreDecision { expires_at } | Phase::PostDecision { expires_at, .. } => {
-                expires_at
+        let (expires_at, expired) = match *phase {
+            Phase::PreDecision { expires_at } => (expires_at, Expired::PreDecision),
+            Phase::DecisionInFlight {
+                expires_at,
+                receipt,
+                unresolved,
             }
-            Phase::Terminal { expires_at } => expires_at,
+            | Phase::PostDecision {
+                expires_at,
+                receipt,
+                unresolved,
+            } => (
+                expires_at,
+                Expired::PostDecision {
+                    receipt,
+                    unresolved,
+                },
+            ),
+            Phase::Terminal {
+                expires_at,
+                expired,
+            } => (expires_at, expired),
         };
-        *phase = Phase::Terminal { expires_at };
+        *phase = Phase::Terminal {
+            expires_at,
+            expired,
+        };
         drop(phase);
         self.notify();
     }
@@ -222,8 +321,25 @@ impl DeadlineController {
 
     pub(crate) fn expired(&self) -> Option<Expired> {
         let now = self.clock.now();
-        match *self.phase.lock().expect("deadline phase lock") {
+        let mut phase = self.phase.lock().expect("deadline phase lock");
+        match *phase {
             Phase::PreDecision { expires_at } if now >= expires_at => Some(Expired::PreDecision),
+            Phase::DecisionInFlight {
+                expires_at,
+                receipt,
+                unresolved,
+            } if now >= expires_at => {
+                let post_expires_at = now.checked_add(POST_DECISION_BUDGET).unwrap_or(now);
+                *phase = Phase::PostDecision {
+                    expires_at: post_expires_at,
+                    receipt,
+                    unresolved,
+                };
+                Some(Expired::PostDecision {
+                    receipt,
+                    unresolved,
+                })
+            }
             Phase::PostDecision {
                 expires_at,
                 receipt,
@@ -232,24 +348,32 @@ impl DeadlineController {
                 receipt,
                 unresolved,
             }),
-            Phase::PreDecision { .. } | Phase::PostDecision { .. } | Phase::Terminal { .. } => None,
+            Phase::Terminal {
+                expires_at,
+                expired,
+            } if now >= expires_at => Some(expired),
+            Phase::PreDecision { .. }
+            | Phase::DecisionInFlight { .. }
+            | Phase::PostDecision { .. }
+            | Phase::Terminal { .. } => None,
         }
     }
 
     fn expires_at(&self) -> Option<Instant> {
         match *self.phase.lock().expect("deadline phase lock") {
-            Phase::PreDecision { expires_at } | Phase::PostDecision { expires_at, .. } => {
-                Some(expires_at)
-            }
-            Phase::Terminal { .. } => None,
+            Phase::PreDecision { expires_at }
+            | Phase::DecisionInFlight { expires_at, .. }
+            | Phase::PostDecision { expires_at, .. }
+            | Phase::Terminal { expires_at, .. } => Some(expires_at),
         }
     }
 
     fn response_expires_at(&self) -> Instant {
         match *self.phase.lock().expect("deadline phase lock") {
             Phase::PreDecision { expires_at }
+            | Phase::DecisionInFlight { expires_at, .. }
             | Phase::PostDecision { expires_at, .. }
-            | Phase::Terminal { expires_at } => expires_at,
+            | Phase::Terminal { expires_at, .. } => expires_at,
         }
     }
 
@@ -334,7 +458,14 @@ mod tests {
                 })
         );
         deadline.terminal();
-        assert!(deadline.expired().is_none());
+        assert!(
+            deadline.expired()
+                == Some(Expired::PostDecision {
+                    receipt: receipt(),
+                    unresolved: Unresolved::Audit,
+                }),
+            "terminal response completion retains the already-expired operation cap"
+        );
         assert!(!deadline.may_abort());
     }
 
@@ -367,6 +498,71 @@ mod tests {
                     receipt: receipt(),
                     unresolved: Unresolved::Audit,
                 })
+        );
+    }
+
+    #[test]
+    fn decision_start_at_300_refuses_but_inflight_from_299_rolls_forward() {
+        let late_clock = ManualClock::new();
+        let late = DeadlineController::with_clock(late_clock.clone());
+        late_clock.advance(PRE_DECISION_BUDGET);
+        assert!(
+            late.begin_decision(receipt(), Unresolved::Store).is_err(),
+            "a durable write may not start at the expired boundary"
+        );
+        assert!(late.decided(receipt(), Unresolved::Store).is_err());
+        assert!(late.expired() == Some(Expired::PreDecision));
+
+        let inflight_clock = ManualClock::new();
+        let inflight = DeadlineController::with_clock(inflight_clock.clone());
+        inflight_clock.advance(Duration::from_secs(299));
+        inflight
+            .begin_decision(receipt(), Unresolved::Store)
+            .expect("write starts before expiry");
+        assert!(!inflight.may_abort());
+        inflight_clock.advance(Duration::from_secs(1));
+        inflight
+            .decided(receipt(), Unresolved::Store)
+            .expect("the in-flight write reached a durable outcome");
+        inflight_clock.advance(Duration::from_secs(29));
+        assert!(inflight.expired().is_none());
+        inflight_clock.advance(Duration::from_secs(1));
+        assert!(
+            inflight.expired()
+                == Some(Expired::PostDecision {
+                    receipt: receipt(),
+                    unresolved: Unresolved::Store,
+                })
+        );
+    }
+
+    #[test]
+    fn expiry_promotes_an_uncertain_inflight_write_without_aborting_or_resetting() {
+        let clock = ManualClock::new();
+        let deadline = DeadlineController::with_clock(clock.clone());
+        deadline
+            .begin_decision(receipt(), Unresolved::Store)
+            .expect("decision begins");
+        clock.advance(PRE_DECISION_BUDGET);
+        assert!(
+            deadline.expired()
+                == Some(Expired::PostDecision {
+                    receipt: receipt(),
+                    unresolved: Unresolved::Store,
+                })
+        );
+        clock.advance(Duration::from_secs(29));
+        deadline
+            .decided(receipt(), Unresolved::Store)
+            .expect("late write completion is the same decision");
+        clock.advance(Duration::from_secs(1));
+        assert!(
+            deadline.expired()
+                == Some(Expired::PostDecision {
+                    receipt: receipt(),
+                    unresolved: Unresolved::Store,
+                }),
+            "late completion cannot reset the post-decision clock"
         );
     }
 
@@ -441,5 +637,31 @@ mod tests {
         tokio::time::advance(PRE_DECISION_BUDGET).await;
         tokio::task::yield_now().await;
         assert!(write.await.expect("write wait").is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backpressured_terminal_frame_reserves_the_required_close_or_eof() {
+        let (mut writer, mut reader) = tokio::io::duplex(1);
+        let frame = vec![7_u8; 4096];
+        let terminal = tokio::spawn(async move {
+            finalize_native_terminal(&mut writer, Some(&frame)).await;
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !terminal.is_finished(),
+            "the one-byte sink must backpressure"
+        );
+
+        tokio::time::advance(TERMINAL_FRAME_ATTEMPT).await;
+        tokio::task::yield_now().await;
+        let mut received = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut received)
+            .await
+            .expect("terminal EOF");
+        terminal.await.expect("bounded finalizer");
+        assert!(
+            received.len() < 4096,
+            "the blocked frame attempt was not abandoned"
+        );
     }
 }

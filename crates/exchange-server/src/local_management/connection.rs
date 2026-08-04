@@ -673,10 +673,18 @@ impl ActiveCeremony {
             }
             self.prepared = true;
         }
-        if let Err(error) = self.coordinator.decide_commit(self.allocation) {
-            return AdvanceOutcome::Terminal(coordinator_refusal(error));
-        }
         let receipt = self.allocation.receipt_id();
+        if deadline
+            .begin_decision(receipt_identity(receipt), Unresolved::Store)
+            .is_err()
+        {
+            self.abort().await;
+            return AdvanceOutcome::Terminal(refusal("deadline_exceeded", 408, "refresh"));
+        }
+        if self.coordinator.decide_commit(self.allocation).is_err() {
+            let _ = deadline.decided(receipt_identity(receipt), Unresolved::Store);
+            return AdvanceOutcome::Terminal(post_refusal("store_unavailable", 503, receipt));
+        }
         if deadline
             .decided(receipt_identity(receipt), Unresolved::Store)
             .is_err()
