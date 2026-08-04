@@ -31,6 +31,25 @@ Decision 0001 forbids.
 The first public X-126 channel must therefore describe the final local-management and credential-
 handoff bytes, not publish an exact six-protocol schema and silently change it afterward.
 
+## Child delivery sequence
+
+X-134 remains the parent release blocker and is not complete until each child below is done, or an
+item is explicitly retired with evidence satisfying the same X-134 Acceptance rows:
+
+1. [X-135](X-135-close-local-management-deadlines.md) — hosted/native deadline and terminal
+   behavior.
+2. [X-136](X-136-bound-helper-plan-and-result-envelope.md) — helper plan validation and the one
+   absolute setup/result envelope.
+3. [X-137](X-137-prove-windows-private-input-and-fxha.md) — native Windows private input and FXHA
+   production-process evidence.
+4. [X-138](X-138-bind-provider-recovery-and-native-c515-evidence.md) — provider crash/replay and
+   exact native C-515 bindings.
+5. [X-139](X-139-canonicalize-release-native-evidence.md) — the sole canonical native-evidence
+   authority, final fixtures and integrated closure proof.
+
+These are sequencing boundaries inside this story, not permission to defer its blockers or ship a
+partial X-134 contract. Their frontmatter records the serialized dependency order.
+
 ## Acceptance
 
 - [ ] This contract change amends X-126's frontmatter to depend on X-134 and replaces/supersedes
