@@ -78,5 +78,8 @@ bound by types and tests; the request continues to contain no tenant, authority 
 
 - X-113 remains the behavior owner. This story adds protocol identity and conformance evidence, not
   another catalogue, invocation adapter or request construction path.
-- X-125 separately owns `exchange.connection-plan.v1`; X-128 owns
-  `exchange.supervisor-ready.v1`. All six meet in `docs/designs/local-release-v1.md`.
+- X-134 supersedes X-125's unpublished `exchange.connection-plan.v1` with v2 and supersedes only
+  X-128's unpublished readiness schema/inventory with `exchange.supervisor-ready.v2`, preserving its
+  capability ABI. Those values and X-134's two owner-bound protocols join this story's four unchanged
+  HTTP v1 identities in the exact eight-field first-public-release object in
+  `docs/designs/local-release-v1.md`.

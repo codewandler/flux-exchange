@@ -111,14 +111,15 @@ only a byte-idempotent resume at an already authorized immutable tag; it is not 
 the tag. X-126 remains active after the implementation merge until that production release passes
 the public five-target verifier.
 
-Decision 0007 adds another independent stop. The six-protocol compatibility shape implemented and
-fixture-tested here is implementation evidence, not the first public compatibility contract. X-134
-must implement and revalidate the canonical revision for owner-bound local management, direct vendor
-credential insertion and the one-shot Service Account credential-handoff protocol. Until that final
-provider schema and its native fixtures land, there is no production trust ceremony, `v0.18.0` or
-crates.io publication, public binary asset, stable-channel update, or X-126 completion. An operator
-must not silently add fields to the exact v1 object or reuse one of its six identities for the new
-semantics.
+Decision 0007 adds another independent stop. A permanent content-derived preflight closes both tag
+workflows before credentials or publication unless the tree consumes the checksummed registry
+release of `codewandler-connector-secrets` 0.20.0, contains only the final v2/eight-protocol
+producers and has a complete digest-checked v2 fixture inventory. There is no override flag or
+readiness marker. The six-protocol compatibility shape previously implemented and fixture-tested is
+unpublished implementation evidence only. Until X-134's owner-bound local management, direct vendor credential
+insertion and one-shot Service Account credential-handoff pass their native fixtures, there is no production
+trust ceremony, tag, crates.io publication, public binary asset, stable-channel update or X-126
+completion.
 
 ## Compatibility identity
 
@@ -129,11 +130,12 @@ configuration:
 flux-exchange compatibility --json
 ```
 
-It writes JSON only, with this exact shape and six protocol keys:
+The first public release writes JSON only, with this exact v2 shape and eight protocol keys. The
+current six-field implementation is deliberately unpublished and cannot pass release preflight:
 
 ```json
 {
-  "schema": "exchange.compatibility.v1",
+  "schema": "exchange.compatibility.v2",
   "release": {
     "tag": "refs/tags/vX.Y.Z",
     "version": "X.Y.Z",
@@ -145,14 +147,16 @@ It writes JSON only, with this exact shape and six protocol keys:
     "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
     "invoke_request": "exchange.invoke-request.v1",
     "invoke_response": "exchange.invoke-response.v1",
-    "connection_plan": "exchange.connection-plan.v1",
-    "supervisor": "exchange.supervisor-ready.v1"
+    "connection_plan": "exchange.connection-plan.v2",
+    "local_management": "exchange.local-management.v1",
+    "service_account_handoff": "exchange.service-account-handoff.v1",
+    "supervisor": "exchange.supervisor-ready.v2"
   }
 }
 ```
 
 Package version is audit identity, not a compatibility guess. A client selects the greatest stable
-SemVer channel entry for which all six signed protocol ids are supported, then requires the manifest,
+SemVer channel entry for which all eight signed protocol ids are supported, then requires the manifest,
 executable output and supervised readiness record to agree exactly. A newer incompatible release is
 skipped. If none is compatible, selection refuses; it does not try `latest`, `PATH`, a sibling
 checkout or Cargo output.

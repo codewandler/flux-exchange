@@ -4,6 +4,9 @@ The local Exchange server has its own release contract so Flux can discover, ver
 compatible executable without bundling that executable or trusting mutable machine state. The
 contract alone is not a claim that a production channel is live: a usable release is evidenced only
 after its immutable tag and complete public asset set pass post-publication verification.
+Before either binary or crates.io publication, a permanent content-derived publication preflight
+requires the released connector-secrets 0.20.0 dependency and complete v2/eight-protocol fixtures;
+there is no environment or marker override.
 
 ## Supported platforms
 
@@ -66,11 +69,12 @@ The side-effect-free inspection command opens no store and binds no listener:
 flux-exchange compatibility --json
 ```
 
-It emits JSON only:
+The first public release emits JSON only. The current six-field implementation is unpublished and
+cannot pass the content-derived publication preflight:
 
 ```json
 {
-  "schema": "exchange.compatibility.v1",
+  "schema": "exchange.compatibility.v2",
   "release": {
     "tag": "refs/tags/vX.Y.Z",
     "version": "X.Y.Z",
@@ -82,13 +86,15 @@ It emits JSON only:
     "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
     "invoke_request": "exchange.invoke-request.v1",
     "invoke_response": "exchange.invoke-response.v1",
-    "connection_plan": "exchange.connection-plan.v1",
-    "supervisor": "exchange.supervisor-ready.v1"
+    "connection_plan": "exchange.connection-plan.v2",
+    "local_management": "exchange.local-management.v1",
+    "service_account_handoff": "exchange.service-account-handoff.v1",
+    "supervisor": "exchange.supervisor-ready.v2"
   }
 }
 ```
 
-Flux verifies an unexpired signed channel, filters its entries by all six protocol identities, and
+Flux verifies an unexpired signed channel, filters its entries by all eight protocol identities, and
 selects the greatest compatible stable semantic version. It never guesses compatibility from a
 package version and never falls back to `latest`, `PATH`, a checkout or Cargo output. A newer
 incompatible release is skipped; no compatible entry is a named refusal.
@@ -137,11 +143,11 @@ unused tag is `v0.18.0`; pushing it irreversibly starts both the five-target bin
 crates.io publication, so an authorized release operator must approve those as one boundary. X-126
 stays active until that real public release passes its five-target verifier.
 
-The six-protocol schema shown above is implementation evidence, not yet the first public contract.
-Decision 0007 requires X-134 to add and natively revalidate the final owner-bound local-management,
-direct secret-insertion and Service Account credential-handoff compatibility schema. Until then there
-is no production trust ceremony, `v0.18.0`/crates.io publication, public binary asset, stable update or
-X-126 completion.
+The v2/eight-protocol schema shown above is the first public contract. The currently implemented
+six-protocol schema remains unpublished implementation evidence. Decision 0007 requires X-134 to add
+and natively revalidate the final owner-bound local-management, direct secret-insertion and Service
+Account credential-handoff compatibility schema. Until then there is no production trust ceremony,
+`v0.18.0`/crates.io publication, public binary asset, stable update or X-126 completion.
 
 The complete wire-level contract, bounds and operator publication procedure remain in the
 [repository's release design](https://github.com/codewandler/flux-exchange/blob/main/docs/designs/local-release-v1.md).

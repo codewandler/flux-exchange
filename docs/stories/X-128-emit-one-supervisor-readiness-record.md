@@ -112,6 +112,10 @@ supervisor, authenticated control channel and later start/status/stop behavior.
 - 2026-08-04: Delivered the exact supervised launch ABI, canonical bounded readiness producer and
   strict verify-before-ownership fixture, native process-start identities, and responsive/wedged
   owner-death proofs across the five-target CI matrix.
+- 2026-08-04: Decision 0007 and X-134 retain that completed transport/capability ABI but supersede
+  its unpublished six-field schema for the first public release. X-134 advances readiness to
+  `exchange.supervisor-ready.v2` solely to carry the final eight-protocol inventory and must rerun
+  all nine native cases and fourteen exact test bindings.
 
 ## Notes
 
@@ -120,5 +124,7 @@ supervisor, authenticated control channel and later start/status/stop behavior.
 - X-126 depends on this story so the released executable and signed manifest carry the same
   compatibility identity the supervisor validates. Flux C-510 consumes the record and owns the
   long-lived supervisor; this story does not add a downloader, daemon manager or stop command.
+- X-134 owns the first-public-release schema/inventory supersession. It may not change this story's
+  FD/HANDLE directions, one-shot framing, process-start identity or liveness behavior.
 - `/health` remains useful after identity is established. It is deliberately not process identity
   and cannot select which process Flux owns.

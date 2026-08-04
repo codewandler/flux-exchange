@@ -43,7 +43,9 @@ implements its manager in C-510.
       set matching Flux's `dist-workspace.toml`; changing either list requires one coordinated
       contract update rather than silently omitting a platform. A target enters the manifest only
       after X-127's native owner-only restart proof and X-128's native supervised-readiness proof
-      pass for it; cross-compilation alone is insufficient.
+      plus C-515's prepared-store child-crash/reopen and lifetime-lease contention/release suites
+      pass natively for that exact target; cross-compilation, a merged provider commit or an
+      unpublished dependency is insufficient.
 - [ ] Unix assets are deterministic archives and Windows is a deterministic zip, each named with
       the exact Exchange version and target triple. Each contains the server executable and only
       explicitly allowed runtime documentation/licence material: no connector/plugin executable,
@@ -167,6 +169,29 @@ implements its manager in C-510.
       a guess. A release check executes every platform artifact it can run directly or under the
       declared cross-platform harness and proves its JSON agrees with the manifest; a missing,
       malformed or contradictory compatibility field refuses publication.
+- [ ] A permanent content-derived X-126 readiness guard, with no flag, environment bypass, network
+      lookup or mutable marker, fails closed until the tagged tree registry-resolves exactly one
+      checksummed `codewandler-connector-secrets` 0.20.0, contains none of the obsolete v1
+      channel/manifest/compatibility/readiness producers or `exchange-release-v1` candidate tree,
+      and contains the complete digest-checked v2 fixture inventory with trust v1, the exact eight
+      protocols, the nine X-128 native cases, fourteen exact native test bindings and the inherited
+      trust-v1 refusal cases. Its synthetic self-test independently proves each stale dependency,
+      identity, missing/extra protocol, residual v1 tree, fixture corruption and lost native/trust
+      case refuses.
+- [ ] That readiness guard is the first post-checkout action in local-release preflight, before
+      trust/secrets/download/build/artifact or GitHub release access, and the first post-checkout
+      action in crates.io publication before token inspection. Every binary publication job depends
+      on the guarded preflight. The crates.io publisher invokes the same guard before metadata or
+      network access in publish mode while preserving dry-run, and repository checks prove the
+      guard's presence and ordering in both workflows and the publishing script. Tagging a stale
+      six-field tree therefore cannot publish either binaries or the host crate merely because
+      production credentials happen to exist.
+- [ ] Publication order is exactly `connectors/C-515 -> exchange/X-134 -> exchange/X-126`: C-515
+      publishes verified `codewandler-connector-secrets` 0.20.0 bytes; X-134 registry-resolves that
+      version and checksum and lands the final provider protocols; then X-126 regenerates every
+      signed v2 artifact and fixture from a commit containing X-134 before publication. A merged
+      provider commit, path/git dependency, stale lockfile or pre-X-134 candidate cannot advance the
+      chain.
 - [ ] Publication is CI-only from an immutable `vX.Y.Z` tag whose version matches the workspace and
       whose exact commit passes the full repository gate. All third-party actions are SHA-pinned,
       signing/provenance happens before exposure, and no local/manual command can be the documented
@@ -265,18 +290,23 @@ implements its manager in C-510.
   padded RFC 4648 base64 of the complete unencrypted minisign secret-key file bytes. This story
   creates or configures none of them and stays in progress until explicitly authorized external
   provisioning and a real public verifier run.
-- 2026-08-04: Roadmap Decisions 0004 and 0007, frozen at `ced7426`, make the merged exact
+- 2026-08-04: Roadmap Decisions 0004 and 0007, frozen at `daf80d5`, make the merged exact
   six-protocol v1 schema implementation evidence only. The next unused tag is `v0.18.0`, whose push
   would irreversibly start both five-target binary and crates.io publication; neither that joint
   operator boundary nor the trust ceremony, public release, or stable-head update may occur until
   canonical X-134 implements and revalidates release-channel, manifest, compatibility and readiness
   v2, connection-plan v2, local-management v1 and service-account-handoff v1.
+- 2026-08-04: The release audit found that absent production signing inputs were only an incidental
+  binary-release stop and did not protect the joint crates.io path. X-126 now requires one permanent
+  content-derived preflight at both tag-publication boundaries. It remains closed until C-515's
+  checksummed 0.20.0 registry release is consumed, X-134 is implemented and the complete v2/eight-
+  protocol candidate is regenerated; no readiness flag or credential can override that evidence.
 
 ## Notes
 
 - Cross-repository authority:
   `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at frozen roadmap
-  authority `ced7426`.
+  authority `daf80d5`.
 - Flux C-510 consumes this channel and owns rollback state, compatible selection, verified
   cache/install/start/status/stop and audit of the installed exact identity. X-126 does not add a
   downloader or lifecycle manager to Exchange.
