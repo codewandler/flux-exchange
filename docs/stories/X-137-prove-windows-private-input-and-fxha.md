@@ -1,0 +1,57 @@
+---
+id: X-137
+title: "Prove Windows private input and FXHA in production"
+status: blocked
+epic: connections
+areas: [exchange-server, protocol, tests, windows]
+depends_on: [X-136]
+design: docs/designs/local-release-v1.md
+note: "X-134 child — native MSVC process evidence for CONIN$, owner pipes and the Decision 0007 FXHA writer attachment"
+---
+
+# Prove Windows private input and FXHA in production
+
+## Goal
+
+Close the Windows-only released process boundary: secrets enter through the real console, ordinary
+FXLM remains multi-frame, and the exact same authenticated named-pipe client attaches one validated
+writer HANDLE to the immediately following MINT without a new protocol or secret-bearing state.
+
+## Acceptance
+
+- [ ] Failing first, native MSVC test
+      `supervised_windows_service_account_helper_delivers_exact_fxsa_and_closes_fxha_adversaries`
+      launches the production supervised server and production `local service-account-mint` helper,
+      reads one exact FXSA frame plus EOF concurrently, requires helper exit 0 and queries the
+      durable receipt. The helper handle list contains only the writer and an unrelated inheritable
+      canary is absent from the child.
+- [ ] The same production-process test proves ordinary PLAN and one multi-frame CONNECT or GRANT
+      ceremony still use `ActiveSession`; FXHA is exactly the committed 16-byte prelude followed by
+      the immediate MINT on that one authenticated connection. No one-shot parser replaces the
+      ordinary FXLM state machine.
+- [ ] Table-driven native cases cover truncated/mutated fields, alias, wrong object/direction,
+      inheritable or unusable handle, wrong PID/creation/SID/session, wrong process, extra byte,
+      second FXHA and non-MINT opcode. Every source/duplicate is closed on all exits and endpoint
+      rearm occurs only after the authenticated pipe and pinned client are dropped.
+- [ ] Failing first, `windows_private_console_input_survives_null_stdio_and_restores_mode` drives
+      production `CONIN$` input with null standard streams and covers cancellation at X-136's
+      unchanged outer deadline. No token, numeric HANDLE or canary appears raw, JSON-escaped,
+      percent-encoded or base64 in logs, receipts, persistence or diagnostics.
+- [ ] Implementation uses only supported Windows APIs named by Decision 0007: same-pipe
+      `GetNamedPipeClientProcessId`, pinned process creation identity and token/session validation,
+      server-side `DuplicateHandle`, noninheritability/distinct writable `FILE_TYPE_PIPE`
+      validation. Remote argv/PEB, undocumented process-information and handle-table enumeration
+      remain structurally absent.
+- [ ] MinGW proves the production path is referenced; the exact test above executes only on
+      `windows-2025` MSVC with one passed, zero ignored and zero filtered.
+
+## Progress
+
+- X-134 already contains typed helper/endpoint/duplication primitives and passing MinGW checks.
+  Those are supplemental and do not satisfy the native process rows in this story.
+
+## Notes
+
+- Child of X-134, sequenced after X-136's helper clocks and grammar. Roadmap Decision 0007 items 10
+  and 17 at authority commit `904e382` define the FXHA boundary; this story may not invent a ninth
+  protocol.
