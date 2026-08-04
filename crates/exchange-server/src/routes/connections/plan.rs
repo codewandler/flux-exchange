@@ -10,7 +10,7 @@ use std::fmt;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, put, MethodRouter};
+use axum::routing::{get, post, put, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{ConfigField, Provider};
 use exchange_host::{
@@ -24,8 +24,12 @@ use super::*;
 
 const VERSION: &str = "exchange.connection-plan.v1";
 
-pub(super) fn route() -> MethodRouter<AppState> {
-    get(show).post(apply)
+pub(super) fn read_route() -> MethodRouter<AppState> {
+    get(show)
+}
+
+pub(super) fn write_route() -> MethodRouter<AppState> {
+    post(apply)
 }
 
 pub(super) fn authority_route() -> MethodRouter<AppState> {
@@ -1310,13 +1314,14 @@ async fn project(
                             &declared[0],
                         )
                         .map_err(|refusal| settings_refused(&refusal))?;
+                    let approved = status.state == AuthorityState::Approved;
                     field.view.authority = Some(authority_view(
                         provider.id,
                         selection.expect("selected above"),
                         &declared[0],
                         status,
                     ));
-                    status.state == AuthorityState::Approved
+                    approved
                 }
                 Destination::Settings(declared) => declared.iter().all(|setting| {
                     settings.is_set_for_instance(
@@ -1807,7 +1812,7 @@ mod tests {
     };
     use crate::dev_identity::DevIdentity;
 
-    const ROSTER: &str = "user:alice@acme,service_account:worker@acme";
+    const ROSTER: &str = "user:alice@acme,user:bob@globex,service_account:worker@acme";
     const SENTINEL: &str = "X125-SENTINEL-NOT-A-REAL-SECRET";
 
     struct Scratch(PathBuf);
@@ -1890,6 +1895,7 @@ mod tests {
                 status: Mutex::new(AuthorityStatus {
                     state: AuthorityState::Unset,
                     revision: None,
+                    origin: None,
                 }),
                 next_revision: AtomicU64::new(1),
                 break_audit_on_revoke: None,
@@ -1937,6 +1943,7 @@ mod tests {
                 *self.status.lock().expect("authority status") = AuthorityStatus {
                     state: AuthorityState::Proposed,
                     revision: Some(revision),
+                    origin: None,
                 };
                 Ok(())
             } else {
@@ -1967,6 +1974,7 @@ mod tests {
                 *status = AuthorityStatus {
                     state: AuthorityState::Unset,
                     revision: None,
+                    origin: None,
                 };
                 Ok(existed)
             } else {
@@ -2015,7 +2023,7 @@ mod tests {
                     setting: declared.binds(),
                 });
             }
-            Ok(*self.status.lock().expect("authority status"))
+            Ok(self.status.lock().expect("authority status").clone())
         }
 
         fn approve_authority_for_instance(
@@ -2075,7 +2083,7 @@ mod tests {
                 });
             }
             status.state = state;
-            Ok(*status)
+            Ok(status.clone())
         }
     }
 
@@ -2210,6 +2218,7 @@ mod tests {
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("roster"),
         ))
+        .with_operator_policy(crate::operator::OperatorPolicy::one("alice"))
         .with_credentials(credentials)
         .with_settings(settings)
         .with_connection_registry(registry.clone())
@@ -2235,6 +2244,7 @@ mod tests {
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("roster"),
         ))
+        .with_operator_policy(crate::operator::OperatorPolicy::one("alice"))
         .with_credentials(credentials.secrets())
         .with_settings(settings)
         .with_connection_registry(registry.clone())
@@ -2316,6 +2326,7 @@ mod tests {
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("roster"),
         ))
+        .with_operator_policy(crate::operator::OperatorPolicy::one("alice"))
         .with_credentials(credentials.secrets())
         .with_settings(settings.clone())
         .with_connection_registry(registry.clone())
@@ -2803,6 +2814,7 @@ mod tests {
             AuthorityStatus {
                 state: AuthorityState::Proposed,
                 revision: Some(42),
+                origin: None,
             },
         ));
         assert_eq!(
@@ -3427,24 +3439,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_get_and_post_are_operator_only() {
+    async fn human_plan_reads_are_value_free_and_derive_the_tenant_from_the_principal() {
         let harness = harness(usize::MAX);
-        for method in [Method::GET, Method::POST] {
-            let body = (method == Method::POST).then(|| {
-                json!({
+        let (status, applied) = call(
+            &harness.app,
+            "alice",
+            Method::POST,
+            "/api/connections/jira/plan",
+            Some(json!({
+                "version": VERSION,
+                "name": "company",
+                "values": {"credential.jira.api_token": SENTINEL}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{applied}");
+
+        let (status, acme) = call(
+            &harness.app,
+            "alice",
+            Method::GET,
+            "/api/connections/jira/plan",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{acme}");
+        assert_eq!(acme["labels"], json!(["company"]));
+
+        let (status, refusal) = call(
+            &harness.app,
+            "bob",
+            Method::POST,
+            "/api/connections/jira/plan",
+            Some(json!({
+                "version": VERSION,
+                "name": "other",
+                "values": {"credential.jira.api_token": SENTINEL}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+
+        // Bob is a resolved human but not a configured operator. His plan is derived from his
+        // own tenant and cannot disclose Alice's label or a value Alice supplied.
+        let (status, globex) = call(
+            &harness.app,
+            "bob",
+            Method::GET,
+            "/api/connections/jira/plan",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{globex}");
+        assert_eq!(globex["labels"], json!([]));
+        assert!(!globex.to_string().contains(SENTINEL));
+    }
+
+    #[tokio::test]
+    async fn service_account_receives_neither_plan_nor_authority_surface() {
+        let harness = harness(usize::MAX);
+        for (method, path, body) in [
+            (Method::GET, "/api/connections/jira/plan", None),
+            (
+                Method::POST,
+                "/api/connections/jira/plan",
+                Some(json!({
                     "version": VERSION,
                     "name": "company",
                     "values": {"credential.jira.api_token": SENTINEL}
-                })
-            });
-            let (status, refusal) = call(
-                &harness.app,
-                "worker",
-                method,
-                "/api/connections/jira/plan",
-                body,
-            )
-            .await;
+                })),
+            ),
+            (
+                Method::PUT,
+                "/api/connections/jira/instances/company/settings/default/endpoint.site/authority",
+                Some(json!({"version": VERSION, "revision": "1"})),
+            ),
+        ] {
+            let (status, refusal) = call(&harness.app, "worker", method, path, body).await;
             assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
             assert!(!refusal.to_string().contains(SENTINEL));
         }

@@ -412,8 +412,13 @@ pub(super) const MODULE: Module = Module {
     routes: &[
         Route {
             path: "/api/connections/{connector}/plan",
+            access: Access::User,
+            method_router: plan::read_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/plan",
             access: Access::Operator,
-            method_router: plan::route,
+            method_router: plan::write_route,
         },
         Route {
             // Under `/api` for the reason the session route is: `vite dev` owns the origin and
@@ -3586,6 +3591,18 @@ fn settings_refused(refusal: &SettingsRefusal) -> Response {
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({ "connector": connector, "field": setting }),
         ),
+        SettingsRefusal::AuthorityRevisionRequired {
+            connector,
+            setting,
+            current,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "current": current.to_string(),
+            }),
+        ),
         SettingsRefusal::AuthorityUnset { connector, setting } => (
             StatusCode::CONFLICT,
             json!({ "connector": connector, "field": setting }),
@@ -3603,6 +3620,27 @@ fn settings_refused(refusal: &SettingsRefusal) -> Response {
                 "expected": expected.to_string(),
                 "current": current.to_string(),
             }),
+        ),
+        SettingsRefusal::AuthorityStateConflict {
+            connector,
+            setting,
+            revision,
+            current,
+            transition,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "revision": revision.to_string(),
+                "state": format!("{current:?}").to_ascii_lowercase(),
+                "action": transition,
+            }),
+        ),
+        SettingsRefusal::OriginSchemeUnsupported { connector, setting }
+        | SettingsRefusal::MalformedOrigin { connector, setting } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector, "field": setting }),
         ),
         SettingsRefusal::InstanceUnsupported {
             connector,
