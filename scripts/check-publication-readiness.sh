@@ -235,14 +235,15 @@ targets = {
     "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc",
 }
 native = fixture.get("native_cases")
-if not isinstance(native, list) or len(native) != 12:
-    refuse("fixture-set must retain the nine X-128 mappings plus the three ratcheted X-134 case ids")
+if not isinstance(native, list) or len(native) != 13:
+    refuse("fixture-set must retain the nine X-128 mappings plus the four ratcheted X-134 case ids")
 native_ids = [case.get("id") for case in native if isinstance(case, dict)]
-if len(native_ids) != 12 or len(set(native_ids)) != 12:
+if len(native_ids) != 13 or len(set(native_ids)) != 13:
     refuse("native case ids are absent or duplicated")
 expected_native_ids = {
     "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
+    "windows-production-root-unsafe-metadata",
     "c515-server-lifetime-lease",
     "expiry-equality-live",
     "supervisor-death-normal-responsive-unix",
@@ -272,6 +273,21 @@ expected_root_evidence = [{
 }]
 if root_case.get("evidence") != expected_root_evidence:
     refuse("production-root poisoning is not bound to its exact real-process test on all five targets")
+windows_root_case = next(case for case in native if case.get("id") == "windows-production-root-unsafe-metadata")
+expected_windows_root_evidence = [
+    {
+        "targets": ["x86_64-pc-windows-msvc"],
+        "test_target": "windows_native_root_poisoning",
+        "exact_test": "windows_supervised_startup_refuses_reparse_point_owner_root_ancestor_without_repair",
+    },
+    {
+        "targets": ["x86_64-pc-windows-msvc"],
+        "test_target": "windows_native_root_poisoning",
+        "exact_test": "windows_supervised_startup_refuses_untrusted_writable_owner_root_ancestor_without_repair",
+    },
+]
+if windows_root_case.get("evidence") != expected_windows_root_evidence:
+    refuse("Windows root poisoning is not bound to its exact two native MSVC process tests")
 lease_case = next(case for case in native if case.get("id") == "c515-server-lifetime-lease")
 expected_lease_evidence = [{
     "targets": sorted(targets),
@@ -299,8 +315,8 @@ for case in native:
             refuse(f"native case {case.get('id')!r} duplicates an evidence binding")
         bindings.append(identity)
         covered.update(selected)
-if len(bindings) != 17 or covered != targets:
-    refuse(f"native fixture mapping has {len(bindings)} bindings over {sorted(covered)}, want 17 over all five targets")
+if len(bindings) != 19 or covered != targets:
+    refuse(f"native fixture mapping has {len(bindings)} bindings over {sorted(covered)}, want 19 over all five targets")
 
 required_contract_cases = {
     "positive-linux", "positive-macos", "positive-windows", "positive-signer-overlap",
@@ -310,6 +326,7 @@ required_contract_cases = {
     "expiry-equality-stopped", "expiry-equality-live", "readiness-bind-domain",
     "readiness-start-kind", "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
+    "windows-production-root-unsafe-metadata",
     "c515-server-lifetime-lease",
     "unix-inherited-abi", "windows-inherited-abi",
     "provenance-client-input",
@@ -413,6 +430,7 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux
 native_ids = [
     "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
+    "windows-production-root-unsafe-metadata",
     "c515-server-lifetime-lease",
     "expiry-equality-live", "supervisor-death-normal-responsive-unix",
     "supervisor-death-normal-wedged-unix", "supervisor-death-sigkill-responsive-unix",
@@ -421,7 +439,7 @@ native_ids = [
 ]
 native = []
 for index, case_id in enumerate(native_ids):
-    count = 3 if case_id in {"unix-inherited-abi", "windows-inherited-abi"} else (2 if case_id == "expiry-equality-live" else 1)
+    count = 3 if case_id in {"unix-inherited-abi", "windows-inherited-abi"} else (2 if case_id in {"expiry-equality-live", "windows-production-root-unsafe-metadata"} else 1)
     evidence = []
     for item in range(count):
         if case_id == "four-form-secret-sentinel-process-scan":
@@ -435,6 +453,15 @@ for index, case_id in enumerate(native_ids):
                 "test_target": "local_state_regressions",
                 "exact_test": "native_process_derives_production_root_from_the_authenticated_os_account",
                 "targets": sorted(targets),
+            })
+        elif case_id == "windows-production-root-unsafe-metadata":
+            evidence.append({
+                "test_target": "windows_native_root_poisoning",
+                "exact_test": [
+                    "windows_supervised_startup_refuses_reparse_point_owner_root_ancestor_without_repair",
+                    "windows_supervised_startup_refuses_untrusted_writable_owner_root_ancestor_without_repair",
+                ][item],
+                "targets": ["x86_64-pc-windows-msvc"],
             })
         elif case_id == "c515-server-lifetime-lease":
             evidence.append({
@@ -535,7 +562,7 @@ import json, sys
 path=sys.argv[1]; value=json.load(open(path)); value["native_cases"][0]["evidence"].pop()
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
-  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted sixteen native bindings"; fi
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted eighteen native bindings"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
   cp "$fixture_set" "$fixture_set.clean"
@@ -554,6 +581,15 @@ path=sys.argv[1]; value=json.load(open(path)); case=next(item for item in value[
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
   if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted production-root process test"; fi
+  mv "$fixture_set.clean" "$fixture_set"
+
+  cp "$fixture_set" "$fixture_set.clean"
+  python3 - "$fixture_set" <<'PY'
+import json, sys
+path=sys.argv[1]; value=json.load(open(path)); case=next(item for item in value["native_cases"] if item["id"] == "windows-production-root-unsafe-metadata"); case["evidence"][1]["targets"]=["x86_64-unknown-linux-gnu"]
+open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
+PY
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted Windows root poisoning on a non-Windows target"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
   cp "$fixture_set" "$fixture_set.clean"

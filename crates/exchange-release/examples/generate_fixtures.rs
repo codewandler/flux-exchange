@@ -1066,6 +1066,21 @@ fn native_fixture_cases() -> Vec<NativeFixtureCase> {
             )],
         },
         NativeFixtureCase {
+            id: "windows-production-root-unsafe-metadata".into(),
+            evidence: vec![
+                evidence(
+                    WINDOWS,
+                    "windows_native_root_poisoning",
+                    "windows_supervised_startup_refuses_reparse_point_owner_root_ancestor_without_repair",
+                ),
+                evidence(
+                    WINDOWS,
+                    "windows_native_root_poisoning",
+                    "windows_supervised_startup_refuses_untrusted_writable_owner_root_ancestor_without_repair",
+                ),
+            ],
+        },
+        NativeFixtureCase {
             // Dependency-crate tests are not Cargo targets in this consumer. This binding proves
             // Exchange's own server-lifetime lease seam; the exact C-515 parent tests stay upstream.
             id: "c515-server-lifetime-lease".into(),

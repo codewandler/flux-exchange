@@ -789,6 +789,7 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
 const REQUIRED_NATIVE_CASES: &[&str] = &[
     "four-form-secret-sentinel-process-scan",
     "production-root-inherited-environment",
+    "windows-production-root-unsafe-metadata",
     "c515-server-lifetime-lease",
     "expiry-equality-live",
     "supervisor-death-normal-responsive-unix",
@@ -829,6 +830,20 @@ const REQUIRED_NATIVE_BINDINGS: &[RequiredNativeBinding] = &[
         targets: release::SUPPORTED_TARGETS,
         test_target: "local_state_regressions",
         exact_test: "native_process_derives_production_root_from_the_authenticated_os_account",
+    },
+    RequiredNativeBinding {
+        id: "windows-production-root-unsafe-metadata",
+        targets: WINDOWS_RELEASE_TARGETS,
+        test_target: "windows_native_root_poisoning",
+        exact_test:
+            "windows_supervised_startup_refuses_reparse_point_owner_root_ancestor_without_repair",
+    },
+    RequiredNativeBinding {
+        id: "windows-production-root-unsafe-metadata",
+        targets: WINDOWS_RELEASE_TARGETS,
+        test_target: "windows_native_root_poisoning",
+        exact_test:
+            "windows_supervised_startup_refuses_untrusted_writable_owner_root_ancestor_without_repair",
     },
     RequiredNativeBinding {
         id: "c515-server-lifetime-lease",
