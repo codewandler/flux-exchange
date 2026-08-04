@@ -52,6 +52,23 @@ or written several times merely because several services use it.
 another submitted value nor another settings-store address: the connector applies those additional
 bindings internally from the value stored for the primary `binds` target.
 
+### CLI aliases are a projection, not a second schema
+
+Every field publishes an `aliases` array, including an empty array when no command-line spelling is
+safe. `connection.name` owns `--name`. A non-secret catalogue form row receives exactly one alias by
+turning its declared field `name` from lower snake case into a long kebab-case option (`site` becomes
+`--site`, `account_email` becomes `--account-email`). A connector that declares its field as
+`endpoint` therefore publishes `--endpoint`; Exchange never substitutes that spelling based on the
+connector or the field's semantics. Secret rows receive no alias because a secret must never travel
+on argv. The rule uses only stable field identity; it does not inspect connector id, vendor, label,
+help, URL template, policy or target.
+
+The server validates the resulting alias set over the whole plan. An alias outside the closed
+`--lower-kebab-case` grammar or one claimed by two field identities refuses the projection; it is
+never silently reassigned or disambiguated with a vendor-specific spelling. Consumers read this
+array and do not repeat the derivation. This leaves an upstream declaration free to grow explicit
+alias metadata in a later protocol version without baking today's convenience rule into a client.
+
 ## Selecting and naming a connection
 
 The read lists the tenant's existing labels and accepts an optional `name` query solely to select a

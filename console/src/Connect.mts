@@ -139,7 +139,7 @@ function authorityBody(
     ]),
     h('p', { class: 'connect__authority-help' }, explanation),
     authority.actions === null ? null : h('div', { class: 'connect__authority-actions' }, [
-      authority.state === 'proposed' || authority.state === 'revoked'
+      authority.state === 'proposed'
         ? h('button', {
           type: 'button', disabled: working,
           onClick: () => action(authority.actions!.approve),

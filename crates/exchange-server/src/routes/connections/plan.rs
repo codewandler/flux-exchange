@@ -141,6 +141,7 @@ struct FieldView {
     required: bool,
     secret: bool,
     input: String,
+    aliases: Vec<String>,
     binds: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     also_binds: Vec<String>,
@@ -1272,6 +1273,7 @@ async fn project(
         required: true,
         secret: false,
         input: "text".to_owned(),
+        aliases: vec!["--name".to_owned()],
         binds: None,
         also_binds: Vec::new(),
         provenance: "exchange",
@@ -1336,6 +1338,17 @@ async fn project(
         fields.push(field.view);
     }
 
+    validate_cli_aliases(&fields).map_err(|reason| {
+        refuse(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "connector `{}` cannot publish an unambiguous connection-plan alias set: {reason}",
+                provider.id
+            ),
+            json!({ "connector": provider.id }),
+        )
+    })?;
+
     let complete = fields
         .iter()
         .filter(|field| field.required)
@@ -1362,6 +1375,56 @@ async fn project(
             ],
         },
     })
+}
+
+/// The v1 convenience spelling is derived only from the declaration's stable field name.
+///
+/// Connector declarations validate lower snake case before reaching the catalogue. Keeping this
+/// transformation beside the serialized field means clients consume aliases instead of inventing
+/// them independently from vendor-facing labels or bindings.
+fn canonical_cli_alias(name: &str) -> String {
+    format!("--{}", name.replace('_', "-"))
+}
+
+fn valid_cli_alias(alias: &str) -> bool {
+    let Some(name) = alias.strip_prefix("--") else {
+        return false;
+    };
+    !name.is_empty()
+        && name.split('-').all(|word| {
+            !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+        && name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+}
+
+fn validate_cli_aliases(fields: &[FieldView]) -> Result<(), String> {
+    let mut owners = BTreeMap::<&str, &str>::new();
+    for field in fields {
+        if field.secret && !field.aliases.is_empty() {
+            return Err(format!(
+                "secret field `{}` publishes a command-line alias",
+                field.identity
+            ));
+        }
+        for alias in &field.aliases {
+            if !valid_cli_alias(alias) {
+                return Err(format!(
+                    "field `{}` publishes malformed alias `{alias}`",
+                    field.identity
+                ));
+            }
+            if let Some(owner) = owners.insert(alias, &field.identity) {
+                return Err(format!(
+                    "alias `{alias}` belongs to both `{owner}` and `{}`",
+                    field.identity
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn connection_context(
@@ -1466,6 +1529,7 @@ fn describe_with_policy(
                 required: credential_required(provider, credential.name),
                 secret: true,
                 input: "secret".to_owned(),
+                aliases: Vec::new(),
                 binds: Some(target.clone()),
                 also_binds: Vec::new(),
                 provenance: "provider.auth",
@@ -1575,6 +1639,10 @@ fn describe_config(
             required: field.required,
             secret,
             input,
+            aliases: (!secret)
+                .then(|| canonical_cli_alias(field.name))
+                .into_iter()
+                .collect(),
             binds: Some(field.binds.to_owned()),
             also_binds: field
                 .also_binds
@@ -1601,25 +1669,28 @@ fn authority_view(
     status: AuthorityStatus,
 ) -> AuthorityView {
     let revision = status.revision.map(|revision| revision.to_string());
-    let actions = revision.as_ref().map(|_| {
-        let target = format!(
-            "/api/connections/{}/instances/{}/settings/{}/{}/authority",
-            encode_segment(connector),
-            encode_segment(label),
-            encode_segment(&declared.service),
-            encode_segment(&declared.binds()),
-        );
-        AuthorityActions {
-            approve: AuthorityAction {
-                method: "PUT",
-                target: target.clone(),
-            },
-            revoke: AuthorityAction {
-                method: "DELETE",
-                target,
-            },
-        }
-    });
+    let actions = match status.state {
+        AuthorityState::Proposed | AuthorityState::Approved => revision.as_ref().map(|_| {
+            let target = format!(
+                "/api/connections/{}/instances/{}/settings/{}/{}/authority",
+                encode_segment(connector),
+                encode_segment(label),
+                encode_segment(&declared.service),
+                encode_segment(&declared.binds()),
+            );
+            AuthorityActions {
+                approve: AuthorityAction {
+                    method: "PUT",
+                    target: target.clone(),
+                },
+                revoke: AuthorityAction {
+                    method: "DELETE",
+                    target,
+                },
+            }
+        }),
+        AuthorityState::Unset | AuthorityState::Revoked => None,
+    };
     AuthorityView {
         state: status.state.into(),
         revision,
@@ -2356,6 +2427,82 @@ mod tests {
     }
 
     #[test]
+    fn every_cli_alias_is_derived_from_the_declared_field_identity() {
+        for provider in connector_catalog::providers() {
+            let described = describe(provider).expect("shipped declarations are readable");
+            let mut aliases = BTreeSet::from(["--name".to_owned()]);
+            for projected in &described {
+                let expected = if projected.view.secret {
+                    Vec::new()
+                } else {
+                    vec![canonical_cli_alias(&projected.view.name)]
+                };
+                assert_eq!(
+                    projected.view.aliases, expected,
+                    "{} {}",
+                    provider.id, projected.view.identity
+                );
+                for alias in &projected.view.aliases {
+                    assert!(
+                        aliases.insert(alias.clone()),
+                        "{} repeats canonical alias {alias}",
+                        provider.id
+                    );
+                }
+            }
+        }
+
+        for (declared_name, expected_alias) in [
+            ("site", "--site"),
+            ("domain", "--domain"),
+            ("subdomain", "--subdomain"),
+        ] {
+            let projected = connector_catalog::providers()
+                .iter()
+                .find_map(|provider| {
+                    describe(provider)
+                        .ok()?
+                        .into_iter()
+                        .find(|field| !field.view.secret && field.view.name == declared_name)
+                })
+                .unwrap_or_else(|| panic!("catalogue has no non-secret `{declared_name}` field"));
+            assert_eq!(projected.view.aliases, [expected_alias]);
+        }
+    }
+
+    #[test]
+    fn malformed_duplicate_and_secret_cli_aliases_are_refused() {
+        let provider = catalogued("jira").expect("jira");
+        let mut fields: Vec<_> = describe(provider)
+            .expect("shipped declarations are readable")
+            .into_iter()
+            .map(|field| field.view)
+            .collect();
+        assert!(validate_cli_aliases(&fields).is_ok());
+
+        let first_aliases = fields[0].aliases.clone();
+        fields[0].aliases = vec!["site".to_owned()];
+        assert!(validate_cli_aliases(&fields)
+            .expect_err("a malformed alias was accepted")
+            .contains("malformed"));
+
+        fields[0].aliases = fields[1].aliases.clone();
+        assert!(validate_cli_aliases(&fields)
+            .expect_err("a duplicate alias was accepted")
+            .contains("belongs to both"));
+
+        fields[0].aliases = first_aliases;
+        let secret = fields
+            .iter_mut()
+            .find(|field| field.secret)
+            .expect("jira has a secret field");
+        secret.aliases = vec!["--api-token".to_owned()];
+        assert!(validate_cli_aliases(&fields)
+            .expect_err("a secret argv alias was accepted")
+            .contains("secret field"));
+    }
+
+    #[test]
     fn declaration_choices_are_published_by_the_generic_projection() {
         let mut choice_fields = 0;
         for provider in connector_catalog::providers() {
@@ -2585,6 +2732,16 @@ mod tests {
             .as_array()
             .expect("fixture fields")
             .clone();
+        for field in &fixture_fields {
+            let expected = if field["secret"] == json!(true) {
+                json!([])
+            } else {
+                json!([canonical_cli_alias(
+                    field["name"].as_str().expect("fixture field name")
+                )])
+            };
+            assert_eq!(field["aliases"], expected, "fixture field: {field}");
+        }
 
         let harness = harness(usize::MAX);
         let mut live_plans = Vec::new();
@@ -2648,6 +2805,17 @@ mod tests {
                 revision: Some(42),
             },
         ));
+        assert_eq!(
+            authority_field.aliases,
+            [canonical_cli_alias(&authority_field.name)]
+        );
+        assert_eq!(
+            fixture_fields
+                .iter()
+                .find(|field| field.get("authority").is_some())
+                .expect("fixture authority row")["aliases"],
+            json!(["--custom-origin"])
+        );
         live_fields.push(serde_json::to_value(authority_field).expect("authority wire row"));
 
         assert_eq!(keys(&fixture), keys(&live_plans[0]));
@@ -2898,6 +3066,7 @@ mod tests {
             .expect("authority field");
         assert_eq!(revoked_field["set"], false);
         assert_eq!(revoked_field["authority"]["state"], "revoked");
+        assert_eq!(revoked_field["authority"]["actions"], Value::Null);
         let setting_path = target.strip_suffix("/authority").expect("setting route");
         let (status, _) = call(&harness.app, "alice", Method::DELETE, setting_path, None).await;
         assert_eq!(status, StatusCode::NO_CONTENT);

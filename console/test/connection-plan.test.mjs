@@ -66,6 +66,11 @@ test('the_shared_v1_contract_is_read_whole_and_a_malformed_declared_row_fails_th
   assert.equal(state.plan.version, CONNECTION_PLAN_VERSION)
   assert.deepEqual(state.plan, contract, 'the strict parser changed or dropped contract metadata')
   assert.deepEqual(state.plan.fields.map(({ identity }) => identity), contract.fields.map(({ identity }) => identity))
+  assert.deepEqual(
+    state.plan.fields.map(({ identity, aliases }) => [identity, aliases]),
+    contract.fields.map(({ identity, aliases }) => [identity, aliases]),
+    'the browser dropped canonical CLI aliases from the shared contract',
+  )
 
   const malformed = structuredClone(contract)
   delete malformed.fields[2].target
@@ -96,6 +101,65 @@ test('the_shared_v1_contract_is_read_whole_and_a_malformed_declared_row_fails_th
   })
   assert.equal(provenanceDropped.status, 'failed')
   assert.match(provenanceDropped.failure.detail, /provenance/)
+
+  const missingAliases = structuredClone(contract)
+  delete missingAliases.fields[1].aliases
+  const aliasesDropped = await loadConnectionPlan(contract.connector, null, {
+    fetch: answer(200, missingAliases).fetch,
+  })
+  assert.equal(aliasesDropped.status, 'failed')
+  assert.match(aliasesDropped.failure.detail, /aliases/)
+
+  for (const alias of ['site', '--Site', '--site_name', '---site', '--']) {
+    const invalidAlias = structuredClone(contract)
+    invalidAlias.fields[1].aliases = [alias]
+    const invalid = await loadConnectionPlan(contract.connector, null, {
+      fetch: answer(200, invalidAlias).fetch,
+    })
+    assert.equal(invalid.status, 'failed', `accepted malformed CLI alias ${alias}`)
+    assert.match(invalid.failure.detail, /alias/i)
+  }
+
+  const repeatedWithinField = structuredClone(contract)
+  repeatedWithinField.fields[1].aliases = ['--region', '--region']
+  const repeated = await loadConnectionPlan(contract.connector, null, {
+    fetch: answer(200, repeatedWithinField).fetch,
+  })
+  assert.equal(repeated.status, 'failed')
+  assert.match(repeated.failure.detail, /repeat.*alias/i)
+
+  const duplicateAlias = structuredClone(contract)
+  duplicateAlias.fields[2].aliases = [...duplicateAlias.fields[1].aliases]
+  const duplicate = await loadConnectionPlan(contract.connector, null, {
+    fetch: answer(200, duplicateAlias).fetch,
+  })
+  assert.equal(duplicate.status, 'failed')
+  assert.match(duplicate.failure.detail, /alias.*more than once/i)
+
+  const secretAlias = structuredClone(contract)
+  secretAlias.fields.find(({ secret }) => secret).aliases = ['--token']
+  const secretOnArgv = await loadConnectionPlan(contract.connector, null, {
+    fetch: answer(200, secretAlias).fetch,
+  })
+  assert.equal(secretOnArgv.status, 'failed')
+  assert.match(secretOnArgv.failure.detail, /secret.*alias|alias.*secret/i)
+
+  const unknownMembers = [
+    (body) => { body.future = true },
+    (body) => { body.fields[1].future = true },
+    (body) => { body.fields[1].target.future = true },
+    (body) => { body.fields[1].choices[0].future = true },
+    (body) => { body.apply.future = true },
+  ]
+  for (const addUnknownMember of unknownMembers) {
+    const body = structuredClone(contract)
+    addUnknownMember(body)
+    const unknown = await loadConnectionPlan(contract.connector, contract.selection, {
+      fetch: answer(200, body).fetch,
+    })
+    assert.equal(unknown.status, 'failed', 'accepted an unknown v1 member')
+    assert.match(unknown.failure.detail, /unknown|closed|member/i)
+  }
 })
 
 test('the_generic_consumer_renders_every_shared_contract_descriptor_without_vendor_logic', async () => {
@@ -134,6 +198,7 @@ test('custom_origin_authority_is_strict_value_free_and_not_a_vendor_schema', asy
     { ...field.authority, revision: '18446744073709551616' },
     { ...field.authority, actions: { ...field.authority.actions, approve: { ...field.authority.actions.approve, method: 'POST' } } },
     { ...field.authority, actions: { ...field.authority.actions, revoke: { ...field.authority.actions.revoke, target: 'https://example.invalid/authority' } } },
+    { ...field.authority, state: 'revoked' },
     { ...field.authority, state: 'unknown' },
     { ...field.authority, value: 'must-never-be-accepted' },
   ]
@@ -162,10 +227,12 @@ test('custom_origin_authority_is_strict_value_free_and_not_a_vendor_schema', asy
   assert.match(approvedHtml, /Revoke authority/)
 
   const revokedPlan = structuredClone(contract)
-  revokedPlan.fields.find(({ identity }) => identity === field.identity).authority.state = 'revoked'
+  const revokedField = revokedPlan.fields.find(({ identity }) => identity === field.identity)
+  revokedField.authority.state = 'revoked'
   const revokedHtml = await form({ plan: { status: 'ready', plan: revokedPlan } })
   assert.match(revokedHtml, /data-authority-state="revoked"/)
-  assert.match(revokedHtml, /Approve proposed authority/)
+  assert.doesNotMatch(revokedHtml, /Approve proposed authority/)
+  assert.doesNotMatch(revokedHtml, /Revoke proposal|Revoke authority/)
 
   const unsetPlan = structuredClone(contract)
   const unsetField = unsetPlan.fields.find(({ identity }) => identity === field.identity)
@@ -396,6 +463,17 @@ test('complete_incomplete_refused_and_partial_apply_outcomes_are_distinct', asyn
   }, { fetch: answer(500, { outcome: 'complete', steps: [], plan: completeContract() }).fetch })
   assert.equal(completeAt500.status, 'failed')
   assert.equal(completeAt500.failure.status, 500)
+
+  for (const body of [
+    { outcome: 'complete', steps: [], plan: completeContract(), future: true },
+    { outcome: 'complete', steps: [{ target: 'connection.name', outcome: 'applied', future: true }], plan: completeContract() },
+  ]) {
+    const unknown = await applyConnectionPlan(contract.connector, {
+      version: CONNECTION_PLAN_VERSION, name: 'production', values: {},
+    }, { fetch: answer(200, body).fetch })
+    assert.equal(unknown.status, 'failed', 'accepted an unknown apply-response member')
+    assert.match(unknown.failure.detail, /closed|unknown/i)
+  }
 })
 
 test('loading_refusal_failure_and_picker_states_remain_distinct', async () => {

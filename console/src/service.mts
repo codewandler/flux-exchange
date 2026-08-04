@@ -846,6 +846,7 @@ export interface ConnectionPlanField {
   required: boolean
   secret: boolean
   input: string
+  aliases: string[]
   binds: string | null
   also_binds?: string[]
   routable: boolean
@@ -893,6 +894,7 @@ function readTarget(value: unknown, context: string): ConnectionPlanTarget | nul
   if (!isObject(value) || typeof value.id !== 'string' || value.id === '') {
     return `${context} has no target identity`
   }
+  if (!hasOnlyKeys(value, ['id'])) return `${context} target is not a closed id object`
   return { id: value.id }
 }
 
@@ -905,6 +907,7 @@ function readChoices(value: unknown, context: string): ConnectionPlanChoice[] | 
     if (!isObject(choice) || typeof choice.value !== 'string' || typeof choice.label !== 'string') {
       return `${context} has a choice without string value and label`
     }
+    if (!hasOnlyKeys(choice, ['value', 'label'])) return `${context} choice is not a closed value and label object`
     if (values.has(choice.value)) return `${context} repeats choice value \`${choice.value}\``
     values.add(choice.value)
     choices.push({ value: choice.value, label: choice.label })
@@ -944,6 +947,11 @@ function readFieldAuthority(value: unknown, context: string): ConnectionFieldAut
   if (!canonicalAuthorityRevision(value.revision)) {
     return `${context} authority has no canonical u64 revision`
   }
+  if (value.state === 'revoked') {
+    return value.actions === null
+      ? { state: 'revoked', revision: value.revision, actions: null }
+      : `${context} revoked authority still advertises actions`
+  }
   if (!isObject(value.actions) || !isObject(value.actions.approve) || !isObject(value.actions.revoke)) {
     return `${context} authority has no complete actions`
   }
@@ -974,6 +982,13 @@ function readFieldAuthority(value: unknown, context: string): ConnectionFieldAut
 function readPlanField(value: unknown, at: number): ConnectionPlanField | string {
   const context = `field ${at + 1}`
   if (!isObject(value)) return `${context} is not an object`
+  const fieldKeys = [
+    'identity', 'provenance', 'name', 'service', 'label', 'help', 'required', 'secret', 'input',
+    'aliases', 'binds', 'also_binds', 'routable', 'set', 'target', 'authority', 'choices', 'reason',
+  ]
+  if (Object.keys(value).some((key) => !fieldKeys.includes(key))) {
+    return `${context} has an unknown member`
+  }
   for (const key of ['identity', 'name', 'label', 'help', 'input'] as const) {
     if (typeof value[key] !== 'string') return `${context} has no string \`${key}\``
   }
@@ -987,11 +1002,20 @@ function readPlanField(value: unknown, at: number): ConnectionPlanField | string
   }
   if (value.secret !== (value.input === 'secret')) return `${context} has inconsistent secret input metadata`
 
+  const aliases = strings(value.aliases, `${context}.aliases`)
+  if (typeof aliases === 'string') return aliases
+  if (new Set(aliases).size !== aliases.length) return `${context} repeats a CLI alias`
+  if (aliases.some((alias) => !/^--[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(alias))) {
+    return `${context} has a malformed CLI alias`
+  }
+  if (value.secret && aliases.length !== 0) return `${context} publishes a secret CLI alias`
+
   const target = readTarget(value.target, context)
   if (typeof target === 'string') return target
   if (value.routable && target === null) return `${context} is routable but has no target`
   if (!value.routable && target !== null) return `${context} is unroutable but has a target`
   if (!value.routable && typeof value.reason !== 'string') return `${context} is unroutable but has no reason`
+  if (value.routable && 'reason' in value) return `${context} is routable but publishes a reason`
 
   let alsoBinds: string[] | undefined
   if ('also_binds' in value) {
@@ -1041,6 +1065,7 @@ function readPlanField(value: unknown, at: number): ConnectionPlanField | string
     required: value.required as boolean,
     secret: value.secret as boolean,
     input: value.input as string,
+    aliases,
     binds: value.binds as string | null,
     ...(alsoBinds === undefined ? {} : { also_binds: alsoBinds }),
     routable: value.routable as boolean,
@@ -1055,6 +1080,9 @@ function readPlanField(value: unknown, at: number): ConnectionPlanField | string
 function readConnectionPlan(body: unknown, expectedConnector: string): ConnectionPlan | string {
   if (!isObject(body)) return 'the plan is not an object'
   if (body.version !== CONNECTION_PLAN_VERSION) return `unsupported or missing plan version`
+  if (!hasOnlyKeys(body, ['version', 'connector', 'vendor', 'labels', 'selection', 'state', 'fields', 'apply'])) {
+    return 'the plan is not a closed v1 object'
+  }
   if (typeof body.connector !== 'string') return 'the plan has no connector'
   if (body.connector !== expectedConnector) {
     return `the plan names connector \`${body.connector}\` instead of \`${expectedConnector}\``
@@ -1072,11 +1100,16 @@ function readConnectionPlan(body: unknown, expectedConnector: string): Connectio
 
   const fields: ConnectionPlanField[] = []
   const identities = new Set<string>()
+  const aliases = new Set<string>()
   for (const [at, value] of body.fields.entries()) {
     const field = readPlanField(value, at)
     if (typeof field === 'string') return field
     if (identities.has(field.identity)) return `field identity \`${field.identity}\` appears more than once`
     identities.add(field.identity)
+    for (const alias of field.aliases) {
+      if (aliases.has(alias)) return `CLI alias \`${alias}\` appears more than once`
+      aliases.add(alias)
+    }
     fields.push(field)
   }
   const derivedState = fields.every((field) => !field.required || (field.routable && field.set))
@@ -1101,11 +1134,15 @@ function readConnectionPlan(body: unknown, expectedConnector: string): Connectio
   const name = fields[0]
   if (name.identity !== 'connection.name' || name.provenance !== 'exchange' || name.name !== 'name' || name.service !== null ||
       name.binds !== null || name.target?.id !== 'connection.name' || !name.required || name.secret ||
-      name.input !== 'text' || !name.routable) {
+      name.input !== 'text' || !name.routable || name.aliases.length !== 1 || name.aliases[0] !== '--name') {
     return 'the first field is not `connection.name`'
   }
 
-  if (!isObject(body.apply) || body.apply.method !== 'POST' || typeof body.apply.target !== 'string' ||
+  if (!isObject(body.apply)) return 'the plan has invalid apply metadata'
+  if (!hasOnlyKeys(body.apply, ['method', 'target', 'retry', 'compensation'])) {
+    return 'the plan apply metadata is not a closed v1 object'
+  }
+  if (body.apply.method !== 'POST' || typeof body.apply.target !== 'string' ||
       typeof body.apply.retry !== 'string') return 'the plan has invalid apply metadata'
   const compensation = strings(body.apply.compensation, 'apply.compensation')
   if (typeof compensation === 'string') return compensation
@@ -1282,6 +1319,7 @@ export async function transitionConnectionAuthority(
 
 function readConnectionPlanResult(body: unknown, expectedConnector: string): ConnectionPlanResult | string {
   if (!isObject(body)) return 'the apply response is not an object'
+  if (!hasOnlyKeys(body, ['outcome', 'steps', 'plan'])) return 'the apply response is not a closed v1 object'
   if (!['complete', 'incomplete', 'refused', 'partial'].includes(String(body.outcome))) {
     return 'the apply response has no valid outcome'
   }
@@ -1292,6 +1330,8 @@ function readConnectionPlanResult(body: unknown, expectedConnector: string): Con
         !['applied', 'unchanged', 'refused', 'skipped'].includes(String(value.outcome))) {
       return `apply step ${at + 1} is malformed`
     }
+    const stepKeys = new Set(['target', 'outcome', 'reason'])
+    if (Object.keys(value).some((key) => !stepKeys.has(key))) return `apply step ${at + 1} has an unknown member`
     if ('reason' in value && typeof value.reason !== 'string') return `apply step ${at + 1} has an invalid reason`
     steps.push({
       target: value.target,
