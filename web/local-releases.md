@@ -69,7 +69,7 @@ The side-effect-free inspection command opens no store and binds no listener:
 flux-exchange compatibility --json
 ```
 
-The first public release emits JSON only. The current six-field implementation is unpublished and
+The first public release emits JSON only. The older six-field implementation is unpublished and
 cannot pass the content-derived publication preflight:
 
 ```json
@@ -136,18 +136,40 @@ one target archive. Import runs the identical freshness, rollback, threshold, au
 newest-compatible selection, compatibility, bounds, digest and archive checks. It bypasses only the
 GitHub transport; provenance is not an import input and offline is not an authenticity exception.
 
-The release machinery is intentionally not a claim of current production availability. As of
-2026-08-04 the production environment, delegated signing inputs, reviewed root policy, trust head and
-stable head have not been provisioned, and the repository's `main` branch is unprotected. The next
-unused tag is `v0.18.0`; pushing it irreversibly starts both the five-target binary publication and
-crates.io publication, so an authorized release operator must approve those as one boundary. X-126
-stays active until that real public release passes its five-target verifier.
+The release machinery is intentionally not a claim of current production availability. A release is
+usable only after an authorized immutable tag, its closed five-target public asset set and the
+post-publication verifier all agree. Tagging starts both binary and crates.io publication, so the
+release operator treats them as one irreversible authorization boundary rather than inferring
+permission from a green staging run.
 
-The v2/eight-protocol schema shown above is the first public contract. The currently implemented
-six-protocol schema remains unpublished implementation evidence. Decision 0007 requires X-134 to add
-and natively revalidate the final owner-bound local-management, direct secret-insertion and Service
-Account credential-handoff compatibility schema. Until then there is no production trust ceremony,
-`v0.18.0`/crates.io publication, public binary asset, stable update or X-126 completion.
+## The local owner boundary
+
+The supervised single-user contract has one native management endpoint. It is an owner-only Unix
+socket below the native state root or an owner-bound Windows named pipe, and it authenticates the
+connecting operating-system account before granting local operator authority inside that dispatcher.
+It is not an HTTP identity provider: loopback TCP, hosted traffic, another account and `--dev` cannot
+reuse the bootstrap. Readiness, liveness and lifecycle control remain separate value-free
+capabilities.
+
+Production discovers the default state root from the authenticated native account, not from
+inherited `HOME`, `XDG_STATE_HOME`, `USERPROFILE`, `LOCALAPPDATA` or an equivalent variable. Every
+path component is checked before use. A symlink or reparse point, foreign ownership, an
+untrusted-writable ancestor or widened owner-only metadata refuses; Exchange does not repair the
+path or fall back to memory.
+
+The verified `flux-exchange` helper owns native secret input and the credential-handoff boundary.
+Flux sends a bounded non-secret
+request, while the helper opens `/dev/tty` or the Windows console directly only when input is needed
+and sends that value to Exchange over the authenticated owner endpoint. Flux receives only a
+value-free receipt or refusal. Service Account mint uses a separate one-way writer capability, so
+the one-time credential does not enter ordinary JSON, argv, environment, standard output,
+diagnostics or supervisor state. The receiver, not Exchange, decides when its own credential store
+has committed that handoff.
+
+The v2/eight-protocol schema shown above is the first public contract: four unchanged HTTP
+identities plus the v2 connection-plan and supervisor identities, local management and the
+Service Account handoff. The older six-protocol shape is unpublished implementation evidence and
+cannot pass the content-derived publication preflight.
 
 The complete wire-level contract, bounds and operator publication procedure remain in the
 [repository's release design](https://github.com/codewandler/flux-exchange/blob/main/docs/designs/local-release-v1.md).

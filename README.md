@@ -27,9 +27,11 @@ live versus target architecture.
 > created, listed, **rotated** and deleted per tenant. With `FLUX_EXCHANGE_CONNECTIONS` bound, one
 > tenant can hold several labelled instances of the same connector; invocation selects one with
 > `?connection=<label>` and refuses ambiguity rather than choosing an account. A signed-in human
-> can fetch and apply one declaration-driven `exchange.connection-plan.v1` contract that names the
-> label, every credential and setting, choices and CLI aliases. The console renders that same
-> contract and reports incomplete, refused and partially-persisted outcomes honestly. GitLab's
+> can fetch one declaration-driven `exchange.connection-plan.v2` contract that names the label,
+> every credential and setting target, choices and CLI aliases without disclosing secret presence:
+> every secret field's live `set` fact is `null`. Mutations use the bounded local-management
+> ceremony rather than placing vendor values in ordinary JSON. The console renders that same
+> contract and reports incomplete and refused outcomes honestly. GitLab's
 > connector-declared custom HTTPS origin is a revisioned proposal until a configured operator
 > reviews and approves it; proposed and revoked values cannot reach request projection.
 > A signed-in human
@@ -161,7 +163,8 @@ workflow execution records, generated WebSocket channels and installed App inbox
 The credential store has moved off this
 list and is described below, and X-47 moved
 per-connection configuration off it too — but the honest replacement claim is narrower than "done":
-a tenant can now **supply**, over HTTP, every admitted catalogue-declared connection value — and
+a tenant can now **supply**, through the bounded operator-onboarding transport, every admitted
+catalogue-declared connection value — and
 **four are refused on purpose**: `asterisk`, `okta`, `docusign` and `freshdesk` template their whole
 destination authority, so a tenant-supplied value would *be* the origin this host sends their
 credential to. Those four stay uninvocable and say so. The design is ahead of the code
@@ -191,9 +194,10 @@ bind its own operator-selected remote placement to run those channels safely.
 
 ### Service Accounts are the non-human API identity
 
-`POST /api/service-accounts` creates a Service Account for the authenticated human's tenant and
-returns an `fxsa_…` token **once**. `GET /api/service-accounts` lists ids and expiries without token
-or verifier material; `DELETE /api/service-accounts/{id}` revokes one. The host keeps only
+`POST /api/service-accounts` accepts only the Service Account's non-secret id and expiry and returns
+exactly one FXSA binary handoff body rather than a JSON credential. `GET /api/service-accounts` lists
+ids and expiries without token or verifier material; `DELETE /api/service-accounts/{id}` revokes one.
+The host keeps only
 `SHA-256(token)` in the owner-only file named by `FLUX_EXCHANGE_SERVICE_ACCOUNTS`.
 
 The token is presented as `Authorization: Bearer …` and resolves to `kind: service_account` in its
@@ -218,16 +222,16 @@ change produces a new value.
 ### The credential store, and what does not protect it
 
 `exchange_host::CredentialStore` binds the portable file-backed store from `connector-secrets`
-rather than reimplementing one. On Unix it creates a `0600` file in a `0700` directory and checks
-the effective owner and modes every time the store opens. On Windows it creates the directory and
-file for the process `TokenUser` SID with a protected DACL containing exactly one explicit
-full-control allow entry for that SID, and checks owner, DACL, object kind and non-reparse metadata
-before every read or write. Unsafe existing metadata is refused, never quietly narrowed — the
+rather than reimplementing one. On Unix it creates a `0600` file below an owner-only directory and
+checks the effective owner, object kind and modes every time the store opens. On Windows it creates
+the directory and file for the process `TokenUser` SID with a protected DACL containing exactly one
+explicit full-control allow entry for that SID, and checks owner, DACL, object kind and non-reparse
+metadata before every read or write. Native local startup also walks the complete path from the
+authenticated account boundary: symlinks or reparse points, foreign ownership and an ancestor
+writable by an untrusted account refuse. Unsafe existing metadata is never quietly narrowed — the
 object already had that metadata while it held values, so repairing it would hide the exposure
-instead of reporting it. A path inside a working tree is refused outright, because a
-credential under a checkout is one `git add -A` from being committed — and the path is resolved
-through every symlink and every `..` before that check, so what is inspected is where the store
-would land rather than how it was spelt. A write is a whole-file
+instead of reporting it. A path inside a working tree is refused outright, because a credential
+under a checkout is one `git add -A` from being committed. A write is a whole-file
 rewrite through a sibling temporary, `fsync` and `rename(2)`, so a crash mid-write leaves the
 previous file whole rather than truncated, and a delete rewrites immediately, so a revoked
 credential does not come back on restart.
@@ -297,10 +301,9 @@ runbook does not treat a staged workflow as proof that the production channel is
 `--supervised` is a separate machine-only launch mode for the Flux
 local supervisor. It accepts only an OS-selected loopback port (`FLUX_EXCHANGE_BIND` may be absent
 or exactly `127.0.0.1:0` or `[::1]:0`) and emits one bounded canonical
-readiness object after every store/safety check and the one listener bind have succeeded. Current
-main emits the fixture-tested but unpublished `exchange.supervisor-ready.v1`; the first public local
-release is blocked until X-134 changes only its schema/inventory to
-`exchange.supervisor-ready.v2` with all eight final protocols. The record goes only to the inherited
+readiness object after every store/safety check and the one listener bind have succeeded. Its
+`exchange.supervisor-ready.v2` identity carries the complete eight-protocol compatibility inventory
+described by the release runbook. The record goes only to the inherited
 one-shot readiness capability; stdout and stderr remain ordinary process output, the HTTP listener
 carries application traffic, and later control is not part of this channel.
 
@@ -314,16 +317,44 @@ receives a byte or fails, so supervisor death cannot leave Exchange or its port 
 async runtime is wedged. Readiness is not logged or copied to HTTP, no PID file is emitted, and
 `/health` becomes useful only after Flux has validated the one-shot process/start identity.
 
-On Linux the default root is `${XDG_STATE_HOME:-$HOME/.local/state}/flux-exchange`; on macOS it is
-`$HOME/Library/Application Support/Flux/Exchange` unless `XDG_STATE_HOME` is explicitly set; on
-Windows it is `%LOCALAPPDATA%\Flux\Exchange`.
-`FLUX_EXCHANGE_STATE` overrides that root. Every individual storage setting remains authoritative,
-but a non-development persistent composition is all-or-nothing: setting only some of credentials,
+Production discovers the default root from the authenticated operating-system account, not from an
+inherited process environment. Linux asks the account database for the effective uid's home and
+uses `.local/state/flux-exchange`; macOS asks the same account database and uses
+`Library/Application Support/Flux/Exchange`; Windows asks the shell for the current account's Local
+AppData known folder and uses `Flux\Exchange`. `HOME`, `XDG_STATE_HOME`, `USERPROFILE`,
+`LOCALAPPDATA` and equivalent inherited variables do not participate. `FLUX_EXCHANGE_STATE` remains
+an explicit operator override, and every individual storage setting remains authoritative, but a
+non-development persistent composition is all-or-nothing: setting only some of credentials,
 settings, grants, connections, channels, workflows, audit and Service Accounts refuses before the
-server listens. New Unix roots are `0700` and files are `0600`. Windows state objects are owned by
-the process SID and use a protected, owner-only DACL; that policy is not described as a Unix mode.
-Unsafe existing metadata refuses and is never repaired. A path directly below a shared directory
-such as `/tmp` is told to use a private child, never to narrow the shared ancestor.
+server listens and names every missing sibling.
+
+The complete path is validated before use. Unix rejects symlinks, a foreign owner, a root or
+descendant wider than owner-only, and any shared ancestor writable by an untrusted account; new
+Exchange roots are `0700` and files are `0600`. Windows rejects reparse points, a foreign owner or
+an unprotected/untrusted DACL; its state objects use a protected owner-only DACL rather than Unix
+mode bits. Existing unsafe metadata is refused and never has its modes narrowed, ownership changed,
+ACL rewritten or any other repair applied. In particular, an explicit store directly below a shared
+directory such as `/tmp` is
+unsafe; create an owner-only child and place the store below it instead of narrowing the shared
+ancestor.
+
+The owner bootstrap exists only inside this supervised, single-user composition. On Unix it is an
+owner-only socket below the native state root; on Windows it is a local named pipe with a protected
+current-user/System DACL. The server authenticates the peer as the same operating-system account and
+maps that fact to local
+operator authority only inside the native-management dispatcher. It never installs that account as
+an HTTP identity, so loopback HTTP, hosted operation routes, another account and `--dev` cannot
+reproduce the bootstrap. The endpoint is also not readiness, liveness or lifecycle control: those
+remain separate, value-free supervisor capabilities.
+
+The verified `flux-exchange` executable, not Flux, mediates native secret entry. Flux supplies a
+closed, non-secret request capability; the helper re-derives and authenticates the owner endpoint,
+reads a requested vendor value directly from `/dev/tty` or the Windows console, and sends it only to
+the running Exchange process. Flux receives one value-free receipt or refusal, never the secret,
+its transaction identity or its requested-field ordering. If no secret is required, the helper does
+not open a terminal. Service Account mint uses a distinct one-way writer capability: Exchange sends
+the one-time credential directly to that writer while ordinary JSON, argv, environment, stdout,
+stderr, readiness, liveness and diagnostics remain value-free.
 
 The supported local targets are `aarch64-apple-darwin`, `x86_64-apple-darwin`,
 `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. CI compiles

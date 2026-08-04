@@ -55,13 +55,19 @@ test('the public release page states the complete portable release contract', ()
     'connector runtime',
     'exchange-stable-v1-generation-',
     'exchange-trust-v1-version-',
-    'v0.18.0',
-    'X-134',
     'implementation evidence',
     'credential-handoff',
     'content-derived publication preflight',
     'The v2/eight-protocol schema shown above is the first public contract',
-    'currently implemented six-protocol schema remains unpublished implementation evidence',
+    'older six-protocol shape is unpublished implementation evidence',
+    'authenticated native account',
+    'XDG_STATE_HOME',
+    'USERPROFILE',
+    'does not repair',
+    'not an HTTP identity provider',
+    '/dev/tty',
+    'Windows console',
+    'value-free receipt or refusal',
   ]) {
     assert.ok(source.includes(required), `${RELEASE_PAGE} does not explain ${required}`)
   }
@@ -106,10 +112,17 @@ test('the operator runbook names delegated secret inputs without claiming they e
     'v0.18.0',
     '`main` is not protected',
     'no `local-release` environment',
-    'X-134',
     'implementation evidence',
     'content-derived preflight',
     'credential-handoff',
+    'authenticated native account',
+    'XDG_STATE_HOME',
+    'USERPROFILE',
+    'never narrows modes',
+    'never an HTTP identity provider',
+    '/dev/tty',
+    'Windows console',
+    'value-free receipt or refusal',
   ]) {
     assert.ok(runbook.includes(required), `operator runbook does not state ${required}`)
   }

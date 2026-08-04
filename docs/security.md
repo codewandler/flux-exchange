@@ -62,6 +62,15 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   builds no request of its own, and the server composition that owns an HTTP client may not name
   `connector_pack`; the three enforcement mechanisms and their blind spots are in
   [`invoke.md`](designs/invoke.md).
+- **Enforced in code.** The supervised single-user composition has a separate native management
+  boundary authenticated to the launching operating-system account. Its local operator mapping
+  exists only inside that dispatcher; it is not an HTTP identity provider and is unavailable to
+  `--dev`, hosted traffic and another account. The verified Exchange helper reads requested input
+  directly from `/dev/tty` or the Windows console and sends it only over that owner-authenticated
+  connection, while Flux receives a value-free result capability. Service Account handoff uses a
+  distinct one-way writer, so neither vendor values nor the one-time credential enter ordinary
+  JSON, argv, environment, standard streams or supervisor state. The provider contract is in
+  [`local-release-v1.md`](designs/local-release-v1.md).
 - **Deployment-dependent.** The filesystem, Fly volume, snapshots, logs, GitHub repository and CI
   runners are trusted operator/platform boundaries. A process running as `root`, a platform
   administrator, a readable backup or a compromised workflow can bypass application-level
@@ -155,10 +164,13 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
 
 ## Credentials and persistent state
 
-- **Enforced in code.** The file credential store creates a `0700` parent and `0600` file, re-checks
-  both modes on open, refuses a widened mode rather than repairing it, resolves symlinks and `..`,
-  and refuses a path inside a Git working tree. It never falls back to an in-memory store when a
-  configured path is missing or unusable; see
+- **Enforced in code.** Production discovers its native state root from the effective uid's account
+  record on Linux/macOS or the current account's Local AppData known folder on Windows, never from
+  inherited `HOME`, `XDG_STATE_HOME`, `USERPROFILE` or `LOCALAPPDATA`. Path traversal refuses
+  symlinks/reparse points, foreign ownership, untrusted-writable ancestors and widened owner-only
+  metadata rather than repairing any of them. The file credential store creates an owner-only
+  parent and file, re-checks their metadata on open and refuses a path inside a Git working tree. It
+  never falls back to an in-memory store when a configured path is missing or unusable; see
   [`credentials.rs`](../crates/exchange-host/src/credentials.rs).
 - **Enforced in code.** Writes use a sibling temporary, `fsync` and rename so a crash does not leave
   a truncated store. Delete rewrites immediately, and connection rotation replaces a credential
