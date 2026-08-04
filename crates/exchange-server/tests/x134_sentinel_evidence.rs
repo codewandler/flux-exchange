@@ -198,7 +198,7 @@ impl Server {
         response
     }
 
-    fn abort_secret_json(&self, cookie: &str, bytes: &[u8]) {
+    fn abort_secret_json(&self, cookie: &str, bytes: &[u8]) -> Vec<u8> {
         let mut stream = connect(self.address);
         let header = format!(
             "POST /api/connections/intercom/plan HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nCookie: {cookie}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -210,7 +210,14 @@ impl Server {
             .expect("aborted request header");
         stream.write_all(bytes).expect("aborted request bytes");
         stream.flush().expect("flush aborted request bytes");
-        let _ = stream.shutdown(Shutdown::Both);
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("half-close truncated request body");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("server observed EOF and closed the truncated request");
+        response
     }
 
     fn crash(mut self) -> PathBuf {
@@ -251,8 +258,12 @@ fn transformed_secret_sentinels_never_enter_refusal_abort_crash_or_restart_outpu
         assert_forms_absent(&response, &forms, Path::new("HTTP refusal"));
     }
 
-    first.abort_secret_json(&cookie, &raw);
-    std::thread::sleep(Duration::from_millis(50));
+    let abort_response = first.abort_secret_json(&cookie, &raw);
+    assert_forms_absent(
+        &abort_response,
+        &forms,
+        Path::new("truncated-request terminal response"),
+    );
 
     let mut in_flight = connect(first.address);
     let crash_query = std::str::from_utf8(&forms[2]).expect("ASCII crash query sentinel");
