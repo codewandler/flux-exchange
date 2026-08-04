@@ -61,6 +61,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- **The datasource vocabulary now follows cross-repository Decision 0006** (X-130). The concepts
+  table's last ambiguous owner cell is resolved: vendor-data Datasource Definitions belong to the
+  connector package, Flux keeps the wire vocabulary and the consuming seam, and a tenant Datasource
+  is a published connector datasource member bound to a connection label with optional
+  entity/filter scoping, frozen at App install. Exchange serves schema/list/get through the
+  existing admission gate and owns tenant authorization and connection resolution, never retrieval
+  semantics. The released-domain audit's upstream gap now points at chartered connector work, the
+  installed-apps design records that `Datasource.kind` becomes a published member reference in
+  `oip` form, and X-131–X-133 file the upstream-gated validation, read-seam and
+  effective-catalogue work.
+
 - **The rich-runtime program now has one official integration execution placement** (X-124).
   Exchange owns authenticated effective Service Account discovery, invocation, rich runtime
   execution and lifecycle; Flux contributes its guarded substrate and embedded client without a

@@ -71,7 +71,14 @@ and connection instance at dispatch.
 The server builds one supervised `flux_app::App` per active installation revision. Its tool registry
 contains exactly the frozen operation adapters. Datasource revisions are frozen into the same
 installation boundary; a package requiring one refuses until its binding exists, and a future live
-retrieval adapter can expose only that frozen record. The Program and each Agent declaration
+retrieval adapter can expose only that frozen record.
+
+`Datasource.kind` is today the free-form String X-108 shipped. Once the upstream connector
+datasource surface ships (flux-roadmap Decision 0006; the connectors vendor-datasource-declarations
+design), `put_datasource` validates it as a reference to a published connector datasource member in
+`oip` form (X-131). A binding names a member reference, never vendor fields: which entities a
+vendor exposes and how to read them stays the connector package's declaration, while the binding
+carries only the member reference, the connection label and optional entity/filter scoping. The Program and each Agent declaration
 apply an additional upstream capability ceiling. The Flux execution environment carries the
 installed App identity, not the human who happened to activate it. Chat and event delivery enter
 through `App::deliver`; no second interpreter or request builder exists.
