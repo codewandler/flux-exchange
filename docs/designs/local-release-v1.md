@@ -1,8 +1,11 @@
-# Local Exchange release protocol v1
+# Local Exchange release protocol v2 (trust v1)
 
-This document is the provider-owned wire contract for X-126 and X-128. Exchange owns these names,
+This filename is retained so existing story links remain stable. This document is the provider-owned
+wire contract for X-126, X-128 and X-134. Exchange owns these names,
 fields, bounds and conformance cases. Flux C-510 consumes them verbatim; a Flux document or type may
-describe how it responds, but cannot define another shape under the same or a competing v1 name.
+describe how it responds, but cannot define another shape under the same or a competing versioned
+name. The long-lived root metadata remains `exchange.release-trust.v1`; channel, manifest,
+compatibility and readiness use v2.
 
 ## Canonical JSON
 
@@ -18,7 +21,7 @@ Arrays are ordered as stated; changing their order changes the signed bytes. All
 no fractional seconds. `origin` is always exactly
 `https://github.com/codewandler/flux-exchange`.
 
-Every JSON integer in v1 is `0..=9007199254740991`, the largest integer interoperable across RFC
+Every JSON integer in this release contract is `0..=9007199254740991`, the largest integer interoperable across RFC
 8785 implementations. A narrower field keeps its narrower bound. A value that may need all of a
 platform `u64` is instead a canonical decimal string: ASCII digits only, no sign or leading zero,
 1..=20 bytes, and numerically within the stated bound. `now` is read from an injected/testable UTC
@@ -42,7 +45,7 @@ Strings which reach filenames or selection have closed grammars:
   `^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$`, contains no `..`, is 1..=128 bytes, and is
   unique under ASCII case-folding.
 
-The exact six protocol ids in this v1 are:
+The exact eight protocol ids in this v2 release contract are:
 
 | Field | Required id | Provider wire contract |
 |---|---|---|
@@ -50,19 +53,21 @@ The exact six protocol ids in this v1 are:
 | `effective_catalogue_response` | `exchange.effective-catalogue-response.v1` | `GET /api/catalogue/effective` and `routes::catalogue::view::EffectiveCatalogue` |
 | `invoke_request` | `exchange.invoke-request.v1` | `POST /api/operations/{operation}/invoke`, optional sole `connection` query, raw operation JSON body |
 | `invoke_response` | `exchange.invoke-response.v1` | the success `exchange_host::Invocation` and closed HTTP refusal variants on that route |
-| `connection_plan` | `exchange.connection-plan.v1` | X-125's plan and submission fixture |
-| `supervisor` | `exchange.supervisor-ready.v1` | X-128's one-shot record and inherited-handle ABI below |
+| `connection_plan` | `exchange.connection-plan.v2` | X-134's non-secret plan and owner-bound submission fixture |
+| `local_management` | `exchange.local-management.v1` | X-134's FXLM owner-management fixture |
+| `service_account_handoff` | `exchange.service-account-handoff.v1` | X-134's exact one-frame FXSA handoff fixture |
+| `supervisor` | `exchange.supervisor-ready.v2` | X-128's unchanged one-shot transport with the v2 inventory below |
 
 X-129 binds the four already-delivered HTTP identities to those exact routes/types and bidirectional
-wire tests. X-125 binds the plan id when it delivers that still-ready protocol. An implementation
-cannot substitute a package version or advertise an id whose provider fixture/type test is absent.
+wire tests. X-134 supersedes X-125's secret-bearing submission and binds the v2 plan plus the two
+owner-bound protocols. An implementation cannot substitute a package version or advertise an id
+whose provider fixture/type test is absent.
 
-This exact six-field object is implementation evidence for the currently delivered provider slice,
-not authorization to publish the first production channel. Decision 0007 requires X-134 to implement
-and revalidate the canonical compatibility revision for owner-bound local management, direct secret
-insertion and the one-shot Service Account credential-handoff protocol. The first public release must
-carry those final provider bytes and native fixtures. It cannot silently add an unknown seventh field
-to this exact v1 object or reuse an existing identity for changed semantics.
+This exact eight-field object is the only publishable first-production inventory. The merged
+six-field v1 object remains unpublished implementation evidence. Decision 0007 requires X-134 to
+implement and revalidate these owner-bound local-management, direct-secret and one-shot Service
+Account handoff bytes before X-126 publishes. The first public release cannot omit a field, add an
+unknown ninth field or reuse an existing identity for changed semantics.
 
 ### HTTP v1 compatible-change policy
 
@@ -155,11 +160,11 @@ final verifier schema and independently reviewed non-test values are approved by
 ## Stable channel
 
 The channel document is named `flux-exchange-release-channel.json`, is at most 256 KiB, and has
-schema identity `exchange.release-channel.v1`:
+schema identity `exchange.release-channel.v2`:
 
 ```json
 {
-  "schema": "exchange.release-channel.v1",
+  "schema": "exchange.release-channel.v2",
   "channel": "stable",
   "origin": "https://github.com/codewandler/flux-exchange",
   "generation": 1,
@@ -179,8 +184,10 @@ schema identity `exchange.release-channel.v1`:
         "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
         "invoke_request": "exchange.invoke-request.v1",
         "invoke_response": "exchange.invoke-response.v1",
-        "connection_plan": "exchange.connection-plan.v1",
-        "supervisor": "exchange.supervisor-ready.v1"
+        "connection_plan": "exchange.connection-plan.v2",
+        "local_management": "exchange.local-management.v1",
+        "service_account_handoff": "exchange.service-account-handoff.v1",
+        "supervisor": "exchange.supervisor-ready.v2"
       }
     }
   ]
@@ -200,7 +207,7 @@ Each channel signature is named
 `flux-exchange-release-channel.json.<channel-key-id>.minisig` and is at most 4 KiB. Owner-only state
 retains one global greatest `{generation, sha256}` for `stable`; a trust version or signer rotation
 never creates a new channel-generation namespace or lowers that floor. After that authenticated
-metadata floor advances, selection filters only by Flux's compiled support for all six protocol
+metadata floor advances, selection filters only by Flux's compiled support for all eight protocol
 fields, then chooses the greatest compatible SemVer. A valid channel with no compatible release is
 a named incompatibility after its higher generation/hash has been durably accepted; it cannot be
 followed by a lower generation merely because selection failed.
@@ -249,11 +256,11 @@ remote process-revocation channel.
 ## Release manifest
 
 The immutable-tag document is named `flux-exchange-release-manifest.json`, is at most 256 KiB, and
-has schema identity `exchange.release-manifest.v1`:
+has schema identity `exchange.release-manifest.v2`:
 
 ```json
 {
-  "schema": "exchange.release-manifest.v1",
+  "schema": "exchange.release-manifest.v2",
   "origin": "https://github.com/codewandler/flux-exchange",
   "tag": "refs/tags/vX.Y.Z",
   "version": "X.Y.Z",
@@ -264,8 +271,10 @@ has schema identity `exchange.release-manifest.v1`:
     "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
     "invoke_request": "exchange.invoke-request.v1",
     "invoke_response": "exchange.invoke-response.v1",
-    "connection_plan": "exchange.connection-plan.v1",
-    "supervisor": "exchange.supervisor-ready.v1"
+    "connection_plan": "exchange.connection-plan.v2",
+    "local_management": "exchange.local-management.v1",
+    "service_account_handoff": "exchange.service-account-handoff.v1",
+    "supervisor": "exchange.supervisor-ready.v2"
   },
   "signing_key_ids": ["flux-exchange-release-2026-01"],
   "assets": [
@@ -304,7 +313,7 @@ total. `other_members` contains 0..=15 entries sorted by path and, with the exec
 archive member set. Paths are relative single-root UTF-8 paths of at most 240 bytes. The complete
 path, collision, format and digest rules remain acceptance criteria in X-126.
 
-Provenance is deliberately absent from the v1 manifest and client/offline set. Minisign threshold
+Provenance is deliberately absent from the v2 manifest and client/offline set. Minisign threshold
 signatures authenticate canonical metadata and the signed archive/executable SHA-256 values close
 client identity. Exchange CI still emits and verifies bounded repository/workflow provenance as
 publication evidence tied to the immutable tag and source commit, but Flux neither downloads,
@@ -317,7 +326,7 @@ client trust root.
 
 ```json
 {
-  "schema": "exchange.compatibility.v1",
+  "schema": "exchange.compatibility.v2",
   "release": {
     "tag": "refs/tags/vX.Y.Z",
     "version": "X.Y.Z",
@@ -329,8 +338,10 @@ client trust root.
     "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
     "invoke_request": "exchange.invoke-request.v1",
     "invoke_response": "exchange.invoke-response.v1",
-    "connection_plan": "exchange.connection-plan.v1",
-    "supervisor": "exchange.supervisor-ready.v1"
+    "connection_plan": "exchange.connection-plan.v2",
+    "local_management": "exchange.local-management.v1",
+    "service_account_handoff": "exchange.service-account-handoff.v1",
+    "supervisor": "exchange.supervisor-ready.v2"
   }
 }
 ```
@@ -339,7 +350,7 @@ X-128's one-shot record is at most 16 KiB. This Linux example shows the exact co
 
 ```json
 {
-  "schema": "exchange.supervisor-ready.v1",
+  "schema": "exchange.supervisor-ready.v2",
   "release": {
     "tag": "refs/tags/vX.Y.Z",
     "version": "X.Y.Z",
@@ -352,8 +363,10 @@ X-128's one-shot record is at most 16 KiB. This Linux example shows the exact co
     "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
     "invoke_request": "exchange.invoke-request.v1",
     "invoke_response": "exchange.invoke-response.v1",
-    "connection_plan": "exchange.connection-plan.v1",
-    "supervisor": "exchange.supervisor-ready.v1"
+    "connection_plan": "exchange.connection-plan.v2",
+    "local_management": "exchange.local-management.v1",
+    "service_account_handoff": "exchange.service-account-handoff.v1",
+    "supervisor": "exchange.supervisor-ready.v2"
   },
   "bind": { "scheme": "http", "host": "127.0.0.1", "port": 1 },
   "process": {
@@ -477,14 +490,14 @@ It runs the identical canonicalization, thresholds, time validity, rollback, new
 selection, bounds, signature, digest, archive and executable checks. It bypasses only the GitHub
 transport. Provenance is publication evidence and is not an offline/client input.
 
-X-126 materializes provider fixtures under `tests/fixtures/exchange-release-v1/`: canonical positive
+X-126 materializes provider fixtures under `tests/fixtures/exchange-release-v2/`: canonical positive
 trust/channel/manifest/compatibility/readiness bytes, test-only signatures and bounded archives;
 plus a machine-readable mutation inventory covering duplicate/unknown/non-canonical fields,
 threshold and role failures, expiry/future/rollback/equivocation, 129 releases, incompatible-newest
 selection, manifest disagreement, archive/path/digest failures and every rejected redirect branch.
 Flux vendors those exact fixture bytes with their Exchange commit and fixture-set SHA-256 and runs
 the same expected outcomes. A byte or expected-outcome difference is a cross-repository contract
-failure, not a reason to create another Flux-owned v1 fixture.
+failure, not a reason to create another Flux-owned v2 fixture.
 
 `fixture-set.json.exchange_commit` names the committed provider-behavior and native-binding
 baseline whose generated bytes the inventory records. It does not claim to be the direct parent of
