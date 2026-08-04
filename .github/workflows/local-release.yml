@@ -216,7 +216,7 @@ jobs:
           fi
           ./scripts/check-dev-signin.sh
 
-      - name: Build identified server and assert compatibility JSON
+      - name: Build identified server and verify exact compatibility identity
         shell: bash
         env:
           FLUX_EXCHANGE_RELEASE_SOURCE_COMMIT: ${{ needs.preflight.outputs.source }}
@@ -227,9 +227,47 @@ jobs:
           suffix=''
           [ "$RUNNER_OS" != Windows ] || suffix='.exe'
           executable="target/${{ matrix.target }}/release/flux-exchange${suffix}"
-          compatibility="$($executable compatibility --json)"
-          [ "$(printf '%s' "$compatibility" | jq -r '.release.source_commit')" = '${{ needs.preflight.outputs.source }}' ]
-          [ "$(printf '%s' "$compatibility" | jq -r '.release.build_id')" = '${{ needs.preflight.outputs.build_id }}' ]
+          python3 - "$RELEASE_TAG" '${{ needs.preflight.outputs.version }}' \
+            '${{ needs.preflight.outputs.source }}' '${{ needs.preflight.outputs.build_id }}' \
+            >compatibility-entry.json <<'PY'
+          import json
+          import sys
+
+          tag, version, source_commit, build_id = sys.argv[1:]
+          entry = {
+              "tag": f"refs/tags/{tag}",
+              "version": version,
+              "source_commit": source_commit,
+              "build_id": build_id,
+              # These fields are outside the compatibility command. Their closed production values
+              # are generated only after every native archive has reached the publish job.
+              "manifest_sha256": "0" * 64,
+              "release_key_ids": ["pre-manifest-native-verification"],
+              "protocols": {
+                  "exchange_api": "exchange.api.v1",
+                  "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
+                  "invoke_request": "exchange.invoke-request.v1",
+                  "invoke_response": "exchange.invoke-response.v1",
+                  "connection_plan": "exchange.connection-plan.v1",
+                  "supervisor": "exchange.supervisor-ready.v1",
+              },
+          }
+          print(json.dumps(entry, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+          PY
+          executable_sha256="$(python3 - "$executable" <<'PY'
+          import hashlib
+          import sys
+
+          digest = hashlib.sha256()
+          with open(sys.argv[1], "rb") as executable:
+              for chunk in iter(lambda: executable.read(1024 * 1024), b""):
+                  digest.update(chunk)
+          print(digest.hexdigest())
+          PY
+          )"
+          cargo run --locked -p flux-exchange-release -- verify-compatibility \
+            --executable "$executable" --entry compatibility-entry.json \
+            --executable-sha256 "$executable_sha256"
           scripts/release-package.sh '${{ needs.preflight.outputs.version }}' '${{ matrix.target }}' "$executable" dist
 
       - name: Upload one native archive
@@ -328,11 +366,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft >release-state.json 2>/dev/null; then
+          expected="$(find release -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          release_was_public=false
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets >release-state.json 2>/dev/null; then
             if [ "$(jq -r '.isDraft' release-state.json)" = false ]; then
+              release_was_public=true
+              actual="$(jq -r '.assets[].name' release-state.json | LC_ALL=C sort)"
+              [ "$actual" = "$expected" ] || { echo '::error::public immutable release asset set disagrees'; diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"); exit 1; }
               mkdir existing
-              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir existing
+              while IFS= read -r asset; do
+                [ -z "$asset" ] || scripts/release-download.sh "$RELEASE_TAG" "$asset" "existing/$asset"
+              done <<<"$expected"
               diff -rq release existing
+              for artifact in existing/*; do
+                gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+                  --source-digest '${{ needs.preflight.outputs.source }}' --source-ref "refs/tags/$RELEASE_TAG" \
+                  --signer-workflow codewandler/flux-exchange/.github/workflows/local-release.yml \
+                  --deny-self-hosted-runners
+              done
             else
               gh release upload "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
             fi
@@ -341,10 +392,11 @@ jobs:
               --title "Flux Exchange ${{ needs.preflight.outputs.version }}" --notes-file /dev/null --draft
             gh release upload "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
           fi
-          expected="$(find release -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
           actual="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
           [ "$actual" = "$expected" ] || { echo '::error::draft release asset set is not closed'; diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"); exit 1; }
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          if [ "$release_was_public" = false ]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          fi
 
       - name: Re-download immutable assets through one 302 and verify provenance
         shell: bash

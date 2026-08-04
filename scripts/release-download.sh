@@ -49,7 +49,7 @@ byte_limit_for() {
 
 require_bounded_curl() {
   local curl_version curl_major curl_minor _curl_patch
-  curl_version="$(curl --version | awk 'NR == 1 { print $2 }')"
+  curl_version="$(curl --disable --version | awk 'NR == 1 { print $2 }')"
   IFS=. read -r curl_major curl_minor _curl_patch <<<"$curl_version"
   [[ "$curl_major" =~ ^[0-9]+$ && "$curl_minor" =~ ^[0-9]+$ ]] || fail 'cannot determine curl version for bounded download'
   if (( curl_major < 8 || (curl_major == 8 && curl_minor < 4) )); then
@@ -88,7 +88,7 @@ url="https://github.com/codewandler/flux-exchange/releases/download/${release_ta
 headers="$(mktemp "${TMPDIR:-/tmp}/flux-exchange-headers.XXXXXX")"
 body="$(mktemp "${TMPDIR:-/tmp}/flux-exchange-body.XXXXXX")"
 trap 'rm -f -- "$headers" "$body"' EXIT
-status="$(curl --silent --show-error --noproxy '*' --proxy '' --proxy-header 'Proxy-Authorization:' \
+status="$(curl --disable --silent --show-error --noproxy '*' --proxy '' --proxy-header 'Proxy-Authorization:' \
   --header 'Authorization:' --header 'Cookie:' --cookie '' --proto '=https' --max-redirs 0 --dump-header "$headers" \
   --max-filesize 65536 --output /dev/null --write-out '%{http_code}' "$url")"
 [ "$status" = 302 ] || fail "initial GitHub response was HTTP $status, expected 302"
@@ -99,7 +99,7 @@ location="$(sed -nE 's/^[Ll]ocation:[[:space:]]*([^\r]*)\r?$/\1/p' "$headers")"
 # this guard is what prevents the network client itself from following an inadmissible location.
 python3 "$root/scripts/release-validate-redirect.py" "$location"
 
-final_status="$(curl --silent --show-error --noproxy '*' --proxy '' --proxy-header 'Proxy-Authorization:' \
+final_status="$(curl --disable --silent --show-error --noproxy '*' --proxy '' --proxy-header 'Proxy-Authorization:' \
   --header 'Authorization:' --header 'Cookie:' --cookie '' --proto '=https' --max-redirs 0 \
   --max-filesize "$byte_limit" --output "$body" \
   --write-out '%{http_code}' "$location")"

@@ -45,8 +45,31 @@ PY
   grep -Fq 'attest-build-provenance@' "$workflow_path" || fail 'provenance is absent before exposure'
   grep -Fq 'group: flux-exchange-stable-channel' "$workflow_path" || fail 'stable-channel writes are not serialized'
   grep -Fq 'scripts/release-download.sh' "$workflow_path" || fail 'post-publication verification bypasses the one-302 transport'
+  grep -Fq 'cargo run --locked -p flux-exchange-release -- verify-compatibility' "$workflow_path" || fail 'native artifacts bypass the production compatibility verifier'
+  grep -Fq -- '--executable-sha256 "$executable_sha256"' "$workflow_path" || fail 'compatibility verification is not bound to independently digested executable bytes'
+  grep -Fq '"tag": f"refs/tags/{tag}"' "$workflow_path" || fail 'native compatibility expectation is not bound to the exact tag'
+  grep -Fq '"version": version' "$workflow_path" || fail 'native compatibility expectation is not bound to the exact version'
+  grep -Fq '"source_commit": source_commit' "$workflow_path" || fail 'native compatibility expectation is not bound to the exact source commit'
+  grep -Fq '"build_id": build_id' "$workflow_path" || fail 'native compatibility expectation is not bound to the exact build ID'
+  for protocol in \
+    '"exchange_api": "exchange.api.v1"' \
+    '"effective_catalogue_response": "exchange.effective-catalogue-response.v1"' \
+    '"invoke_request": "exchange.invoke-request.v1"' \
+    '"invoke_response": "exchange.invoke-response.v1"' \
+    '"connection_plan": "exchange.connection-plan.v1"' \
+    '"supervisor": "exchange.supervisor-ready.v1"'; do
+    grep -Fq "$protocol" "$workflow_path" || fail "native compatibility expectation omits $protocol"
+  done
   grep -Fq '[ "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" ]' "$workflow_path" || fail 'resumable publication is not bound to the immutable tag ref used by provenance'
   grep -Fq '[ "$GITHUB_SHA" = "$source" ]' "$workflow_path" || fail 'checked-out source is not bound to the workflow provenance SHA'
+  if grep -Fq 'gh release download' "$workflow_path"; then
+    fail 'workflow uses unbounded authenticated release downloads'
+  fi
+  grep -Fq 'gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets' "$workflow_path" || fail 'immutable resume does not inspect names before downloading bytes'
+  if grep -F '$(curl ' "$download_path" | grep -Fv '$(curl --disable ' >/dev/null; then
+    fail 'a curl invocation can load ambient configuration'
+  fi
+  [ "$(grep -Fc 'curl --disable ' "$download_path")" = 3 ] || fail 'release transport has an unexpected curl invocation set'
   grep -Fq -- '--max-filesize 65536' "$download_path" || fail 'initial redirect response body is unbounded'
   grep -Fq -- '--max-filesize "$byte_limit"' "$download_path" || fail 'release transport does not bound response bytes while reading'
   if grep -Eq 'releases/(latest|download/latest)|curl[^\n]*(-L|--location)([[:space:]]|$)' "$workflow_path"; then
@@ -81,11 +104,23 @@ if [ "${1:-}" = --self-test ]; then
   sed -i.bak '/verify-staged/d' "$scratch/workflow.yml"
   if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted staged-verifier removal'; fi
   cp "$workflow" "$scratch/workflow.yml"
+  sed -i.bak '/verify-compatibility/d' "$scratch/workflow.yml"
+  if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted native production compatibility-verifier removal'; fi
+  cp "$workflow" "$scratch/workflow.yml"
+  sed -i.bak '/exchange\.invoke-response\.v1/d' "$scratch/workflow.yml"
+  if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted a missing native protocol binding'; fi
+  cp "$workflow" "$scratch/workflow.yml"
+  printf '%s\n' '          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"' >>"$scratch/workflow.yml"
+  if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted an unbounded authenticated immutable-resume download'; fi
+  cp "$workflow" "$scratch/workflow.yml"
   sed -i.bak '/GITHUB_REF.*refs\/tags/d' "$scratch/workflow.yml"
   if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted provenance tag-ref binding removal'; fi
   cp "$root/scripts/release-download.sh" "$scratch/release-download.sh"
   sed -i.bak '/--max-filesize/d' "$scratch/release-download.sh"
   if (check "$workflow" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted receive-time byte-bound removal'; fi
+  cp "$root/scripts/release-download.sh" "$scratch/release-download.sh"
+  sed -i.bak '0,/curl --disable /s//curl /' "$scratch/release-download.sh"
+  if (check "$workflow" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted curl configuration loading'; fi
   printf 'PASS check-local-release self-test\n'
   exit 0
 fi
