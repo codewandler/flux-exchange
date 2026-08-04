@@ -33,9 +33,12 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::codec::{Direction, Frame, Opcode, StreamDecoder};
-use super::dispatcher::{deadline_frame, Transport};
+use super::dispatcher::{expired_reply, Transport};
 use super::service_account::{OneShotWriter, WriterRefusal};
-use super::{ActiveSession, Dispatcher, SessionAdvance, SessionBegin, TransactionCoordinator};
+use super::{
+    ActiveSession, DeadlineController, Dispatcher, SessionAdvance, SessionBegin,
+    TransactionCoordinator,
+};
 use crate::state::AppState;
 
 const PIPE_PREFIX: &str = r"\\.\pipe\flux-exchange-local-management-v1-";
@@ -346,16 +349,21 @@ impl LocalManagement {
             let Ok(mut connection) = self.endpoint.accept_authenticated().await else {
                 return;
             };
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
-            if tokio::time::timeout_at(
-                deadline,
-                dispatch_one(&mut connection, &self.dispatcher, &self.tenant),
-            )
-            .await
-            .is_err()
+            let deadline = DeadlineController::start();
+            if let Err(expired) = deadline
+                .race(dispatch_one(
+                    &mut connection,
+                    &self.dispatcher,
+                    &self.tenant,
+                    &deadline,
+                ))
+                .await
             {
-                let _ = connection.pipe.write_all(&deadline_frame()).await;
-                let _ = connection.pipe.shutdown().await;
+                let (reply, _) = expired_reply(expired).into_parts();
+                let _ = deadline
+                    .race_response(connection.pipe.write_all(&reply))
+                    .await;
+                let _ = deadline.race_response(connection.pipe.shutdown()).await;
             }
             // The endpoint is rearmed only after both the pipe and its pinned client process have
             // been dropped, so no attachment can be associated with the next connection.
@@ -371,6 +379,7 @@ async fn dispatch_one(
     connection: &mut AuthenticatedPipe,
     dispatcher: &Dispatcher,
     tenant: &exchange_host::Tenant,
+    deadline: &DeadlineController,
 ) -> std::io::Result<()> {
     let mut prefix = [0_u8; 4];
     let prefix_length = read_prefix(&mut connection.pipe, &mut prefix).await?;
@@ -445,8 +454,10 @@ async fn dispatch_one(
         };
         if received == 0 {
             let _ = decoder.finish();
-            if let Some(session) = &active {
-                session.abort().await;
+            if deadline.may_abort() {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
             }
             return Ok(());
         }
@@ -459,8 +470,10 @@ async fn dispatch_one(
         while let Some(request) = match decoder.next_frame() {
             Ok(frame) => frame,
             Err(_) => {
-                if let Some(session) = &active {
-                    session.abort().await;
+                if deadline.may_abort() {
+                    if let Some(session) = &active {
+                        session.abort().await;
+                    }
                 }
                 return Ok(());
             }
@@ -470,24 +483,45 @@ async fn dispatch_one(
                     SessionAdvance::Awaiting => {}
                     SessionAdvance::Terminal(reply) => {
                         let (response, _) = reply.into_parts();
-                        connection.pipe.write_all(&response).await?;
-                        connection.pipe.shutdown().await?;
+                        deadline
+                            .race_response(connection.pipe.write_all(&response))
+                            .await
+                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+                        deadline
+                            .race_response(connection.pipe.shutdown())
+                            .await
+                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
                         return Ok(());
                     }
                 }
             } else {
                 match dispatcher
-                    .begin_frame_with_writer(Transport::Native, tenant, request, writer.take())
+                    .begin_frame_with_writer(
+                        Transport::Native,
+                        tenant,
+                        request,
+                        writer.take(),
+                        deadline,
+                    )
                     .await
                 {
                     SessionBegin::Terminal(reply) => {
                         let (response, _) = reply.into_parts();
-                        connection.pipe.write_all(&response).await?;
-                        connection.pipe.shutdown().await?;
+                        deadline
+                            .race_response(connection.pipe.write_all(&response))
+                            .await
+                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
+                        deadline
+                            .race_response(connection.pipe.shutdown())
+                            .await
+                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
                         return Ok(());
                     }
                     SessionBegin::Active { response, session } => {
-                        connection.pipe.write_all(&response).await?;
+                        deadline
+                            .race_response(connection.pipe.write_all(&response))
+                            .await
+                            .map_err(|()| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
                         active = Some(session);
                     }
                 }

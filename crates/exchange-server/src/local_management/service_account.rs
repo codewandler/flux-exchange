@@ -6,6 +6,7 @@
 //! crash window in which either a principal or a receipt exists alone. The retained store exposes
 //! that atomic seam directly, so this adapter never opens or maintains a second ledger.
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,7 @@ use flux_exchange::service_account::{
 use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::deadline::{DeadlineController, ReceiptIdentity, Unresolved};
 use super::service_account_handoff::HandoffFrame;
 
 pub(crate) const MINT_OPCODE: u16 = 0x0020;
@@ -249,6 +251,23 @@ pub(crate) trait MintPort: Send + Sync {
         handoff: &mut dyn TokenHandoff,
     ) -> Result<MintOutcome, MintPortRefusal>;
 
+    fn mint_observed(
+        &self,
+        actor: &Principal,
+        request: &MintRequest,
+        receipt_id: ReceiptId,
+        handoff: &mut dyn TokenHandoff,
+        decided: &mut dyn FnMut(ReceiptId),
+    ) -> Result<MintOutcome, MintPortRefusal> {
+        let outcome = self.mint(actor, request, receipt_id, handoff)?;
+        match &outcome {
+            MintOutcome::Committed { receipt_id, .. } | MintOutcome::Replay { receipt_id, .. } => {
+                decided(receipt_id.clone());
+            }
+        }
+        Ok(outcome)
+    }
+
     fn query(
         &self,
         tenant: &Tenant,
@@ -286,11 +305,22 @@ impl MintPort for RetainedMintPort {
         receipt_id: ReceiptId,
         handoff: &mut dyn TokenHandoff,
     ) -> Result<MintOutcome, MintPortRefusal> {
+        self.mint_observed(actor, request, receipt_id, handoff, &mut |_| {})
+    }
+
+    fn mint_observed(
+        &self,
+        actor: &Principal,
+        request: &MintRequest,
+        receipt_id: ReceiptId,
+        handoff: &mut dyn TokenHandoff,
+        decided: &mut dyn FnMut(ReceiptId),
+    ) -> Result<MintOutcome, MintPortRefusal> {
         let as_of = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| MintPortRefusal::Internal)?;
         let as_of = i64::try_from(as_of.as_secs()).map_err(|_| MintPortRefusal::Internal)?;
-        let outcome = self.store.mint_with_receipt(
+        let outcome = self.store.mint_with_receipt_observed(
             actor,
             request.id(),
             Expiry {
@@ -299,6 +329,11 @@ impl MintPort for RetainedMintPort {
             },
             receipt_id.bytes(),
             |token| handoff.write_token(token),
+            |bytes| {
+                if let Some(receipt) = ReceiptId::from_bytes(bytes) {
+                    decided(receipt);
+                }
+            },
         );
         match outcome {
             Ok(DurableMintOutcome::Committed { id, receipt_id }) => Ok(MintOutcome::Committed {
@@ -375,6 +410,24 @@ impl ServiceAccountCeremony {
     }
 
     /// Handle one admitted native opcode as this connection's sole logical operation.
+    pub(crate) fn handle_with_deadline(
+        &self,
+        actor: &Principal,
+        opcode: u16,
+        payload: &[u8],
+        writer: Option<Box<dyn OneShotWriter>>,
+        deadline: &DeadlineController,
+    ) -> ServiceAccountFrame {
+        match opcode {
+            MINT_OPCODE => self.mint(actor, payload, writer, deadline),
+            QUERY_OPCODE if writer.is_none() => self.query(actor.tenant(), payload, deadline),
+            QUERY_OPCODE => refusal(Refusal::UnexpectedFrame),
+            _ => refusal(Refusal::UnexpectedFrame),
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)] // The source-backed integration suite calls this compatibility test seam.
     pub(crate) fn handle(
         &self,
         actor: &Principal,
@@ -382,12 +435,7 @@ impl ServiceAccountCeremony {
         payload: &[u8],
         writer: Option<Box<dyn OneShotWriter>>,
     ) -> ServiceAccountFrame {
-        match opcode {
-            MINT_OPCODE => self.mint(actor, payload, writer),
-            QUERY_OPCODE if writer.is_none() => self.query(actor.tenant(), payload),
-            QUERY_OPCODE => refusal(Refusal::UnexpectedFrame),
-            _ => refusal(Refusal::UnexpectedFrame),
-        }
+        self.handle_with_deadline(actor, opcode, payload, writer, &DeadlineController::start())
     }
 
     fn mint(
@@ -395,6 +443,7 @@ impl ServiceAccountCeremony {
         actor: &Principal,
         payload: &[u8],
         writer: Option<Box<dyn OneShotWriter>>,
+        deadline: &DeadlineController,
     ) -> ServiceAccountFrame {
         let Some(writer) = writer else {
             return refusal(Refusal::WriterInvalid);
@@ -415,11 +464,31 @@ impl ServiceAccountCeremony {
             writer: Some(writer),
             written: false,
         };
-        match self.port.mint(actor, &request, receipt_id, &mut handoff) {
+        let invariant = Cell::new(false);
+        let mut decided = |receipt: ReceiptId| {
+            if deadline
+                .decided(service_account_receipt(&receipt), Unresolved::Store)
+                .is_err()
+            {
+                invariant.set(true);
+            }
+        };
+        match self
+            .port
+            .mint_observed(actor, &request, receipt_id, &mut handoff, &mut decided)
+        {
+            Ok(MintOutcome::Committed { id: _, receipt_id }) if invariant.get() => {
+                refusal_with_receipt(Refusal::Internal, receipt_id)
+            }
+            Ok(MintOutcome::Replay { id: _, receipt_id }) if invariant.get() => {
+                refusal_with_receipt(Refusal::Internal, receipt_id)
+            }
             Ok(MintOutcome::Committed { id, receipt_id }) if handoff.written => {
+                deadline.terminal();
                 receipt(id, receipt_id, false)
             }
             Ok(MintOutcome::Replay { id, receipt_id }) if !handoff.written => {
+                deadline.terminal();
                 receipt(id, receipt_id, true)
             }
             Ok(_) => refusal(Refusal::Internal),
@@ -427,18 +496,37 @@ impl ServiceAccountCeremony {
         }
     }
 
-    fn query(&self, tenant: &Tenant, payload: &[u8]) -> ServiceAccountFrame {
+    fn query(
+        &self,
+        tenant: &Tenant,
+        payload: &[u8],
+        deadline: &DeadlineController,
+    ) -> ServiceAccountFrame {
         let request: QueryControl = match canonical(payload) {
             Ok(request) => request,
             Err(()) => return refusal(Refusal::InvalidRequest),
         };
         match self.port.query(tenant, &request.receipt_id) {
             Ok(Some(MintOutcome::Committed { id, receipt_id }))
-            | Ok(Some(MintOutcome::Replay { id, receipt_id })) => receipt(id, receipt_id, true),
+            | Ok(Some(MintOutcome::Replay { id, receipt_id })) => {
+                if deadline
+                    .decided(service_account_receipt(&receipt_id), Unresolved::Store)
+                    .is_err()
+                {
+                    return refusal_with_receipt(Refusal::Internal, receipt_id);
+                }
+                deadline.terminal();
+                receipt(id, receipt_id, true)
+            }
             Ok(None) => refusal(Refusal::InvalidRequest),
             Err(error) => refusal(Refusal::from(error)),
         }
     }
+}
+
+fn service_account_receipt(receipt: &ReceiptId) -> ReceiptIdentity {
+    ReceiptIdentity::from_protocol_bytes(receipt.bytes())
+        .expect("Service Account receipt identities are always nonzero")
 }
 
 struct FxsaHandoff {
@@ -514,6 +602,16 @@ struct ErrorBody {
     status: u16,
 }
 
+#[derive(Serialize)]
+struct PostDecisionErrorBody {
+    code: &'static str,
+    commit: &'static str,
+    receipt_id: ReceiptId,
+    retry: &'static str,
+    schema: &'static str,
+    status: u16,
+}
+
 #[derive(Clone, Copy)]
 enum Refusal {
     InvalidRequest,
@@ -560,6 +658,21 @@ fn refusal(refusal: Refusal) -> ServiceAccountFrame {
             code,
             commit: "none",
             retry,
+            schema: ERROR_SCHEMA,
+            status,
+        },
+    )
+}
+
+fn refusal_with_receipt(refusal: Refusal, receipt_id: ReceiptId) -> ServiceAccountFrame {
+    let (code, status, _) = refusal.tuple();
+    response(
+        ERROR_OPCODE,
+        &PostDecisionErrorBody {
+            code,
+            commit: "query_receipt",
+            receipt_id,
+            retry: "same_proposal",
             schema: ERROR_SCHEMA,
             status,
         },

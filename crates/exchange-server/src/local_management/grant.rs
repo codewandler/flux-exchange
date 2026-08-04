@@ -5,6 +5,7 @@
 //! revisioned host port. Keeping that boundary explicit lets native and hosted dispatchers share
 //! one mutation path without either transport acquiring a second grant representation.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use connector_catalog::{provider, ProviderKey};
@@ -14,6 +15,8 @@ use exchange_host::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+use super::deadline::{DeadlineController, ReceiptIdentity, Unresolved};
 
 pub(crate) const PREVIEW_OPCODE: u16 = 0x0010;
 pub(crate) const CANDIDATE_OPCODE: u16 = 0x0011;
@@ -110,15 +113,33 @@ impl GrantCeremony {
     }
 
     /// Handle one admitted client grant opcode as the connection's sole logical operation.
-    pub(crate) fn handle(&self, tenant: &Tenant, opcode: u16, payload: &[u8]) -> GrantFrame {
+    pub(crate) fn handle_with_deadline(
+        &self,
+        tenant: &Tenant,
+        opcode: u16,
+        payload: &[u8],
+        deadline: &DeadlineController,
+    ) -> GrantFrame {
         match opcode {
-            PREVIEW_OPCODE => self.preview(tenant, payload),
-            APPLY_OPCODE => self.apply(tenant, payload),
-            QUERY_OPCODE => self.query(tenant, payload),
+            PREVIEW_OPCODE => {
+                let frame = self.preview(tenant, payload);
+                deadline.terminal();
+                frame
+            }
+            APPLY_OPCODE => self.apply(tenant, payload, deadline),
+            QUERY_OPCODE => self.query(tenant, payload, deadline),
             // The shared codec has already rejected unknown opcodes. A client sending either
             // server response opcode, or a known opcode in this grant state, is a state refusal.
-            _ => refusal(Refusal::UnexpectedFrame),
+            _ => {
+                deadline.terminal();
+                refusal(Refusal::UnexpectedFrame)
+            }
         }
+    }
+
+    #[cfg(test)]
+    fn handle(&self, tenant: &Tenant, opcode: u16, payload: &[u8]) -> GrantFrame {
+        self.handle_with_deadline(tenant, opcode, payload, &DeadlineController::start())
     }
 
     fn preview(&self, tenant: &Tenant, payload: &[u8]) -> GrantFrame {
@@ -138,7 +159,7 @@ impl GrantCeremony {
         }
     }
 
-    fn apply(&self, tenant: &Tenant, payload: &[u8]) -> GrantFrame {
+    fn apply(&self, tenant: &Tenant, payload: &[u8], deadline: &DeadlineController) -> GrantFrame {
         let request: GrantPreview = match canonical(payload) {
             Ok(request) => request,
             Err(()) => return refusal(Refusal::InvalidRequest),
@@ -150,43 +171,87 @@ impl GrantCeremony {
             Ok(receipt) => receipt,
             Err(()) => return refusal(Refusal::Internal),
         };
-        match self.grants.apply(
+        let invariant = Cell::new(false);
+        let mut decided = |receipt: GrantReceiptId| {
+            if deadline
+                .decided(grant_receipt(receipt), Unresolved::Audit)
+                .is_err()
+            {
+                invariant.set(true);
+            }
+        };
+        match self.grants.apply_observed(
             tenant,
             &request.candidate,
             request.revision,
             request.proposal_digest,
             receipt,
+            &mut decided,
         ) {
-            Ok(receipt) => self.audited_receipt(tenant, receipt),
-            Err(error) => refusal(Refusal::from(error)),
+            Ok(receipt) if invariant.get() => {
+                postdecision_refusal("internal_refusal", 500, receipt.receipt_id)
+            }
+            Ok(receipt) => self.audited_receipt(tenant, receipt, deadline),
+            Err(error) => {
+                deadline.terminal();
+                refusal(Refusal::from(error))
+            }
         }
     }
 
-    fn query(&self, tenant: &Tenant, payload: &[u8]) -> GrantFrame {
+    fn query(&self, tenant: &Tenant, payload: &[u8], deadline: &DeadlineController) -> GrantFrame {
         let request: QueryRequest = match canonical(payload) {
             Ok(request) => request,
             Err(()) => return refusal(Refusal::InvalidRequest),
         };
         match self.grants.query(tenant, request.receipt_id) {
-            Ok(Some(receipt)) => self.audited_receipt(tenant, receipt),
-            Ok(None) => refusal(Refusal::InvalidRequest),
-            Err(error) => refusal(Refusal::from(error)),
+            Ok(Some(receipt)) => {
+                if deadline
+                    .decided(grant_receipt(receipt.receipt_id), Unresolved::Audit)
+                    .is_err()
+                {
+                    return postdecision_refusal("internal_refusal", 500, receipt.receipt_id);
+                }
+                self.audited_receipt(tenant, receipt, deadline)
+            }
+            Ok(None) => {
+                deadline.terminal();
+                refusal(Refusal::InvalidRequest)
+            }
+            Err(error) => {
+                deadline.terminal();
+                refusal(Refusal::from(error))
+            }
         }
     }
 
-    fn audited_receipt(&self, tenant: &Tenant, receipt: GrantApplyReceipt) -> GrantFrame {
+    fn audited_receipt(
+        &self,
+        tenant: &Tenant,
+        receipt: GrantApplyReceipt,
+        deadline: &DeadlineController,
+    ) -> GrantFrame {
         match self.audit.commit(
             tenant,
             &receipt.connector,
             receipt.revision,
             receipt.receipt_id,
         ) {
-            Ok(()) => receipt_frame(receipt),
+            Ok(()) => {
+                deadline.terminal();
+                receipt_frame(receipt)
+            }
             Err(GrantAuditUnavailable) => {
+                deadline.unresolved(Unresolved::Audit);
                 postdecision_refusal("audit_unavailable", 503, receipt.receipt_id)
             }
         }
     }
+}
+
+fn grant_receipt(receipt: GrantReceiptId) -> ReceiptIdentity {
+    ReceiptIdentity::from_protocol_bytes(receipt.protocol_bytes())
+        .expect("grant receipt identities are always nonzero")
 }
 
 fn released(connector: &str) -> bool {

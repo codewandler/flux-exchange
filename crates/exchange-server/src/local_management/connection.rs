@@ -14,6 +14,7 @@ use exchange_host::{
 use serde::{Deserialize, Serialize};
 
 use super::codec::{Direction, Frame, Opcode};
+use super::deadline::{DeadlineController, ReceiptIdentity, Unresolved};
 use super::proposal::{ConnectBegin, CredentialAction, CredentialBegin, ProposalError, TargetFact};
 use super::transaction::{
     Allocation, CoordinatorRefusal, ProposalState, ReceiptId, TransactionCoordinator,
@@ -46,12 +47,23 @@ impl Ceremony {
     }
 
     /// Begin one mutation after transport authentication, or return a terminal replay/refusal.
-    pub(super) async fn begin(&self, tenant: &Tenant, request: Frame) -> BeginOutcome {
+    pub(super) async fn begin(
+        &self,
+        tenant: &Tenant,
+        request: Frame,
+        deadline: &DeadlineController,
+    ) -> BeginOutcome {
         match request.opcode() {
-            Opcode::ConnectBegin => self.begin_connect(tenant, request).await,
-            Opcode::CredentialBegin => self.begin_credential(tenant, request).await,
-            Opcode::ConnectQuery => self.query(tenant, request, Opcode::ConnectReceipt).await,
-            Opcode::CredentialQuery => self.query(tenant, request, Opcode::CredentialReceipt).await,
+            Opcode::ConnectBegin => self.begin_connect(tenant, request, deadline).await,
+            Opcode::CredentialBegin => self.begin_credential(tenant, request, deadline).await,
+            Opcode::ConnectQuery => {
+                self.query(tenant, request, Opcode::ConnectReceipt, deadline)
+                    .await
+            }
+            Opcode::CredentialQuery => {
+                self.query(tenant, request, Opcode::CredentialReceipt, deadline)
+                    .await
+            }
             _ => BeginOutcome::Terminal(refusal("unexpected_frame", 409, "never")),
         }
     }
@@ -72,7 +84,12 @@ impl Ceremony {
         Ok(())
     }
 
-    async fn begin_connect(&self, tenant: &Tenant, request: Frame) -> BeginOutcome {
+    async fn begin_connect(
+        &self,
+        tenant: &Tenant,
+        request: Frame,
+        deadline: &DeadlineController,
+    ) -> BeginOutcome {
         let Some(payload) = request.control_payload() else {
             return BeginOutcome::Terminal(refusal("invalid_request", 400, "never"));
         };
@@ -90,7 +107,7 @@ impl Ceremony {
             provider_digest,
         ) {
             Ok(Some(ProposalState::Committed(receipt))) => {
-                return self.replay(receipt, true).await;
+                return self.replay(receipt, true, deadline).await;
             }
             Ok(Some(ProposalState::Active)) => {
                 return BeginOutcome::Terminal(refusal("connect_busy", 409, "refresh"));
@@ -224,7 +241,12 @@ impl Ceremony {
         .await
     }
 
-    async fn begin_credential(&self, tenant: &Tenant, request: Frame) -> BeginOutcome {
+    async fn begin_credential(
+        &self,
+        tenant: &Tenant,
+        request: Frame,
+        deadline: &DeadlineController,
+    ) -> BeginOutcome {
         let Some(payload) = request.control_payload() else {
             return BeginOutcome::Terminal(refusal("invalid_request", 400, "never"));
         };
@@ -242,7 +264,7 @@ impl Ceremony {
             provider_digest,
         ) {
             Ok(Some(ProposalState::Committed(receipt))) => {
-                return self.replay(receipt, true).await;
+                return self.replay(receipt, true, deadline).await;
             }
             Ok(Some(ProposalState::Active)) => {
                 return BeginOutcome::Terminal(refusal("connect_busy", 409, "refresh"));
@@ -438,7 +460,13 @@ impl Ceremony {
         }
     }
 
-    async fn query(&self, tenant: &Tenant, request: Frame, opcode: Opcode) -> BeginOutcome {
+    async fn query(
+        &self,
+        tenant: &Tenant,
+        request: Frame,
+        opcode: Opcode,
+        deadline: &DeadlineController,
+    ) -> BeginOutcome {
         let Some(payload) = request.control_payload() else {
             return BeginOutcome::Terminal(refusal("invalid_request", 400, "never"));
         };
@@ -451,21 +479,34 @@ impl Ceremony {
         else {
             return BeginOutcome::Terminal(refusal("invalid_request", 400, "never"));
         };
-        match self.replay_frame(tenant, receipt, true, opcode) {
+        match self.replay_frame(tenant, receipt, true, opcode, deadline) {
             Ok(frame) => BeginOutcome::Terminal(frame),
             Err(frame) => BeginOutcome::Terminal(frame),
         }
     }
 
-    async fn replay(&self, receipt: ReceiptId, replayed: bool) -> BeginOutcome {
+    async fn replay(
+        &self,
+        receipt: ReceiptId,
+        replayed: bool,
+        deadline: &DeadlineController,
+    ) -> BeginOutcome {
+        if deadline
+            .decided(receipt_identity(receipt), Unresolved::Internal)
+            .is_err()
+        {
+            return BeginOutcome::Terminal(post_refusal("internal_refusal", 500, receipt));
+        }
         let publication = match self.coordinator.publication(receipt) {
             Ok(Some(bytes)) => match parse_publication(&bytes) {
                 Ok(publication) => publication,
                 Err(_) => {
+                    deadline.unresolved(Unresolved::Internal);
                     return BeginOutcome::Terminal(post_refusal("internal_refusal", 500, receipt));
                 }
             },
             _ => {
+                deadline.unresolved(Unresolved::Internal);
                 return BeginOutcome::Terminal(post_refusal("internal_refusal", 500, receipt));
             }
         };
@@ -473,16 +514,20 @@ impl Ceremony {
             Ok(true) => {}
             Ok(false) => {
                 if let Err(error) = apply_publication(&self.state, receipt, &publication) {
+                    deadline.unresolved(publication_unresolved(error));
                     return BeginOutcome::Terminal(publication_refusal(error, receipt));
                 }
                 if self.coordinator.mark_published(receipt).is_err() {
+                    deadline.unresolved(Unresolved::Store);
                     return BeginOutcome::Terminal(post_refusal("store_unavailable", 503, receipt));
                 }
             }
             Err(_) => {
+                deadline.unresolved(Unresolved::Store);
                 return BeginOutcome::Terminal(post_refusal("store_unavailable", 503, receipt));
             }
         }
+        deadline.terminal();
         BeginOutcome::Terminal(receipt_frame(&publication, receipt, replayed))
     }
 
@@ -492,12 +537,19 @@ impl Ceremony {
         receipt: ReceiptId,
         replayed: bool,
         expected: Opcode,
+        deadline: &DeadlineController,
     ) -> Result<Frame, Frame> {
         let bytes = self
             .coordinator
             .publication(receipt)
             .map_err(|_| refusal("store_unavailable", 503, "operator"))?
             .ok_or_else(|| refusal("invalid_request", 400, "never"))?;
+        if deadline
+            .decided(receipt_identity(receipt), Unresolved::Internal)
+            .is_err()
+        {
+            return Err(post_refusal("internal_refusal", 500, receipt));
+        }
         let publication = parse_publication(&bytes)
             .map_err(|_| post_refusal("internal_refusal", 500, receipt))?;
         if publication.tenant != tenant.as_str() {
@@ -510,17 +562,23 @@ impl Ceremony {
         match self
             .coordinator
             .publication_is_complete(receipt)
-            .map_err(|_| post_refusal("store_unavailable", 503, receipt))?
-        {
+            .map_err(|_| {
+                deadline.unresolved(Unresolved::Store);
+                post_refusal("store_unavailable", 503, receipt)
+            })? {
             true => {}
             false => {
-                apply_publication(&self.state, receipt, &publication)
-                    .map_err(|error| publication_refusal(error, receipt))?;
-                self.coordinator
-                    .mark_published(receipt)
-                    .map_err(|_| post_refusal("store_unavailable", 503, receipt))?;
+                apply_publication(&self.state, receipt, &publication).map_err(|error| {
+                    deadline.unresolved(publication_unresolved(error));
+                    publication_refusal(error, receipt)
+                })?;
+                self.coordinator.mark_published(receipt).map_err(|_| {
+                    deadline.unresolved(Unresolved::Store);
+                    post_refusal("store_unavailable", 503, receipt)
+                })?;
             }
         }
+        deadline.terminal();
         Ok(receipt_frame(&publication, receipt, replayed))
     }
 }
@@ -540,7 +598,44 @@ pub(super) struct ActiveCeremony {
 }
 
 impl ActiveCeremony {
-    pub(super) async fn accept(&mut self, request: Frame) -> AdvanceOutcome {
+    #[cfg(test)]
+    pub(super) fn abort_probe(
+        allocation: Allocation,
+        coordinator: Arc<TransactionCoordinator>,
+        state: AppState,
+    ) -> Self {
+        let scope = CredentialScope::new("local", "example.test")
+            .expect("the fixed abort-probe credential scope is valid");
+        Self {
+            allocation,
+            batch: SecretBatch::new(scope),
+            coordinator,
+            expected: Vec::new(),
+            next_ordinal: 1,
+            prepared: false,
+            publication: Publication {
+                action: PublicationAction::Connect,
+                connector: "test".to_owned(),
+                expected_head: None,
+                instance: "00000000000000000000000000".to_owned(),
+                label: "test".to_owned(),
+                next_head: "1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_owned(),
+                schema: PUBLICATION_SCHEMA.to_owned(),
+                settings: Vec::new(),
+                tenant: "local".to_owned(),
+            },
+            state,
+            _claim: None,
+            _tenant_claim: None,
+        }
+    }
+
+    pub(super) async fn accept(
+        &mut self,
+        request: Frame,
+        deadline: &DeadlineController,
+    ) -> AdvanceOutcome {
         if request.opcode() == Opcode::Secret {
             return self.accept_secret(request).await;
         }
@@ -581,17 +676,48 @@ impl ActiveCeremony {
         if let Err(error) = self.coordinator.decide_commit(self.allocation) {
             return AdvanceOutcome::Terminal(coordinator_refusal(error));
         }
-        let receipt = match self.coordinator.commit(self.allocation).await {
-            Ok(receipt) => receipt,
-            Err(error) => return AdvanceOutcome::Terminal(coordinator_refusal(error)),
-        };
-        if let Err(error) = apply_publication(&self.state, receipt, &self.publication) {
-            return AdvanceOutcome::Terminal(publication_refusal(error, receipt));
+        let receipt = self.allocation.receipt_id();
+        if deadline
+            .decided(receipt_identity(receipt), Unresolved::Store)
+            .is_err()
+        {
+            return AdvanceOutcome::Terminal(post_refusal("internal_refusal", 500, receipt));
         }
-        if self.coordinator.mark_published(receipt).is_err() {
-            return AdvanceOutcome::Terminal(post_refusal("store_unavailable", 503, receipt));
+
+        // Once the decision journal is durable, this owned task must outlive a transport timeout
+        // or disconnect. Dropping the JoinHandle detaches rather than aborts it, so recovery and
+        // the provider see only roll-forward after this boundary.
+        let coordinator = self.coordinator.clone();
+        let allocation = self.allocation;
+        let state = self.state.clone();
+        let publication = self.publication.clone();
+        let rollforward_deadline = deadline.clone();
+        let rollforward = tokio::spawn(async move {
+            let receipt = match coordinator.commit(allocation).await {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    rollforward_deadline.unresolved(Unresolved::Store);
+                    return coordinator_refusal(error);
+                }
+            };
+            if let Err(error) = apply_publication(&state, receipt, &publication) {
+                rollforward_deadline.unresolved(publication_unresolved(error));
+                return publication_refusal(error, receipt);
+            }
+            if coordinator.mark_published(receipt).is_err() {
+                rollforward_deadline.unresolved(Unresolved::Store);
+                return post_refusal("store_unavailable", 503, receipt);
+            }
+            rollforward_deadline.terminal();
+            receipt_frame(&publication, receipt, false)
+        });
+        match rollforward.await {
+            Ok(frame) => AdvanceOutcome::Terminal(frame),
+            Err(_) => {
+                deadline.unresolved(Unresolved::Internal);
+                AdvanceOutcome::Terminal(post_refusal("internal_refusal", 500, receipt))
+            }
         }
-        AdvanceOutcome::Terminal(receipt_frame(&self.publication, receipt, false))
     }
 
     async fn accept_secret(&mut self, request: Frame) -> AdvanceOutcome {
@@ -917,6 +1043,19 @@ pub(crate) enum PublicationRefusal {
     Store,
     Audit,
     Invariant,
+}
+
+fn receipt_identity(receipt: ReceiptId) -> ReceiptIdentity {
+    ReceiptIdentity::from_protocol_bytes(receipt.protocol_bytes())
+        .expect("transaction receipts are always nonzero")
+}
+
+const fn publication_unresolved(refusal: PublicationRefusal) -> Unresolved {
+    match refusal {
+        PublicationRefusal::Store => Unresolved::Store,
+        PublicationRefusal::Audit => Unresolved::Audit,
+        PublicationRefusal::Invariant => Unresolved::Internal,
+    }
 }
 
 impl PublicationRefusal {

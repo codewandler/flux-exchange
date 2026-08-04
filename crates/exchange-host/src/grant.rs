@@ -1063,6 +1063,25 @@ mod file {
             proposal_digest: GrantProposalDigest,
             receipt_id: GrantReceiptId,
         ) -> Result<GrantApplyReceipt, GrantTransactionRefusal> {
+            self.apply_observed(
+                tenant,
+                candidate,
+                revision,
+                proposal_digest,
+                receipt_id,
+                &mut |_| {},
+            )
+        }
+
+        fn apply_observed(
+            &self,
+            tenant: &Tenant,
+            candidate: &GrantCandidate,
+            revision: StoreRevision,
+            proposal_digest: GrantProposalDigest,
+            receipt_id: GrantReceiptId,
+            decided: &mut dyn FnMut(GrantReceiptId),
+        ) -> Result<GrantApplyReceipt, GrantTransactionRefusal> {
             validate_candidate(candidate)?;
             if candidate.proposal_digest(&revision)? != proposal_digest {
                 return Err(GrantTransactionRefusal::DigestMismatch);
@@ -1085,6 +1104,7 @@ mod file {
                 .iter()
                 .find(|receipt| receipt.proposal_digest == proposal_digest)
             {
+                decided(receipt.receipt_id);
                 return Ok(receipt.response(true));
             }
             if record
@@ -1129,6 +1149,7 @@ mod file {
 
             self.persist_versioned(&versioned)
                 .map_err(transaction_refusal)?;
+            decided(receipt.receipt_id);
             *held = Loaded::Versioned(versioned);
             Ok(receipt.response(false))
         }

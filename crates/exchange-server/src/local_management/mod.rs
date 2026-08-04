@@ -4,6 +4,7 @@
 mod codec;
 
 mod connection;
+mod deadline;
 
 mod dispatcher;
 mod grant;
@@ -12,7 +13,10 @@ mod service_account;
 
 pub mod transaction;
 
+pub(crate) use deadline::DeadlineController;
+#[cfg(test)]
 pub(crate) use dispatcher::deadline_frame;
+pub(crate) use dispatcher::expired_reply;
 pub(crate) use dispatcher::ActiveSession;
 pub(crate) use dispatcher::Dispatcher;
 pub(crate) use dispatcher::Transport;

@@ -372,6 +372,25 @@ pub trait GrantTransactions: Send + Sync {
         receipt_id: GrantReceiptId,
     ) -> Result<GrantApplyReceipt, GrantTransactionRefusal>;
 
+    /// Apply while exposing the first instant at which this receipt is durably queryable.
+    ///
+    /// The default preserves compatibility for non-file implementations. Durable production
+    /// stores override this method and call `decided` immediately after fsync (or immediately on a
+    /// byte-identical replay), before publishing later in-memory or audit projections.
+    fn apply_observed(
+        &self,
+        tenant: &Tenant,
+        candidate: &GrantCandidate,
+        revision: StoreRevision,
+        proposal_digest: GrantProposalDigest,
+        receipt_id: GrantReceiptId,
+        decided: &mut dyn FnMut(GrantReceiptId),
+    ) -> Result<GrantApplyReceipt, GrantTransactionRefusal> {
+        let receipt = self.apply(tenant, candidate, revision, proposal_digest, receipt_id)?;
+        decided(receipt.receipt_id);
+        Ok(receipt)
+    }
+
     /// Query a receipt in the resolved tenant only.
     fn query(
         &self,

@@ -13,10 +13,13 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, Interest};
 use tokio::net::{UnixListener, UnixStream};
 
 use super::codec::{Direction, StreamDecoder};
-use super::dispatcher::{deadline_frame, Transport};
+use super::dispatcher::{expired_reply, Transport};
 use super::service_account::OneShotWriter;
 use super::service_account_handoff::unix_transfer::{receive_initial_fd, UnixHandoffError};
-use super::{ActiveSession, Dispatcher, SessionAdvance, SessionBegin, TransactionCoordinator};
+use super::{
+    ActiveSession, DeadlineController, Dispatcher, SessionAdvance, SessionBegin,
+    TransactionCoordinator,
+};
 use crate::state::AppState;
 
 const RUN_DIRECTORY: &str = "run";
@@ -187,35 +190,41 @@ impl LocalManagement {
                     let _closed_projection =
                         (owner.tenant, owner.principal, owner.user, owner.operator);
                     let mut stream = stream;
-                    let deadline =
-                        tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+                    let deadline = DeadlineController::start();
                     let mut initial = [0_u8; 65_548];
-                    let received = tokio::time::timeout_at(
-                        deadline,
-                        receive_initial_capability(&stream, expected_peer_uid, &mut initial),
-                    )
-                    .await;
+                    let received = deadline
+                        .race(receive_initial_capability(
+                            &stream,
+                            expected_peer_uid,
+                            &mut initial,
+                        ))
+                        .await;
                     let (writer, received) = match received {
                         Ok(Ok(received)) => received,
                         Ok(Err(_)) => {
                             let _ = stream.shutdown().await;
                             return;
                         }
-                        Err(_) => {
-                            let _ = stream.write_all(&deadline_frame()).await;
-                            let _ = stream.shutdown().await;
+                        Err(expired) => {
+                            let (reply, _) = expired_reply(expired).into_parts();
+                            let _ = deadline.race_response(stream.write_all(&reply)).await;
+                            let _ = deadline.race_response(stream.shutdown()).await;
                             return;
                         }
                     };
-                    if tokio::time::timeout_at(
-                        deadline,
-                        dispatch_one(&mut stream, dispatcher, &initial[..received], writer),
-                    )
-                    .await
-                    .is_err()
+                    if let Err(expired) = deadline
+                        .race(dispatch_one(
+                            &mut stream,
+                            dispatcher,
+                            &initial[..received],
+                            writer,
+                            &deadline,
+                        ))
+                        .await
                     {
-                        let _ = stream.write_all(&deadline_frame()).await;
-                        let _ = stream.shutdown().await;
+                        let (reply, _) = expired_reply(expired).into_parts();
+                        let _ = deadline.race_response(stream.write_all(&reply)).await;
+                        let _ = deadline.race_response(stream.shutdown()).await;
                     }
                 }
             });
@@ -491,6 +500,7 @@ async fn dispatch_one(
     dispatcher: Dispatcher,
     initial: &[u8],
     mut writer: Option<Box<dyn OneShotWriter>>,
+    deadline: &DeadlineController,
 ) -> io::Result<()> {
     let mut decoder = StreamDecoder::new(Direction::ClientToServer);
     let mut bytes = [0_u8; 4096];
@@ -514,16 +524,20 @@ async fn dispatch_one(
         };
         if received == 0 {
             let _ = decoder.finish();
-            if let Some(session) = &active {
-                session.abort().await;
+            if deadline.may_abort() {
+                if let Some(session) = &active {
+                    session.abort().await;
+                }
             }
             return Ok(());
         }
         while let Some(request) = match decoder.next_frame() {
             Ok(frame) => frame,
             Err(_) => {
-                if let Some(session) = &active {
-                    session.abort().await;
+                if deadline.may_abort() {
+                    if let Some(session) = &active {
+                        session.abort().await;
+                    }
                 }
                 return Ok(());
             }
@@ -533,8 +547,14 @@ async fn dispatch_one(
                     SessionAdvance::Awaiting => {}
                     SessionAdvance::Terminal(reply) => {
                         let (response, _) = reply.into_parts();
-                        stream.write_all(&response).await?;
-                        stream.shutdown().await?;
+                        deadline
+                            .race_response(stream.write_all(&response))
+                            .await
+                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
+                        deadline
+                            .race_response(stream.shutdown())
+                            .await
+                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
                         return Ok(());
                     }
                 }
@@ -542,17 +562,32 @@ async fn dispatch_one(
                 let tenant = exchange_host::Tenant::new(LOCAL_OWNER_TENANT)
                     .expect("the fixed native owner tenant is valid");
                 match dispatcher
-                    .begin_frame_with_writer(Transport::Native, &tenant, request, writer.take())
+                    .begin_frame_with_writer(
+                        Transport::Native,
+                        &tenant,
+                        request,
+                        writer.take(),
+                        deadline,
+                    )
                     .await
                 {
                     SessionBegin::Terminal(reply) => {
                         let (response, _) = reply.into_parts();
-                        stream.write_all(&response).await?;
-                        stream.shutdown().await?;
+                        deadline
+                            .race_response(stream.write_all(&response))
+                            .await
+                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
+                        deadline
+                            .race_response(stream.shutdown())
+                            .await
+                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
                         return Ok(());
                     }
                     SessionBegin::Active { response, session } => {
-                        stream.write_all(&response).await?;
+                        deadline
+                            .race_response(stream.write_all(&response))
+                            .await
+                            .map_err(|()| io::Error::from(io::ErrorKind::TimedOut))??;
                         active = Some(session);
                     }
                 }
@@ -796,6 +831,44 @@ mod tests {
         .expect("client task");
         server.abort();
         assert_eq!(received, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn authenticated_native_idle_and_partial_traffic_expire_on_one_absolute_clock() {
+        let root = private_root("absolute-deadline");
+        let endpoint = LocalManagement::bind_at(&root, effective_uid(), test_dispatcher(&root))
+            .expect("owner endpoint");
+        let path = endpoint.path().to_owned();
+        let server = tokio::spawn(endpoint.serve());
+        let stream = UnixStream::connect(path).await.expect("owner connection");
+        let (mut reader, mut writer) = stream.into_split();
+
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"FXLM")
+            .await
+            .expect("partial first header");
+        let response = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut bytes)
+                .await
+                .expect("deadline response EOF");
+            bytes
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(299)).await;
+        tokio::task::yield_now().await;
+        assert!(!response.is_finished());
+
+        // More bytes do not replace the authentication-time anchor.
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &[1, 0, 0, 1])
+            .await
+            .expect("more partial header bytes");
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let response = response.await.expect("response task");
+        assert_eq!(response, crate::local_management::deadline_frame());
+
+        server.abort();
         let _ = std::fs::remove_dir_all(root);
     }
 

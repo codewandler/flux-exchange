@@ -624,6 +624,23 @@ impl ServiceAccountStore {
         receipt_id: [u8; 32],
         handoff: impl FnOnce(&ServiceAccountToken) -> Result<(), E>,
     ) -> Result<DurableMintOutcome, DurableMintError<E>> {
+        self.mint_with_receipt_observed(minted_by, id, expiry, receipt_id, handoff, |_| {})
+    }
+
+    /// Mint while exposing the exact durable decision instant to the local protocol controller.
+    ///
+    /// The observer runs immediately after the atomic store replacement is durable, before the
+    /// in-memory projection changes. A byte-identical replay invokes it when the retained receipt
+    /// is discovered. It receives only the opaque receipt identity.
+    pub fn mint_with_receipt_observed<E>(
+        &self,
+        minted_by: &Principal,
+        id: &str,
+        expiry: Expiry,
+        receipt_id: [u8; 32],
+        handoff: impl FnOnce(&ServiceAccountToken) -> Result<(), E>,
+        decided: impl FnOnce([u8; 32]),
+    ) -> Result<DurableMintOutcome, DurableMintError<E>> {
         if minted_by.kind() != PrincipalKind::User {
             return Err(DurableMintError::InvalidRequest);
         }
@@ -646,10 +663,12 @@ impl ServiceAccountStore {
                 receipt.tenant == tenant.as_str() && receipt.proposal_identity == proposal_identity
             })
         {
+            let existing_receipt_id =
+                decode_receipt_id(existing_id).map_err(|_| DurableMintError::Internal)?;
+            decided(existing_receipt_id);
             return Ok(DurableMintOutcome::Replay {
                 id: existing_receipt.id.clone(),
-                receipt_id: decode_receipt_id(existing_id)
-                    .map_err(|_| DurableMintError::Internal)?,
+                receipt_id: existing_receipt_id,
             });
         }
 
@@ -693,6 +712,7 @@ impl ServiceAccountStore {
         );
         self.write(&candidate)
             .map_err(|_| DurableMintError::StoreUnavailable)?;
+        decided(receipt_id);
         *state = candidate;
 
         Ok(DurableMintOutcome::Committed { id, receipt_id })

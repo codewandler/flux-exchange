@@ -10,6 +10,7 @@ use super::connection::{
     ActiveCeremony, AdvanceOutcome as ConnectionAdvance, BeginOutcome as ConnectionBegin,
     Ceremony as ConnectionCeremony, PublicationRefusal,
 };
+use super::deadline::{DeadlineController, Expired, ReceiptIdentity, Unresolved};
 use super::grant::{GrantAudit, GrantAuditUnavailable, GrantCeremony};
 use super::service_account::{OneShotWriter, ServiceAccountCeremony};
 use super::TransactionCoordinator;
@@ -65,6 +66,7 @@ pub(crate) enum SessionBegin {
 /// One live interactive ceremony retained by its sole native/WebSocket connection.
 pub(crate) struct ActiveSession {
     ceremony: ActiveCeremony,
+    deadline: DeadlineController,
 }
 
 /// Result of one subsequent client frame.
@@ -78,7 +80,7 @@ impl ActiveSession {
         let request = match exact_frame(bytes) {
             Ok(frame) => frame,
             Err(error) => {
-                self.ceremony.abort().await;
+                self.abort().await;
                 return SessionAdvance::Terminal(decode_reply(error));
             }
         };
@@ -86,14 +88,21 @@ impl ActiveSession {
     }
 
     pub(super) async fn accept_frame(&mut self, request: Frame) -> SessionAdvance {
-        match self.ceremony.accept(request).await {
-            ConnectionAdvance::Awaiting => SessionAdvance::Awaiting,
-            ConnectionAdvance::Terminal(frame) => SessionAdvance::Terminal(hosted_frame(frame)),
+        match self
+            .deadline
+            .race(self.ceremony.accept(request, &self.deadline))
+            .await
+        {
+            Ok(ConnectionAdvance::Awaiting) => SessionAdvance::Awaiting,
+            Ok(ConnectionAdvance::Terminal(frame)) => SessionAdvance::Terminal(hosted_frame(frame)),
+            Err(expired) => SessionAdvance::Terminal(expired_reply(expired)),
         }
     }
 
     pub(crate) async fn abort(&self) {
-        self.ceremony.abort().await;
+        if self.deadline.may_abort() {
+            self.ceremony.abort().await;
+        }
     }
 }
 
@@ -106,6 +115,20 @@ impl HostedReply {
 /// Canonical pre-decision absolute-deadline outcome shared by native and hosted transports.
 pub(crate) fn deadline_frame() -> Vec<u8> {
     error_frame(body("deadline_exceeded", 408, "refresh"))
+}
+
+/// Terminal deadline outcome selected from the durable phase at the exact expiry boundary.
+pub(crate) fn expired_reply(expired: Expired) -> HostedReply {
+    match expired {
+        Expired::PreDecision => HostedReply {
+            bytes: deadline_frame(),
+            close_code: 1008,
+        },
+        Expired::PostDecision {
+            receipt,
+            unresolved,
+        } => hosted_frame(postdeadline_refusal(receipt, unresolved)),
+    }
 }
 
 /// Shared local-management authority after transport authentication.
@@ -156,12 +179,13 @@ impl Dispatcher {
         transport: Transport,
         tenant: &Tenant,
         bytes: &[u8],
+        deadline: &DeadlineController,
     ) -> SessionBegin {
         let request = match exact_frame(bytes) {
             Ok(frame) => frame,
             Err(error) => return SessionBegin::Terminal(decode_reply(error)),
         };
-        self.begin_frame(transport, tenant, request).await
+        self.begin_frame(transport, tenant, request, deadline).await
     }
 
     pub(super) async fn begin_frame(
@@ -169,8 +193,9 @@ impl Dispatcher {
         transport: Transport,
         tenant: &Tenant,
         request: Frame,
+        deadline: &DeadlineController,
     ) -> SessionBegin {
-        self.begin_frame_with_writer(transport, tenant, request, None)
+        self.begin_frame_with_writer(transport, tenant, request, None, deadline)
             .await
     }
 
@@ -184,6 +209,7 @@ impl Dispatcher {
         tenant: &Tenant,
         request: Frame,
         writer: Option<Box<dyn OneShotWriter>>,
+        deadline: &DeadlineController,
     ) -> SessionBegin {
         if !admitted(transport, request.opcode()) {
             return SessionBegin::Terminal(hosted_frame(refusal("unexpected_frame", 409, "never")));
@@ -198,16 +224,19 @@ impl Dispatcher {
                 | Opcode::CredentialBegin
                 | Opcode::CredentialQuery
         ) {
-            return match self.connection.begin(tenant, request).await {
+            return match self.connection.begin(tenant, request, deadline).await {
                 ConnectionBegin::Terminal(frame) => SessionBegin::Terminal(hosted_frame(frame)),
                 ConnectionBegin::Active { response, active } => SessionBegin::Active {
                     response: response.encode(),
-                    session: Box::new(ActiveSession { ceremony: *active }),
+                    session: Box::new(ActiveSession {
+                        ceremony: *active,
+                        deadline: deadline.clone(),
+                    }),
                 },
             };
         }
         SessionBegin::Terminal(hosted_frame(
-            self.dispatch_terminal(transport, tenant, request, writer)
+            self.dispatch_terminal(transport, tenant, request, writer, deadline)
                 .await,
         ))
     }
@@ -222,6 +251,7 @@ impl Dispatcher {
         tenant: &Tenant,
         request: Frame,
         writer: Option<Box<dyn OneShotWriter>>,
+        deadline: &DeadlineController,
     ) -> Frame {
         let _state = &self.state;
         let _coordinator = &self.coordinator;
@@ -235,7 +265,8 @@ impl Dispatcher {
             let Some(payload) = request.control_payload() else {
                 return refusal("unexpected_frame", 422, "never");
             };
-            let response = grant.handle(tenant, request.opcode() as u16, payload);
+            let response =
+                grant.handle_with_deadline(tenant, request.opcode() as u16, payload, deadline);
             let opcode = Opcode::try_from(response.opcode())
                 .expect("grant ceremonies return only closed FXLM opcodes");
             return Frame::control(
@@ -273,7 +304,13 @@ impl Dispatcher {
                 return refusal("unexpected_frame", 422, "never");
             };
             let actor = Principal::new(PrincipalKind::User, "local-owner", tenant.clone());
-            let response = ceremony.handle(&actor, request.opcode() as u16, payload, writer);
+            let response = ceremony.handle_with_deadline(
+                &actor,
+                request.opcode() as u16,
+                payload,
+                writer,
+                deadline,
+            );
             let opcode = Opcode::try_from(response.opcode())
                 .expect("Service Account ceremonies return only closed FXLM opcodes");
             return Frame::control(
@@ -406,6 +443,16 @@ struct ErrorBody {
     status: u16,
 }
 
+#[derive(Serialize)]
+struct PostDecisionErrorBody {
+    code: &'static str,
+    commit: &'static str,
+    receipt_id: String,
+    retry: &'static str,
+    schema: &'static str,
+    status: u16,
+}
+
 const fn body(code: &'static str, status: u16, retry: &'static str) -> ErrorBody {
     ErrorBody {
         code,
@@ -423,13 +470,37 @@ fn refusal(code: &'static str, status: u16, retry: &'static str) -> Frame {
         .expect("the fixed FXLM refusal is bounded")
 }
 
+fn postdeadline_refusal(receipt: ReceiptIdentity, unresolved: Unresolved) -> Frame {
+    let (code, status) = match unresolved {
+        Unresolved::Store => ("store_unavailable", 503),
+        Unresolved::Audit => ("audit_unavailable", 503),
+        Unresolved::Internal => ("internal_refusal", 500),
+    };
+    let encoded = serde_json::to_vec(&PostDecisionErrorBody {
+        code,
+        commit: "query_receipt",
+        receipt_id: receipt.encoded(),
+        retry: "same_proposal",
+        schema: "exchange.local-management-error.v1",
+        status,
+    })
+    .expect("the closed value-free post-decision refusal serializes");
+    Frame::control(Direction::ServerToClient, Opcode::Error, encoded)
+        .expect("the fixed post-decision refusal is bounded")
+}
+
 fn error_frame(error: ErrorBody) -> Vec<u8> {
     refusal(error.code, error.status, error.retry).encode()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use exchange_host::{CredentialScope, CredentialStore, SecretBatch, SecretProposalDigest};
+
     use super::*;
+    use crate::local_management::transaction::TransactionKind;
 
     fn request(opcode: Opcode, payload: &[u8]) -> Vec<u8> {
         Frame::control(Direction::ClientToServer, opcode, payload.to_vec())
@@ -466,5 +537,113 @@ mod tests {
             Err(DecodeRefusal::Frame(FrameError::TruncatedFrame { .. }))
                 | Err(DecodeRefusal::Truncated)
         ));
+    }
+
+    #[tokio::test]
+    async fn active_session_abort_tombstones_only_before_the_durable_decision() {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!(
+            "flux-exchange-x134-session-abort-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("private test root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only test root");
+        }
+        let store = CredentialStore::bind(root.join("credentials/store"))
+            .expect("retained credential store");
+        let coordinator = Arc::new(
+            TransactionCoordinator::bind(
+                root.join("transactions/journal.sqlite3"),
+                store.prepared_secrets(),
+            )
+            .expect("transaction coordinator"),
+        );
+        let proposal = SecretProposalDigest::from_protocol_bytes([9; 32]);
+
+        let before = coordinator
+            .allocate_for_tenant(
+                TransactionKind::Connect,
+                "local",
+                "test",
+                "before",
+                proposal,
+            )
+            .expect("pre-decision allocation");
+        let before_session = ActiveSession {
+            ceremony: ActiveCeremony::abort_probe(
+                before,
+                coordinator.clone(),
+                AppState::without_identity(),
+            ),
+            deadline: DeadlineController::start(),
+        };
+        before_session.abort().await;
+        assert!(
+            coordinator
+                .proposal_state_for_tenant(
+                    TransactionKind::Connect,
+                    "local",
+                    "test",
+                    "before",
+                    proposal,
+                )
+                .expect("pre-decision state")
+                .is_none(),
+            "pre-decision disconnect must tombstone the allocation"
+        );
+
+        let after = coordinator
+            .allocate_for_tenant(TransactionKind::Connect, "local", "test", "after", proposal)
+            .expect("post-decision allocation");
+        let batch = SecretBatch::new(
+            CredentialScope::new("local", "example.test").expect("test credential scope"),
+        );
+        coordinator
+            .prepare(after, &batch)
+            .await
+            .expect("prepared provider row");
+        coordinator.decide_commit(after).expect("durable decision");
+        let deadline = DeadlineController::start();
+        deadline
+            .decided(
+                ReceiptIdentity::from_protocol_bytes(after.receipt_id().protocol_bytes())
+                    .expect("nonzero receipt"),
+                Unresolved::Store,
+            )
+            .expect("deadline decision");
+        let after_session = ActiveSession {
+            ceremony: ActiveCeremony::abort_probe(
+                after,
+                coordinator.clone(),
+                AppState::without_identity(),
+            ),
+            deadline,
+        };
+        after_session.abort().await;
+        assert!(matches!(
+            coordinator
+                .proposal_state_for_tenant(
+                    TransactionKind::Connect,
+                    "local",
+                    "test",
+                    "after",
+                    proposal,
+                )
+                .expect("post-decision state"),
+            Some(crate::local_management::transaction::ProposalState::Active)
+        ));
+        coordinator
+            .commit(after)
+            .await
+            .expect("post-decision row remains recoverable");
+
+        drop(coordinator);
+        drop(store);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

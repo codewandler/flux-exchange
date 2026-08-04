@@ -87,4 +87,5 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 flux-exchange-release = { path = "../exchange-release" }
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
