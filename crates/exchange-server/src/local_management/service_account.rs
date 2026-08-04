@@ -394,6 +394,121 @@ impl MintPort for RetainedMintPort {
 }
 
 #[cfg(test)]
+#[allow(dead_code)] // The binary test owns this deterministic real-store deadline seam.
+struct DecisionPausedRetainedMintPort {
+    inner: RetainedMintPort,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+    entered_flag: Arc<std::sync::atomic::AtomicBool>,
+    completed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // The binary test owns this deterministic real-store deadline seam.
+struct PreDecisionPausedRetainedMintPort {
+    inner: RetainedMintPort,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+    completed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl MintPort for PreDecisionPausedRetainedMintPort {
+    fn mint(
+        &self,
+        actor: &Principal,
+        request: &MintRequest,
+        receipt_id: ReceiptId,
+        handoff: &mut dyn TokenHandoff,
+    ) -> Result<MintOutcome, MintPortRefusal> {
+        self.entered.wait();
+        self.release.wait();
+        let result = self.inner.mint(actor, request, receipt_id, handoff);
+        self.completed
+            .store(true, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    fn mint_observed(
+        &self,
+        actor: &Principal,
+        request: &MintRequest,
+        receipt_id: ReceiptId,
+        handoff: &mut dyn TokenHandoff,
+        starting: &mut dyn FnMut(ReceiptId) -> bool,
+        decided: &mut dyn FnMut(ReceiptId),
+    ) -> Result<MintOutcome, MintPortRefusal> {
+        self.entered.wait();
+        self.release.wait();
+        let result = self
+            .inner
+            .mint_observed(actor, request, receipt_id, handoff, starting, decided);
+        self.completed
+            .store(true, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    fn query(
+        &self,
+        tenant: &Tenant,
+        receipt_id: &ReceiptId,
+    ) -> Result<Option<MintOutcome>, MintPortRefusal> {
+        self.inner.query(tenant, receipt_id)
+    }
+}
+
+#[cfg(test)]
+impl MintPort for DecisionPausedRetainedMintPort {
+    fn mint(
+        &self,
+        actor: &Principal,
+        request: &MintRequest,
+        receipt_id: ReceiptId,
+        handoff: &mut dyn TokenHandoff,
+    ) -> Result<MintOutcome, MintPortRefusal> {
+        self.inner.mint(actor, request, receipt_id, handoff)
+    }
+
+    fn mint_observed(
+        &self,
+        actor: &Principal,
+        request: &MintRequest,
+        receipt_id: ReceiptId,
+        handoff: &mut dyn TokenHandoff,
+        starting: &mut dyn FnMut(ReceiptId) -> bool,
+        decided: &mut dyn FnMut(ReceiptId),
+    ) -> Result<MintOutcome, MintPortRefusal> {
+        let entered = self.entered.clone();
+        let release = self.release.clone();
+        let result = self.inner.mint_observed(
+            actor,
+            request,
+            receipt_id,
+            handoff,
+            starting,
+            &mut |receipt| {
+                decided(receipt);
+                self.entered_flag
+                    .store(true, std::sync::atomic::Ordering::Release);
+                entered.wait();
+                release.wait();
+            },
+        );
+        self.completed
+            .store(true, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    fn query(
+        &self,
+        tenant: &Tenant,
+        receipt_id: &ReceiptId,
+    ) -> Result<Option<MintOutcome>, MintPortRefusal> {
+        self.inner.query(tenant, receipt_id)
+    }
+}
+
+#[cfg(test)]
 #[allow(dead_code)] // Constructed by the integration FXLM suite through this source module.
 struct FixedReceiptId([u8; 32]);
 
@@ -422,6 +537,40 @@ impl ServiceAccountCeremony {
     /// Bind the already-open retained store as the sole verifier/proposal/receipt authority.
     pub(crate) fn bind_retained(store: Arc<ServiceAccountStore>) -> Result<Self, BindingRefusal> {
         Ok(Self::new(Arc::new(RetainedMintPort { store })))
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)] // Source-backed integration crates do not construct the binary test seam.
+    pub(super) fn bind_retained_with_decision_pause(
+        store: Arc<ServiceAccountStore>,
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+        entered_flag: Arc<std::sync::atomic::AtomicBool>,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self::new(Arc::new(DecisionPausedRetainedMintPort {
+            inner: RetainedMintPort { store },
+            entered,
+            release,
+            entered_flag,
+            completed,
+        }))
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)] // Source-backed integration crates do not construct the binary test seam.
+    pub(super) fn bind_retained_with_predecision_pause(
+        store: Arc<ServiceAccountStore>,
+        entered: Arc<std::sync::Barrier>,
+        release: Arc<std::sync::Barrier>,
+        completed: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self::new(Arc::new(PreDecisionPausedRetainedMintPort {
+            inner: RetainedMintPort { store },
+            entered,
+            release,
+            completed,
+        }))
     }
 
     #[cfg(test)]
@@ -488,6 +637,7 @@ impl ServiceAccountCeremony {
         let mut handoff = FxsaHandoff {
             writer: Some(writer),
             written: false,
+            deadline: deadline.clone(),
         };
         let invariant = Cell::new(false);
         let started = Cell::new(false);
@@ -586,10 +736,14 @@ fn service_account_receipt(receipt: &ReceiptId) -> ReceiptIdentity {
 struct FxsaHandoff {
     writer: Option<Box<dyn OneShotWriter>>,
     written: bool,
+    deadline: DeadlineController,
 }
 
 impl TokenHandoff for FxsaHandoff {
     fn write_token(&mut self, token: &ServiceAccountToken) -> Result<(), MintPortRefusal> {
+        if self.deadline.expired().is_some() {
+            return Err(MintPortRefusal::DecisionExpired);
+        }
         let writer = self.writer.take().ok_or(MintPortRefusal::WriterClosed)?;
         let frame = HandoffFrame::new(token.as_str().as_bytes().to_vec())
             .map_err(|_| MintPortRefusal::Internal)?;

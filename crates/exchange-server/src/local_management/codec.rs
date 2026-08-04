@@ -328,6 +328,11 @@ impl StreamDecoder {
         })
     }
 
+    /// Bytes already received after the most recently decoded complete frame.
+    pub(super) fn buffered_bytes(&self) -> &[u8] {
+        &self.buffered
+    }
+
     fn header(&self) -> Result<Option<Header>, FrameError> {
         if self.buffered.len() < HEADER_LEN {
             return Ok(None);

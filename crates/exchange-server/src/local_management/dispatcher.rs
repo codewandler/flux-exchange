@@ -369,6 +369,11 @@ fn decode_reply(error: DecodeRefusal) -> HostedReply {
     }
 }
 
+#[cfg(any(unix, windows))]
+pub(super) fn native_frame_refusal(error: FrameError) -> Vec<u8> {
+    error_frame(frame_error(DecodeRefusal::Frame(error)))
+}
+
 fn hosted_frame(frame: Frame) -> HostedReply {
     let close_code = if frame.opcode() == Opcode::Error {
         frame
@@ -534,11 +539,9 @@ mod tests {
     };
 
     use super::*;
-    use crate::local_management::service_account::{
-        MintOutcome, MintPort, MintPortRefusal, MintRequest, ReceiptId as MintReceiptId,
-        TokenHandoff, WriterRefusal,
-    };
+    use crate::local_management::service_account::WriterRefusal;
     use crate::local_management::transaction::TransactionKind;
+    use crate::service_account::ServiceAccountStore;
 
     struct BlockingGrantPort {
         inner: Arc<GrantStore>,
@@ -619,73 +622,38 @@ mod tests {
         }
     }
 
-    struct BlockingMintPort {
+    struct BlockingGrantAudit {
+        inner: Arc<AuditJournal>,
         entered: Arc<Barrier>,
         release: Arc<Barrier>,
-        decision_first: bool,
-        committed: Mutex<Option<(String, MintReceiptId)>>,
     }
 
-    impl MintPort for BlockingMintPort {
-        fn mint(
+    impl GrantAudit for BlockingGrantAudit {
+        fn commit(
             &self,
-            _actor: &Principal,
-            _request: &MintRequest,
-            _receipt_id: MintReceiptId,
-            _handoff: &mut dyn TokenHandoff,
-        ) -> Result<MintOutcome, MintPortRefusal> {
-            Err(MintPortRefusal::Internal)
-        }
-
-        fn mint_observed(
-            &self,
-            _actor: &Principal,
-            request: &MintRequest,
-            receipt_id: MintReceiptId,
-            _handoff: &mut dyn TokenHandoff,
-            starting: &mut dyn FnMut(MintReceiptId) -> bool,
-            decided: &mut dyn FnMut(MintReceiptId),
-        ) -> Result<MintOutcome, MintPortRefusal> {
-            if !self.decision_first {
-                self.entered.wait();
-                self.release.wait();
-            }
-            if !starting(receipt_id.clone()) {
-                return Err(MintPortRefusal::DecisionExpired);
-            }
-            if self.decision_first {
-                self.entered.wait();
-                self.release.wait();
-            }
-            let id = request.id().to_owned();
-            *self.committed.lock().expect("mint result") = Some((id.clone(), receipt_id.clone()));
-            decided(receipt_id.clone());
-            Ok(MintOutcome::Committed { id, receipt_id })
-        }
-
-        fn query(
-            &self,
-            _tenant: &Tenant,
-            receipt_id: &MintReceiptId,
-        ) -> Result<Option<MintOutcome>, MintPortRefusal> {
-            Ok(self
-                .committed
-                .lock()
-                .expect("mint result")
-                .as_ref()
-                .filter(|(_, held)| held == receipt_id)
-                .map(|(id, held)| MintOutcome::Replay {
-                    id: id.clone(),
-                    receipt_id: held.clone(),
-                }))
+            tenant: &Tenant,
+            connector: &str,
+            revision: StoreRevision,
+            receipt_id: GrantReceiptId,
+        ) -> Result<(), GrantAuditUnavailable> {
+            self.entered.wait();
+            self.release.wait();
+            <AuditJournal as GrantAudit>::commit(
+                self.inner.as_ref(),
+                tenant,
+                connector,
+                revision,
+                receipt_id,
+            )
         }
     }
 
-    struct UnusedWriter;
+    struct CaptureWriter(Arc<Mutex<Vec<Vec<u8>>>>);
 
-    impl OneShotWriter for UnusedWriter {
-        fn write_once(self: Box<Self>, _frame: &[u8]) -> Result<(), WriterRefusal> {
-            Err(WriterRefusal::Closed)
+    impl OneShotWriter for CaptureWriter {
+        fn write_once(self: Box<Self>, frame: &[u8]) -> Result<(), WriterRefusal> {
+            self.0.lock().expect("captured FXSA").push(frame.to_vec());
+            Ok(())
         }
     }
 
@@ -903,6 +871,28 @@ mod tests {
             .commit(inflight)
             .await
             .expect("in-flight decision commits");
+        tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        inflight_deadline
+            .decided(
+                ReceiptIdentity::from_protocol_bytes(inflight.receipt_id().protocol_bytes())
+                    .expect("nonzero receipt"),
+                Unresolved::Store,
+            )
+            .expect("same durable receipt observation is idempotent");
+        assert!(
+            inflight_deadline
+                .decided(
+                    ReceiptIdentity::from_protocol_bytes([0x99; 32]).expect("different receipt"),
+                    Unresolved::Store,
+                )
+                .is_err(),
+            "a different durable receipt is an invariant refusal"
+        );
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(matches!(
+            inflight_deadline.expired(),
+            Some(Expired::PostDecision { .. })
+        ));
 
         let late = coordinator
             .allocate_for_tenant(
@@ -933,149 +923,6 @@ mod tests {
             .abort_before_decision(late)
             .await
             .expect("late operation remains safely abortable");
-
-        drop(coordinator);
-        drop(store);
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn allocated_ceremony_drop_tombstones_only_until_the_decision_guard_disarms() {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        let root = std::env::temp_dir().join(format!(
-            "flux-exchange-x135-cancellation-guard-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&root).expect("private test root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-                .expect("owner-only test root");
-        }
-        let store = CredentialStore::bind(root.join("credentials/store"))
-            .expect("retained credential store");
-        let coordinator = Arc::new(
-            TransactionCoordinator::bind(
-                root.join("transactions/journal.sqlite3"),
-                store.prepared_secrets(),
-            )
-            .expect("transaction coordinator"),
-        );
-        let proposal = SecretProposalDigest::from_protocol_bytes([17; 32]);
-        let batch = SecretBatch::new(
-            CredentialScope::new("local", "example.test").expect("test credential scope"),
-        );
-
-        for (label, prepared) in [
-            ("begin-drop", false),
-            ("prepare-drop", true),
-            ("secret-drop", false),
-        ] {
-            let allocation = coordinator
-                .allocate_for_tenant(TransactionKind::Connect, "local", "test", label, proposal)
-                .expect("guarded allocation");
-            if prepared {
-                coordinator
-                    .prepare(allocation, &batch)
-                    .await
-                    .expect("prepared row");
-            }
-            let deadline = DeadlineController::start();
-            let ceremony = ActiveCeremony::abort_probe(
-                allocation,
-                coordinator.clone(),
-                AppState::without_identity(),
-                deadline,
-            );
-            drop(ceremony);
-            for _ in 0..32 {
-                if coordinator
-                    .proposal_state_for_tenant(
-                        TransactionKind::Connect,
-                        "local",
-                        "test",
-                        label,
-                        proposal,
-                    )
-                    .expect("guard state")
-                    .is_none()
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-            assert!(
-                coordinator
-                    .proposal_state_for_tenant(
-                        TransactionKind::Connect,
-                        "local",
-                        "test",
-                        label,
-                        proposal,
-                    )
-                    .expect("tombstoned state")
-                    .is_none(),
-                "dropping {label} must tombstone the pre-decision allocation"
-            );
-        }
-
-        let decided = coordinator
-            .allocate_for_tenant(
-                TransactionKind::Connect,
-                "local",
-                "test",
-                "commit-drop",
-                proposal,
-            )
-            .expect("decision allocation");
-        coordinator
-            .prepare(decided, &batch)
-            .await
-            .expect("decision prepare");
-        let deadline = DeadlineController::start();
-        let mut ceremony = ActiveCeremony::abort_probe(
-            decided,
-            coordinator.clone(),
-            AppState::without_identity(),
-            deadline.clone(),
-        );
-        deadline
-            .begin_decision(
-                ReceiptIdentity::from_protocol_bytes(decided.receipt_id().protocol_bytes())
-                    .expect("nonzero receipt"),
-                Unresolved::Store,
-            )
-            .expect("decision starts");
-        coordinator
-            .decide_commit(decided)
-            .expect("durable decision");
-        ceremony.disarm_abort_probe();
-        deadline
-            .decided(
-                ReceiptIdentity::from_protocol_bytes(decided.receipt_id().protocol_bytes())
-                    .expect("nonzero receipt"),
-                Unresolved::Store,
-            )
-            .expect("decision observed");
-        drop(ceremony);
-        assert!(matches!(
-            coordinator
-                .proposal_state_for_tenant(
-                    TransactionKind::Connect,
-                    "local",
-                    "test",
-                    "commit-drop",
-                    proposal,
-                )
-                .expect("post-decision state"),
-            Some(crate::local_management::transaction::ProposalState::Active)
-        ));
-        coordinator
-            .commit(decided)
-            .await
-            .expect("post-decision drop retains roll-forward");
 
         drop(coordinator);
         drop(store);
@@ -1173,24 +1020,99 @@ mod tests {
             "the released worker must observe the expired start and skip the grant write"
         );
 
-        let mint_entered = Arc::new(Barrier::new(2));
-        let mint_release = Arc::new(Barrier::new(2));
-        let mint_port = Arc::new(BlockingMintPort {
-            entered: mint_entered.clone(),
-            release: mint_release.clone(),
-            decision_first: true,
-            committed: Mutex::new(None),
-        });
-        let mint = ServiceAccountCeremony::with_receipts(mint_port.clone(), [0x55; 32]);
-        let actor = Principal::new(PrincipalKind::User, "local-owner", tenant.clone());
+        let audit = Arc::new(
+            AuditJournal::bind(root.join("audit/journal.sqlite3")).expect("audit journal"),
+        );
+        let audit_entered = Arc::new(Barrier::new(2));
+        let audit_release = Arc::new(Barrier::new(2));
+        let grant = GrantCeremony::new(
+            grants.clone(),
+            Arc::new(BlockingGrantAudit {
+                inner: audit,
+                entered: audit_entered.clone(),
+                release: audit_release.clone(),
+            }),
+        );
+        let selector: GrantSelector = serde_json::from_slice(
+            br#"{"effects_within":null,"idempotency":null,"max_risk":"low"}"#,
+        )
+        .expect("selector");
+        let candidate = grants
+            .preview(&tenant, "github", selector)
+            .expect("post-decision candidate");
+        let candidate_bytes = serde_json::to_vec(&candidate).expect("candidate bytes");
         let deadline = DeadlineController::start();
         let worker_deadline = deadline.clone();
+        let worker_tenant = tenant.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            grant.handle_with_deadline(
+                &worker_tenant,
+                super::super::grant::APPLY_OPCODE,
+                &candidate_bytes,
+                &worker_deadline,
+            )
+        });
+        let raced_deadline = deadline.clone();
+        let raced = tokio::spawn(async move { raced_deadline.race(worker).await });
+        audit_entered.wait();
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        let grant_receipt = match raced.await.expect("grant audit runtime") {
+            Err(Expired::PostDecision {
+                receipt,
+                unresolved: Unresolved::Audit,
+            }) => receipt,
+            _ => panic!("blocked audit must expire after a durable grant decision"),
+        };
+        audit_release.wait();
+        let grant_receipt = GrantReceiptId::from_protocol_bytes(
+            decode_lowerhex_32(&grant_receipt.encoded()).expect("grant receipt bytes"),
+        )
+        .expect("grant receipt identity");
+        for _ in 0..64 {
+            if grants
+                .query(&tenant, grant_receipt)
+                .expect("grant receipt query")
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            grants
+                .query(&tenant, grant_receipt)
+                .expect("grant receipt query")
+                .is_some(),
+            "a blocked audit cannot hide the durable grant receipt"
+        );
+
+        let service_accounts = Arc::new(
+            ServiceAccountStore::open(root.join("service-accounts/store.json"))
+                .expect("Service Account store"),
+        );
+        let actor = Principal::new(PrincipalKind::User, "local-owner", tenant.clone());
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mint_entered = Arc::new(Barrier::new(2));
+        let mint_release = Arc::new(Barrier::new(2));
+        let mint_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mint = ServiceAccountCeremony::bind_retained_with_predecision_pause(
+            service_accounts.clone(),
+            mint_entered.clone(),
+            mint_release.clone(),
+            mint_completed.clone(),
+        );
+        let deadline = DeadlineController::start();
+        let worker_deadline = deadline.clone();
+        let pre_actor = actor.clone();
+        let pre_capture = captured.clone();
+        let pre_payload = mint_payload("pre-blocked");
         let worker = tokio::task::spawn_blocking(move || {
             mint.handle_with_deadline(
-                &actor,
+                &pre_actor,
                 crate::local_management::service_account::MINT_OPCODE,
-                br#"{"expires_at":"4070908800","id":"runtime"}"#,
-                Some(Box::new(UnusedWriter)),
+                &pre_payload,
+                Some(Box::new(CaptureWriter(pre_capture))),
                 &worker_deadline,
             )
         });
@@ -1202,24 +1124,151 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(matches!(
             raced.await.expect("mint runtime"),
-            Err(Expired::PostDecision {
-                unresolved: Unresolved::Store,
-                ..
-            })
+            Err(Expired::PreDecision)
         ));
         mint_release.wait();
-        for _ in 0..32 {
-            if mint_port.committed.lock().expect("mint result").is_some() {
+        for _ in 0..10_000 {
+            if mint_completed.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            std::thread::yield_now();
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            mint_completed.load(std::sync::atomic::Ordering::Acquire),
+            "the expired real-store mint worker must finish before the retained store is reused"
+        );
+        assert!(
+            captured.lock().expect("captured FXSA").is_empty(),
+            "an expired pre-decision mint must not disclose through the one-shot writer"
+        );
+
+        let mint_entered = Arc::new(Barrier::new(2));
+        let mint_release = Arc::new(Barrier::new(2));
+        let mint_entered_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mint_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mint = ServiceAccountCeremony::bind_retained_with_decision_pause(
+            service_accounts.clone(),
+            mint_entered.clone(),
+            mint_release.clone(),
+            mint_entered_flag.clone(),
+            mint_completed.clone(),
+        );
+        let query_mint = ServiceAccountCeremony::bind_retained(service_accounts.clone())
+            .expect("retained mint port");
+        let deadline = DeadlineController::start();
+        let worker_deadline = deadline.clone();
+        let post_actor = actor.clone();
+        let post_capture = captured.clone();
+        let post_payload = mint_payload("post-blocked");
+        let worker = tokio::task::spawn_blocking(move || {
+            mint.handle_with_deadline(
+                &post_actor,
+                crate::local_management::service_account::MINT_OPCODE,
+                &post_payload,
+                Some(Box::new(CaptureWriter(post_capture))),
+                &worker_deadline,
+            )
+        });
+        let raced_deadline = deadline.clone();
+        let raced = tokio::spawn(async move { raced_deadline.race(worker).await });
+        for _ in 0..10_000 {
+            if mint_entered_flag.load(std::sync::atomic::Ordering::Acquire) || raced.is_finished() {
+                break;
+            }
+            std::thread::yield_now();
+            tokio::task::yield_now().await;
+        }
+        if !mint_entered_flag.load(std::sync::atomic::Ordering::Acquire) {
+            match raced.await.expect("early mint runtime") {
+                Ok(Ok(frame)) => panic!(
+                    "real mint returned before durable decision: opcode={} payload={}",
+                    frame.opcode(),
+                    String::from_utf8_lossy(frame.payload())
+                ),
+                Ok(Err(_)) => panic!("real mint worker failed before durable decision"),
+                Err(_) => panic!("real mint expired before reaching its durable decision"),
+            }
+        }
+        mint_entered.wait();
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        tokio::task::yield_now().await;
+        let mint_receipt = match raced.await.expect("mint store runtime") {
+            Err(Expired::PostDecision {
+                receipt,
+                unresolved: Unresolved::Store,
+            }) => receipt,
+            _ => panic!("blocked post-decision mint must retain its receipt"),
+        };
+        mint_release.wait();
+        for _ in 0..10_000 {
+            if mint_completed.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            std::thread::yield_now();
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            mint_completed.load(std::sync::atomic::Ordering::Acquire),
+            "the detached post-decision mint worker must drain after its test barrier releases"
+        );
+        for _ in 0..64 {
+            let query = format!(r#"{{"receipt_id":"{}"}}"#, mint_receipt.encoded());
+            let response = query_mint.handle_with_deadline(
+                &actor,
+                crate::local_management::service_account::QUERY_OPCODE,
+                query.as_bytes(),
+                None,
+                &DeadlineController::start(),
+            );
+            if response.opcode() == crate::local_management::service_account::RECEIPT_OPCODE {
                 break;
             }
             tokio::task::yield_now().await;
         }
-        assert!(
-            mint_port.committed.lock().expect("mint result").is_some(),
-            "post-decision mint work must detach and become queryable"
+        let query = format!(r#"{{"receipt_id":"{}"}}"#, mint_receipt.encoded());
+        let response = query_mint.handle_with_deadline(
+            &actor,
+            crate::local_management::service_account::QUERY_OPCODE,
+            query.as_bytes(),
+            None,
+            &DeadlineController::start(),
+        );
+        assert_eq!(
+            response.opcode(),
+            crate::local_management::service_account::RECEIPT_OPCODE,
+            "post-decision mint work must detach and become query/replay-visible"
+        );
+        assert_eq!(
+            captured.lock().expect("captured FXSA").len(),
+            1,
+            "the real retained store consumes the one-shot writer exactly once"
         );
 
+        drop(service_accounts);
         drop(grants);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn decode_lowerhex_32(value: &str) -> Option<[u8; 32]> {
+        if value.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0_u8; 32];
+        for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+            let high = (pair[0] as char).to_digit(16)? as u8;
+            let low = (pair[1] as char).to_digit(16)? as u8;
+            bytes[index] = (high << 4) | low;
+        }
+        Some(bytes)
+    }
+
+    fn mint_payload(id: &str) -> Vec<u8> {
+        let expires_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_secs()
+            + 3_600;
+        format!(r#"{{"expires_at":"{expires_at}","id":"{id}"}}"#).into_bytes()
     }
 }

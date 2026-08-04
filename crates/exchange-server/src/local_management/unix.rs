@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, Interest};
 use tokio::net::{UnixListener, UnixStream};
 
 use super::codec::{Direction, StreamDecoder};
-use super::dispatcher::{expired_reply, Transport};
+use super::dispatcher::{expired_reply, native_frame_refusal, Transport};
 use super::service_account::OneShotWriter;
 use super::service_account_handoff::unix_transfer::{receive_initial_fd, UnixHandoffError};
 use super::{
@@ -507,37 +507,48 @@ async fn dispatch_one(
     let mut active: Option<Box<ActiveSession>> = None;
     loop {
         let received = if let Some(initial) = first.take() {
-            if decoder.push(initial).is_err() {
+            if let Err(error) = decoder.push(initial) {
+                let response = native_frame_refusal(error);
+                write_native_terminal(stream, &response, deadline).await;
                 return Ok(());
             }
             initial.len()
         } else {
             let received = stream.read(&mut bytes).await?;
-            if received != 0 && decoder.push(&bytes[..received]).is_err() {
-                if let Some(session) = active.as_mut() {
-                    session.abort().await;
+            if received != 0 {
+                if let Err(error) = decoder.push(&bytes[..received]) {
+                    if let Some(session) = active.as_mut() {
+                        session.abort().await;
+                    }
+                    let response = native_frame_refusal(error);
+                    write_native_terminal(stream, &response, deadline).await;
+                    return Ok(());
                 }
-                return Ok(());
             }
             received
         };
         if received == 0 {
-            let _ = decoder.finish();
             if deadline.may_abort() {
                 if let Some(session) = active.as_mut() {
                     session.abort().await;
                 }
             }
+            if let Err(error) = decoder.finish() {
+                let response = native_frame_refusal(error);
+                write_native_terminal(stream, &response, deadline).await;
+            }
             return Ok(());
         }
         while let Some(request) = match decoder.next_frame() {
             Ok(frame) => frame,
-            Err(_) => {
+            Err(error) => {
                 if deadline.may_abort() {
                     if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }
+                let response = native_frame_refusal(error);
+                write_native_terminal(stream, &response, deadline).await;
                 return Ok(());
             }
         } {

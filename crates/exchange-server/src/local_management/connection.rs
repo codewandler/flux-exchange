@@ -39,11 +39,31 @@ static PUBLICATION_FAILURE_INJECTED: std::sync::atomic::AtomicBool =
 pub(super) struct Ceremony {
     state: AppState,
     coordinator: Arc<TransactionCoordinator>,
+    #[cfg(test)]
+    cancellation_pause: Option<Arc<CancellationPause>>,
 }
 
 impl Ceremony {
     pub(super) const fn new(state: AppState, coordinator: Arc<TransactionCoordinator>) -> Self {
-        Self { state, coordinator }
+        Self {
+            state,
+            coordinator,
+            #[cfg(test)]
+            cancellation_pause: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_cancellation_pause(
+        state: AppState,
+        coordinator: Arc<TransactionCoordinator>,
+        pause: Arc<CancellationPause>,
+    ) -> Self {
+        Self {
+            state,
+            coordinator,
+            cancellation_pause: Some(pause),
+        }
     }
 
     /// Begin one mutation after transport authentication, or return a terminal replay/refusal.
@@ -432,6 +452,10 @@ impl Ceremony {
             cancellation.abort().await;
             return BeginOutcome::Terminal(refusal("store_unavailable", 503, "operator"));
         }
+        #[cfg(test)]
+        if let Some(pause) = &self.cancellation_pause {
+            pause.at(CancellationPoint::Begin).await;
+        }
         let mut active = ActiveCeremony {
             allocation,
             batch: targets.batch,
@@ -442,6 +466,8 @@ impl Ceremony {
             publication,
             state: self.state.clone(),
             cancellation,
+            #[cfg(test)]
+            cancellation_pause: self.cancellation_pause.clone(),
             _claim: claim,
             _tenant_claim: tenant_claim,
         };
@@ -455,6 +481,10 @@ impl Ceremony {
                 return BeginOutcome::Terminal(coordinator_refusal(error));
             }
             active.prepared = true;
+            #[cfg(test)]
+            if let Some(pause) = &active.cancellation_pause {
+                pause.at(CancellationPoint::Prepare).await;
+            }
         }
         let response = need_secrets(active.allocation, &active.expected);
         BeginOutcome::Active {
@@ -597,6 +627,8 @@ pub(super) struct ActiveCeremony {
     publication: Publication,
     state: AppState,
     cancellation: CeremonyCancellation,
+    #[cfg(test)]
+    cancellation_pause: Option<Arc<CancellationPause>>,
     _claim: Option<Claim>,
     _tenant_claim: Option<Claim>,
 }
@@ -632,14 +664,10 @@ impl ActiveCeremony {
             },
             state,
             cancellation: CeremonyCancellation::new(allocation, coordinator.clone(), deadline),
+            cancellation_pause: None,
             _claim: None,
             _tenant_claim: None,
         }
-    }
-
-    #[cfg(test)]
-    pub(super) fn disarm_abort_probe(&mut self) {
-        self.cancellation.disarm();
     }
 
     pub(super) async fn accept(
@@ -683,6 +711,10 @@ impl ActiveCeremony {
                 return AdvanceOutcome::Terminal(coordinator_refusal(error));
             }
             self.prepared = true;
+            #[cfg(test)]
+            if let Some(pause) = &self.cancellation_pause {
+                pause.at(CancellationPoint::Prepare).await;
+            }
         }
         let receipt = self.allocation.receipt_id();
         if deadline
@@ -703,6 +735,10 @@ impl ActiveCeremony {
             .is_err()
         {
             return AdvanceOutcome::Terminal(post_refusal("internal_refusal", 500, receipt));
+        }
+        #[cfg(test)]
+        if let Some(pause) = &self.cancellation_pause {
+            pause.at(CancellationPoint::Commit).await;
         }
 
         // Once the decision journal is durable, this owned task must outlive a transport timeout
@@ -770,12 +806,53 @@ impl ActiveCeremony {
             self.abort().await;
             return AdvanceOutcome::Terminal(refusal("invalid_request", 400, "never"));
         }
+        #[cfg(test)]
+        if let Some(pause) = &self.cancellation_pause {
+            pause.at(CancellationPoint::Secret).await;
+        }
         self.next_ordinal = self.next_ordinal.saturating_add(1);
         AdvanceOutcome::Awaiting
     }
 
     pub(super) async fn abort(&mut self) {
         self.cancellation.abort().await;
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CancellationPoint {
+    Begin,
+    Prepare,
+    Secret,
+    Commit,
+}
+
+#[cfg(test)]
+struct CancellationPause {
+    point: CancellationPoint,
+    entered: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl CancellationPause {
+    fn new(point: CancellationPoint) -> Arc<Self> {
+        Arc::new(Self {
+            point,
+            entered: tokio::sync::Notify::new(),
+        })
+    }
+
+    async fn at(&self, point: CancellationPoint) {
+        if self.point != point {
+            return;
+        }
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+    }
+
+    async fn wait_until_entered(&self) {
+        self.entered.notified().await;
     }
 }
 
@@ -1554,4 +1631,348 @@ fn control<T: Serialize>(opcode: Opcode, value: &T) -> Frame {
 
 fn error(body: ErrorBody) -> Frame {
     control(Opcode::Error, &body)
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use exchange_host::{
+        ConnectionLabel, ConnectionRegistry as _, CredentialStore, InstanceId,
+        MemoryConnectionRegistry, SettingsStore,
+    };
+    use serde_json::{json, Value};
+
+    use super::*;
+    use crate::audit::AuditJournal;
+    use crate::credential_head::CredentialHeadStore;
+    use crate::local_management::proposal::TargetPartition;
+
+    struct Harness {
+        root: std::path::PathBuf,
+        _store: CredentialStore,
+        coordinator: Arc<TransactionCoordinator>,
+        state: AppState,
+        tenant: Tenant,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            let root = std::env::temp_dir().join(format!(
+                "flux-exchange-x135-real-cancellation-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir(&root).expect("private test root");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                    .expect("owner-only test root");
+            }
+            let store = CredentialStore::bind(root.join("credentials/store"))
+                .expect("retained credential store");
+            let coordinator = Arc::new(
+                TransactionCoordinator::bind(
+                    root.join("transactions/journal.sqlite3"),
+                    store.prepared_secrets(),
+                )
+                .expect("transaction coordinator"),
+            );
+            let tenant = Tenant::new("local").expect("tenant");
+            let registry = Arc::new(MemoryConnectionRegistry::default());
+            let label = ConnectionLabel::new("work").expect("label");
+            registry
+                .assign(
+                    &tenant,
+                    "github",
+                    &label,
+                    &InstanceId::parse("11111111-1111-4111-8111-111111111111").expect("instance"),
+                )
+                .expect("seed held connection");
+            let head_key =
+                CredentialHeadKey::new("local", "github", "work").expect("credential-head key");
+            let heads = Arc::new(
+                CredentialHeadStore::migrate_legacy(&root, &[head_key])
+                    .expect("credential-head migration"),
+            );
+            let settings = Arc::new(
+                SettingsStore::bind(root.join("settings/store.json")).expect("settings store"),
+            );
+            let audit = Arc::new(
+                AuditJournal::bind(root.join("audit/journal.jsonl")).expect("audit journal"),
+            );
+            let state = AppState::without_identity()
+                .with_credentials(store.secrets())
+                .with_settings(settings)
+                .with_connection_registry(registry)
+                .with_credential_heads(heads)
+                .with_transaction_coordinator(coordinator.clone())
+                .with_audit(audit);
+            Self {
+                root,
+                _store: store,
+                coordinator,
+                state,
+                tenant,
+            }
+        }
+
+        fn connect_begin(&self, label: &str) -> (Frame, SecretProposalDigest) {
+            let snapshot =
+                crate::routes::native_plan_snapshot(&self.state, &self.tenant, "freshdesk", None)
+                    .unwrap_or_else(|_| panic!("freshdesk plan"));
+            let mut selected = BTreeSet::new();
+            let mut targets = Vec::new();
+            let mut settings = Vec::new();
+            let mut authorities = Vec::new();
+            for target in snapshot.targets.iter().filter(|target| target.required) {
+                if selected.insert(target.id.as_str()) {
+                    targets.push(json!({"revision": target.revision, "target": target.id}));
+                }
+                match target.partition {
+                    TargetPartition::ConnectionName | TargetPartition::Credential => {}
+                    TargetPartition::Setting => settings.push(json!({
+                        "target": target.id,
+                        "value": setting_value(&target.id),
+                    })),
+                    TargetPartition::Authority => {
+                        authorities.push(json!({"revision": null, "target": target.id}));
+                    }
+                }
+            }
+            let value = json!({
+                "authorities": authorities,
+                "connector": "freshdesk",
+                "label": label,
+                "plan_revision": snapshot.plan_revision,
+                "settings": settings,
+                "targets": targets,
+            });
+            proposal_frame(Opcode::ConnectBegin, value, |bytes| {
+                let parsed = ConnectBegin::parse_canonical(bytes).expect("canonical connect BEGIN");
+                protocol_digest(&parsed.proposal_digest())
+            })
+        }
+
+        fn credential_begin(&self) -> (Frame, SecretProposalDigest) {
+            let snapshot = crate::routes::native_plan_snapshot(
+                &self.state,
+                &self.tenant,
+                "github",
+                Some("work"),
+            )
+            .unwrap_or_else(|_| panic!("github selected plan"));
+            let targets = snapshot
+                .targets
+                .iter()
+                .filter(|target| target.required && target.partition == TargetPartition::Credential)
+                .map(|target| json!({"revision": target.revision, "target": target.id}))
+                .collect::<Vec<_>>();
+            assert!(!targets.is_empty(), "github must request one credential");
+            let value = json!({
+                "action": "acquire",
+                "connector": "github",
+                "credential_revision": snapshot.credential_revision.expect("legacy head"),
+                "label": "work",
+                "plan_revision": snapshot.plan_revision,
+                "targets": targets,
+            });
+            proposal_frame(Opcode::CredentialBegin, value, |bytes| {
+                let parsed =
+                    CredentialBegin::parse_canonical(bytes).expect("canonical credential BEGIN");
+                protocol_digest(&parsed.proposal_digest())
+            })
+        }
+
+        fn proposal_state(
+            &self,
+            kind: TransactionKind,
+            connector: &str,
+            label: &str,
+            proposal: SecretProposalDigest,
+        ) -> Option<ProposalState> {
+            self.coordinator
+                .proposal_state_for_tenant(kind, self.tenant.as_str(), connector, label, proposal)
+                .expect("proposal state")
+        }
+
+        async fn wait_tombstoned(
+            &self,
+            kind: TransactionKind,
+            connector: &str,
+            label: &str,
+            proposal: SecretProposalDigest,
+        ) {
+            for _ in 0..64 {
+                if self
+                    .proposal_state(kind, connector, label, proposal)
+                    .is_none()
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+            panic!("cancelled production operation was not tombstoned");
+        }
+
+        fn finish(self) {
+            let root = self.root.clone();
+            drop(self);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    fn proposal_frame(
+        opcode: Opcode,
+        value: Value,
+        digest: impl FnOnce(&[u8]) -> SecretProposalDigest,
+    ) -> (Frame, SecretProposalDigest) {
+        let payload = serde_json::to_vec(&value).expect("canonical proposal");
+        let digest = digest(&payload);
+        (
+            Frame::control(Direction::ClientToServer, opcode, payload).expect("BEGIN frame"),
+            digest,
+        )
+    }
+
+    fn setting_value(target: &str) -> &'static str {
+        if target.ends_with(".domain") {
+            "acme.freshdesk.com"
+        } else {
+            panic!("no closed fixture value for {target}")
+        }
+    }
+
+    async fn cancel_begin_at(
+        harness: &Harness,
+        point: CancellationPoint,
+        label: &str,
+    ) -> SecretProposalDigest {
+        let (request, proposal) = harness.connect_begin(label);
+        let pause = CancellationPause::new(point);
+        let ceremony = Ceremony::with_cancellation_pause(
+            harness.state.clone(),
+            harness.coordinator.clone(),
+            pause.clone(),
+        );
+        let tenant = harness.tenant.clone();
+        let deadline = DeadlineController::start();
+        let task = tokio::spawn(async move { ceremony.begin(&tenant, request, &deadline).await });
+        pause.wait_until_entered().await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        harness
+            .wait_tombstoned(TransactionKind::Connect, "freshdesk", label, proposal)
+            .await;
+        proposal
+    }
+
+    #[tokio::test]
+    async fn allocated_ceremony_drop_tombstones_only_until_the_decision_guard_disarms() {
+        let harness = Harness::new();
+
+        for (point, label) in [
+            (CancellationPoint::Begin, "begin-drop"),
+            (CancellationPoint::Prepare, "prepare-drop"),
+        ] {
+            let proposal = cancel_begin_at(&harness, point, label).await;
+            let (retry, retry_proposal) = harness.connect_begin(label);
+            assert_eq!(proposal.protocol_bytes(), retry_proposal.protocol_bytes());
+            assert!(matches!(
+                Ceremony::new(harness.state.clone(), harness.coordinator.clone())
+                    .begin(&harness.tenant, retry, &DeadlineController::start())
+                    .await,
+                BeginOutcome::Active { .. }
+            ));
+        }
+
+        let (credential, proposal) = harness.credential_begin();
+        let pause = CancellationPause::new(CancellationPoint::Secret);
+        let ceremony = Ceremony::with_cancellation_pause(
+            harness.state.clone(),
+            harness.coordinator.clone(),
+            pause.clone(),
+        );
+        let BeginOutcome::Active { mut active, .. } = ceremony
+            .begin(&harness.tenant, credential, &DeadlineController::start())
+            .await
+        else {
+            panic!("credential BEGIN must become active");
+        };
+        let secret = Frame::secret(Direction::ClientToServer, 1, b"phase-secret".to_vec())
+            .expect("SECRET frame");
+        let task =
+            tokio::spawn(async move { active.accept(secret, &DeadlineController::start()).await });
+        pause.wait_until_entered().await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        harness
+            .wait_tombstoned(TransactionKind::Credential, "github", "work", proposal)
+            .await;
+
+        let (credential, proposal) = harness.credential_begin();
+        let pause = CancellationPause::new(CancellationPoint::Commit);
+        let ceremony = Ceremony::with_cancellation_pause(
+            harness.state.clone(),
+            harness.coordinator.clone(),
+            pause.clone(),
+        );
+        let BeginOutcome::Active {
+            response,
+            mut active,
+        } = ceremony
+            .begin(&harness.tenant, credential, &DeadlineController::start())
+            .await
+        else {
+            panic!("credential BEGIN must become active");
+        };
+        active
+            .accept(
+                Frame::secret(Direction::ClientToServer, 1, b"commit-secret".to_vec())
+                    .expect("SECRET frame"),
+                &DeadlineController::start(),
+            )
+            .await;
+        let needed: Value = serde_json::from_slice(response.control_payload().expect("NEED body"))
+            .expect("NEED JSON");
+        let commit = json!({
+            "proposal_digest": needed["proposal_digest"],
+            "transaction_id": needed["transaction_id"],
+        });
+        let commit = Frame::control(
+            Direction::ClientToServer,
+            Opcode::CredentialCommit,
+            serde_json::to_vec(&commit).expect("COMMIT JSON"),
+        )
+        .expect("COMMIT frame");
+        let deadline = DeadlineController::start();
+        let task = tokio::spawn(async move { active.accept(commit, &deadline).await });
+        pause.wait_until_entered().await;
+        task.abort();
+        assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+        assert!(matches!(
+            harness.proposal_state(TransactionKind::Credential, "github", "work", proposal),
+            Some(ProposalState::Active)
+        ));
+        harness
+            .coordinator
+            .recover()
+            .await
+            .expect("durable decision rolls forward after cancellation");
+        assert!(
+            Ceremony::new(harness.state.clone(), harness.coordinator.clone())
+                .recover()
+                .is_ok(),
+            "public metadata recovery"
+        );
+        assert!(matches!(
+            harness.proposal_state(TransactionKind::Credential, "github", "work", proposal),
+            Some(ProposalState::Committed(_))
+        ));
+
+        harness.finish();
+    }
 }

@@ -33,7 +33,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::codec::{Direction, Frame, Opcode, StreamDecoder};
-use super::dispatcher::{expired_reply, Transport};
+use super::dispatcher::{expired_reply, native_frame_refusal, Transport};
 use super::service_account::{OneShotWriter, WriterRefusal};
 use super::{
     deadline::{finalize_native_terminal, write_native_terminal},
@@ -388,7 +388,7 @@ async fn dispatch_one(
     let mut writer: Option<Box<dyn OneShotWriter>> = None;
     if prefix_length < prefix.len() {
         if b"FXHA".starts_with(&prefix[..prefix_length]) {
-            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated).await?;
+            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated, deadline).await?;
         }
         return Ok(());
     }
@@ -396,13 +396,13 @@ async fn dispatch_one(
         let mut attachment = [0_u8; ATTACHMENT_BYTES];
         attachment[..4].copy_from_slice(&prefix);
         if read_prefix(&mut connection.pipe, &mut attachment[4..]).await? < ATTACHMENT_BYTES - 4 {
-            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated).await?;
+            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated, deadline).await?;
             return Ok(());
         }
         let source = match parse_attachment(&attachment) {
             Ok(source) => source,
             Err(refusal) => {
-                refuse_attachment(&mut connection.pipe, refusal).await?;
+                refuse_attachment(&mut connection.pipe, refusal, deadline).await?;
                 return Ok(());
             }
         };
@@ -412,14 +412,14 @@ async fn dispatch_one(
         {
             Ok(writer) => writer,
             Err(refusal) => {
-                refuse_attachment(&mut connection.pipe, refusal).await?;
+                refuse_attachment(&mut connection.pipe, refusal, deadline).await?;
                 return Ok(());
             }
         };
         writer = Some(Box::new(duplicate));
         let following = read_prefix(&mut connection.pipe, &mut prefix).await?;
         if following < prefix.len() {
-            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated).await?;
+            refuse_attachment(&mut connection.pipe, AttachmentRefusal::Truncated, deadline).await?;
             return Ok(());
         }
         let refusal = if &prefix == b"FXHA" {
@@ -430,7 +430,7 @@ async fn dispatch_one(
             None
         };
         if let Some(refusal) = refusal {
-            refuse_attachment(&mut connection.pipe, refusal).await?;
+            refuse_attachment(&mut connection.pipe, refusal, deadline).await?;
             return Ok(());
         }
     }
@@ -438,7 +438,9 @@ async fn dispatch_one(
     let mut decoder = StreamDecoder::new(Direction::ClientToServer);
     let mut bytes = [0_u8; 4096];
     let mut active: Option<Box<ActiveSession>> = None;
-    if decoder.push(&prefix).is_err() {
+    if let Err(error) = decoder.push(&prefix) {
+        let response = native_frame_refusal(error);
+        write_native_terminal(&mut connection.pipe, &response, deadline).await;
         return Ok(());
     }
     let mut initial_pending = true;
@@ -451,28 +453,37 @@ async fn dispatch_one(
             connection.pipe.read(&mut bytes).await?
         };
         if received == 0 {
-            let _ = decoder.finish();
             if deadline.may_abort() {
                 if let Some(session) = active.as_mut() {
                     session.abort().await;
                 }
             }
-            return Ok(());
-        }
-        if !used_initial && decoder.push(&bytes[..received]).is_err() {
-            if let Some(session) = active.as_mut() {
-                session.abort().await;
+            if let Err(error) = decoder.finish() {
+                let response = native_frame_refusal(error);
+                write_native_terminal(&mut connection.pipe, &response, deadline).await;
             }
             return Ok(());
         }
+        if !used_initial {
+            if let Err(error) = decoder.push(&bytes[..received]) {
+                if let Some(session) = active.as_mut() {
+                    session.abort().await;
+                }
+                let response = native_frame_refusal(error);
+                write_native_terminal(&mut connection.pipe, &response, deadline).await;
+                return Ok(());
+            }
+        }
         while let Some(request) = match decoder.next_frame() {
             Ok(frame) => frame,
-            Err(_) => {
+            Err(error) => {
                 if deadline.may_abort() {
                     if let Some(session) = active.as_mut() {
                         session.abort().await;
                     }
                 }
+                let response = native_frame_refusal(error);
+                write_native_terminal(&mut connection.pipe, &response, deadline).await;
                 return Ok(());
             }
         } {
@@ -486,6 +497,23 @@ async fn dispatch_one(
                     }
                 }
             } else {
+                if writer.is_some() {
+                    let refusal = if request.opcode() != Opcode::ServiceAccountMint {
+                        Some(AttachmentRefusal::UnexpectedFrame)
+                    } else if decoder.buffered_bytes().starts_with(b"FXHA") {
+                        Some(AttachmentRefusal::UnexpectedFrame)
+                    } else if !decoder.buffered_bytes().is_empty() {
+                        Some(AttachmentRefusal::InvalidFrame)
+                    } else {
+                        // The attachment is consumed by exactly this immediate MINT.
+                        // Later reads cannot inherit the writer because `take` clears it.
+                        None
+                    };
+                    if let Some(refusal) = refusal {
+                        refuse_attachment(&mut connection.pipe, refusal, deadline).await?;
+                        return Ok(());
+                    }
+                }
                 match dispatcher
                     .begin_frame_with_writer(
                         Transport::Native,
@@ -529,15 +557,18 @@ async fn read_prefix(stream: &mut NamedPipeServer, bytes: &mut [u8]) -> std::io:
 async fn refuse_attachment(
     stream: &mut NamedPipeServer,
     refusal: AttachmentRefusal,
+    deadline: &DeadlineController,
 ) -> std::io::Result<()> {
     if let Ok(frame) = Frame::control(
         Direction::ServerToClient,
         Opcode::Error,
         refusal.body().to_vec(),
     ) {
-        stream.write_all(&frame.encode()).await?;
+        write_native_terminal(stream, &frame.encode(), deadline).await;
+        return Ok(());
     }
-    stream.shutdown().await
+    finalize_native_terminal(stream, None).await;
+    Ok(())
 }
 
 /// A fixed, value-free native endpoint refusal.
