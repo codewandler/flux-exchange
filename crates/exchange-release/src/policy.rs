@@ -7,7 +7,9 @@ use time::{Duration, OffsetDateTime};
 
 use crate::archive::ensure_one_root;
 use crate::model::*;
-use crate::{digest_hex, Error, Result, JCS_SAFE_INTEGER, ORIGIN, SUPPORTED_TARGETS};
+use crate::{
+    digest_hex, read_bounded_file, Error, Result, JCS_SAFE_INTEGER, ORIGIN, SUPPORTED_TARGETS,
+};
 
 pub(crate) struct VerifiedTrust {
     pub document: TrustDocument,
@@ -21,7 +23,7 @@ pub(crate) fn verify_trust(
 ) -> Result<VerifiedTrust> {
     validate_root_policy(policy)?;
     let path = directory.join("flux-exchange-release-trust.json");
-    let bytes = read_bounded(&path, 64 * 1024)?;
+    let bytes = read_bounded_file(&path, 64 * 1024)?;
     let document: TrustDocument = crate::canonical::parse(&bytes, 64 * 1024)?;
     if document.schema != "exchange.release-trust.v1" || document.origin != ORIGIN {
         return Err(Error::Schema(
@@ -112,7 +114,7 @@ pub(crate) fn verify_channel(
     now: OffsetDateTime,
 ) -> Result<(Channel, Vec<u8>)> {
     let path = directory.join("flux-exchange-release-channel.json");
-    let bytes = read_bounded(&path, 256 * 1024)?;
+    let bytes = read_bounded_file(&path, 256 * 1024)?;
     let channel: Channel = crate::canonical::parse(&bytes, 256 * 1024)?;
     if channel.schema != "exchange.release-channel.v1"
         || channel.channel != "stable"
@@ -192,7 +194,7 @@ pub(crate) fn verify_manifest(
     target: Option<&str>,
 ) -> Result<(Manifest, Vec<u8>)> {
     let path = directory.join("flux-exchange-release-manifest.json");
-    let bytes = read_bounded(&path, 256 * 1024)?;
+    let bytes = read_bounded_file(&path, 256 * 1024)?;
     if digest_hex(&bytes) != selected.manifest_sha256 {
         return Err(Error::Digest(
             "manifest digest disagrees with selected channel entry".into(),
@@ -322,6 +324,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
         validate_member(asset.executable.bytes, &asset.executable.sha256)?;
         let mut expanded = asset.executable.bytes;
         let mut prior = None;
+        let mut support = BTreeSet::new();
         for member in &asset.other_members {
             if prior.is_some_and(|path: &str| path >= member.path.as_str()) {
                 return Err(Error::Schema(
@@ -329,6 +332,25 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                 ));
             }
             prior = Some(&member.path);
+            let basename = member
+                .path
+                .rsplit('/')
+                .next()
+                .ok_or_else(|| Error::Archive("supporting member has no basename".into()))?;
+            let expected_kind = match basename {
+                "LICENSE-APACHE" | "LICENSE-MIT" => MemberKind::License,
+                "README.md" => MemberKind::Documentation,
+                _ => {
+                    return Err(Error::Archive(format!(
+                        "supporting member basename {basename:?} is outside the packager contract"
+                    )))
+                }
+            };
+            if member.kind != expected_kind || !support.insert(basename) {
+                return Err(Error::Archive(format!(
+                    "supporting member {basename:?} has the wrong kind or is duplicated"
+                )));
+            }
             validate_member(member.bytes, &member.sha256)?;
             expanded = expanded
                 .checked_add(member.bytes)
@@ -338,6 +360,11 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
                     "archive declares more than 512 MiB expanded bytes".into(),
                 ));
             }
+        }
+        if !support.contains("LICENSE-APACHE") || !support.contains("LICENSE-MIT") {
+            return Err(Error::Archive(
+                "archive must contain both required license basenames".into(),
+            ));
         }
     }
     Ok(())
@@ -462,12 +489,11 @@ fn verify_signatures<'a>(
             Error::Signature(format!("signer {id} is not valid for this role/time"))
         })?;
         let path = directory.join(format!("{basename}.{id}.minisig"));
-        if !path.is_file() {
-            return Err(Error::Signature(format!(
-                "required signature {basename}.{id}.minisig is absent"
-            )));
-        }
-        let bytes = read_bounded(&path, 4096)?;
+        let bytes = read_bounded_file(&path, 4096).map_err(|error| {
+            Error::Signature(format!(
+                "required signature {basename}.{id}.minisig is absent or unreadable: {error}"
+            ))
+        })?;
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| Error::Signature("signature is not UTF-8".into()))?;
         let public =
@@ -736,15 +762,4 @@ fn validate_public_key(encoded: &str) -> Result<[u8; 32]> {
     let mut material = [0u8; 32];
     material.copy_from_slice(&decoded[10..]);
     Ok(material)
-}
-
-fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
-    let metadata = std::fs::metadata(path).map_err(|error| Error::Io(path.to_owned(), error))?;
-    if metadata.len() > limit as u64 {
-        return Err(Error::Bounds(format!(
-            "{} exceeds {limit} bytes",
-            path.display()
-        )));
-    }
-    std::fs::read(path).map_err(|error| Error::Io(path.to_owned(), error))
 }

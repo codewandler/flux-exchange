@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Validate the sole GitHub release-asset redirect before curl follows it."""
 
+import json
 import re
 import sys
 import urllib.parse
@@ -64,6 +65,31 @@ def validate(raw: str) -> None:
             raise ValueError("redirect query decodes to a control byte")
 
 
+def validate_fixture(path: str) -> None:
+    with open(path, "rb") as source:
+        raw = source.read(16385)
+        if len(raw) > 16384:
+            raise ValueError("transport fixture exceeds 16384 bytes")
+    try:
+        fixture = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("transport fixture is not UTF-8 JSON") from error
+    expected = {"status", "location", "forwarded_credentials", "final_status", "second_redirect"}
+    if not isinstance(fixture, dict) or set(fixture) != expected:
+        raise ValueError("transport fixture schema is not exact")
+    if type(fixture["status"]) is not int or fixture["status"] != 302:
+        raise ValueError("initial response is not HTTP 302")
+    if type(fixture["forwarded_credentials"]) is not bool or fixture["forwarded_credentials"]:
+        raise ValueError("credentials reached redirect transport")
+    if type(fixture["location"]) is not str:
+        raise ValueError("redirect Location is not a string")
+    validate(fixture["location"])
+    if type(fixture["final_status"]) is not int or fixture["final_status"] != 200:
+        raise ValueError("final response is not HTTP 200")
+    if type(fixture["second_redirect"]) is not bool or fixture["second_redirect"]:
+        raise ValueError("a second redirect was admitted")
+
+
 def self_test() -> None:
     base = "https://release-assets.githubusercontent.com/github-production-release-asset/1/00000000-0000-0000-0000-000000000001?sig=good%20value"
     validate(base)
@@ -91,10 +117,17 @@ def self_test() -> None:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         self_test()
+    elif len(sys.argv) == 3 and sys.argv[1] == "--fixture":
+        try:
+            validate_fixture(sys.argv[2])
+        except (OSError, ValueError) as error:
+            raise SystemExit(f"release-download: {error}") from error
     elif len(sys.argv) == 2:
         try:
             validate(sys.argv[1])
         except ValueError as error:
             raise SystemExit(f"release-download: {error}") from error
     else:
-        raise SystemExit("usage: release-validate-redirect.py <url>|--self-test")
+        raise SystemExit(
+            "usage: release-validate-redirect.py <url>|--fixture <fixture.json>|--self-test"
+        )

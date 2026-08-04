@@ -1,8 +1,11 @@
 use flux_exchange_release::{
-    canonical, package_archive, select_compatible, transport, verify_archive, Platform, Protocols,
-    ReleaseEntry,
+    canonical, delegated_signing_key_id, package_archive, read_bounded_file, select_compatible,
+    stage_manifest, transport, verify_archive, FixtureSet, Manifest, Platform, Protocols,
+    ReleaseEntry, TrustDocument,
 };
+use serde::Deserialize;
 use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
 
@@ -90,6 +93,63 @@ fn rust_and_download_validator_refuse_the_same_raw_query_character() {
     assert!(!status.success());
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RedirectFixture {
+    status: u16,
+    location: String,
+    forwarded_credentials: bool,
+    final_status: u16,
+    second_redirect: bool,
+}
+
+#[test]
+fn rust_and_python_transport_admission_match_the_shared_fixture_inventory() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixtures = root.join("tests/fixtures/exchange-release-v1");
+    let set: FixtureSet = canonical::parse(
+        &read_bounded_file(&fixtures.join("fixture-set.json"), 256 * 1024)
+            .expect("bounded fixture manifest"),
+        256 * 1024,
+    )
+    .expect("fixture manifest");
+    let script = root.join("scripts/release-validate-redirect.py");
+    let mut compared = 0;
+    for case in set
+        .cases
+        .iter()
+        .filter(|case| case.operation == "transport")
+    {
+        let path = fixtures.join(&case.input);
+        let fixture: RedirectFixture = canonical::parse(
+            &read_bounded_file(&path, 16 * 1024).expect("bounded redirect fixture"),
+            16 * 1024,
+        )
+        .expect("redirect fixture");
+        let rust = transport::validate_redirect(
+            fixture.status,
+            &fixture.location,
+            fixture.forwarded_credentials,
+        )
+        .and_then(|()| transport::validate_final(fixture.final_status, fixture.second_redirect))
+        .is_ok();
+        let python = Command::new("python3")
+            .arg(&script)
+            .arg("--fixture")
+            .arg(&path)
+            .status()
+            .expect("run Python redirect validator")
+            .success();
+        assert_eq!(rust, python, "Rust/Python disagreement for {}", case.id);
+        assert_eq!(rust, case.expected_result == "accepted", "{}", case.id);
+        compared += 1;
+    }
+    assert_eq!(
+        compared, 25,
+        "transport fixture inventory changed unreviewed"
+    );
+}
+
 #[test]
 fn duplicate_members_and_unsafe_integers_refuse_before_mapping() {
     assert!(canonical::parse_value(br#"{"x":1,"x":1}"#, 64).is_err());
@@ -169,4 +229,152 @@ fn archive_paths_refuse_traversal_before_extraction() {
         &[],
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn archive_member_modes_are_the_exact_packager_modes() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let path = temporary.path().join("wrong-mode.tar.zst");
+    let payload = b"binary";
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o777);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "root/flux-exchange", Cursor::new(payload))
+            .expect("tar member");
+        builder.finish().expect("tar finish");
+    }
+    fs::write(
+        &path,
+        zstd::stream::encode_all(Cursor::new(tar_bytes), 19).expect("zstd"),
+    )
+    .expect("archive");
+    let expected = vec![(
+        "root/flux-exchange".to_owned(),
+        payload.len() as u64,
+        flux_exchange_release::digest_hex(payload),
+    )];
+    assert!(verify_archive(&path, "tar.zst", Platform::Unix, &expected).is_err());
+}
+
+#[test]
+fn raw_zip_member_names_must_be_utf8() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let executable = temporary.path().join("flux-exchange.exe");
+    let apache = temporary.path().join("LICENSE-APACHE");
+    let mit = temporary.path().join("LICENSE-MIT");
+    fs::write(&executable, b"binary").expect("executable");
+    fs::write(&apache, b"apache").expect("license");
+    fs::write(&mit, b"mit").expect("license");
+    let asset = package_archive(
+        "1.2.3",
+        "x86_64-pc-windows-msvc",
+        &executable,
+        &[apache, mit],
+        None,
+        temporary.path(),
+    )
+    .expect("package");
+    let archive = temporary.path().join(&asset.archive);
+    let mut bytes = fs::read(&archive).expect("zip");
+    let needle = b"LICENSE-APACHE";
+    let mut mutations = 0;
+    for index in 0..=bytes.len() - needle.len() {
+        if bytes[index..].starts_with(needle) {
+            bytes[index] = 0xff;
+            mutations += 1;
+        }
+    }
+    assert_eq!(mutations, 2, "local and central ZIP names");
+    fs::write(&archive, bytes).expect("mutated ZIP");
+    let expected = std::iter::once((
+        asset.executable.path,
+        asset.executable.bytes,
+        asset.executable.sha256,
+    ))
+    .chain(
+        asset
+            .other_members
+            .into_iter()
+            .map(|member| (member.path, member.bytes, member.sha256)),
+    )
+    .collect::<Vec<_>>();
+    let error = verify_archive(&archive, "zip", Platform::Windows, &expected)
+        .expect_err("invalid raw ZIP name");
+    assert!(error
+        .to_string()
+        .contains("raw ZIP member path is not UTF-8"));
+}
+
+#[test]
+fn bounded_reader_and_support_member_contract_refuse_widening() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let oversized = temporary.path().join("oversized");
+    fs::write(&oversized, b"12345").expect("oversized input");
+    assert!(read_bounded_file(&oversized, 4).is_err());
+
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/exchange-release-v1/positive");
+    let mut manifest: Manifest = canonical::parse(
+        &read_bounded_file(
+            &fixtures.join("flux-exchange-release-manifest.json"),
+            256 * 1024,
+        )
+        .expect("fixture manifest"),
+        256 * 1024,
+    )
+    .expect("manifest");
+    manifest.assets[0].other_members[0].path = manifest.assets[0].other_members[0]
+        .path
+        .replace("LICENSE-APACHE", "NOTICE");
+    assert!(stage_manifest(&fixtures, &manifest).is_err());
+}
+
+#[test]
+fn packager_refuses_documentation_under_an_unadmitted_basename() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let executable = temporary.path().join("flux-exchange");
+    let apache = temporary.path().join("LICENSE-APACHE");
+    let mit = temporary.path().join("LICENSE-MIT");
+    let documentation = temporary.path().join("guide.md");
+    fs::write(&executable, b"binary").expect("executable");
+    fs::write(&apache, b"apache").expect("license");
+    fs::write(&mit, b"mit").expect("license");
+    fs::write(&documentation, b"guide").expect("documentation");
+    assert!(package_archive(
+        "1.2.3",
+        "x86_64-unknown-linux-gnu",
+        &executable,
+        &[apache, mit],
+        Some(&documentation),
+        temporary.path(),
+    )
+    .is_err());
+}
+
+#[test]
+fn delegated_signer_uses_a_half_open_validity_interval() {
+    let trust_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/exchange-release-v1/positive/flux-exchange-release-trust.json");
+    let trust: TrustDocument = canonical::parse(
+        &read_bounded_file(&trust_path, 64 * 1024).expect("trust bytes"),
+        64 * 1024,
+    )
+    .expect("trust");
+    let key = &trust.roles.release.keys[0];
+    let before = flux_exchange_release::parse_utc(&key.not_before).expect("not_before");
+    let after = flux_exchange_release::parse_utc(&key.not_after).expect("not_after");
+    assert_eq!(
+        delegated_signing_key_id(&trust, "release", &key.minisign_public_key, before)
+            .expect("inclusive lower bound"),
+        key.key_id
+    );
+    assert!(delegated_signing_key_id(&trust, "release", &key.minisign_public_key, after).is_err());
 }

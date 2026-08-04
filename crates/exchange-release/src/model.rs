@@ -143,7 +143,7 @@ pub struct OtherMember {
     pub sha256: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemberKind {
     Documentation,

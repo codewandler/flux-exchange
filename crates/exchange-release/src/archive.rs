@@ -2,14 +2,14 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
 use crate::model::{Asset, MemberKind};
 use crate::{
-    digest_hex, Error, Platform, Result, MAX_ARCHIVE_BYTES, MAX_EXPANDED_BYTES, MAX_MEMBER_BYTES,
+    digest_hex, read_bounded_file, Error, Platform, Result, MAX_ARCHIVE_BYTES, MAX_EXPANDED_BYTES,
+    MAX_MEMBER_BYTES,
 };
 
 #[derive(Debug)]
@@ -21,20 +21,18 @@ struct SeenMember {
 /// Verify the selected archive against its complete signed member inventory.
 pub fn verify_asset(directory: &Path, asset: &Asset) -> Result<()> {
     let archive_path = directory.join(&asset.archive);
-    let metadata =
-        std::fs::metadata(&archive_path).map_err(|error| Error::Io(archive_path.clone(), error))?;
-    if !metadata.is_file()
-        || metadata.len() != asset.archive_bytes
-        || metadata.len() > MAX_ARCHIVE_BYTES
-    {
+    let bytes = read_bounded_file(&archive_path, MAX_ARCHIVE_BYTES)?;
+    verify_asset_bytes(&bytes, asset)
+}
+
+fn verify_asset_bytes(bytes: &[u8], asset: &Asset) -> Result<()> {
+    if bytes.len() as u64 != asset.archive_bytes {
         return Err(Error::Archive(format!(
             "archive size disagrees for {}",
             asset.archive
         )));
     }
-    let bytes =
-        std::fs::read(&archive_path).map_err(|error| Error::Io(archive_path.clone(), error))?;
-    if digest_hex(&bytes) != asset.archive_sha256 {
+    if digest_hex(bytes) != asset.archive_sha256 {
         return Err(Error::Digest(format!(
             "archive digest disagrees for {}",
             asset.archive
@@ -42,7 +40,7 @@ pub fn verify_asset(directory: &Path, asset: &Asset) -> Result<()> {
     }
     let expected = expected_members(asset)?;
     let platform = Platform::from_target(&asset.target)?;
-    let seen = verify_archive_members(&archive_path, &asset.format, platform, &expected)?;
+    let seen = verify_archive_members(bytes, &asset.format, platform, &expected)?;
     if seen.len() != expected.len() {
         return Err(Error::Archive("archive member set is not exact".into()));
     }
@@ -61,25 +59,20 @@ pub fn verify_asset(directory: &Path, asset: &Asset) -> Result<()> {
 }
 
 pub(crate) fn executable_bytes(directory: &Path, asset: &Asset) -> Result<Vec<u8>> {
-    verify_asset(directory, asset)?;
     let path = directory.join(&asset.archive);
-    match asset.format.as_str() {
+    let archive_bytes = read_bounded_file(&path, MAX_ARCHIVE_BYTES)?;
+    verify_asset_bytes(&archive_bytes, asset)?;
+    let bytes = match asset.format.as_str() {
         "zip" => {
-            let file = File::open(&path).map_err(|error| Error::Io(path.clone(), error))?;
-            let mut archive =
-                zip::ZipArchive::new(file).map_err(|error| Error::Archive(error.to_string()))?;
+            let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes.as_slice()))
+                .map_err(|error| Error::Archive(error.to_string()))?;
             let mut member = archive
                 .by_name(&asset.executable.path)
                 .map_err(|error| Error::Archive(error.to_string()))?;
-            let mut bytes = Vec::with_capacity(asset.executable.bytes as usize);
-            member
-                .read_to_end(&mut bytes)
-                .map_err(|error| Error::Archive(error.to_string()))?;
-            Ok(bytes)
+            read_exact_member_bytes(&mut member, asset.executable.bytes)?
         }
         "tar.zst" => {
-            let file = File::open(&path).map_err(|error| Error::Io(path.clone(), error))?;
-            let decoder = zstd::stream::read::Decoder::new(file)
+            let decoder = zstd::stream::read::Decoder::new(Cursor::new(archive_bytes.as_slice()))
                 .map_err(|error| Error::Archive(error.to_string()))?;
             let mut archive = tar::Archive::new(decoder);
             for entry in archive
@@ -92,19 +85,44 @@ pub(crate) fn executable_bytes(directory: &Path, asset: &Asset) -> Result<Vec<u8
                     .map_err(|error| Error::Archive(error.to_string()))?
                     == Path::new(&asset.executable.path)
                 {
-                    let mut bytes = Vec::with_capacity(asset.executable.bytes as usize);
-                    entry
-                        .read_to_end(&mut bytes)
-                        .map_err(|error| Error::Archive(error.to_string()))?;
-                    return Ok(bytes);
+                    return finish_executable(
+                        read_exact_member_bytes(&mut entry, asset.executable.bytes)?,
+                        asset,
+                    );
                 }
             }
-            Err(Error::Archive(
+            return Err(Error::Archive(
                 "verified executable member disappeared".into(),
-            ))
+            ));
         }
-        _ => Err(Error::Archive("unknown archive format".into())),
+        _ => return Err(Error::Archive("unknown archive format".into())),
+    };
+    finish_executable(bytes, asset)
+}
+
+fn read_exact_member_bytes(reader: &mut impl Read, declared: u64) -> Result<Vec<u8>> {
+    let capacity = usize::try_from(declared)
+        .map_err(|_| Error::Bounds("member size does not fit this platform".into()))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    reader
+        .take(declared.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| Error::Archive(error.to_string()))?;
+    if bytes.len() as u64 != declared {
+        return Err(Error::Archive(
+            "returned executable bytes disagree with their declared size".into(),
+        ));
     }
+    Ok(bytes)
+}
+
+fn finish_executable(bytes: Vec<u8>, asset: &Asset) -> Result<Vec<u8>> {
+    if digest_hex(&bytes) != asset.executable.sha256 {
+        return Err(Error::Digest(
+            "returned executable digest disagrees with signed member digest".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn expected_members(asset: &Asset) -> Result<BTreeMap<String, (u64, String)>> {
@@ -136,18 +154,19 @@ pub(crate) fn verify_archive(
     platform: Platform,
     expected: &BTreeMap<String, (u64, String)>,
 ) -> Result<()> {
-    verify_archive_members(path, format, platform, expected).map(|_| ())
+    let bytes = read_bounded_file(path, MAX_ARCHIVE_BYTES)?;
+    verify_archive_members(&bytes, format, platform, expected).map(|_| ())
 }
 
 fn verify_archive_members(
-    path: &Path,
+    bytes: &[u8],
     format: &str,
     platform: Platform,
     expected: &BTreeMap<String, (u64, String)>,
 ) -> Result<BTreeMap<String, SeenMember>> {
     match (format, platform) {
-        ("zip", Platform::Windows) => verify_zip(path, expected),
-        ("tar.zst", Platform::Unix) => verify_tar_zst(path, expected),
+        ("zip", Platform::Windows) => verify_zip(bytes, expected),
+        ("tar.zst", Platform::Unix) => verify_tar_zst(bytes, expected),
         _ => Err(Error::Archive(
             "archive format does not match target platform".into(),
         )),
@@ -155,12 +174,11 @@ fn verify_archive_members(
 }
 
 fn verify_zip(
-    path: &Path,
+    bytes: &[u8],
     expected: &BTreeMap<String, (u64, String)>,
 ) -> Result<BTreeMap<String, SeenMember>> {
-    let file = File::open(path).map_err(|error| Error::Io(path.to_owned(), error))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|error| Error::Archive(error.to_string()))?;
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| Error::Archive(error.to_string()))?;
     if archive.len() > 16 {
         return Err(Error::Bounds("archive has more than 16 members".into()));
     }
@@ -181,8 +199,16 @@ fn verify_zip(
                 member.name()
             )));
         }
-        let name = member.name().to_owned();
+        let name = std::str::from_utf8(member.name_raw())
+            .map_err(|_| Error::Archive("raw ZIP member path is not UTF-8".into()))?
+            .to_owned();
+        if name != member.name() {
+            return Err(Error::Archive(
+                "ZIP member path is not represented by its raw UTF-8 bytes".into(),
+            ));
+        }
         validate_member_path(&name)?;
+        validate_member_mode(&name, member.unix_mode())?;
         if member.size() > MAX_MEMBER_BYTES {
             return Err(Error::Bounds(format!(
                 "archive member {name} exceeds 256 MiB"
@@ -202,12 +228,11 @@ fn verify_zip(
             return Err(Error::Archive(format!("duplicate archive member {name}")));
         }
     }
-    trailing_zip_bytes(path)?;
+    trailing_zip_bytes(bytes)?;
     Ok(seen)
 }
 
-fn trailing_zip_bytes(path: &Path) -> Result<()> {
-    let bytes = std::fs::read(path).map_err(|error| Error::Io(path.to_owned(), error))?;
+fn trailing_zip_bytes(bytes: &[u8]) -> Result<()> {
     let start = bytes.len().saturating_sub(65_557);
     let position = bytes[start..]
         .windows(4)
@@ -225,15 +250,11 @@ fn trailing_zip_bytes(path: &Path) -> Result<()> {
 }
 
 fn verify_tar_zst(
-    path: &Path,
+    bytes: &[u8],
     expected: &BTreeMap<String, (u64, String)>,
 ) -> Result<BTreeMap<String, SeenMember>> {
-    let file = File::open(path).map_err(|error| Error::Io(path.to_owned(), error))?;
-    let file_len = file
-        .metadata()
-        .map_err(|error| Error::Io(path.to_owned(), error))?
-        .len();
-    let mut decoder = zstd::stream::read::Decoder::with_buffer(BufReader::new(file))
+    let file_len = bytes.len() as u64;
+    let mut decoder = zstd::stream::read::Decoder::with_buffer(BufReader::new(Cursor::new(bytes)))
         .map_err(|error| Error::Archive(error.to_string()))?
         .single_frame();
     let mut expanded_bytes = Vec::new();
@@ -281,6 +302,11 @@ fn verify_tar_zst(
             .ok_or_else(|| Error::Archive("member path is not UTF-8".into()))?
             .to_owned();
         validate_member_path(&name)?;
+        let mode = member
+            .header()
+            .mode()
+            .map_err(|error| Error::Archive(error.to_string()))?;
+        validate_member_mode(&name, Some(mode))?;
         let size = member
             .header()
             .size()
@@ -316,6 +342,28 @@ fn verify_tar_zst(
         return Err(Error::Archive("tar has trailing decompressed data".into()));
     }
     Ok(seen)
+}
+
+fn validate_member_mode(path: &str, mode: Option<u32>) -> Result<()> {
+    let basename = path
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| Error::Archive("archive member has no basename".into()))?;
+    let expected = match basename {
+        "flux-exchange" | "flux-exchange.exe" => 0o755,
+        "LICENSE-APACHE" | "LICENSE-MIT" | "README.md" => 0o644,
+        _ => {
+            return Err(Error::Archive(format!(
+                "supporting member basename {basename:?} is outside the packager contract"
+            )))
+        }
+    };
+    if !matches!(mode, Some(actual) if actual == expected || actual == 0o100000 | expected) {
+        return Err(Error::Archive(format!(
+            "archive member {path} mode is not {expected:o}"
+        )));
+    }
+    Ok(())
 }
 
 fn read_member(reader: &mut impl Read, declared: u64) -> Result<SeenMember> {
@@ -414,8 +462,7 @@ pub(crate) fn package(
 ) -> Result<Asset> {
     crate::policy::parse_stable_version(version)?;
     let platform = Platform::from_target(target)?;
-    let executable_bytes =
-        std::fs::read(executable).map_err(|error| Error::Io(executable.to_owned(), error))?;
+    let executable_bytes = read_bounded_file(executable, MAX_MEMBER_BYTES)?;
     if licenses.len() != 2 {
         return Err(Error::Schema(
             "package requires exactly two --license inputs".into(),
@@ -432,12 +479,16 @@ pub(crate) fn package(
                 "unadmitted license basename {basename:?}"
             )));
         }
-        let bytes = std::fs::read(license).map_err(|error| Error::Io(license.to_owned(), error))?;
+        let bytes = read_bounded_file(license, MAX_MEMBER_BYTES)?;
         supporting.push((basename.to_owned(), MemberKind::License, bytes));
     }
     if let Some(documentation) = documentation {
-        let bytes = std::fs::read(documentation)
-            .map_err(|error| Error::Io(documentation.to_owned(), error))?;
+        if documentation.file_name().and_then(|name| name.to_str()) != Some("README.md") {
+            return Err(Error::Schema(
+                "documentation basename must be README.md".into(),
+            ));
+        }
+        let bytes = read_bounded_file(documentation, MAX_MEMBER_BYTES)?;
         supporting.push(("README.md".into(), MemberKind::Documentation, bytes));
     }
     supporting.sort_by(|left, right| left.0.cmp(&right.0));
@@ -491,7 +542,7 @@ pub(crate) fn package(
         )?,
     };
     if output.exists() {
-        let existing = std::fs::read(&output).map_err(|error| Error::Io(output.clone(), error))?;
+        let existing = read_bounded_file(&output, MAX_ARCHIVE_BYTES)?;
         if existing != bytes {
             return Err(Error::Archive(format!(
                 "refusing to replace different deterministic archive {}",

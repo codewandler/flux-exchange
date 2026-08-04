@@ -243,7 +243,7 @@ fn stage_release(arguments: &[String]) -> anyhow::Result<()> {
     let spec = Path::new(required_option(arguments, "--spec")?);
     let directory = Path::new(required_option(arguments, "--directory")?);
     let output = Path::new(required_option(arguments, "--output")?);
-    let bytes = std::fs::read(spec).with_context(|| format!("read {}", spec.display()))?;
+    let bytes = release::read_bounded_file(spec, 256 * 1024)?;
     let manifest: Manifest = serde_json::from_slice(&bytes).context("parse manifest draft")?;
     let canonical = release::stage_manifest(directory, &manifest)?;
     write_new_or_identical(output, &canonical)?;
@@ -292,8 +292,7 @@ fn update_channel(arguments: &[String]) -> anyhow::Result<()> {
             releases: vec![entry],
         })?
     } else {
-        let existing_bytes =
-            std::fs::read(existing_path).with_context(|| format!("read {existing_path}"))?;
+        let existing_bytes = release::read_bounded_file(Path::new(existing_path), 256 * 1024)?;
         let mut existing: Channel = canonical::parse(&existing_bytes, 256 * 1024)?;
         if let Some(prior) = existing
             .releases
@@ -342,18 +341,9 @@ fn sign(arguments: &[String]) -> anyhow::Result<()> {
     let now = release::parse_utc(required_option(arguments, "--now")?)?;
     let trust = release::verify_trust_document(trust_directory, &policy, now)?;
     let role = required_option(arguments, "--role")?;
-    let keys = match role {
-        "channel" => &trust.roles.channel.keys,
-        "release" => &trust.roles.release.keys,
-        _ => bail!("--role must be channel or release"),
-    };
     let public_base64 = public.to_base64();
-    let metadata_id = keys
-        .iter()
-        .find(|key| key.minisign_public_key == public_base64)
-        .map(|key| key.key_id.as_str())
-        .ok_or_else(|| anyhow!("secret public key is not delegated for role {role}"))?;
-    let bytes = std::fs::read(payload).with_context(|| format!("read {}", payload.display()))?;
+    let metadata_id = release::delegated_signing_key_id(&trust, role, &public_base64, now)?;
+    let bytes = release::read_bounded_file(payload, 256 * 1024)?;
     let signature = minisign::sign(
         Some(&public),
         &secret,
@@ -371,7 +361,7 @@ fn sign(arguments: &[String]) -> anyhow::Result<()> {
     write_new_or_identical(&output, text.as_bytes())?;
     status(&SignStatus {
         schema: "exchange.release-signature.v1",
-        key_id: metadata_id,
+        key_id: &metadata_id,
         minisign_public_key: &public_base64,
         output: output.display().to_string(),
     })
@@ -431,8 +421,7 @@ fn execute_compatibility(
     entry: &ReleaseEntry,
     expected_digest: &str,
 ) -> anyhow::Result<()> {
-    let executable_bytes =
-        std::fs::read(executable).with_context(|| format!("read {}", executable.display()))?;
+    let executable_bytes = release::read_bounded_file(executable, release::MAX_MEMBER_BYTES)?;
     if release::digest_hex(&executable_bytes) != expected_digest {
         bail!("executable digest disagrees with signed target");
     }
@@ -1086,7 +1075,7 @@ fn read_policy(path: &str) -> anyhow::Result<RootPolicy> {
 }
 fn read_canonical<T: serde::de::DeserializeOwned>(path: &Path, limit: usize) -> anyhow::Result<T> {
     Ok(canonical::parse(
-        &std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
+        &release::read_bounded_file(path, limit as u64)?,
         limit,
     )?)
 }
@@ -1192,16 +1181,37 @@ fn secret_from_environment(environment: &str) -> anyhow::Result<(minisign::Secre
     Ok((secret, public))
 }
 fn write_new_or_identical(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    if let Ok(existing) = std::fs::read(path) {
-        if existing == bytes {
-            return Ok(());
+    match release::read_bounded_file(path, bytes.len() as u64) {
+        Ok(existing) => {
+            if existing == bytes {
+                return Ok(());
+            }
+            bail!(
+                "refusing to overwrite different bytes at {}",
+                path.display()
+            );
         }
-        bail!(
-            "refusing to overwrite different bytes at {}",
-            path.display()
-        );
+        Err(release::Error::Io(_, error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     std::fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_new_or_identical;
+
+    #[test]
+    fn output_writer_only_creates_absent_or_accepts_identical_files() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let path = temporary.path().join("output");
+        write_new_or_identical(&path, b"first").expect("create absent output");
+        write_new_or_identical(&path, b"first").expect("accept identical output");
+        assert!(write_new_or_identical(&path, b"other").is_err());
+        assert_eq!(std::fs::read(&path).expect("retained output"), b"first");
+        assert!(write_new_or_identical(&path, b"x").is_err());
+        assert_eq!(std::fs::read(&path).expect("retained output"), b"first");
+    }
 }
 fn status(value: &impl Serialize) -> anyhow::Result<()> {
     let bytes = canonical::encode(value)?;

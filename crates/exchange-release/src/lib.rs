@@ -11,6 +11,7 @@ pub use model::*;
 use semver::Version;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use time::OffsetDateTime;
 
@@ -58,6 +59,44 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Read one regular file through one opened handle and a hard receive bound.
+///
+/// Metadata from the handle is only an early refusal. The bounded read remains authoritative, so
+/// replacing or growing a path cannot turn the check into an unbounded allocation or make callers
+/// verify bytes from one file and consume bytes reopened from another.
+pub fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path).map_err(|error| Error::Io(path.to_owned(), error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| Error::Io(path.to_owned(), error))?;
+    if !metadata.is_file() {
+        return Err(Error::Bounds(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    if metadata.len() > limit {
+        return Err(Error::Bounds(format!(
+            "{} exceeds {limit} bytes",
+            path.display()
+        )));
+    }
+    let capacity = usize::try_from(metadata.len().min(limit))
+        .map_err(|_| Error::Bounds("file size does not fit this platform".into()))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| Error::Io(path.to_owned(), error))?;
+    if bytes.len() as u64 > limit {
+        return Err(Error::Bounds(format!(
+            "{} grew past {limit} bytes while reading",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Platform {
@@ -283,6 +322,36 @@ pub fn verify_trust_document(
     now: OffsetDateTime,
 ) -> Result<TrustDocument> {
     policy::verify_trust(directory, root_policy, now).map(|verified| verified.document)
+}
+
+/// Resolve one delegated online signer and enforce its half-open validity at signing time.
+pub fn delegated_signing_key_id(
+    trust: &TrustDocument,
+    role: &str,
+    minisign_public_key: &str,
+    now: OffsetDateTime,
+) -> Result<String> {
+    let keys = match role {
+        "channel" => &trust.roles.channel.keys,
+        "release" => &trust.roles.release.keys,
+        _ => {
+            return Err(Error::Signature(
+                "signer role is not channel or release".into(),
+            ))
+        }
+    };
+    let key = keys
+        .iter()
+        .find(|key| key.minisign_public_key == minisign_public_key)
+        .ok_or_else(|| Error::Signature(format!("public key is not delegated for role {role}")))?;
+    let before = policy::parse_time(&key.not_before)?;
+    let after = policy::parse_time(&key.not_after)?;
+    if !(before <= now && now < after) {
+        return Err(Error::Time(
+            "delegated signer is outside its half-open validity interval".into(),
+        ));
+    }
+    Ok(key.key_id.clone())
 }
 
 /// Validate a manifest's closed provider shape and every archive in `directory`.
