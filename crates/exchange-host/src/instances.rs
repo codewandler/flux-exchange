@@ -328,19 +328,13 @@ pub enum RegistryRefusal {
     },
 }
 
-#[cfg(unix)]
 mod file {
     use std::collections::BTreeSet;
-    use std::fs;
-    use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
     use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::paths::{enclosing_working_tree, resolve};
-
-    /// The setting a composing binary reads the durable connection-registry path from.
-    pub const CONNECTION_REGISTRY_SETTING: &str = "FLUX_EXCHANGE_CONNECTIONS";
+    use crate::{private_fs, CONNECTION_REGISTRY_SETTING};
 
     /// A durable label overlay. The file contains labels and host-minted UUIDs, never credentials.
     #[derive(Debug)]
@@ -388,14 +382,12 @@ mod file {
                         path: resolved.display().to_string(),
                         reason: "the store path has no parent directory".to_owned(),
                     })?;
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(directory)
-                .map_err(|error| ConnectionRegistryStoreError::Unusable {
+            private_fs::ensure_directory(directory).map_err(|error| {
+                ConnectionRegistryStoreError::Unusable {
                     path: resolved.display().to_string(),
                     reason: error.to_string(),
-                })?;
+                }
+            })?;
             let values = read(&resolved)?;
             validate(&resolved, &values)?;
             Ok(Self {
@@ -439,20 +431,8 @@ mod file {
             };
             let encoded = serde_json::to_vec_pretty(values)
                 .map_err(|error| unavailable(error.to_string()))?;
-            let temporary = self.path.with_extension("tmp");
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)
-                .map_err(|error| unavailable(error.to_string()))?;
-            file.write_all(&encoded)
-                .map_err(|error| unavailable(error.to_string()))?;
-            file.sync_all()
-                .map_err(|error| unavailable(error.to_string()))?;
-            drop(file);
-            fs::rename(&temporary, &self.path).map_err(|error| unavailable(error.to_string()))
+            private_fs::write_atomic(&self.path, &encoded)
+                .map_err(|error| unavailable(error.to_string()))
         }
 
         fn change<T>(
@@ -471,15 +451,14 @@ mod file {
     }
 
     fn read(path: &Path) -> Result<Values, ConnectionRegistryStoreError> {
-        let raw = match fs::read(path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Values::new()),
-            Err(error) => {
-                return Err(ConnectionRegistryStoreError::Unusable {
-                    path: path.display().to_string(),
-                    reason: error.to_string(),
-                })
+        let Some(raw) = private_fs::read(path, 1024 * 1024).map_err(|error| {
+            ConnectionRegistryStoreError::Unusable {
+                path: path.display().to_string(),
+                reason: error.to_string(),
             }
+        })?
+        else {
+            return Ok(Values::new());
         };
         if raw.is_empty() {
             return Ok(Values::new());
@@ -605,10 +584,7 @@ mod file {
     }
 }
 
-#[cfg(unix)]
-pub use file::{
-    ConnectionRegistryStore, ConnectionRegistryStoreError, CONNECTION_REGISTRY_SETTING,
-};
+pub use file::{ConnectionRegistryStore, ConnectionRegistryStoreError};
 
 #[cfg(test)]
 mod tests {
@@ -641,7 +617,7 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed),
             ));
-            std::fs::create_dir_all(&path).expect("a scratch directory");
+            crate::ensure_private_state_directory(&path).expect("a scratch directory");
             Self(path)
         }
     }
@@ -732,9 +708,9 @@ mod tests {
         let scratch = Scratch::new("flux-exchange-duplicate-instance");
         let path = scratch.0.join("connections.json");
         let id = "0d3f79ae-b6df-4f77-8f77-438436c3b2ef";
-        std::fs::write(
+        crate::write_private_state_file(
             &path,
-            format!(r#"{{"acme":{{"zendesk":{{"prod":"{id}","alias":"{id}"}}}}}}"#),
+            format!(r#"{{"acme":{{"zendesk":{{"prod":"{id}","alias":"{id}"}}}}}}"#).as_bytes(),
         )
         .expect("a planted registry");
 

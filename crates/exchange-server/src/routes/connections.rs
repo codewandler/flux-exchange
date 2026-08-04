@@ -245,24 +245,14 @@ mod plan;
 ///
 /// `pub(super)` since X-12: [`invoke`](super::invoke) refuses in the same terms when no store is
 /// bound, and one setting quoted from two places would be two strings to keep in step.
-#[cfg(unix)]
 pub(super) const STORE_SETTING: &str = exchange_host::CREDENTIAL_STORE_SETTING;
-/// The same, where the file store does not exist. Only `FileStore` is `#[cfg(unix)]`; the port is
-/// not, so a composition on another platform binds its own store rather than this one.
-#[cfg(not(unix))]
-pub(super) const STORE_SETTING: &str = "FLUX_EXCHANGE_CREDENTIALS";
 
 /// The setting that names the connection-settings store, quoted when none is bound.
 ///
 /// Spelled through the host's own constant for [`STORE_SETTING`]'s reason. `pub(super)` for its
 /// reason too: [`invoke`](super::invoke) points a refused invocation at this surface, and one
 /// setting quoted from two places would be two strings to keep in step.
-#[cfg(unix)]
 pub(super) const SETTINGS_SETTING: &str = exchange_host::CONNECTION_SETTINGS_SETTING;
-/// The same, where the file store does not exist. Only the file binding is `#[cfg(unix)]`; the port
-/// is not, so a composition on another platform binds its own store rather than this one.
-#[cfg(not(unix))]
-pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
 
 /// **Who may write a connection setting: a `User`, and nothing else.**
 ///

@@ -153,6 +153,53 @@ jobs:
       - name: Build on the declared MSRV
         run: cargo build --workspace --locked
 
+  native-local-state:
+    name: local state · ${{ matrix.target }}
+    # Platform support is the real credential-bearing composition, not a cross-compiled health
+    # handler. Each row runs on its target architecture and exercises the shared logical formats,
+    # the native owner-only filesystem binding and the real --dev process restart.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install Rust toolchain for the native target
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: "1.97.0"
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: local-state-${{ matrix.target }}
+
+      - name: Compile the complete server and local composition
+        run: cargo check --workspace --all-targets --locked --target ${{ matrix.target }}
+
+      - name: Exercise native owner-only storage fixtures
+        run: cargo test -p codewandler-flux-exchange-host --locked private_fs
+
+      - name: Exercise zero-configuration state selection
+        run: cargo test -p flux-exchange --bin flux-exchange --locked local_state
+
+      - name: Restart the real development composition over durable state
+        shell: bash
+        run: ./scripts/check-dev-signin.sh
+
   console:
     name: console · audit · test · build
     runs-on: ubuntu-latest

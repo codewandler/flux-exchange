@@ -5,9 +5,6 @@
 //! id or document body. Execution lives beside the ordinary invocation path in `invoke.rs`.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs;
-use std::io::Write as _;
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -19,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::paths::{enclosing_working_tree, resolve};
-use crate::Tenant;
+use crate::{private_fs, Tenant};
 
 /// The setting a composing binary reads the workflow directory from.
 pub const WORKFLOW_STORE_SETTING: &str = "FLUX_EXCHANGE_WORKFLOWS";
@@ -526,31 +523,24 @@ impl WorkflowStore {
                 root: worktree.display().to_string(),
             });
         }
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&root)
-            .map_err(|error| WorkflowRefusal::Unusable {
-                path: root.display().to_string(),
-                reason: error.to_string(),
-            })?;
-        admit_owner_only(&root)?;
+        private_fs::ensure_directory(&root).map_err(|error| WorkflowRefusal::Unusable {
+            path: root.display().to_string(),
+            reason: error.to_string(),
+        })?;
         let path = root.join("definitions.json");
-        let definitions = match fs::read(&path) {
-            Ok(bytes) => {
-                admit_owner_only(&path)?;
+        let definitions = match private_fs::read(&path, 1024 * 1024).map_err(|error| {
+            WorkflowRefusal::Unusable {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            }
+        })? {
+            Some(bytes) => {
                 serde_json::from_slice(&bytes).map_err(|error| WorkflowRefusal::Unusable {
                     path: path.display().to_string(),
                     reason: error.to_string(),
                 })?
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(error) => {
-                return Err(WorkflowRefusal::Unusable {
-                    path: path.display().to_string(),
-                    reason: error.to_string(),
-                })
-            }
+            None => BTreeMap::new(),
         };
         Ok(Self {
             path,
@@ -766,54 +756,13 @@ impl WorkflowStore {
                 reason: error.to_string(),
             }
         })?;
-        let temporary = self.path.with_extension("tmp");
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|error| self.unwritable(error))?;
-        if file
-            .metadata()
-            .map_err(|error| self.unwritable(error))?
-            .mode()
-            & 0o077
-            != 0
-        {
-            return Err(WorkflowRefusal::Unwritable {
-                path: temporary.display().to_string(),
-                reason: "permissions allow group or other access".into(),
-            });
-        }
-        file.set_len(0).map_err(|error| self.unwritable(error))?;
-        file.write_all(&encoded)
-            .map_err(|error| self.unwritable(error))?;
-        file.sync_all().map_err(|error| self.unwritable(error))?;
-        drop(file);
-        fs::rename(&temporary, &self.path).map_err(|error| self.unwritable(error))
+        private_fs::write_atomic(&self.path, &encoded).map_err(|error| {
+            WorkflowRefusal::Unwritable {
+                path: self.path.display().to_string(),
+                reason: error.to_string(),
+            }
+        })
     }
-
-    fn unwritable(&self, error: std::io::Error) -> WorkflowRefusal {
-        WorkflowRefusal::Unwritable {
-            path: self.path.display().to_string(),
-            reason: error.to_string(),
-        }
-    }
-}
-
-fn admit_owner_only(path: &Path) -> Result<(), WorkflowRefusal> {
-    let metadata = fs::metadata(path).map_err(|error| WorkflowRefusal::Unusable {
-        path: path.display().to_string(),
-        reason: error.to_string(),
-    })?;
-    if metadata.mode() & 0o077 != 0 {
-        return Err(WorkflowRefusal::Unusable {
-            path: path.display().to_string(),
-            reason: "permissions allow group or other access".into(),
-        });
-    }
-    Ok(())
 }
 
 fn draft(

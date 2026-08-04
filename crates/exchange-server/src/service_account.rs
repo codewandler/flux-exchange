@@ -76,16 +76,15 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+#[cfg(test)]
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use exchange_host::{Principal, PrincipalKind, Tenant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracing::warn;
 
 use crate::entropy;
 
@@ -334,28 +333,26 @@ impl ServiceAccountStore {
         // The directory first, at `0700` set in the `mkdir(2)` rather than `chmod`-ed afterwards —
         // a window in which the directory exists at a wider mode is a window, however short.
         if let Some(parent) = path.parent() {
-            create_directory(parent).map_err(|source| ServiceAccountStoreError::Unusable {
-                path: parent.display().to_string(),
-                source,
+            exchange_host::ensure_private_state_directory(parent).map_err(|source| {
+                ServiceAccountStoreError::Unusable {
+                    path: parent.display().to_string(),
+                    source: io::Error::other(source),
+                }
             })?;
-            admit_mode(parent, "directory")?;
         }
 
-        let live = match fs::read(&path) {
-            Ok(bytes) => {
-                admit_mode(&path, "file")?;
-                read(&bytes, &path)?
-            }
-            // Nothing minted yet. The file is created by the first mint, at `0600`, rather than
-            // here — an empty store has nothing to protect and nothing to lose.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
-            Err(source) => {
-                return Err(ServiceAccountStoreError::Unusable {
+        let live =
+            match exchange_host::read_private_state_file(&path, 1024 * 1024).map_err(|source| {
+                ServiceAccountStoreError::Unusable {
                     path: path.display().to_string(),
-                    source,
-                })
-            }
-        };
+                    source: io::Error::other(source),
+                }
+            })? {
+                Some(bytes) => read(&bytes, &path)?,
+                // Nothing minted yet. The file is created by the first mint with native owner-only metadata, rather than
+                // here — an empty store has nothing to protect and nothing to lose.
+                None => BTreeMap::new(),
+            };
 
         Ok(Self {
             path,
@@ -376,7 +373,7 @@ impl ServiceAccountStore {
     /// will assume it holds tokens.
     pub fn banner(&self) -> String {
         format!(
-            "service_accounts: {} (file store, mode 0600, verifiers only — no token is recoverable from it)",
+            "service_accounts: {} (platform owner-only file store, verifiers only — no token is recoverable from it)",
             self.path().display(),
         )
     }
@@ -576,41 +573,21 @@ impl ServiceAccountStore {
 
     /// Write the whole store, atomically.
     ///
-    /// A sibling temporary at `0600`, `fsync`, then `rename(2)` — the shape `connector_secrets`'
-    /// file store uses, for its reason: a crash part way through leaves either the old file or the
-    /// new one, never half of either. A truncate-and-write in place would leave a store that parses
+    /// A native owner-only sibling temporary, durable flush, then atomic replacement — the shape
+    /// `connector_secrets`' file store uses, for its reason: a crash part way through leaves either
+    /// the old file or the new one, never half of either. A truncate-and-write in place would leave a store that parses
     /// as fewer service_accounts than exist, which reads exactly like a revocation nobody performed.
     ///
     /// Called with the map's guard held, so the bytes on disk are always some state this map was
     /// actually in.
     fn write(&self, live: &BTreeMap<Verifier, ServiceAccount>) -> io::Result<()> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-
         let encoded = serde_json::to_vec_pretty(&StoredFile {
             version: FORMAT_VERSION,
             service_accounts: live.clone(),
         })
         .map_err(io::Error::other)?;
 
-        let temporary = self.path.with_file_name(format!(
-            ".{}.{}.{}.tmp",
-            self.path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "service_accounts".to_string()),
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed),
-        ));
-
-        let outcome =
-            write_tight(&temporary, &encoded).and_then(|()| fs::rename(&temporary, &self.path));
-        if outcome.is_err() {
-            // Best effort: the failure being reported is the interesting one, and a temporary left
-            // behind by a failed write is the thing that made `connector_secrets` reap them.
-            let _ = fs::remove_file(&temporary);
-        }
-
-        outcome
+        exchange_host::write_private_state_file(&self.path, &encoded).map_err(io::Error::other)
     }
 
     /// The live service_accounts.
@@ -755,114 +732,6 @@ fn absolute(path: &Path) -> io::Result<PathBuf> {
     } else {
         Ok(std::env::current_dir()?.join(path))
     }
-}
-
-/// Create `directory` and every missing parent, tight from the moment it exists.
-#[cfg(unix)]
-fn create_directory(directory: &Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt as _;
-
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(directory)
-}
-
-/// The same, where a mode cannot be spelled. See [`admit_mode`] for what that costs.
-#[cfg(not(unix))]
-fn create_directory(directory: &Path) -> io::Result<()> {
-    fs::create_dir_all(directory)
-}
-
-/// Write `bytes` to a file created at `0600`, and `fsync` it before returning.
-#[cfg(unix)]
-fn write_tight(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    // `create_new`, so a temporary somebody else is holding is a failure rather than something this
-    // write silently takes over; and the mode in the `open(2)` rather than `chmod`-ed after, so
-    // there is no instant at which the file exists at a wider one.
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-
-    file.write_all(bytes)?;
-    // Before the rename, not after: a rename that lands ahead of the data is how a crash produces a
-    // file that is present and empty.
-    file.sync_all()
-}
-
-/// The same, where a mode cannot be spelled. See [`admit_mode`] for what that costs.
-#[cfg(not(unix))]
-fn write_tight(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-/// Refuse a store somebody else could write; warn about one somebody else could read.
-///
-/// The two exposures are not the same and the module documentation carries the argument:
-///
-/// - **Group- or world-writable** is an authentication bypass. Whoever can write this file can plant
-///   a verifier of their own and then present the matching token as any agent in any tenant. So it
-///   refuses, and the mode is reported rather than tightened — a mode this host quietly repaired
-///   would hide that it was ever wrong, which is `exchange_host::credentials`' rule too.
-/// - **Group- or world-readable** is a disclosure of the roster and of nothing that can be spent.
-///   That warns. Refusing to start would take `/health`, the catalogue and sign-in down over a file
-///   whose entire contents an attacker can do nothing with.
-#[cfg(unix)]
-fn admit_mode(path: &Path, what: &str) -> Result<(), ServiceAccountStoreError> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let Ok(metadata) = fs::metadata(path) else {
-        // Unreadable metadata is not a mode this function can vouch for either way, and the caller
-        // is about to fail on the contents for a reason that names the file.
-        return Ok(());
-    };
-
-    let mode = metadata.permissions().mode() & 0o777;
-
-    if mode & 0o022 != 0 {
-        return Err(ServiceAccountStoreError::Writable {
-            path: path.display().to_string(),
-            what: what.to_string(),
-            mode,
-        });
-    }
-
-    if mode & 0o044 != 0 {
-        warn!(
-            path = %path.display(),
-            mode = format!("{mode:04o}"),
-            "the Service Account store {what} is readable by others. That discloses which service_accounts exist, in \
-             which tenants, and when their tokens expire — it discloses no token and yields no \
-             access, which is why this is a warning and not a refusal. `chmod 0600` on the file and \
-             `0700` on its directory",
-        );
-    }
-
-    Ok(())
-}
-
-/// The same, where a mode cannot be spelled.
-///
-/// The store is still safe to *read* — what it holds is verifiers, and the module documentation's
-/// claim about an attacker who reads it does not depend on a file mode. What is genuinely lost is
-/// the refusal above: on such a platform nothing here stops somebody who can write the file from
-/// planting a verifier. A composition on one should bind a store of its own.
-#[cfg(not(unix))]
-fn admit_mode(_path: &Path, _what: &str) -> Result<(), ServiceAccountStoreError> {
-    Ok(())
 }
 
 /// Why a Service Account store could not be opened. Every variant refuses; none falls back.
@@ -1097,7 +966,7 @@ impl std::error::Error for ServiceAccountError {
 mod tests {
     use super::*;
 
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A scratch directory under the system temporary directory, removed on drop.
     ///
@@ -1420,7 +1289,8 @@ mod tests {
     fn a_store_that_cannot_be_read_is_refused_rather_than_treated_as_empty() {
         let scratch = Scratch::new("unreadable");
         let path = scratch.store();
-        create_directory(path.parent().expect("a parent")).expect("a directory");
+        exchange_host::ensure_private_state_directory(path.parent().expect("a parent"))
+            .expect("a directory");
 
         for (label, contents) in [
             ("not json", "this is not a store".to_string()),
@@ -1445,7 +1315,8 @@ mod tests {
                 .to_string(),
             ),
         ] {
-            fs::write(&path, &contents).expect("a store file");
+            exchange_host::write_private_state_file(&path, contents.as_bytes())
+                .expect("a store file");
             let refused = ServiceAccountStore::open(&path)
                 .expect_err("a store that cannot be read must be refused, {label}");
             assert!(
@@ -1483,16 +1354,14 @@ mod tests {
         assert_eq!(mode(store.path().parent().expect("a parent")), 0o700);
     }
 
-    /// The two exposures, told apart.
+    /// Every wider mode refuses without repair.
     ///
-    /// A store somebody else can **write** is an authentication bypass — they plant a verifier and
-    /// present the matching token — so it refuses. A store somebody else can **read** discloses the
-    /// roster and yields no access, so it warns and the host goes on serving. Collapsing the two
-    /// either way is wrong: refusing on readable takes the host down over nothing spendable, and
-    /// warning on writable leaves the bypass open.
+    /// The file carries verifiers and identity inventory. The portable local-state contract keeps
+    /// every store behind one owner-only boundary rather than weakening one because it contains no
+    /// recoverable token.
     #[cfg(unix)]
     #[test]
-    fn a_writable_store_is_refused_and_a_merely_readable_one_is_not() {
+    fn every_wider_store_mode_is_refused_without_repair() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let scratch = Scratch::new("exposure");
@@ -1503,32 +1372,25 @@ mod tests {
             .expect("randomness");
         drop(store);
 
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).expect("a widened mode");
-        let refused =
-            ServiceAccountStore::open(&path).expect_err("a writable store must be refused");
-        assert!(
-            matches!(refused, ServiceAccountStoreError::Writable { .. }),
-            "expected Writable, got: {refused}",
-        );
-        assert!(
-            refused.to_string().contains("plant a verifier"),
-            "the refusal must name the bypass rather than the mode alone: {refused}",
-        );
-        // Reported, not repaired: tightening it here would hide that it was ever wrong.
-        assert_eq!(
-            fs::metadata(&path)
-                .expect("the file exists")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o666,
-        );
-
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("a widened mode");
-        assert!(
-            ServiceAccountStore::open(&path).is_ok(),
-            "a readable store discloses a roster and no token, so it must not take the host down",
-        );
+        for mode in [0o666, 0o644] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("a widened mode");
+            let refused = ServiceAccountStore::open(&path)
+                .expect_err("a non-owner-only store must be refused");
+            assert!(
+                matches!(refused, ServiceAccountStoreError::Unusable { .. }),
+                "expected Unusable, got: {refused}",
+            );
+            assert!(refused.to_string().contains("wider than 0600"), "{refused}");
+            assert_eq!(
+                fs::metadata(&path)
+                    .expect("the file exists")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                mode,
+                "refusal must not repair the planted mode",
+            );
+        }
     }
 
     /// Replacing a live agent by minting over its name is refused.

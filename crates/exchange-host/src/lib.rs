@@ -42,12 +42,26 @@
 //! corrects most often: a claim that outlives what it describes. A doc that understates is not
 //! harmless — it sends the next reader looking for a route that is already there.
 
-#![forbid(unsafe_code)]
+// Native Windows security descriptors are exposed by the OS through pointer-based APIs. Keep
+// unsafe denied everywhere by default and confine the one audited exception to `private_fs`'s
+// Windows implementation; callers see only its safe path API.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+
+/// Configuration setting naming the persistent connector-channel store.
+pub const CHANNEL_STORE_SETTING: &str = "FLUX_EXCHANGE_CHANNELS";
+/// Configuration setting naming the durable connection-registry store.
+pub const CONNECTION_REGISTRY_SETTING: &str = "FLUX_EXCHANGE_CONNECTIONS";
+/// Configuration setting naming the connection-settings store.
+pub const CONNECTION_SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
+/// Configuration setting naming the tenant grant store.
+pub const GRANT_STORE_SETTING: &str = "FLUX_EXCHANGE_GRANTS";
+/// Configuration setting naming the workflow definitions directory.
+pub const WORKFLOW_STORE_SETTING: &str = "FLUX_EXCHANGE_WORKFLOWS";
 
 // How a credential was obtained, and the named weaknesses in obtaining it that way. Vocabulary
 // only, and deliberately separate from `connections`: that module answers *where* a credential
@@ -56,23 +70,20 @@ mod acquisition;
 mod app;
 mod channel;
 mod connections;
-// Unix only, and for the reason `connector_secrets::file` is: the whole of what protects a value in
-// the file store is `0600` and `0700`, and a platform that cannot spell those would get a store that
-// implied a safety it did not have.
-#[cfg(unix)]
+// The platform-native owner-only implementation lives in connector-secrets: Unix modes and owners
+// on Unix, process SID ownership and a protected owner-only DACL on Windows.
 mod credentials;
 mod grant;
 mod instances;
 mod invoke;
 mod lease;
+mod private_fs;
 // Where a file store may sit, asked before one is created. Shared by the two file stores this crate
 // binds, so "is this path somewhere a commit could pick it up" is one walk rather than two copies.
-#[cfg(unix)]
 mod paths;
 mod principal;
 mod runtime;
 mod settings;
-#[cfg(unix)]
 mod workflow;
 
 /// Re-exported so a composing binary can implement [`Identity`] without taking its own dependency
@@ -144,27 +155,21 @@ pub use channel::{
     ChannelId, ChannelPlanRefusal, ChannelRecord, ChannelRefusal, Channels,
     ConnectorChannelPlanner, MemoryChannels,
 };
-#[cfg(unix)]
-pub use channel::{ChannelStore, ChannelStoreError, CHANNEL_STORE_SETTING};
+pub use channel::{ChannelStore, ChannelStoreError};
 pub use connections::{
     address_path, admit_tenant_occupancy, stored_bytes, ConnectionRefusal, ConnectorDeclaration,
     DeclaredCredential, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES,
 };
-#[cfg(unix)]
 pub use credentials::{CredentialStore, CredentialStoreError, CREDENTIAL_STORE_SETTING};
 pub use grant::{
     admit_grant, admit_inbound, Effect, Grant, GrantRefusal, Granted, Grants, Idempotency,
     InboundGrant, InboundGranted, OperationFacts, Risk, Selector,
 };
-#[cfg(unix)]
-pub use grant::{GrantStore, GrantStoreError, GRANT_STORE_SETTING};
+pub use grant::{GrantStore, GrantStoreError};
 pub use instances::{
     ConnectionLabel, ConnectionRegistry, MemoryConnectionRegistry, NamedConnection, RegistryRefusal,
 };
-#[cfg(unix)]
-pub use instances::{
-    ConnectionRegistryStore, ConnectionRegistryStoreError, CONNECTION_REGISTRY_SETTING,
-};
+pub use instances::{ConnectionRegistryStore, ConnectionRegistryStoreError};
 pub use invoke::{
     admit_runtime, operation_input_schema, Contexts, InputSchemaError, Invocation, InvokeRefusal,
     Invoker, Sent, WorkflowInvocation, WorkflowInvokeRefusal,
@@ -177,14 +182,82 @@ pub use settings::{
     AuthorityStatus, ConnectionSettings, DeclaredSetting, HostPinning, PreparedAuthorityProposal,
     SettingKind, SettingsRefusal, MAX_SETTING_VALUE_BYTES, MAX_TENANT_SETTINGS_BYTES,
 };
-#[cfg(unix)]
-pub use settings::{SettingsStore, SettingsStoreError, CONNECTION_SETTINGS_SETTING};
-#[cfg(unix)]
+pub use settings::{SettingsStore, SettingsStoreError};
 pub use workflow::{
     editor_catalog, editor_schema, validate_workflow, EditorOperation, FrozenOperation,
     PureEditorTools, ValidatedWorkflow, WorkflowDraft, WorkflowEdit, WorkflowRefusal,
-    WorkflowStore, WorkflowVersion, EDITOR_SCHEMA_VERSION, WORKFLOW_STORE_SETTING,
+    WorkflowStore, WorkflowVersion, EDITOR_SCHEMA_VERSION,
 };
+
+/// Create or verify a platform-native owner-only directory for one local Exchange composition.
+///
+/// Unix requires the current effective owner and mode `0700`. Windows requires the process-token
+/// user SID as owner and a protected DACL with one allow entry for that SID. Existing unsafe state
+/// is refused without changing its owner, mode, DACL, kind, or reparse status.
+///
+/// # Errors
+///
+/// Returns a value-free [`StoreError`] naming an unsafe or unreadable path.
+pub fn ensure_private_state_directory(
+    path: impl AsRef<std::path::Path>,
+) -> std::result::Result<(), StoreError> {
+    private_fs::ensure_directory(path.as_ref())
+}
+
+/// Read a platform-native owner-only local-state file with an explicit byte bound.
+///
+/// `None` means the path does not exist. Unsafe metadata and every other failure refuse rather than
+/// being treated as an empty store.
+///
+/// # Errors
+///
+/// Returns a value-free [`StoreError`] naming an unsafe, unreadable, wrong-kind, linked/reparse, or
+/// over-limit file.
+pub fn read_private_state_file(
+    path: impl AsRef<std::path::Path>,
+    limit: usize,
+) -> std::result::Result<Option<Vec<u8>>, StoreError> {
+    private_fs::read(path.as_ref(), limit)
+}
+
+/// Create an empty platform-native owner-only file if absent, or verify an existing one.
+///
+/// # Errors
+///
+/// Returns a value-free [`StoreError`] without repairing unsafe existing metadata.
+pub fn ensure_private_state_file(
+    path: impl AsRef<std::path::Path>,
+) -> std::result::Result<(), StoreError> {
+    private_fs::ensure_file(path.as_ref())
+}
+
+/// Verify an existing platform-native owner-only regular file without reading its contents.
+///
+/// # Errors
+///
+/// Returns a value-free [`StoreError`] for absence, unsafe metadata, a wrong kind, or unreadable
+/// security information.
+pub fn verify_private_state_file(
+    path: impl AsRef<std::path::Path>,
+) -> std::result::Result<(), StoreError> {
+    private_fs::verify_file(path.as_ref())
+}
+
+/// Atomically replace a platform-native owner-only local-state file.
+///
+/// The parent and existing destination are verified without repair. The replacement is created
+/// owner-only before any bytes enter it, flushed, and installed with the platform's atomic replace
+/// primitive.
+///
+/// # Errors
+///
+/// Returns a value-free [`StoreError`] naming the path whose metadata or IO refused the write.
+pub fn write_private_state_file(
+    path: impl AsRef<std::path::Path>,
+    bytes: &[u8],
+) -> std::result::Result<(), StoreError> {
+    private_fs::write_atomic(path.as_ref(), bytes)
+}
 
 /// Errors the host raises. Every variant refuses; none repairs.
 #[derive(Debug, thiserror::Error)]

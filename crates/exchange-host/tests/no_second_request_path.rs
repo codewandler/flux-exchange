@@ -150,6 +150,14 @@ const ALLOWED: &[(&str, &str)] = &[
         "package integrity and frozen-authority fingerprints. No IO.",
     ),
     ("thiserror", "a proc macro. No IO."),
+    (
+        "rustix",
+        "raw Unix filesystem and process-identity bindings used only to enforce owner-only local state. No transport.",
+    ),
+    (
+        "windows-sys",
+        "raw Windows filesystem and security-descriptor bindings used only to enforce owner-only local state. No transport.",
+    ),
 ];
 
 /// The source rules of lock 2, each as a sentence a failure can quote.

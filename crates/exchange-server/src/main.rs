@@ -23,6 +23,7 @@ mod dev_identity;
 mod entropy;
 mod execution;
 mod local_identity;
+mod local_state;
 mod managed_apps;
 mod oidc;
 mod operator;
@@ -185,6 +186,11 @@ impl Startup {
             Self::Configured { .. } => None,
             Self::Development { roster, .. } => Some(roster),
         }
+    }
+
+    /// Whether this is the zero-configuration durable local composition.
+    const fn is_development(&self) -> bool {
+        matches!(self, Self::Development { .. })
     }
 }
 
@@ -401,6 +407,11 @@ fn configured_console() -> Option<PathBuf> {
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
 fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefusal> {
+    let local_state = local_state::configured(startup.is_development()).map_err(|source| {
+        StartupRefusal::LocalState {
+            reason: source.to_string(),
+        }
+    })?;
     // Read deployment policy before binding any store or background authority. No released
     // connector declares a hazard yet; X-75 hands this posture to the acquisition binding when the
     // first one does. Parsing it now makes an unknown opt-in a startup refusal instead of a policy
@@ -432,8 +443,12 @@ fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefus
         );
     }
     state = state.with_operator_policy(operators);
-    let audit = audit_store()?;
-    if let Some(store) = service_account_store()? {
+    let audit = audit_store(local_state.as_ref().map(|paths| paths.audit.as_path()))?;
+    if let Some(store) = service_account_store(
+        local_state
+            .as_ref()
+            .map(|paths| paths.service_accounts.as_path()),
+    )? {
         // A Service Account verifier is an identity binding in its own right, so it must be bound
         // before reachable-address admission is decided.
         state = state.with_service_accounts(store);
@@ -448,14 +463,18 @@ fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefus
         state = state.with_audit(audit);
     }
 
-    if let Some(registry) = connection_registry()? {
+    if let Some(registry) = connection_registry(
+        local_state
+            .as_ref()
+            .map(|paths| paths.connections.as_path()),
+    )? {
         state = state.with_connection_registry(registry);
     }
 
     // Bound before the invoker, because the invoker reads it. A composition with no settings store
     // still builds one — it gets an empty configuration, which is X-12's behaviour: the connectors
     // that need nothing per connection run, and the ones that do refuse by name.
-    let settings = settings_store()?;
+    let settings = settings_store(local_state.as_ref().map(|paths| paths.settings.as_path()))?;
     if let Some(store) = settings.clone() {
         state = state.with_settings(store);
     }
@@ -467,10 +486,12 @@ fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefus
     // Bound before the invoker, because the invoker requires it. **No grant store, no invoker** —
     // see `grant_store`: an invoker built without one could only be built by choosing what to do in
     // its absence, and the only available choice is to admit everything.
-    let grants = grant_store()?;
+    let grants = grant_store(local_state.as_ref().map(|paths| paths.grants.as_path()))?;
 
-    let channels = channel_store()?;
-    if let Some(store) = credential_store()? {
+    let channels = channel_store(local_state.as_ref().map(|paths| paths.channels.as_path()))?;
+    if let Some(store) =
+        credential_store(local_state.as_ref().map(|paths| paths.credential.as_path()))?
+    {
         // The invoker is built from the same store the connections surface writes to, and only
         // when there is one. A composition with no store could still resolve a principal and look
         // an operation up, and would then send every request unauthenticated — a fail-closed `401`
@@ -526,10 +547,15 @@ fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefus
              refuses instead of supervising unauthenticated vendor connections"
         );
     }
-    if let Some((workflows, pure, runs)) = workflow_store()? {
+    if let Some((workflows, pure, runs)) =
+        workflow_store(local_state.as_ref().map(|paths| paths.workflows.as_path()))?
+    {
         state = state.with_workflows(workflows, pure, runs);
     }
-    if let Some(apps) = app_store(state.invoker().cloned())? {
+    if let Some(apps) = app_store(
+        state.invoker().cloned(),
+        local_state.as_ref().and_then(|paths| paths.apps.as_deref()),
+    )? {
         state = state.with_apps(apps);
     }
 
@@ -540,14 +566,21 @@ fn compose(startup: &Startup, bind: SocketAddr) -> Result<AppState, StartupRefus
 #[cfg(unix)]
 fn app_store(
     invoker: Option<Arc<exchange_host::Invoker>>,
+    local_default: Option<&std::path::Path>,
 ) -> Result<Option<Arc<ManagedAppSupervisor>>, StartupRefusal> {
-    let Ok(configured) = std::env::var(exchange_host::APP_STORE_SETTING) else {
+    let explicitly_configured = std::env::var(exchange_host::APP_STORE_SETTING).ok();
+    let configured = explicitly_configured
+        .as_deref()
+        .map(std::path::Path::new)
+        .or(local_default);
+    let Some(configured) = configured else {
         warn!(
             "no installed App store is bound ({} is unset), so App installation and chat refuse",
             exchange_host::APP_STORE_SETTING
         );
         return Ok(None);
     };
+    let configured = configured.to_string_lossy();
     let store = exchange_host::AppStore::bind_configured(
         Some(&configured),
         exchange_host::PackageRegistry::curated(),
@@ -572,43 +605,42 @@ fn app_store(
 #[cfg(not(unix))]
 fn app_store(
     _invoker: Option<Arc<exchange_host::Invoker>>,
+    _local_default: Option<&std::path::Path>,
 ) -> Result<Option<Arc<ManagedAppSupervisor>>, StartupRefusal> {
     Ok(None)
 }
 
 /// Bind the durable application audit journal, or bind none for a loopback composition.
-#[cfg(unix)]
-fn audit_store() -> Result<Option<Arc<AuditJournal>>, StartupRefusal> {
-    let Ok(configured) = std::env::var(AUDIT_SETTING) else {
+fn audit_store(
+    configured: Option<&std::path::Path>,
+) -> Result<Option<Arc<AuditJournal>>, StartupRefusal> {
+    let Some(configured) = configured else {
         warn!(
             "no durable audit journal is bound ({AUDIT_SETTING} is unset); loopback remains \
              available, but a reachable bind will refuse"
         );
         return Ok(None);
     };
-    let journal = AuditJournal::bind(&configured).map_err(|error| StartupRefusal::AuditStore {
+    let journal = AuditJournal::bind(configured).map_err(|error| StartupRefusal::AuditStore {
         reason: error.to_string(),
     })?;
     info!(path = %journal.path().display(), "audit evidence: owner-only SQLite journal, minimum 30-day retention");
     Ok(Some(Arc::new(journal)))
 }
 
-#[cfg(not(unix))]
-fn audit_store() -> Result<Option<Arc<AuditJournal>>, StartupRefusal> {
-    Ok(None)
-}
-
 /// Bind persistent channel declarations, or bind none. Unset is an unavailable capability rather
 /// than an in-memory fallback; configured and unreadable refuses startup.
-#[cfg(unix)]
-fn channel_store() -> Result<Option<Arc<dyn exchange_host::Channels>>, StartupRefusal> {
-    let Ok(configured) = std::env::var(exchange_host::CHANNEL_STORE_SETTING) else {
+fn channel_store(
+    configured: Option<&std::path::Path>,
+) -> Result<Option<Arc<dyn exchange_host::Channels>>, StartupRefusal> {
+    let Some(configured) = configured else {
         warn!(
             "no channel store is bound ({} is unset), so persistent connector channels refuse",
             exchange_host::CHANNEL_STORE_SETTING
         );
         return Ok(None);
     };
+    let configured = configured.to_string_lossy();
     let store =
         exchange_host::ChannelStore::bind_configured(Some(&configured)).map_err(|error| {
             StartupRefusal::ChannelStore {
@@ -619,11 +651,6 @@ fn channel_store() -> Result<Option<Arc<dyn exchange_host::Channels>>, StartupRe
     Ok(Some(Arc::new(store)))
 }
 
-#[cfg(not(unix))]
-fn channel_store() -> Result<Option<Arc<dyn exchange_host::Channels>>, StartupRefusal> {
-    Ok(None)
-}
-
 /// Bind workflow definitions and the audited pure cognition pack, or bind neither.
 type WorkflowBinding = (
     Arc<exchange_host::WorkflowStore>,
@@ -631,15 +658,17 @@ type WorkflowBinding = (
     Arc<crate::workflow_runs::WorkflowRunStore>,
 );
 
-#[cfg(unix)]
-fn workflow_store() -> Result<Option<WorkflowBinding>, StartupRefusal> {
-    let Ok(configured) = std::env::var(exchange_host::WORKFLOW_STORE_SETTING) else {
+fn workflow_store(
+    configured: Option<&std::path::Path>,
+) -> Result<Option<WorkflowBinding>, StartupRefusal> {
+    let Some(configured) = configured else {
         warn!(
             "no workflow store is bound ({} is unset), so workflow authoring and runs refuse",
             exchange_host::WORKFLOW_STORE_SETTING
         );
         return Ok(None);
     };
+    let configured = configured.to_string_lossy();
     let store =
         exchange_host::WorkflowStore::bind_configured(Some(&configured)).map_err(|error| {
             StartupRefusal::WorkflowStore {
@@ -669,11 +698,6 @@ fn workflow_store() -> Result<Option<WorkflowBinding>, StartupRefusal> {
     Ok(Some((Arc::new(store), Arc::new(pure), Arc::new(runs))))
 }
 
-#[cfg(not(unix))]
-fn workflow_store() -> Result<Option<WorkflowBinding>, StartupRefusal> {
-    Ok(None)
-}
-
 /// Bind the Service Account store the environment names, or bind none.
 ///
 /// The same three states as the credential store, for the same reason and with one difference worth
@@ -685,13 +709,12 @@ fn workflow_store() -> Result<Option<WorkflowBinding>, StartupRefusal> {
 /// and, here, one of the ways it can be unusable is a mode that would let somebody else plant a
 /// verifier, which is an authentication bypass rather than an inconvenience. See `crate::service_account`.
 ///
-/// Not `#[cfg(unix)]`, unlike the credential store. What protects a *credential* in that file is the
-/// mode and nothing else, so a platform that cannot spell one gets no store at all; what protects an
-/// Service Account token here is that the store holds a digest rather than the token, which holds on every
-/// platform. The mode still matters — it is what stops a planted verifier — and `crate::service_account`
-/// states plainly what is lost where it cannot be checked.
-fn service_account_store() -> Result<Option<Arc<ServiceAccountStore>>, StartupRefusal> {
-    let canonical = std::env::var(SERVICE_ACCOUNT_STORE_SETTING).ok();
+/// The same platform-native boundary as the credential store protects this verifier file: Unix
+/// owner/mode checks or Windows process-SID ownership and a protected owner-only DACL.
+fn service_account_store(
+    configured: Option<&std::path::Path>,
+) -> Result<Option<Arc<ServiceAccountStore>>, StartupRefusal> {
+    let canonical = configured.map(|path| path.to_string_lossy());
     let configured = match service_account_store_path(canonical.as_deref())? {
         Some(configured) => configured,
         None => {
@@ -732,14 +755,14 @@ fn service_account_store_path(canonical: Option<&str>) -> Result<Option<String>,
 /// start**, since a store the operator named and this process could not open is a mistake with no
 /// later moment at which it announces itself.
 ///
-/// `#[cfg(unix)]` because `CredentialStore` is: what protects a value in the file store is `0600`
-/// and `0700`, and a platform that cannot spell those would get a store implying a safety it does
-/// not have. The *port* is not gated, so another platform's composition binds its own.
-#[cfg(unix)]
-fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
+/// `connector-secrets` owns the platform binding: Unix owner/mode checks and Windows process-SID /
+/// protected-DACL checks reach this composition through the same safe [`CredentialStore`] API.
+fn credential_store(
+    configured: Option<&std::path::Path>,
+) -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
     use exchange_host::{CredentialStore, CREDENTIAL_STORE_SETTING};
 
-    let Ok(configured) = std::env::var(CREDENTIAL_STORE_SETTING) else {
+    let Some(configured) = configured else {
         warn!(
             "no credential store is bound ({CREDENTIAL_STORE_SETTING} is unset), so connecting a \
              connector will refuse. Set it to a path outside every working tree to hold \
@@ -748,6 +771,7 @@ fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, Sta
         return Ok(None);
     };
 
+    let configured = configured.to_string_lossy();
     let store = CredentialStore::bind_configured(Some(&configured)).map_err(|source| {
         StartupRefusal::CredentialStore {
             reason: source.to_string(),
@@ -758,12 +782,6 @@ fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, Sta
     info!("{}", store.banner());
 
     Ok(Some(store.secrets()))
-}
-
-/// No file store on this platform; a composition here binds its own or holds none.
-#[cfg(not(unix))]
-fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
-    Ok(None)
 }
 
 /// Bind the grant store the environment names, or bind none.
@@ -779,15 +797,14 @@ fn credential_store() -> Result<Option<Arc<dyn exchange_host::SecretStore>>, Sta
 /// **The safe state is the one you get by doing nothing**; the useful one is the one you have to
 /// configure.
 ///
-/// `#[cfg(unix)]` because the file binding is, for [`credential_store`]'s reason with a different
-/// thing at stake: nothing in this file is a secret, and somebody who can *write* to it decides what
-/// this host will run with a tenant's credentials. The port is not gated, so another platform's
-/// composition binds its own.
-#[cfg(unix)]
-fn grant_store() -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusal> {
+/// The portable file binding applies the same native owner-only boundary as the credential store,
+/// because somebody who can write this file decides what runs with a tenant's credentials.
+fn grant_store(
+    configured: Option<&std::path::Path>,
+) -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusal> {
     use exchange_host::{GrantStore, GRANT_STORE_SETTING};
 
-    let Ok(configured) = std::env::var(GRANT_STORE_SETTING) else {
+    let Some(configured) = configured else {
         warn!(
             "no grant store is bound ({GRANT_STORE_SETTING} is unset), so this host runs no \
              operation for anybody: an invocation is admitted by a grant, and there is nowhere for \
@@ -797,6 +814,7 @@ fn grant_store() -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusa
         return Ok(None);
     };
 
+    let configured = configured.to_string_lossy();
     let store = GrantStore::bind_configured(Some(&configured)).map_err(|source| {
         StartupRefusal::GrantStore {
             reason: source.to_string(),
@@ -807,12 +825,6 @@ fn grant_store() -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusa
     info!("{}", store.banner());
 
     Ok(Some(Arc::new(store)))
-}
-
-/// No file store on this platform; a composition here binds its own or holds none.
-#[cfg(not(unix))]
-fn grant_store() -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusal> {
-    Ok(None)
 }
 
 /// Bind the connection-settings store the environment names, or bind none.
@@ -830,14 +842,14 @@ fn grant_store() -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusa
 /// Unset is therefore a *warning* rather than a silent absence, and it names the consequence
 /// precisely: seventeen connectors refuse by name until this is set, and the rest are unaffected.
 ///
-/// `#[cfg(unix)]` because the file binding is, for [`credential_store`]'s reason with less at stake:
-/// the modes there are what protects a credential, and here they are hygiene for a customer's data.
-/// The port is not gated, so another platform's composition binds its own.
-#[cfg(unix)]
-fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>, StartupRefusal> {
+/// The portable file binding applies the platform-native owner-only boundary even though this file
+/// contains customer configuration rather than credentials.
+fn settings_store(
+    configured: Option<&std::path::Path>,
+) -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>, StartupRefusal> {
     use exchange_host::{SettingsStore, CONNECTION_SETTINGS_SETTING};
 
-    let Ok(configured) = std::env::var(CONNECTION_SETTINGS_SETTING) else {
+    let Some(configured) = configured else {
         warn!(
             "no connection-settings store is bound ({CONNECTION_SETTINGS_SETTING} is unset), so \
              every connector whose base URL is templated on a per-connection value — zendesk, \
@@ -847,6 +859,7 @@ fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>
         return Ok(None);
     };
 
+    let configured = configured.to_string_lossy();
     let store = SettingsStore::bind_configured(Some(&configured)).map_err(|source| {
         StartupRefusal::SettingsStore {
             reason: source.to_string(),
@@ -860,17 +873,18 @@ fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>
 }
 
 /// Bind the durable label-to-UUID overlay, or bind none for sole-connection compatibility.
-#[cfg(unix)]
 fn connection_registry(
+    configured: Option<&std::path::Path>,
 ) -> Result<Option<Arc<dyn exchange_host::ConnectionRegistry>>, StartupRefusal> {
     use exchange_host::{ConnectionRegistryStore, CONNECTION_REGISTRY_SETTING};
 
-    let Ok(configured) = std::env::var(CONNECTION_REGISTRY_SETTING) else {
+    let Some(configured) = configured else {
         warn!(
             "no connection registry is bound ({CONNECTION_REGISTRY_SETTING} is unset); sole legacy connections still work, but labels and multiple instances refuse"
         );
         return Ok(None);
     };
+    let configured = configured.to_string_lossy();
     let store = ConnectionRegistryStore::bind_configured(Some(&configured)).map_err(|source| {
         StartupRefusal::ConnectionRegistry {
             reason: source.to_string(),
@@ -878,18 +892,6 @@ fn connection_registry(
     })?;
     info!("{}", store.banner());
     Ok(Some(Arc::new(store)))
-}
-
-#[cfg(not(unix))]
-fn connection_registry(
-) -> Result<Option<Arc<dyn exchange_host::ConnectionRegistry>>, StartupRefusal> {
-    Ok(None)
-}
-
-/// No file store on this platform; a composition here binds its own or holds none.
-#[cfg(not(unix))]
-fn settings_store() -> Result<Option<Arc<dyn exchange_host::ConnectionSettings>>, StartupRefusal> {
-    Ok(None)
 }
 
 /// Bind the identity port this composition serves with.

@@ -500,41 +500,29 @@ pub enum GrantRefusal {
 // The file binding
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(unix)]
-pub use file::{GrantStore, GrantStoreError, GRANT_STORE_SETTING};
+pub use file::{GrantStore, GrantStoreError};
 
 /// The file-backed binding of [`Grants`].
 ///
-/// `#[cfg(unix)]` for [`crate::credentials`]' and [`crate::settings`]' reason, and the stake is
-/// stated plainly because it is *not* the same one: nothing in this file is a secret, and a
+/// The portable owner-only filesystem boundary has a different stake here: nothing in this file is a secret, and a
 /// **planted** grant is an authorisation bypass — somebody who can write here can decide what this
-/// host will run with a tenant's credentials. The modes are what keep that to this process's user,
-/// so a platform that cannot spell them gets no store from this crate and binds its own.
-///
-/// What this does **not** do, said here rather than implied by the modes: it creates the file at
-/// `0600` and does **not** verify the mode of one it finds. That is the settings store's posture,
-/// and on this file it is worth naming — a grant file somebody else could already write to is not
-/// something this store detects.
-#[cfg(unix)]
+/// host will run with a tenant's credentials. Unix owner/mode checks or Windows process-SID and
+/// protected-DACL checks keep that authority to the process identity and refuse unsafe existing
+/// metadata without repairing it.
 mod file {
     use std::collections::BTreeMap;
-    use std::fs;
-    use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
     use std::path::{Path, PathBuf};
     use std::sync::RwLock;
 
     use super::{Grant, GrantRefusal, Grants};
     use crate::paths::{enclosing_working_tree, resolve};
-    use crate::Tenant;
+    use crate::{private_fs, Tenant, GRANT_STORE_SETTING};
 
     /// The setting a composing binary reads the grant store path from.
     ///
     /// The host does not read the environment itself — a binary passes the value it found to
     /// [`GrantStore::bind_configured`]. The *name* lives here so the refusal below and the reader
     /// that produced the value cannot drift apart into two different spellings.
-    pub const GRANT_STORE_SETTING: &str = "FLUX_EXCHANGE_GRANTS";
-
     /// A location that would have worked, quoted in every refusal.
     ///
     /// Written with `$HOME` rather than expanded: nothing here reads the environment, and a refusal
@@ -631,14 +619,10 @@ mod file {
                 path: resolved.display().to_string(),
                 reason: "the store path has no parent directory".to_owned(),
             })?;
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(directory)
-                .map_err(|error| GrantStoreError::Unusable {
-                    path: resolved.display().to_string(),
-                    reason: error.to_string(),
-                })?;
+            private_fs::ensure_directory(directory).map_err(|error| GrantStoreError::Unusable {
+                path: resolved.display().to_string(),
+                reason: error.to_string(),
+            })?;
 
             let held = read(&resolved)?;
 
@@ -661,7 +645,7 @@ mod file {
         /// store paths at startup should be able to tell which one is the list of what may run.
         pub fn banner(&self) -> String {
             format!(
-                "grants: {} (file store, mode 0600, what each tenant may run)",
+                "grants: {} (platform owner-only file store, what each tenant may run)",
                 self.path.display()
             )
         }
@@ -678,34 +662,10 @@ mod file {
                 reason,
             };
 
-            let directory = self
-                .path
-                .parent()
-                .ok_or_else(|| unwritable("the store path has no parent directory".to_owned()))?;
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(directory)
-                .map_err(|error| unwritable(error.to_string()))?;
-
             let encoded =
                 serde_json::to_vec_pretty(held).map_err(|error| unwritable(error.to_string()))?;
-
-            let temporary = self.path.with_extension("tmp");
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)
-                .map_err(|error| unwritable(error.to_string()))?;
-            file.write_all(&encoded)
-                .map_err(|error| unwritable(error.to_string()))?;
-            file.sync_all()
-                .map_err(|error| unwritable(error.to_string()))?;
-            drop(file);
-
-            fs::rename(&temporary, &self.path).map_err(|error| unwritable(error.to_string()))
+            private_fs::write_atomic(&self.path, &encoded)
+                .map_err(|error| unwritable(error.to_string()))
         }
     }
 
@@ -714,15 +674,13 @@ mod file {
     /// A file that is *there* and unreadable is a refusal. See [`GrantStore`]: there is deliberately
     /// no arm here that starts empty because parsing failed.
     fn read(path: &Path) -> Result<Held, GrantStoreError> {
-        let raw = match fs::read(path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Held::new()),
-            Err(error) => {
-                return Err(GrantStoreError::Unusable {
-                    path: path.display().to_string(),
-                    reason: error.to_string(),
-                })
-            }
+        let Some(raw) =
+            private_fs::read(path, 1024 * 1024).map_err(|error| GrantStoreError::Unusable {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?
+        else {
+            return Ok(Held::new());
         };
 
         if raw.is_empty() {
@@ -1213,7 +1171,7 @@ mod tests {
             let refusal = GrantStore::bind_configured(configured)
                 .expect_err("an unnamed store is not a store");
             assert!(
-                refusal.to_string().contains(GRANT_STORE_SETTING),
+                refusal.to_string().contains(crate::GRANT_STORE_SETTING),
                 "the refusal must name the setting an operator has to set: {refusal}",
             );
         }
