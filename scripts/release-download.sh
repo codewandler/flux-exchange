@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fetch one fixed-origin GitHub release asset through exactly one admitted 302.
 set -euo pipefail
+export LC_ALL=C
 
 fail() { printf 'release-download: %s\n' "$*" >&2; exit 1; }
 root="$(git rev-parse --show-toplevel)"
@@ -9,26 +10,53 @@ valid_key_id() {
   printf '%s' "$1" | grep -Eq '^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$' && [[ "$1" != *--* ]]
 }
 
+valid_counter() {
+  local value="$1" maximum=9007199254740991
+  [[ "$value" =~ ^[1-9][0-9]{0,15}$ ]] || return 1
+  [ "${#value}" -lt "${#maximum}" ] || [ "$value" = "$maximum" ] || [[ "$value" < "$maximum" ]]
+}
+
+release_kind() {
+  local release_tag="$1" counter
+  case "$release_tag" in
+    exchange-trust-v1) printf 'trust\n'; return ;;
+    exchange-stable-v1) printf 'channel\n'; return ;;
+    exchange-trust-v1-version-*)
+      counter="${release_tag#exchange-trust-v1-version-}"
+      valid_counter "$counter" || fail 'invalid immutable trust-version tag'
+      printf 'trust-history\n'; return ;;
+    exchange-stable-v1-generation-*)
+      counter="${release_tag#exchange-stable-v1-generation-}"
+      valid_counter "$counter" || fail 'invalid immutable stable-generation tag'
+      printf 'channel-history\n'; return ;;
+    v*)
+      printf '%s' "${release_tag#v}" | grep -Eq '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$' || fail 'invalid immutable release tag'
+      printf 'release\n'; return ;;
+    *) fail 'release tag is outside the closed transport policy' ;;
+  esac
+}
+
 byte_limit_for() {
-  local release_tag="$1" basename="$2" key_id version target _runner format _executable suffix
-  case "$release_tag:$basename" in
-    exchange-trust-v1:flux-exchange-release-trust.json) printf '65536\n'; return ;;
-    exchange-trust-v1:flux-exchange-release-trust.json.*.minisig)
+  local release_tag="$1" basename="$2" key_id version target _runner format _executable suffix kind
+  kind="$(release_kind "$release_tag")"
+  case "$kind:$basename" in
+    trust:flux-exchange-release-trust.json|trust-history:flux-exchange-release-trust.json|channel-history:flux-exchange-release-trust.json)
+      printf '65536\n'; return ;;
+    trust:flux-exchange-release-trust.json.*.minisig|trust-history:flux-exchange-release-trust.json.*.minisig|channel-history:flux-exchange-release-trust.json.*.minisig)
       key_id="${basename#flux-exchange-release-trust.json.}"
       key_id="${key_id%.minisig}"
       valid_key_id "$key_id" || fail 'unsafe root key id before signature path construction'
       printf '4096\n'; return ;;
-    exchange-stable-v1:flux-exchange-release-channel.json) printf '262144\n'; return ;;
-    exchange-stable-v1:flux-exchange-release-channel.json.*.minisig)
+    channel:flux-exchange-release-channel.json|channel-history:flux-exchange-release-channel.json)
+      printf '262144\n'; return ;;
+    channel:flux-exchange-release-channel.json.*.minisig|channel-history:flux-exchange-release-channel.json.*.minisig)
       key_id="${basename#flux-exchange-release-channel.json.}"
       key_id="${key_id%.minisig}"
       valid_key_id "$key_id" || fail 'unsafe channel key id before signature path construction'
       printf '4096\n'; return ;;
   esac
-  case "$release_tag" in
-    v*) version="${release_tag#v}" ;;
-    *) fail 'release tag is outside the closed transport policy' ;;
-  esac
+  [ "$kind" = release ] || fail 'asset basename is outside the closed metadata-history set'
+  version="${release_tag#v}"
   case "$basename" in
     flux-exchange-release-manifest.json) printf '262144\n'; return ;;
     flux-exchange-release-manifest.json.*.minisig)
@@ -61,8 +89,15 @@ if [ "${1:-}" = --self-test ]; then
   require_bounded_curl
   [ "$(byte_limit_for exchange-trust-v1 flux-exchange-release-trust.json)" = 65536 ]
   [ "$(byte_limit_for exchange-stable-v1 flux-exchange-release-channel.json.channel-2026-01.minisig)" = 4096 ]
+  [ "$(byte_limit_for exchange-trust-v1-version-1 flux-exchange-release-trust.json.root-2026-01.minisig)" = 4096 ]
+  [ "$(byte_limit_for exchange-stable-v1-generation-9007199254740991 flux-exchange-release-trust.json)" = 65536 ]
+  [ "$(byte_limit_for exchange-stable-v1-generation-7 flux-exchange-release-channel.json)" = 262144 ]
   [ "$(byte_limit_for v1.2.3 flux-exchange-1.2.3-x86_64-pc-windows-msvc.zip)" = 268435456 ]
   if (byte_limit_for exchange-stable-v1 flux-exchange-release-channel.json.bad--key.minisig >/dev/null 2>&1); then fail 'self-test accepted an unsafe key id'; fi
+  if (byte_limit_for exchange-trust-v1-version-01 flux-exchange-release-trust.json >/dev/null 2>&1); then fail 'self-test accepted a noncanonical trust-history version'; fi
+  if (byte_limit_for exchange-stable-v1-generation-9007199254740992 flux-exchange-release-channel.json >/dev/null 2>&1); then fail 'self-test accepted a generation above the JCS-safe bound'; fi
+  if (byte_limit_for exchange-trust-v1-version-2 flux-exchange-release-channel.json >/dev/null 2>&1); then fail 'self-test accepted a channel asset in trust history'; fi
+  if (byte_limit_for exchange-stable-v1-generation-2 flux-exchange-release-manifest.json >/dev/null 2>&1); then fail 'self-test accepted a manifest in stable history'; fi
   if (byte_limit_for v1.2.3 arbitrary-file >/dev/null 2>&1); then fail 'self-test accepted an arbitrary immutable asset'; fi
   if (byte_limit_for v1.2.3 flux-exchange-1.2.4-x86_64-pc-windows-msvc.zip >/dev/null 2>&1); then fail 'self-test accepted a mismatched archive version'; fi
   printf 'PASS release download policy self-test\n'
@@ -74,11 +109,7 @@ release_tag="$1"
 basename="$2"
 destination="$3"
 
-case "$release_tag" in
-  exchange-trust-v1|exchange-stable-v1) ;;
-  v*) printf '%s' "${release_tag#v}" | grep -Eq '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$' || fail 'invalid immutable release tag' ;;
-  *) fail 'release tag is outside the closed transport policy' ;;
-esac
+release_kind "$release_tag" >/dev/null
 printf '%s' "$basename" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$' || fail 'unsafe asset basename'
 case "$basename" in *..*) fail 'unsafe asset basename' ;; esac
 byte_limit="$(byte_limit_for "$release_tag" "$basename")"

@@ -51,6 +51,12 @@ test('the public release page states the complete portable release contract', ()
     'Flux release artifact',
     'official integration plugin',
     'connector runtime',
+    'exchange-stable-v1-generation-',
+    'exchange-trust-v1-version-',
+    'v0.18.0',
+    'X-134',
+    'implementation evidence',
+    'credential-handoff',
   ]) {
     assert.ok(source.includes(required), `${RELEASE_PAGE} does not explain ${required}`)
   }
@@ -85,6 +91,14 @@ test('the operator runbook names delegated secret inputs without claiming they e
     '.github/release-root-policy.json',
     'intentionally absent',
     'X-126 creates or configures no production signing secret',
+    'exchange-stable-v1-generation-',
+    'exchange-trust-v1-version-',
+    'v0.18.0',
+    '`main` is not protected',
+    'no `local-release` environment',
+    'X-134',
+    'implementation evidence',
+    'credential-handoff',
   ]) {
     assert.ok(runbook.includes(required), `operator runbook does not state ${required}`)
   }

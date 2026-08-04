@@ -57,6 +57,13 @@ X-129 binds the four already-delivered HTTP identities to those exact routes/typ
 wire tests. X-125 binds the plan id when it delivers that still-ready protocol. An implementation
 cannot substitute a package version or advertise an id whose provider fixture/type test is absent.
 
+This exact six-field object is implementation evidence for the currently delivered provider slice,
+not authorization to publish the first production channel. Decision 0007 requires X-134 to implement
+and revalidate the canonical compatibility revision for owner-bound local management, direct secret
+insertion and the one-shot Service Account credential-handoff protocol. The first public release must
+carry those final provider bytes and native fixtures. It cannot silently add an unknown seventh field
+to this exact v1 object or reuse an existing identity for changed semantics.
+
 ### HTTP v1 compatible-change policy
 
 The four HTTP v1 identities are strict wire identities, not an additive schema promise. A change is
@@ -135,6 +142,16 @@ the pinned root threshold. Owner-only state retains the greatest accepted `{vers
 globally: a lower version, or different bytes at the same version, refuses before an online signer
 is trusted.
 
+The mutable `exchange-trust-v1` release is a client discovery head, not the only retained evidence.
+Before an externally authorized offline-root operation advances it, the candidate document and its
+exact required root-signature set are published under
+`exchange-trust-v1-version-<canonical-version>`. That immutable history tag is never deleted,
+recreated or clobbered. A partial private draft may add only missing expected files after every
+present name, byte size and SHA-256 agrees; public bytes are then fetched through the closed transport
+and root-verified before the mutable head changes. This workflow neither chooses the root policy nor
+automates that external operation. The production root policy remains non-authoritative until the
+final verifier schema and independently reviewed non-test values are approved by owner/security.
+
 ## Stable channel
 
 The channel document is named `flux-exchange-release-channel.json`, is at most 256 KiB, and has
@@ -187,6 +204,18 @@ metadata floor advances, selection filters only by Flux's compiled support for a
 fields, then chooses the greatest compatible SemVer. A valid channel with no compatible release is
 a named incompatibility after its higher generation/hash has been durably accepted; it cannot be
 followed by a lower generation merely because selection failed.
+
+Before CI advances `exchange-stable-v1`, it publishes the exact trust document/root signatures used
+for verification and the new channel document/channel signatures under
+`exchange-stable-v1-generation-<canonical-generation>`. The history release targets the immutable
+source commit. Once public, its tag and closed asset set are never deleted, recreated or clobbered;
+different bytes are publication equivocation. A partial private draft may only fill missing expected
+assets after present names, sizes and SHA-256 values agree. CI attests the newly produced channel
+document and signatures, not the externally root-signed trust bytes, then bounded-downloads the
+public snapshot, verifies its exact target/set/bytes, trust and channel signatures, and channel
+provenance. Only after that succeeds may mutable-head signatures be exposed followed by the canonical
+channel index. These immutable history releases are audit/recovery evidence; Flux clients continue to
+use the fixed mutable-head URL and signed rollback floors above.
 
 Rollback state advances by authenticated metadata layer, not by successful download:
 
@@ -407,6 +436,14 @@ verification therefore constructs only these initial requests:
 - immutable release inputs:
   `https://github.com/codewandler/flux-exchange/releases/download/vX.Y.Z/<signed-basename>`
 
+Publication/audit tooling additionally constructs only these immutable evidence requests; clients do
+not use them for ordinary discovery:
+
+- trust history:
+  `https://github.com/codewandler/flux-exchange/releases/download/exchange-trust-v1-version-<version>/<trust-basename>`
+- channel history:
+  `https://github.com/codewandler/flux-exchange/releases/download/exchange-stable-v1-generation-<generation>/<trust-or-channel-basename>`
+
 Every metadata signature uses the same directory and its exact derived basename. The initial request
 sends no authorization, proxy authorization or cookie, ignores proxy environment/configuration, and
 accepts exactly HTTP 302 with one `Location`. That location is at most 8192 bytes and must be HTTPS
@@ -425,6 +462,12 @@ After validation, the client makes a new credential-free GET to that exact URL. 
 must be HTTP 200 and cannot redirect. The CDN URL/query is transient transport only: it is never
 persisted, logged, signed, accepted from metadata or used as release identity. Declared byte bounds
 apply while reading, and minisign plus the signed SHA-256 still decide authenticity and identity.
+
+The historical `version` and `generation` tag suffixes are canonical decimal integers in
+`1..=9007199254740991`. Trust-history releases admit only the trust document and its basename-derived
+root signatures. Stable-history releases admit exactly one trust document, its required root
+signatures, one channel document and its required channel signatures. No history tag admits a
+manifest, archive, arbitrary URL or undeclared asset.
 
 ## Offline set and conformance ownership
 

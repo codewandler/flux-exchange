@@ -360,7 +360,11 @@ jobs:
       - name: Record repository and workflow provenance before exposure
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-path: release/*
+          # Trust bytes came from the external offline-root process. Attest only what this workflow
+          # built or signed; root signatures remain the authority for the copied trust snapshot.
+          subject-path: |
+            release/*
+            channel-next/*
 
       - name: Create or resume the immutable draft and expose only the verified closed set
         shell: bash
@@ -385,12 +389,29 @@ jobs:
                   --deny-self-hosted-runners
               done
             else
-              gh release upload "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+              actual="$(jq -r '.assets[].name' release-state.json | LC_ALL=C sort)"
+              while IFS= read -r asset; do
+                [ -z "$asset" ] || printf '%s\n' "$expected" | grep -Fxq "$asset" || { echo "::error::private immutable draft contains undeclared asset $asset"; exit 1; }
+              done <<<"$actual"
+              while IFS= read -r asset; do
+                [ -n "$asset" ] || continue
+                if printf '%s\n' "$actual" | grep -Fxq "$asset"; then
+                  local_size="$(wc -c <"release/$asset")"
+                  local_digest="sha256:$(sha256sum "release/$asset" | awk '{print $1}')"
+                  remote_size="$(jq -er --arg asset "$asset" '.assets[] | select(.name == $asset) | .size' release-state.json)"
+                  remote_digest="$(jq -er --arg asset "$asset" '.assets[] | select(.name == $asset) | .digest' release-state.json)"
+                  [ "$remote_size" = "$local_size" ] && [ "$remote_digest" = "$local_digest" ] || { echo "::error::private immutable draft asset $asset disagrees"; exit 1; }
+                else
+                  gh release upload "$RELEASE_TAG" "release/$asset" --repo "$GITHUB_REPOSITORY"
+                fi
+              done <<<"$expected"
             fi
           else
             gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --target '${{ needs.preflight.outputs.source }}' \
               --title "Flux Exchange ${{ needs.preflight.outputs.version }}" --notes-file /dev/null --draft
-            gh release upload "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+            while IFS= read -r asset; do
+              [ -z "$asset" ] || gh release upload "$RELEASE_TAG" "release/$asset" --repo "$GITHUB_REPOSITORY"
+            done <<<"$expected"
           fi
           actual="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
           [ "$actual" = "$expected" ] || { echo '::error::draft release asset set is not closed'; diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual"); exit 1; }
@@ -408,6 +429,95 @@ jobs:
           done
           diff -rq release live
           for artifact in live/*; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
+              --source-digest '${{ needs.preflight.outputs.source }}' --source-ref "refs/tags/$RELEASE_TAG" \
+              --signer-workflow codewandler/flux-exchange/.github/workflows/local-release.yml \
+              --deny-self-hosted-runners
+          done
+
+      - name: Publish or resume immutable stable-generation evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          generation="$(jq -er '.generation' channel-next/flux-exchange-release-channel.json)"
+          history_tag="exchange-stable-v1-generation-${generation}"
+          mkdir channel-history
+          cp trust/* channel-next/* channel-history/
+          expected="$(find channel-history -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          history_was_public=false
+
+          if gh release view "$history_tag" --repo "$GITHUB_REPOSITORY" --json isDraft,assets >history-state.json 2>/dev/null; then
+            tag_object="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${history_tag}" --jq '[.object.type,.object.sha] | @tsv')"
+            [ "$tag_object" = $'commit\t${{ needs.preflight.outputs.source }}' ] || { echo '::error::stable-history tag target disagrees with its release source'; exit 1; }
+            if [ "$(jq -r '.isDraft' history-state.json)" = false ]; then
+              history_was_public=true
+            else
+              actual="$(jq -r '.assets[].name' history-state.json | LC_ALL=C sort)"
+              while IFS= read -r asset; do
+                [ -z "$asset" ] || printf '%s\n' "$expected" | grep -Fxq "$asset" || { echo "::error::private stable-history draft contains undeclared asset $asset"; exit 1; }
+              done <<<"$actual"
+              while IFS= read -r asset; do
+                [ -n "$asset" ] || continue
+                if printf '%s\n' "$actual" | grep -Fxq "$asset"; then
+                  local_size="$(wc -c <"channel-history/$asset")"
+                  local_digest="sha256:$(sha256sum "channel-history/$asset" | awk '{print $1}')"
+                  remote_size="$(jq -er --arg asset "$asset" '.assets[] | select(.name == $asset) | .size' history-state.json)"
+                  remote_digest="$(jq -er --arg asset "$asset" '.assets[] | select(.name == $asset) | .digest' history-state.json)"
+                  [ "$remote_size" = "$local_size" ] && [ "$remote_digest" = "$local_digest" ] || { echo "::error::private stable-history asset $asset disagrees"; exit 1; }
+                else
+                  gh release upload "$history_tag" "channel-history/$asset" --repo "$GITHUB_REPOSITORY"
+                fi
+              done <<<"$expected"
+            fi
+          else
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${history_tag}" >/dev/null 2>&1; then
+              echo '::error::stable-history tag exists without its immutable release; refusing recreation'
+              exit 1
+            fi
+            gh release create "$history_tag" --repo "$GITHUB_REPOSITORY" --target '${{ needs.preflight.outputs.source }}' \
+              --title "Flux Exchange stable generation ${generation}" \
+              --notes 'Immutable trust/channel audit snapshot; exchange-stable-v1 remains the mutable discovery head.' \
+              --draft --latest=false
+            while IFS= read -r asset; do
+              [ -z "$asset" ] || gh release upload "$history_tag" "channel-history/$asset" --repo "$GITHUB_REPOSITORY"
+            done <<<"$expected"
+          fi
+
+          tag_object="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${history_tag}" --jq '[.object.type,.object.sha] | @tsv')"
+          [ "$tag_object" = $'commit\t${{ needs.preflight.outputs.source }}' ] || { echo '::error::stable-history tag target disagrees with its release source'; exit 1; }
+
+          if [ "$history_was_public" = false ]; then
+            actual="$(gh release view "$history_tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
+            [ "$actual" = "$expected" ] || { echo '::error::private stable-history asset set is not closed'; exit 1; }
+            gh release edit "$history_tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          fi
+
+          # The public archive, not authenticated API state, is the evidence boundary. Derive its
+          # closed signature set from the two authenticated documents and use only bounded transport.
+          mkdir channel-history-live
+          scripts/release-download.sh "$history_tag" flux-exchange-release-trust.json channel-history-live/flux-exchange-release-trust.json
+          scripts/release-download.sh "$history_tag" flux-exchange-release-channel.json channel-history-live/flux-exchange-release-channel.json
+          [ "$(jq -er '.generation' channel-history-live/flux-exchange-release-channel.json)" = "$generation" ]
+          jq -er '.root_signing_key_ids[]' channel-history-live/flux-exchange-release-trust.json | while IFS= read -r key_id; do
+            scripts/release-download.sh "$history_tag" "flux-exchange-release-trust.json.${key_id}.minisig" "channel-history-live/flux-exchange-release-trust.json.${key_id}.minisig"
+          done
+          jq -er '.signing_key_ids[]' channel-history-live/flux-exchange-release-channel.json | while IFS= read -r key_id; do
+            scripts/release-download.sh "$history_tag" "flux-exchange-release-channel.json.${key_id}.minisig" "channel-history-live/flux-exchange-release-channel.json.${key_id}.minisig"
+          done
+          actual="$(gh release view "$history_tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
+          downloaded="$(find channel-history-live -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
+          [ "$actual" = "$downloaded" ] || { echo '::error::public stable-history asset set is not closed'; exit 1; }
+          diff -rq channel-history channel-history-live
+          diff -q channel-next/flux-exchange-release-channel.json channel-history-live/flux-exchange-release-channel.json
+          for signature in channel-next/*.minisig; do
+            diff -q "$signature" "channel-history-live/${signature#channel-next/}"
+          done
+          # Historical signatures are audited at their signed issuance point; expiry governs new
+          # client starts, not whether retained public evidence remains cryptographically reviewable.
+          now="$(jq -er '.issued_at' channel-history-live/flux-exchange-release-channel.json)"
+          cargo run --locked -p flux-exchange-release -- verify-channel channel-history-live \
+            --root-policy .github/release-root-policy.json --now "$now"
+          for artifact in channel-history-live/flux-exchange-release-channel.json*; do
             gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY" \
               --source-digest '${{ needs.preflight.outputs.source }}' --source-ref "refs/tags/$RELEASE_TAG" \
               --signer-workflow codewandler/flux-exchange/.github/workflows/local-release.yml \

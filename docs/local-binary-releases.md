@@ -94,6 +94,32 @@ trust policy. The offline root secret never enters CI. Repository/workflow prove
 separate post-publication evidence; it is neither a client trust mechanism nor an online/offline
 import input.
 
+### Production authorization is still a hard stop
+
+As of 2026-08-04 there is no `local-release` environment, neither delegated secret is configured,
+`.github/release-root-policy.json` is absent, neither `exchange-trust-v1` nor
+`exchange-stable-v1` exists, and `main` is not protected. This implementation creates none of those
+objects and does not turn an unprotected merge into release authorization. The eventual policy must
+be a separately reviewed, non-test policy matching the final integrated verifier schema; the
+repository does not choose production root ids, packets, threshold or custodians in advance.
+
+The next unused version is `v0.18.0`. Pushing that tag starts both this five-target binary workflow
+and the crates.io workflow, whose publications are irreversible. Creating or pushing the tag is
+therefore one explicit release-operator authorization boundary for both products, after owner and
+security approval confirms every production hard stop above has been resolved. Workflow dispatch is
+only a byte-idempotent resume at an already authorized immutable tag; it is not permission to create
+the tag. X-126 remains active after the implementation merge until that production release passes
+the public five-target verifier.
+
+Decision 0007 adds another independent stop. The six-protocol compatibility shape implemented and
+fixture-tested here is implementation evidence, not the first public compatibility contract. X-134
+must implement and revalidate the canonical revision for owner-bound local management, direct vendor
+credential insertion and the one-shot Service Account credential-handoff protocol. Until that final
+provider schema and its native fixtures land, there is no production trust ceremony, `v0.18.0` or
+crates.io publication, public binary asset, stable-channel update, or X-126 completion. An operator
+must not silently add fields to the exact v1 object or reuse one of its six identities for the new
+semantics.
+
 ## Compatibility identity
 
 Inspect a built executable without opening a store, binding a listener or requiring identity
@@ -183,6 +209,17 @@ Rotating the pinned offline root is exceptional and coordinated: a Flux release 
 successor before it becomes required, transition metadata must satisfy both root policies, and only a
 later Flux release may remove the retired root.
 
+Replacing the mutable `exchange-trust-v1` release is an external offline-root operation, not a step
+in `local-release.yml`. Before a trust document becomes the mutable head, owner/security operators
+publish its exact canonical document and required root signatures under the immutable tag
+`exchange-trust-v1-version-<version>`. The version is canonical decimal in the signed v1 domain. An
+existing public history release is never deleted, recreated or uploaded with clobber semantics; its
+tag target, exact asset names, sizes and bytes must agree or rotation refuses. A partial private draft
+may only fill missing expected assets after matching every present size and SHA-256. The complete
+public archive is then re-downloaded through the bounded one-redirect transport and verified against
+the reviewed policy before `exchange-trust-v1` changes. No online workflow generates that trust
+document or attests externally root-signed bytes as if CI produced them.
+
 ## Online update and offline import
 
 The online path fetches root-signed trust metadata, the delegated signed stable channel, the selected
@@ -216,3 +253,19 @@ without an exact-version input.
 
 Record the tag, public release URL, verifier run and source SHA in X-126 before closing it. A failed
 live verification leaves the release unusable and the story open.
+
+Before the mutable `exchange-stable-v1` head advances, the workflow publishes
+`exchange-stable-v1-generation-<generation>`. That immutable release contains exactly the verified
+trust document and its required root signatures plus the new channel document and its required
+channel signatures. The workflow attests the new channel bytes, not the externally supplied trust
+bytes, then re-downloads the complete snapshot through the same bounded one-redirect transport,
+checks its tag target, names, sizes and bytes, verifies root and channel signatures, and verifies the
+channel provenance. Only then does it upload stable signatures followed by the mutable canonical
+index.
+
+Public history is append-only: an existing version release or stable-generation snapshot is never
+deleted, recreated or clobbered. A private partial draft may only fill absent expected assets after
+the present names, sizes and SHA-256 digests agree; an extra or changed asset refuses. Immutable
+version releases, trust-version and stable-generation snapshots, their attestations, and successful
+workflow runs are retained as audit evidence. The mutable trust and stable heads remain discovery
+pointers and cannot erase or substitute for that history.

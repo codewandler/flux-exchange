@@ -50,6 +50,14 @@ is retired. Clients refresh root-signed trust metadata, and the stable channel's
 continues across that rotation. This needs no Flux release. Replacing the pinned offline root is
 exceptional: Flux must first ship support for the successor root and overlapping transition policy.
 
+Mutable trust and channel releases are discovery heads, not the only audit record. Each externally
+authorized trust update first retains its exact root-signed set under
+`exchange-trust-v1-version-<version>`. Each channel update first retains the verified trust/channel
+snapshot under `exchange-stable-v1-generation-<generation>`, and CI attests the new channel bytes.
+Public history is never clobbered or deleted; it is bounded-downloaded and signature-verified before
+the corresponding mutable head changes. Immutable version releases, metadata snapshots,
+attestations, and successful workflow runs remain the rollback/audit evidence.
+
 ## Compatibility is a protocol set
 
 The side-effect-free inspection command opens no store and binds no listener:
@@ -121,6 +129,19 @@ signed channel snapshot and signatures, the same selected signed manifest and si
 one target archive. Import runs the identical freshness, rollback, threshold, authenticity,
 newest-compatible selection, compatibility, bounds, digest and archive checks. It bypasses only the
 GitHub transport; provenance is not an import input and offline is not an authenticity exception.
+
+The release machinery is intentionally not a claim of current production availability. As of
+2026-08-04 the production environment, delegated signing inputs, reviewed root policy, trust head and
+stable head have not been provisioned, and the repository's `main` branch is unprotected. The next
+unused tag is `v0.18.0`; pushing it irreversibly starts both the five-target binary publication and
+crates.io publication, so an authorized release operator must approve those as one boundary. X-126
+stays active until that real public release passes its five-target verifier.
+
+The six-protocol schema shown above is implementation evidence, not yet the first public contract.
+Decision 0007 requires X-134 to add and natively revalidate the final owner-bound local-management,
+direct secret-insertion and Service Account credential-handoff compatibility schema. Until then there
+is no production trust ceremony, `v0.18.0`/crates.io publication, public binary asset, stable update or
+X-126 completion.
 
 The complete wire-level contract, bounds and operator publication procedure remain in the
 [repository's release design](https://github.com/codewandler/flux-exchange/blob/main/docs/designs/local-release-v1.md).
