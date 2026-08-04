@@ -37,15 +37,19 @@ lockfile and compile-time tests.
 - [X-97 — Public credentials leave the file store](X-97-public-credentials-leave-the-file-store.md) · The file store is honest and mode-safe but application-plaintext; the existing SecretStore port is the seam for a managed Vault-class backend.
 - [X-111 — Host every connector runtime through Exchange (epic)](X-111-rich-connector-runtimes-epic.md) · EPIC — Exchange is the sole official-integration executor: ship the effective catalogue and existing HTTP invoke first, then rich runtimes and lifecycle
 - [X-126 — Publish verified local Exchange binaries for every Flux platform](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — Flux can manage a separately released, attested Exchange executable on a clean machine without bundling plugins or trusting PATH
+- [X-134 — Publish owner-bound local onboarding without secret JSON](X-134-publish-owner-bound-local-onboarding.md) · Milestone 1 — OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public local release
+- [X-135 — Close hosted and native local-management deadlines](X-135-close-local-management-deadlines.md) · X-134 child — one admission clock, one durable-decision transition and bounded terminal behavior on every transport
 
 ## Next (ready — take the top one unless the user named a story)
-
-### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-134 — Publish owner-bound local onboarding without secret JSON](X-134-publish-owner-bound-local-onboarding.md) · Milestone 1 — OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public local release
+_None._
 
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
+- [X-136 — Bound helper plan validation and the absolute result envelope](X-136-bound-helper-plan-and-result-envelope.md) · X-134 child — revalidate the complete v2 plan and keep every helper operation inside one 5s setup / 335s result envelope
+- [X-137 — Prove Windows private input and FXHA in production](X-137-prove-windows-private-input-and-fxha.md) · X-134 child — native MSVC process evidence for CONIN$, owner pipes and the Decision 0007 FXHA writer attachment
+- [X-138 — Bind provider recovery, replay and native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — crash/query/same-proposal recovery and exact five-target connector-secrets 0.20 release bindings
+- [X-139 — Canonicalize the release-native fixture inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — replace the historical 13-case projection with one canonical JSON authority and final five-target reports
 
 ## Backlog
 - [X-51 — A broken doc link fails the build instead of hiding among twenty others](X-51-a-broken-doc-link-is-visible.md) · found by X-48, 2026-08-01: `cargo doc --workspace --no-deps` emits ~20 unresolved intra-doc link warnings and is not in the gate, so a genuinely broken link in new code is invisible
