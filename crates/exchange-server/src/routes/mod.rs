@@ -37,7 +37,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, MethodRouter};
 use axum::{Json, Router};
-use exchange_host::IdentityError;
+use exchange_host::{IdentityError, PrincipalKind};
 use serde_json::json;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
@@ -102,6 +102,7 @@ impl Route {
         let admitted = match self.access {
             Access::Anonymous => return route,
             Access::Principal => Admitted::Any,
+            Access::User => Admitted::User,
             Access::Operator => Admitted::Operator,
         };
 
@@ -118,6 +119,7 @@ impl Route {
 #[derive(Clone, Copy)]
 enum Admitted {
     Any,
+    User,
     Operator,
 }
 
@@ -149,6 +151,11 @@ pub enum Access {
     /// `tests::the_surface_publishes_a_route_that_requires_a_principal` keeps at least one so the
     /// enumeration above never becomes a comparison against an empty set.
     Principal,
+    /// Refused unless the resolved principal is a human [`PrincipalKind::User`].
+    ///
+    /// This is deliberately separate from [`Access::Operator`]: being human is an identity fact,
+    /// while operator authority is deployment policy over one immutable human subject.
+    User,
     /// Refused unless a human principal's immutable id appears in the deployment-owned operator
     /// policy. This is a role axis, deliberately separate from principal kind.
     Operator,
@@ -413,8 +420,13 @@ async fn require_principal(
     }
 
     match resolved {
-        Ok(Some(principal)) => match admitted {
-            Admitted::Operator if !state.is_operator(&principal) => {
+        Ok(Some(principal)) => {
+            let authority_refusal = match admitted {
+                Admitted::User if principal.kind() != PrincipalKind::User => Some(refuse_user()),
+                Admitted::Operator if !state.is_operator(&principal) => Some(refuse_operator()),
+                _ => None,
+            };
+            if let Some(response) = authority_refusal {
                 if let Err(error) = record_audit(
                     &state,
                     &request_id,
@@ -436,9 +448,8 @@ async fn require_principal(
                     return audit_unavailable(error);
                 }
                 warn!(%principal, "{KIND_REFUSED}");
-                refuse_operator()
-            }
-            _ => {
+                response
+            } else {
                 if let Err(error) = record_audit(
                     &state,
                     &request_id,
@@ -506,7 +517,7 @@ async fn require_principal(
                 }
                 response
             }
-        },
+        }
         Ok(None) => {
             if let Err(error) = record_audit(
                 &state,
@@ -840,6 +851,14 @@ pub(super) fn refuse_operator() -> Response {
             "this route requires an operator configured by {}",
             crate::operator::OPERATOR_SUBJECTS_ENV
         ),
+    )
+}
+
+/// Refuse a resolved non-human caller from a human-only management read or write.
+fn refuse_user() -> Response {
+    refuse(
+        StatusCode::FORBIDDEN,
+        "this route requires an authenticated human principal",
     )
 }
 
@@ -1589,6 +1608,24 @@ mod tests {
         );
     }
 
+    /// The plan read is human-only but deliberately does not require deployment operator policy:
+    /// an ordinary connection owner may inspect its value-free state within the resolved tenant.
+    #[test]
+    fn the_human_surface_is_only_what_was_declared() {
+        const USER_GATED: &[(&str, &str)] = &[("connections", "/api/connections/{connector}/plan")];
+
+        let gated: Vec<_> = published()
+            .filter(|(_, route)| route.access == Access::User)
+            .map(|(module, route)| (module.name, route.path))
+            .collect();
+
+        assert_eq!(
+            gated, USER_GATED,
+            "the human-only route boundary changed; every entry needs an argument in \
+             USER_GATED, and these are what are gated: {gated:?}",
+        );
+    }
+
     /// **X-40.** Every route that admits only some kinds of principal, and the argument for each.
     ///
     /// The companion to `the_anonymous_surface_is_only_what_was_declared_anonymous` on the other
@@ -1654,6 +1691,9 @@ mod tests {
             ("apps", "/api/apps/{app}/activity"),
             ("apps", "/api/apps/{app}/sessions"),
             ("apps", "/api/app-deliveries/{delivery}/retry"),
+            // Applying the complete plan accepts credentials and request-steering settings, so
+            // POST remains operator work. Its value-free GET declaration is separately `User`.
+            ("connections", "/api/connections/{connector}/plan"),
             // X-91 makes connection inventory administrative too: knowing which vendor accounts
             // are held is operator state, not ordinary-member catalogue access.
             ("connections", "/api/connections"),
@@ -1704,6 +1744,10 @@ mod tests {
             (
                 "connections",
                 "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
+            ),
+            (
+                "connections",
+                "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
             ),
             (
                 "connections",

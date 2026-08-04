@@ -642,6 +642,10 @@ mod tests {
              it is operator work rather than another public capability.",
         ),
         (
+            "/api/connections/{connector}/plan",
+            "the declaration-driven projection and orchestrator beneath connections; credential values are never an agent capability.",
+        ),
+        (
             "/api/connections/{connector}/label",
             "as above; naming the sole connection is operator metadata.",
         ),
@@ -656,6 +660,10 @@ mod tests {
         (
             "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
             "as above; selecting which endpoint receives this connection's credential is an operator action.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
+            "as above; exact normalized-origin review and explicit approval or revocation are operator actions.",
         ),
         (
             "/api/connections/{connector}/instances/{label}/credentials/{credential}",

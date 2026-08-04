@@ -1,0 +1,181 @@
+{
+  "version": "exchange.connection-plan.v1",
+  "connector": "example-helpdesk",
+  "vendor": "Example Helpdesk",
+  "labels": ["production", "sandbox"],
+  "selection": "production",
+  "state": "incomplete",
+  "fields": [
+    {
+      "identity": "connection.name",
+      "provenance": "exchange",
+      "name": "name",
+      "service": null,
+      "label": "Connection name",
+      "help": "A tenant-scoped label such as production or sandbox.",
+      "required": true,
+      "secret": false,
+      "input": "text",
+      "aliases": ["--name"],
+      "binds": null,
+      "routable": true,
+      "set": true,
+      "target": {
+        "id": "connection.name"
+      }
+    },
+    {
+      "identity": "config.default.region",
+      "provenance": "provider.config",
+      "name": "region",
+      "service": "default",
+      "label": "Region",
+      "help": "The region declared for this connection.",
+      "required": true,
+      "secret": false,
+      "input": "text",
+      "aliases": ["--region"],
+      "binds": "endpoint.region",
+      "routable": true,
+      "set": true,
+      "target": {
+        "id": "setting.default.endpoint.region"
+      },
+      "choices": [
+        { "value": "global", "label": "Global" },
+        { "value": "europe", "label": "Europe" }
+      ]
+    },
+    {
+      "identity": "config.default.account_email",
+      "provenance": "provider.config",
+      "name": "account_email",
+      "service": "default",
+      "label": "Account email",
+      "help": "The account identity paired with the token.",
+      "required": true,
+      "secret": false,
+      "input": "email",
+      "aliases": ["--account-email"],
+      "binds": "username.example_helpdesk.api_token",
+      "also_binds": ["header.X-Example-Account"],
+      "routable": true,
+      "set": true,
+      "target": {
+        "id": "setting.default.username.example_helpdesk.api_token"
+      }
+    },
+    {
+      "identity": "config.default.custom_origin",
+      "provenance": "provider.config",
+      "name": "custom_origin",
+      "service": "default",
+      "label": "Custom origin",
+      "help": "A proposed authority must be approved before the runtime can use it.",
+      "required": true,
+      "secret": false,
+      "input": "url",
+      "aliases": ["--custom-origin"],
+      "binds": "endpoint.custom_origin",
+      "routable": true,
+      "set": false,
+      "target": {
+        "id": "setting.default.endpoint.custom_origin"
+      },
+      "authority": {
+        "state": "proposed",
+        "revision": "42",
+        "actions": {
+          "approve": {
+            "method": "PUT",
+            "target": "/api/connections/example-helpdesk/instances/production/settings/default/endpoint.custom_origin/authority"
+          },
+          "revoke": {
+            "method": "DELETE",
+            "target": "/api/connections/example-helpdesk/instances/production/settings/default/endpoint.custom_origin/authority"
+          }
+        }
+      }
+    },
+    {
+      "identity": "config.default.service_token",
+      "provenance": "provider.config",
+      "name": "service_token",
+      "service": "default",
+      "label": "Service token",
+      "help": "A token issued by the provider.",
+      "required": true,
+      "secret": true,
+      "input": "secret",
+      "aliases": [],
+      "binds": "credential.example_helpdesk.service_token",
+      "routable": true,
+      "set": false,
+      "target": {
+        "id": "credential.example_helpdesk.service_token"
+      }
+    },
+    {
+      "identity": "config.audit.service_token",
+      "provenance": "provider.config",
+      "name": "service_token",
+      "service": "audit",
+      "label": "Audit service token",
+      "help": "The same provider token is used by the audit service.",
+      "required": true,
+      "secret": true,
+      "input": "secret",
+      "aliases": [],
+      "binds": "credential.example_helpdesk.service_token",
+      "routable": true,
+      "set": false,
+      "target": {
+        "id": "credential.example_helpdesk.service_token"
+      }
+    },
+    {
+      "identity": "credential.example_helpdesk.api_token",
+      "provenance": "provider.auth",
+      "name": "api_token",
+      "service": null,
+      "label": "example_helpdesk.api_token",
+      "help": "The credential declared by provider authentication.",
+      "required": true,
+      "secret": true,
+      "input": "secret",
+      "aliases": [],
+      "binds": "credential.example_helpdesk.api_token",
+      "routable": true,
+      "set": false,
+      "target": {
+        "id": "credential.example_helpdesk.api_token"
+      }
+    },
+    {
+      "identity": "config.events.callback",
+      "provenance": "provider.config",
+      "name": "callback",
+      "service": "events",
+      "label": "Callback",
+      "help": "This build cannot route the declared callback binding.",
+      "required": true,
+      "secret": false,
+      "input": "url",
+      "aliases": ["--callback"],
+      "binds": "callback.url",
+      "routable": false,
+      "set": false,
+      "target": null,
+      "reason": "binding `callback.url` is not admitted by this build"
+    }
+  ],
+  "apply": {
+    "method": "POST",
+    "target": "/api/connections/example-helpdesk/plan",
+    "retry": "Retry the same selected label; only submitted targets are replaced.",
+    "compensation": [
+      "Unset an applied setting through its published target.",
+      "Remove the labelled connection through the existing connection route."
+    ]
+  }
+}

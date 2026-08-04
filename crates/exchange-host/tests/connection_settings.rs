@@ -931,15 +931,18 @@ fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
     }
 
     // Pinned exactly, so that a catalogue change in either direction is a failing test rather than
-    // a silent hole: a fifth connector arriving unpinned, or one of these four gaining a suffix
-    // upstream and staying refused for no reason. It has already fired once for real — `intercom`
-    // arrived here when catalogue 0.10 moved its host, and this assertion is how anybody found out.
+    // a silent hole: another connector arriving unpinned, or one of these gaining a suffix upstream
+    // and staying refused for no reason. GitLab remains in this ordinary-tenant census even though
+    // X-125 gives its typed declaration a separate operator-reviewed authority lifecycle. It has
+    // already fired once for real — `intercom` arrived here when catalogue 0.10 moved its host, and
+    // this assertion is how anybody found out.
     assert_eq!(
         refused,
         vec![
             "asterisk/endpoint.host ({host}:8089)".to_owned(),
             "docusign/endpoint.account_host ({account_host})".to_owned(),
             "freshdesk/endpoint.domain ({domain})".to_owned(),
+            "gitlab/endpoint.origin ({origin})".to_owned(),
             "okta/endpoint.domain ({domain})".to_owned(),
         ],
         "the set of connectors a tenant may not configure has changed",

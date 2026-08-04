@@ -5,6 +5,8 @@
 //! GET    /api/connections               every connection this tenant holds
 //! POST   /api/connections/{connector}   connect one, with the values it declares
 //! GET    /api/connections/{connector}   one connection, as addresses and never as values
+//! GET/POST /api/connections/{connector}/plan
+//!                                       project and apply a labelled declaration-driven plan
 //! DELETE /api/connections/{connector}   disconnect, destroying every credential it holds
 //! PUT    /api/connections/{connector}/credentials/{credential}
 //!                                       replace one credential's value, in place
@@ -219,7 +221,7 @@ use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
     address_path, admit_tenant_occupancy, declared_settings, host_pinning, stored_bytes,
-    AcquisitionRefusal, AuthPostureRefusal, ConnectionLabel, ConnectionRefusal,
+    AcquisitionRefusal, AuthPostureRefusal, ConnectionLabel, ConnectionRefusal, ConnectionRegistry,
     ConnectorDeclaration, CredentialRef, CredentialScope, DeclaredCredential, DeclaredSetting,
     HostPinning, InstanceId, PasswordRedemption, Principal, RefreshRedemption, RegistryRefusal,
     Secret, SecretBatch, SecretStore, SettingsRefusal, StoreError, Tenant, TenantInstances,
@@ -233,6 +235,8 @@ use crate::audit::{
     Action as AuditAction, Outcome as AuditOutcome, RequestId, Target as AuditTarget,
 };
 use crate::state::AppState;
+
+mod plan;
 
 /// The setting that names the credential store, quoted when none is bound.
 ///
@@ -407,6 +411,16 @@ pub(super) const MODULE: Module = Module {
     name: "connections",
     routes: &[
         Route {
+            path: "/api/connections/{connector}/plan",
+            access: Access::User,
+            method_router: plan::read_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/plan",
+            access: Access::Operator,
+            method_router: plan::write_route,
+        },
+        Route {
             // Under `/api` for the reason the session route is: `vite dev` owns the origin and
             // proxies `/api` to this host, so anything outside that prefix is answered by the SPA
             // fallback instead.
@@ -512,6 +526,11 @@ pub(super) const MODULE: Module = Module {
             path: "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
             access: Access::Operator,
             method_router: instance_setting_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
+            access: Access::Operator,
+            method_router: plan::authority_route,
         },
         Route {
             path: "/api/connections/{connector}/instances/{label}/credentials/{credential}",
@@ -2282,6 +2301,7 @@ async fn create_instance(
             label: label.to_string(),
         });
     }
+    let mut pending_label = None;
     let instance = match existing_requested {
         Some(stale) => stale,
         None => {
@@ -2294,6 +2314,12 @@ async fn create_instance(
             {
                 return registry_refused(&refusal);
             }
+            pending_label = Some(PendingLabel::new(
+                registry.as_ref(),
+                principal.tenant(),
+                provider.id,
+                &label,
+            ));
             instance
         }
     };
@@ -2462,6 +2488,9 @@ async fn create_instance(
         }
         return store_failed(&error);
     }
+    if let Some(pending) = pending_label.as_mut() {
+        pending.commit();
+    }
     (
         StatusCode::CREATED,
         Json(json!({
@@ -2471,6 +2500,59 @@ async fn create_instance(
         })),
     )
         .into_response()
+}
+
+/// A new registry row is preparation for credential creation, not a connection by itself.
+///
+/// The UUID is deliberately retained when a stale row predates this request (retry resumes it),
+/// while a row this request just assigned is removed on every early return. This keeps the
+/// existing handler's cross-store failure honest without trying to roll back a credential that did
+/// commit.
+struct PendingLabel<'a> {
+    registry: &'a dyn ConnectionRegistry,
+    tenant: &'a Tenant,
+    connector: &'a str,
+    label: &'a ConnectionLabel,
+    committed: bool,
+}
+
+impl<'a> PendingLabel<'a> {
+    fn new(
+        registry: &'a dyn ConnectionRegistry,
+        tenant: &'a Tenant,
+        connector: &'a str,
+        label: &'a ConnectionLabel,
+    ) -> Self {
+        Self {
+            registry,
+            tenant,
+            connector,
+            label,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingLabel<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(refusal) = self
+                .registry
+                .remove(self.tenant, self.connector, self.label)
+            {
+                error!(
+                    %refusal,
+                    connector = self.connector,
+                    label = self.label.as_str(),
+                    "a refused connection create could not remove its uncommitted label"
+                );
+            }
+        }
+    }
 }
 
 async fn show_instance(
@@ -3246,6 +3328,9 @@ async fn set_setting(
     let Some(setting) = DeclaredSetting::parse(&service, &field) else {
         return unreadable_field(provider, &service, &field);
     };
+    if store.is_custom_origin(provider.id, &setting) {
+        return custom_origin_plan_required(provider, &setting);
+    }
 
     // **Every decision is the store's, and there is deliberately no second copy of one here.**
     //
@@ -3301,7 +3386,17 @@ async fn clear_setting(
         Err(refusal) => settings_refused(&refusal),
         Ok(false) => nothing_to_clear(provider, &setting),
         Ok(true) => {
-            if let Some(channels) = state.channels() {
+            if store.is_custom_origin(provider.id, &setting) {
+                if let Some(channels) = state.channels() {
+                    if channels
+                        .replace_authority(principal.tenant(), provider.id)
+                        .await
+                        .is_err()
+                    {
+                        return authority_clear_partial(provider, None, &setting);
+                    }
+                }
+            } else if let Some(channels) = state.channels() {
                 channels.restart(principal.tenant(), provider.id);
             }
             StatusCode::NO_CONTENT.into_response()
@@ -3377,6 +3472,9 @@ async fn set_instance_setting(
     let Some(setting) = DeclaredSetting::parse(&service, &field) else {
         return unreadable_field(provider, &service, &field);
     };
+    if store.is_custom_origin(provider.id, &setting) {
+        return custom_origin_plan_required(provider, &setting);
+    }
     if let Err(refusal) = store.set_for_instance(
         principal.tenant(),
         provider.id,
@@ -3414,12 +3512,55 @@ async fn clear_instance_setting(
         Err(refusal) => settings_refused(&refusal),
         Ok(false) => nothing_to_clear(provider, &setting),
         Ok(true) => {
-            if let Some(channels) = state.channels() {
+            if store.is_custom_origin(provider.id, &setting) {
+                if let Some(channels) = state.channels() {
+                    if channels
+                        .replace_authority(principal.tenant(), provider.id)
+                        .await
+                        .is_err()
+                    {
+                        return authority_clear_partial(provider, Some(&label), &setting);
+                    }
+                }
+            } else if let Some(channels) = state.channels() {
                 channels.restart(principal.tenant(), provider.id);
             }
             StatusCode::NO_CONTENT.into_response()
         }
     }
+}
+
+fn custom_origin_plan_required(provider: &'static Provider, setting: &DeclaredSetting) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        "operator-approved origins may only be proposed through the revision-checked connection plan",
+        json!({
+            "connector": provider.id,
+            "service": setting.service,
+            "field": setting.binds(),
+            "code": "connection_plan_required",
+        }),
+    )
+}
+
+fn authority_clear_partial(
+    provider: &'static Provider,
+    label: Option<&str>,
+    setting: &DeclaredSetting,
+) -> Response {
+    (
+        StatusCode::MULTI_STATUS,
+        Json(json!({
+            "connector": provider.id,
+            "label": label,
+            "service": setting.service,
+            "field": setting.binds(),
+            "action": "cleared",
+            "outcome": "partial",
+            "may_have_happened": true,
+        })),
+    )
+        .into_response()
 }
 
 /// One setting as a caller sees it: where it belongs and whether it is supplied. Never its value.
@@ -3505,6 +3646,61 @@ fn nothing_to_clear(provider: &'static Provider, setting: &DeclaredSetting) -> R
 /// value.
 fn settings_refused(refusal: &SettingsRefusal) -> Response {
     let (status, extra) = match refusal {
+        SettingsRefusal::AuthorityUnsupported { connector, setting } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector, "field": setting }),
+        ),
+        SettingsRefusal::AuthorityRevisionRequired {
+            connector,
+            setting,
+            current,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "current": current.to_string(),
+            }),
+        ),
+        SettingsRefusal::AuthorityUnset { connector, setting } => (
+            StatusCode::CONFLICT,
+            json!({ "connector": connector, "field": setting }),
+        ),
+        SettingsRefusal::AuthorityRevisionConflict {
+            connector,
+            setting,
+            expected,
+            current,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "expected": expected.to_string(),
+                "current": current.to_string(),
+            }),
+        ),
+        SettingsRefusal::AuthorityStateConflict {
+            connector,
+            setting,
+            revision,
+            current,
+            transition,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "revision": revision.to_string(),
+                "state": format!("{current:?}").to_ascii_lowercase(),
+                "action": transition,
+            }),
+        ),
+        SettingsRefusal::OriginSchemeUnsupported { connector, setting }
+        | SettingsRefusal::MalformedOrigin { connector, setting } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector, "field": setting }),
+        ),
         SettingsRefusal::InstanceUnsupported {
             connector,
             instance,
@@ -7815,6 +8011,37 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn direct_setting_write_cannot_bypass_revisioned_origin_proposal() {
+        let (app, _credentials, settings, _scratch) = configurable_app();
+        let declared =
+            DeclaredSetting::parse("default", "endpoint.origin").expect("released GitLab origin");
+
+        let (status, refused) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/gitlab/settings/default/endpoint.origin",
+            Some(json!({ "value": "https://gitlab.internal.example" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert_eq!(refused["code"], "connection_plan_required");
+        assert!(!refused.to_string().contains("gitlab.internal.example"));
+        assert_eq!(
+            settings
+                .authority_status_for_instance(
+                    &Tenant::new("acme").expect("tenant"),
+                    "gitlab",
+                    None,
+                    &declared,
+                )
+                .expect("authority status")
+                .state,
+            exchange_host::AuthorityState::Unset,
+        );
+    }
+
     /// **The exfiltration path, refused at the surface a caller can actually reach.**
     ///
     /// `connection_settings.rs::a_setting_cannot_become_the_destination_authority` proves the store
@@ -8854,8 +9081,8 @@ mod tests {
         );
     }
 
-    /// **X-91.** Every connection route is administrative and declares operator authority at the
-    /// route-table boundary.
+    /// **X-91/X-125.** Every connection mutation is administrative; the value-free plan read is
+    /// deliberately available to any authenticated human at the route-table boundary.
     ///
     /// Asserted here as well as in the surface-wide enumeration, because that one compares against a
     /// list somebody edits and this one cannot be satisfied by editing a list: [`Access::Anonymous`]
@@ -8874,14 +9101,24 @@ mod tests {
     /// that, since this test alone cannot tell a path gated for one verb from one gated whole.
     #[test]
     fn every_connection_route_declares_operator_authority() {
+        let mut human_reads = Vec::new();
         for route in MODULE.routes {
-            assert_eq!(
-                route.access,
-                Access::Operator,
-                "{} must remain operator-only",
-                route.path
-            );
+            if route.access == Access::User {
+                human_reads.push(route.path);
+            } else {
+                assert_eq!(
+                    route.access,
+                    Access::Operator,
+                    "{} must remain operator-only",
+                    route.path
+                );
+            }
         }
+        assert_eq!(
+            human_reads,
+            vec!["/api/connections/{connector}/plan"],
+            "only the value-free connection-plan read is human-visible"
+        );
     }
 
     /// What a listing actually costs, and the invariant underneath it.
@@ -10086,10 +10323,11 @@ mod tests {
             assert_eq!(references, vec![legacy]);
         }
 
-        /// A registry row is durable before the credential batch starts. A transient failure must
-        /// reuse that inert UUID rather than turning every retry into a duplicate-label conflict.
+        /// A registry row prepared for a credential batch is not yet a connection. A transient
+        /// refusal removes it, so retry is a fresh create rather than a duplicate-label conflict
+        /// or an inert connection visible to another caller.
         #[tokio::test]
-        async fn a_failed_atomic_migration_can_be_retried_with_the_same_label() {
+        async fn a_failed_atomic_migration_rolls_back_its_label_and_can_be_retried() {
             let scratch = Scratch::new();
             let store = scratch.store();
             let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
@@ -10115,23 +10353,42 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "{body}");
 
-            for expected in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::CREATED] {
-                let (status, body) = call(
-                    &app,
-                    "alice",
-                    Method::POST,
-                    "/api/connections/zendesk/instances/sandbox",
-                    Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
-                )
-                .await;
-                assert_eq!(status, expected, "{body}");
-            }
-
             let tenant = Tenant::new("acme").expect("plain tenant");
-            let entries =
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            let after_refusal =
                 exchange_host::ConnectionRegistry::entries(registry.as_ref(), &tenant, "zendesk")
                     .expect("registry rows");
-            assert_eq!(entries.len(), 2, "the retry must not mint a third UUID");
+            assert_eq!(
+                after_refusal.len(),
+                1,
+                "only the established label survives"
+            );
+            assert_eq!(after_refusal[0].label.as_str(), "prod");
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let after_retry =
+                exchange_host::ConnectionRegistry::entries(registry.as_ref(), &tenant, "zendesk")
+                    .expect("registry rows");
+            assert_eq!(after_retry.len(), 2);
+            assert!(after_retry
+                .iter()
+                .any(|entry| entry.label.as_str() == "sandbox"));
         }
 
         /// Deleting the naming overlay cannot hide connections: existence and UUIDs come back from

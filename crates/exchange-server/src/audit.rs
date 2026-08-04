@@ -70,6 +70,9 @@ pub enum Action {
     ConnectionRemoved,
     SettingSet,
     SettingCleared,
+    SettingAuthorityProposed,
+    SettingAuthorityApproved,
+    SettingAuthorityRevoked,
     GrantsReplaced,
     Invocation,
     AlertRaised,
@@ -93,6 +96,9 @@ impl Action {
             Self::ConnectionRemoved => "connection_removed",
             Self::SettingSet => "setting_set",
             Self::SettingCleared => "setting_cleared",
+            Self::SettingAuthorityProposed => "setting_authority_proposed",
+            Self::SettingAuthorityApproved => "setting_authority_approved",
+            Self::SettingAuthorityRevoked => "setting_authority_revoked",
             Self::GrantsReplaced => "grants_replaced",
             Self::Invocation => "invocation",
             Self::AlertRaised => "alert_raised",
@@ -177,6 +183,12 @@ pub enum Target {
         service: String,
         field: String,
     },
+    SettingAuthority {
+        connector: String,
+        service: String,
+        field: String,
+        revision: String,
+    },
     Grants {
         tenant: String,
     },
@@ -226,6 +238,15 @@ impl Target {
             } => (
                 "instance_setting",
                 format!("{connector}/{label}/{service}/{field}"),
+            ),
+            Self::SettingAuthority {
+                connector,
+                service,
+                field,
+                revision,
+            } => (
+                "setting_authority",
+                format!("{connector}/{service}/{field}/{revision}"),
             ),
             Self::Grants { tenant } => ("grants", tenant.clone()),
             Self::Invocation { operation } => ("invocation", operation.clone()),
@@ -380,6 +401,16 @@ impl AuditJournal {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    #[cfg(test)]
+    pub(crate) fn refuse_writes_for_test(&self) {
+        self.inner
+            .lock()
+            .expect("audit journal lock")
+            .connection
+            .execute_batch("PRAGMA query_only = ON")
+            .expect("arm audit write refusal");
     }
 
     /// Append one final event that does not surround a state-changing action.
@@ -628,7 +659,10 @@ impl AuditJournal {
                 | Action::CredentialAcquired
                 | Action::CredentialRotated
                 | Action::CredentialRefreshed
-                | Action::ConnectionRemoved,
+                | Action::ConnectionRemoved
+                | Action::SettingAuthorityProposed
+                | Action::SettingAuthorityApproved
+                | Action::SettingAuthorityRevoked,
                 Outcome::Succeeded,
             ) => Some((
                 AlertPolicy::CredentialChanged,
@@ -1271,6 +1305,26 @@ mod tests {
                 },
             )
             .expect("credential change evidence");
+        for (request, action) in [
+            ("origin-proposed", Action::SettingAuthorityProposed),
+            ("origin-approved", Action::SettingAuthorityApproved),
+            ("origin-revoked", Action::SettingAuthorityRevoked),
+        ] {
+            journal
+                .record(
+                    &RequestId::for_test(request),
+                    action,
+                    Outcome::Succeeded,
+                    Some(&alice()),
+                    Target::InstanceSetting {
+                        connector: "generic".to_owned(),
+                        label: "production".to_owned(),
+                        service: "default".to_owned(),
+                        field: "endpoint.custom_origin".to_owned(),
+                    },
+                )
+                .expect("origin authority change evidence");
+        }
         journal
             .record(
                 &RequestId::for_test("grant-change"),
@@ -1296,7 +1350,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("count");
-            assert_eq!(count, 4);
+            assert_eq!(count, 7);
         }
         drop(journal);
 
@@ -1321,7 +1375,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count");
-        assert_eq!(count, 5, "the flood policy re-arms after its window");
+        assert_eq!(count, 8, "the flood policy re-arms after its window");
     }
 
     #[test]

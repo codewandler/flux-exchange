@@ -92,6 +92,22 @@ export function connectionEndpoint(connector: string): string {
   return `${CONNECTIONS_ENDPOINT}/${encodeURIComponent(connector)}`
 }
 
+/** The one versioned read/write surface for a complete labelled connection. */
+export function connectionPlanEndpoint(connector: string): string {
+  return `${connectionEndpoint(connector)}/plan`
+}
+
+/** One declared setting's compare-and-set authority lifecycle for an operator-owned label. */
+export function connectionAuthorityEndpoint(
+  connector: string,
+  label: string,
+  service: string,
+  field: string,
+): string {
+  return `${connectionEndpoint(connector)}/instances/${encodeURIComponent(label)}` +
+    `/settings/${encodeURIComponent(service)}/${encodeURIComponent(field)}/authority`
+}
+
 /**
  * Where one credential of one connection is **replaced**.
  *
@@ -297,11 +313,11 @@ export interface ServiceRefusal {
 
 /** A body that was read, or the failure that reading it was. */
 type Read =
-  | { ok: true; body: unknown }
+  | { ok: true; status: number; body: unknown }
   // The body is carried on the failure too, because a refusal's body is where the service says what
   // would have worked — the declared credential names on a `422`, the address on a `409` — and a
   // caller that only ever saw the summarised sentence could not read either.
-  | { ok: false; failure: ServiceFailure; body: unknown }
+  | { ok: false; status: number | null; failure: ServiceFailure; body: unknown }
 
 /** What went wrong, in the transport's own words — never a sentence invented here. */
 function describe(error: unknown): string {
@@ -359,13 +375,14 @@ async function read(endpoint: string, options: LoadOptions, init?: RequestInit):
     return {
       ok: false,
       body: undefined,
+      status: null,
       failure: { kind: 'unreachable', endpoint, status: null, detail: describe(error) },
     }
   }
 
   // A successful DELETE has deliberately no representation. Treating its empty body as malformed
   // would turn a completed revocation into an indeterminate failure in the console.
-  if (response.ok && response.status === 204) return { ok: true, body: null }
+  if (response.ok && response.status === 204) return { ok: true, status: response.status, body: null }
 
   // The body is read before the status is judged, because a refusal's body is where the reason is —
   // and a refusal with an unreadable body is still a refusal, never an unreadable success.
@@ -380,6 +397,7 @@ async function read(endpoint: string, options: LoadOptions, init?: RequestInit):
   if (!response.ok) {
     return {
       ok: false,
+      status: response.status,
       body,
       failure: {
         kind: 'refused',
@@ -393,12 +411,13 @@ async function read(endpoint: string, options: LoadOptions, init?: RequestInit):
   if (unreadable !== null) {
     return {
       ok: false,
+      status: response.status,
       body,
       failure: { kind: 'unreadable', endpoint, status: response.status, detail: unreadable },
     }
   }
 
-  return { ok: true, body }
+  return { ok: true, status: response.status, body }
 }
 
 /** Whether a value is a JSON object, which is the only shape either route may answer with. */
@@ -781,183 +800,761 @@ export async function loadConnections(options: LoadOptions = {}): Promise<Connec
 }
 
 // ---------------------------------------------------------------------------------------------
-// Connecting: the write, and the one question that has to be asked before it.
-//
-// A connect form needs to know **what a connector declares**, and this console must not be the
-// thing that knows. A list kept here goes stale the day a connector gains a credential, and the
-// operator who then cannot enter it has no way to tell that the console is the one that is wrong.
-// So the declaration is read from the service, every time, and the inputs are whatever it said.
-//
-// Since X-46 that question is a `GET` on the catalogue rather than a `POST` the service refuses:
-// **rendering a form costs no write.** `loadDeclaration` carries the history.
+// Connecting: one versioned declaration-driven projection and its composite write.
 // ---------------------------------------------------------------------------------------------
 
-/** What a connector declares — the names a connection may carry values for. */
-export interface Declaration {
-  /** The connector these belong to, echoed so the value stands on its own. */
+/** The connection-plan version understood by this console. */
+export const CONNECTION_PLAN_VERSION = 'exchange.connection-plan.v1'
+
+export interface ConnectionPlanChoice {
+  value: string
+  label: string
+}
+
+/** A stable identity accepted in the composite plan's `values` object. */
+export interface ConnectionPlanTarget {
+  id: string
+}
+
+export type ConnectionAuthorityState = 'unset' | 'proposed' | 'approved' | 'revoked'
+
+export interface ConnectionAuthorityAction {
+  method: 'PUT' | 'DELETE'
+  target: string
+}
+
+export interface ConnectionAuthorityProposalActions {
+  approve: ConnectionAuthorityAction & { method: 'PUT' }
+  revoke: ConnectionAuthorityAction & { method: 'DELETE' }
+}
+
+export interface ConnectionAuthorityApprovedActions {
+  revoke: ConnectionAuthorityAction & { method: 'DELETE' }
+}
+
+export type ConnectionAuthorityActions = ConnectionAuthorityProposalActions | ConnectionAuthorityApprovedActions
+
+/** Value-free authority state for a field whose value can become a request destination. */
+export type ConnectionFieldAuthority =
+  | { state: 'unset'; revision: null; actions: null }
+  | { state: 'proposed'; revision: string; actions: ConnectionAuthorityProposalActions }
+  | { state: 'approved'; revision: string; actions: ConnectionAuthorityApprovedActions }
+  | { state: 'revoked'; revision: string; actions: null }
+
+/** One descriptor, retained even when another descriptor shares its submission target. */
+export interface ConnectionPlanField {
+  identity: string
+  provenance: 'exchange' | 'provider.config' | 'provider.auth'
+  name: string
+  service: string | null
+  label: string
+  help: string
+  required: boolean
+  secret: boolean
+  input: string
+  aliases: string[]
+  binds: string | null
+  also_binds?: string[]
+  routable: boolean
+  set: boolean
+  target: ConnectionPlanTarget | null
+  authority?: ConnectionFieldAuthority
+  choices?: ConnectionPlanChoice[]
+  reason?: string
+}
+
+export interface ConnectionPlanApply {
+  method: 'POST'
+  target: string
+  retry: string
+  compensation: string[]
+}
+
+/** A value-free projection of every field the connector declares and how complete one label is. */
+export interface ConnectionPlan {
+  version: typeof CONNECTION_PLAN_VERSION
   connector: string
-  /**
-   * The flat-namespace names the catalogue publishes, in the order the service published them.
-   *
-   * Unreordered and unfiltered on purpose: the order is the connector's own, and a console that
-   * sorted them would be presenting its own opinion of a declaration as the declaration.
-   */
-  credentials: string[]
+  vendor: string
+  labels: string[]
+  selection: string | null
+  state: 'complete' | 'incomplete'
+  fields: ConnectionPlanField[]
+  apply: ConnectionPlanApply
 }
 
-/**
- * What this console knows about one connector's declaration.
- *
- * Four states rather than the three the reads above use, and the fourth earns its place. `refused`
- * is the service answering the question — the catalogue does not carry this connector at all — in a
- * sentence the operator acts on, and folding it into `failed` would put that sentence through the
- * summariser that truncates. `failed` stays what it is everywhere else in this file: nothing was
- * read, and the console cannot tell you anything.
- *
- * A connector that declares **no** credential is none of those: it is `ready` with an empty
- * `credentials`, because "nothing to store for this one" is an answer and not an absence of one.
- * Before X-46 it arrived as a `refused`, since the workaround could only learn it from a refusal.
- */
-export type DeclarationState =
+export type ConnectionPlanState =
   | { status: 'loading' }
-  | { status: 'ready'; declaration: Declaration }
+  | { status: 'ready'; plan: ConnectionPlan }
   | { status: 'refused'; refusal: ServiceRefusal }
   | { status: 'failed'; failure: ServiceFailure }
 
-/**
- * The declared names in a catalogue declaration, or `null` when it carries none this can read.
- *
- * All-or-nothing, for the reason `readConnectors` gives: one entry that fails the shape check fails
- * the whole read. A declaration silently missing a credential is a form silently missing an input,
- * and an operator who fills in the boxes they were given has no way to tell that a box is absent.
- */
-function readDeclared(body: unknown): string[] | null {
-  if (!isObject(body) || !Array.isArray(body.credentials)) return null
-  const declared = body.credentials
-    .map((credential) =>
-      isObject(credential) && typeof credential.name === 'string' ? credential.name : null
-    )
-    .filter((name): name is string => name !== null)
-  return declared.length === body.credentials.length ? declared : null
+function strings(value: unknown, field: string): string[] | string {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    return `\`${field}\` is not an array of strings`
+  }
+  return [...value]
 }
 
-/**
- * What a connector declares, read from the catalogue.
- *
- * ```text
- * GET /api/catalogue/connectors/slack/credentials
- * 200 {"connector":"slack","authority":"com.slack.api","credentials":[{"name":"slack.bot_token",…}]}
- * ```
- *
- * **A read, and only a read.** X-44 had no route to ask this of: the served catalogue published an
- * operation's metadata and no credentials, so the only place the service stated a declaration was
- * the `422` it gives a `POST /api/connections/{connector}` carrying `{"credentials": {}}`. That
- * workaround wrote nothing and carried no value — both were verified, and the `422` still says
- * exactly what it said — but it made a capability fact something this console inferred from an
- * error body, so rewording the refusal would have rendered every connector unreadable. X-46 made it
- * a field, one layer up from where X-43 made the same call for sign-in availability, and this
- * function is the whole of the console's half of it.
- *
- * Three properties survive the change, and they are the ones worth keeping. The names still come
- * from `connector_catalog`, so a connector that gains a credential gains an input with nobody
- * editing this console. Nothing is sent, so there is no value to leak and nothing an audit of the
- * traffic has to be told to disregard. And the endpoint is anonymous, so a form renders before a
- * principal resolves rather than after.
- */
-export async function loadDeclaration(
-  connector: string,
-  options: LoadOptions = {}
-): Promise<DeclarationState> {
-  const endpoint = declarationEndpoint(connector)
-  const answered = await read(endpoint, options)
+function readTarget(value: unknown, context: string): ConnectionPlanTarget | null | string {
+  if (value === null) return null
+  if (!isObject(value) || typeof value.id !== 'string' || value.id === '') {
+    return `${context} has no target identity`
+  }
+  if (!hasOnlyKeys(value, ['id'])) return `${context} target is not a closed id object`
+  return { id: value.id }
+}
 
-  if (answered.ok) {
-    const declared = readDeclared(answered.body)
-    if (declared) return { status: 'ready', declaration: { connector, credentials: declared } }
+function readChoices(value: unknown, context: string): ConnectionPlanChoice[] | string {
+  if (!Array.isArray(value)) return `${context} choices are not an array`
+  if (value.length === 0) return `${context} publishes empty choices instead of omitting them`
+  const choices: ConnectionPlanChoice[] = []
+  const values = new Set<string>()
+  for (const choice of value) {
+    if (!isObject(choice) || typeof choice.value !== 'string' || typeof choice.label !== 'string') {
+      return `${context} has a choice without string value and label`
+    }
+    if (!hasOnlyKeys(choice, ['value', 'label'])) return `${context} choice is not a closed value and label object`
+    if (values.has(choice.value)) return `${context} repeats choice value \`${choice.value}\``
+    values.add(choice.value)
+    choices.push({ value: choice.value, label: choice.label })
+  }
+  return choices
+}
 
-    // A `200` whose body this console cannot read is not a connector that declares nothing. An
-    // empty `credentials` array is that, and it arrives through the branch above as an empty
-    // declaration — which `Connect.mts` renders as "declares no credential", the true sentence.
+function relativeAuthorityTarget(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith('/api/') && !value.startsWith('//') &&
+    !value.includes('?') && !value.includes('#') && !value.includes('://')
+}
+
+const MAX_U64 = '18446744073709551615'
+
+function canonicalAuthorityRevision(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return false
+  return value.length < MAX_U64.length || (value.length === MAX_U64.length && value <= MAX_U64)
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  const admitted = new Set(keys)
+  return Object.keys(value).every((key) => admitted.has(key)) && keys.every((key) => key in value)
+}
+
+function readFieldAuthority(value: unknown, context: string): ConnectionFieldAuthority | string {
+  if (!isObject(value) || !['unset', 'proposed', 'approved', 'revoked'].includes(String(value.state))) {
+    return `${context} has no valid authority state`
+  }
+  if (!hasOnlyKeys(value, ['state', 'revision', 'actions'])) {
+    return `${context} authority is not a closed state, revision and actions object`
+  }
+  if (value.state === 'unset') {
+    return value.revision === null && value.actions === null
+      ? { state: 'unset', revision: null, actions: null }
+      : `${context} has malformed unset authority metadata`
+  }
+  if (!canonicalAuthorityRevision(value.revision)) {
+    return `${context} authority has no canonical u64 revision`
+  }
+  if (value.state === 'revoked') {
+    return value.actions === null
+      ? { state: 'revoked', revision: value.revision, actions: null }
+      : `${context} revoked authority still advertises actions`
+  }
+  if (!isObject(value.actions)) return `${context} authority has no state-specific actions`
+
+  if (value.state === 'approved') {
+    if (!hasOnlyKeys(value.actions, ['revoke']) || !isObject(value.actions.revoke) ||
+        !hasOnlyKeys(value.actions.revoke, ['method', 'target']) ||
+        value.actions.revoke.method !== 'DELETE' || !relativeAuthorityTarget(value.actions.revoke.target)) {
+      return `${context} approved authority has invalid state-specific actions`
+    }
     return {
-      status: 'failed',
-      failure: {
-        kind: 'unreadable',
-        endpoint,
-        status: 200,
-        detail: 'the catalogue answered with no `credentials` array this console could read',
-      },
+      state: 'approved', revision: value.revision,
+      actions: { revoke: { method: 'DELETE', target: value.actions.revoke.target } },
     }
   }
 
-  const error = serviceError(answered.body)
-  if (error !== null && answered.failure.status !== null) {
-    // The catalogue naming the id it does not carry — a `404` on a connector this console listed
-    // is the service and this bundle disagreeing about what exists, and that sentence is the one
-    // an operator acts on. Kept whole rather than summarised, for the reason `serviceError` gives.
-    return {
-      status: 'refused',
-      refusal: { endpoint, status: answered.failure.status, error },
-    }
+  if (!hasOnlyKeys(value.actions, ['approve', 'revoke']) ||
+      !isObject(value.actions.approve) || !isObject(value.actions.revoke) ||
+      !hasOnlyKeys(value.actions.approve, ['method', 'target']) ||
+      !hasOnlyKeys(value.actions.revoke, ['method', 'target'])) {
+    return `${context} proposed authority has invalid state-specific actions`
+  }
+  const approve = value.actions.approve
+  const revoke = value.actions.revoke
+  if (approve.method !== 'PUT' || !relativeAuthorityTarget(approve.target) ||
+      revoke.method !== 'DELETE' || !relativeAuthorityTarget(revoke.target) ||
+      approve.target !== revoke.target) {
+    return `${context} proposed authority has invalid state-specific actions`
+  }
+  return {
+    state: 'proposed', revision: value.revision,
+    actions: {
+      approve: { method: 'PUT', target: approve.target },
+      revoke: { method: 'DELETE', target: revoke.target },
+    },
+  }
+}
+
+function readPlanField(value: unknown, at: number): ConnectionPlanField | string {
+  const context = `field ${at + 1}`
+  if (!isObject(value)) return `${context} is not an object`
+  const fieldKeys = [
+    'identity', 'provenance', 'name', 'service', 'label', 'help', 'required', 'secret', 'input',
+    'aliases', 'binds', 'also_binds', 'routable', 'set', 'target', 'authority', 'choices', 'reason',
+  ]
+  if (Object.keys(value).some((key) => !fieldKeys.includes(key))) {
+    return `${context} has an unknown member`
+  }
+  for (const key of ['identity', 'name', 'label', 'help', 'input'] as const) {
+    if (typeof value[key] !== 'string') return `${context} has no string \`${key}\``
+  }
+  if (!['exchange', 'provider.config', 'provider.auth'].includes(String(value.provenance))) {
+    return `${context} has no valid \`provenance\``
+  }
+  if (value.service !== null && typeof value.service !== 'string') return `${context} has an invalid \`service\``
+  if (value.binds !== null && typeof value.binds !== 'string') return `${context} has invalid \`binds\``
+  for (const key of ['required', 'secret', 'routable', 'set'] as const) {
+    if (typeof value[key] !== 'boolean') return `${context} has no boolean \`${key}\``
+  }
+  if (value.secret !== (value.input === 'secret')) return `${context} has inconsistent secret input metadata`
+
+  const aliases = strings(value.aliases, `${context}.aliases`)
+  if (typeof aliases === 'string') return aliases
+  if (new Set(aliases).size !== aliases.length) return `${context} repeats a CLI alias`
+  if (aliases.some((alias) => !/^--[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(alias))) {
+    return `${context} has a malformed CLI alias`
+  }
+  if (value.secret && aliases.length !== 0) return `${context} publishes a secret CLI alias`
+
+  const target = readTarget(value.target, context)
+  if (typeof target === 'string') return target
+  if (value.routable && target === null) return `${context} is routable but has no target`
+  if (!value.routable && target !== null) return `${context} is unroutable but has a target`
+  if (!value.routable && typeof value.reason !== 'string') return `${context} is unroutable but has no reason`
+  if (value.routable && 'reason' in value) return `${context} is routable but publishes a reason`
+
+  let alsoBinds: string[] | undefined
+  if ('also_binds' in value) {
+    const parsed = strings(value.also_binds, `${context}.also_binds`)
+    if (typeof parsed === 'string') return parsed
+    if (parsed.length === 0) return `${context} publishes empty also_binds instead of omitting it`
+    alsoBinds = parsed
   }
 
-  return { status: 'failed', failure: answered.failure }
+  let choices: ConnectionPlanChoice[] | undefined
+  if ('choices' in value) {
+    const parsed = readChoices(value.choices, context)
+    if (typeof parsed === 'string') return parsed
+    choices = parsed
+  }
+
+  let authority: ConnectionFieldAuthority | undefined
+  if ('authority' in value) {
+    const parsed = readFieldAuthority(value.authority, context)
+    if (typeof parsed === 'string') return parsed
+    if (value.set !== (parsed.state === 'approved')) {
+      return `${context} authority state does not match whether the field is runtime-effective`
+    }
+    if (value.service === null || value.binds === null || value.provenance !== 'provider.config' || value.secret || !value.routable) {
+      return `${context} authority does not belong to a routable non-secret provider setting`
+    }
+    authority = parsed
+  }
+
+  // Credential target identities are the generic routing fact. Reject an inconsistent descriptor
+  // rather than ever letting a credential-shaped target degrade into an ordinary text control.
+  if (target?.id.startsWith('credential.') && value.secret !== true) {
+    return `${context} routes to a credential target but is not secret`
+  }
+  if (value.provenance === 'provider.auth' &&
+      (value.service !== null || value.identity !== value.binds || value.identity !== target?.id || !value.secret)) {
+    return `${context} is not a complete synthesized provider.auth credential descriptor`
+  }
+
+  return {
+    identity: value.identity as string,
+    provenance: value.provenance as ConnectionPlanField['provenance'],
+    name: value.name as string,
+    service: value.service as string | null,
+    label: value.label as string,
+    help: value.help as string,
+    required: value.required as boolean,
+    secret: value.secret as boolean,
+    input: value.input as string,
+    aliases,
+    binds: value.binds as string | null,
+    ...(alsoBinds === undefined ? {} : { also_binds: alsoBinds }),
+    routable: value.routable as boolean,
+    set: value.set as boolean,
+    target,
+    ...(authority === undefined ? {} : { authority }),
+    ...(choices === undefined ? {} : { choices }),
+    ...(!value.routable ? { reason: value.reason as string } : {}),
+  }
+}
+
+function readConnectionPlan(body: unknown, expectedConnector: string): ConnectionPlan | string {
+  if (!isObject(body)) return 'the plan is not an object'
+  if (body.version !== CONNECTION_PLAN_VERSION) return `unsupported or missing plan version`
+  if (!hasOnlyKeys(body, ['version', 'connector', 'vendor', 'labels', 'selection', 'state', 'fields', 'apply'])) {
+    return 'the plan is not a closed v1 object'
+  }
+  if (typeof body.connector !== 'string') return 'the plan has no connector'
+  if (body.connector !== expectedConnector) {
+    return `the plan names connector \`${body.connector}\` instead of \`${expectedConnector}\``
+  }
+  if (typeof body.vendor !== 'string') return 'the plan has no vendor'
+  const labels = strings(body.labels, 'labels')
+  if (typeof labels === 'string') return labels
+  if (new Set(labels).size !== labels.length) return 'the plan repeats an existing label'
+  if (body.selection !== null && typeof body.selection !== 'string') return 'the plan has an invalid selection'
+  if (typeof body.selection === 'string' && !labels.includes(body.selection)) {
+    return 'the selected label is not present in labels'
+  }
+  if (body.state !== 'complete' && body.state !== 'incomplete') return 'the plan has no valid state'
+  if (!Array.isArray(body.fields) || body.fields.length === 0) return 'the plan has no fields'
+
+  const fields: ConnectionPlanField[] = []
+  const identities = new Set<string>()
+  const aliases = new Set<string>()
+  for (const [at, value] of body.fields.entries()) {
+    const field = readPlanField(value, at)
+    if (typeof field === 'string') return field
+    if (identities.has(field.identity)) return `field identity \`${field.identity}\` appears more than once`
+    identities.add(field.identity)
+    for (const alias of field.aliases) {
+      if (aliases.has(alias)) return `CLI alias \`${alias}\` appears more than once`
+      aliases.add(alias)
+    }
+    fields.push(field)
+  }
+  const derivedState = fields.every((field) => !field.required || (field.routable && field.set))
+    ? 'complete'
+    : 'incomplete'
+  if (body.state !== derivedState) {
+    return `the plan claims \`${body.state}\` but its required fields derive \`${derivedState}\``
+  }
+  if (body.selection === null && fields.some((field) => field.authority?.state !== undefined && field.authority.state !== 'unset')) {
+    return 'a proposed authority state has no selected label'
+  }
+  if (typeof body.selection === 'string') {
+    for (const field of fields) {
+      if (field.authority?.actions === null || field.authority?.actions === undefined ||
+          field.service === null || field.binds === null) continue
+      const expected = connectionAuthorityEndpoint(body.connector, body.selection, field.service, field.binds)
+      if (Object.values(field.authority.actions).some((action) => action?.target !== expected)) {
+        return `field \`${field.identity}\` authority actions do not name their declared setting`
+      }
+    }
+  }
+  const name = fields[0]
+  if (name.identity !== 'connection.name' || name.provenance !== 'exchange' || name.name !== 'name' || name.service !== null ||
+      name.binds !== null || name.target?.id !== 'connection.name' || !name.required || name.secret ||
+      name.input !== 'text' || !name.routable || name.aliases.length !== 1 || name.aliases[0] !== '--name') {
+    return 'the first field is not `connection.name`'
+  }
+
+  if (!isObject(body.apply)) return 'the plan has invalid apply metadata'
+  if (!hasOnlyKeys(body.apply, ['method', 'target', 'retry', 'compensation'])) {
+    return 'the plan apply metadata is not a closed v1 object'
+  }
+  if (body.apply.method !== 'POST' || typeof body.apply.target !== 'string' ||
+      typeof body.apply.retry !== 'string') return 'the plan has invalid apply metadata'
+  if (body.apply.target !== connectionPlanEndpoint(expectedConnector)) {
+    return 'the plan apply target does not name this connector plan'
+  }
+  const compensation = strings(body.apply.compensation, 'apply.compensation')
+  if (typeof compensation === 'string') return compensation
+
+  return {
+    version: CONNECTION_PLAN_VERSION,
+    connector: body.connector,
+    vendor: body.vendor,
+    labels,
+    selection: body.selection as string | null,
+    state: body.state,
+    fields,
+    apply: { method: 'POST', target: body.apply.target, retry: body.apply.retry, compensation },
+  }
 }
 
 /**
- * What became of a connect.
- *
- * Three outcomes for the same reason every read here has three states: a refusal and an outage are
- * different events, and a caller must not be able to confuse either with success. There is no
- * `loading` — a write is awaited by whoever started it, and the busy flag belongs to the view.
+ * Read a plan, selecting an existing operator-owned label only in the query. Values have no query
+ * representation and this API deliberately accepts no other selection input.
  */
-export type ConnectOutcome =
-  | { status: 'connected'; connection: Connection }
-  | { status: 'refused'; refusal: ServiceRefusal }
-  | { status: 'failed'; failure: ServiceFailure }
-
-/**
- * Connect a connector, with the values an operator typed.
- *
- * **The values go in the body and nowhere else.** Not in the path, not in a query string — a value
- * in a query string is a value in an access log, and in a browser's history and in every referrer
- * header the page then sends. This function is the only place in the console a credential value is
- * ever handled, it holds none after it returns, and what it returns is the service's own view of
- * the connection: addresses and `held`, never a value.
- *
- * A refusal is carried whole. `409` — the connector is already connected — is not special-cased
- * here; it is a refusal like any other, and the *view* is what knows to point an operator at
- * rotation. This function will not delete anything, and there is deliberately no sibling that
- * would: `DELETE` then `POST` is the window X-39 exists to remove.
- */
-export async function connect(
+export async function loadConnectionPlan(
   connector: string,
-  values: Record<string, string>,
+  selection: string | null,
   options: LoadOptions = {}
-): Promise<ConnectOutcome> {
-  const endpoint = connectionEndpoint(connector)
-  const answered = await read(endpoint, options, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ credentials: values }),
-  })
+): Promise<ConnectionPlanState> {
+  const endpoint = connectionPlanEndpoint(connector)
+  const selectedEndpoint = selection === null ? endpoint : `${endpoint}?name=${encodeURIComponent(selection)}`
+  const answered = await read(selectedEndpoint, options)
 
   if (!answered.ok) {
     const error = serviceError(answered.body)
     if (error !== null && answered.failure.status !== null) {
-      return { status: 'refused', refusal: { endpoint, status: answered.failure.status, error } }
+      return { status: 'refused', refusal: { endpoint: selectedEndpoint, status: answered.failure.status, error } }
     }
     return { status: 'failed', failure: answered.failure }
   }
 
-  const connection = readConnection(answered.body)
-  if (typeof connection === 'string') {
+  const plan = readConnectionPlan(answered.body, connector)
+  if (typeof plan === 'string') {
     return {
       status: 'failed',
-      failure: { kind: 'unreadable', endpoint, status: 201, detail: connection },
+      failure: { kind: 'unreadable', endpoint: selectedEndpoint, status: answered.status, detail: plan },
+    }
+  }
+  return { status: 'ready', plan }
+}
+
+export interface ConnectionPlanSubmission {
+  version: typeof CONNECTION_PLAN_VERSION
+  name: string
+  current_name?: string
+  values: Record<string, string>
+  expected_revisions: Record<string, string>
+}
+
+export interface ConnectionPlanOrdinaryStep {
+  target: string
+  outcome: 'applied' | 'unchanged' | 'refused' | 'skipped'
+  reason?: string
+}
+
+export interface ConnectionPlanProposalStep {
+  target: string
+  outcome: 'applied'
+  action: 'proposed'
+  revision: string
+  may_have_happened: true
+  reason?: string
+}
+
+export type ConnectionPlanStep = ConnectionPlanOrdinaryStep | ConnectionPlanProposalStep
+
+export interface ConnectionPlanResult {
+  outcome: 'complete' | 'incomplete' | 'refused' | 'partial'
+  steps: ConnectionPlanStep[]
+  plan: ConnectionPlan
+}
+
+export type ConnectionPlanOutcome =
+  | { status: 'answered'; result: ConnectionPlanResult }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export interface ConnectionAuthorityTransition {
+  connector: string
+  label: string
+  service: string
+  field: string
+  revision: string
+  action: ConnectionAuthorityAction
+}
+
+export interface ConnectionAuthorityTransitionResult {
+  version: typeof CONNECTION_PLAN_VERSION
+  connector: string
+  label: string
+  service: string
+  field: string
+  action: 'approved' | 'revoked'
+  authority: {
+    state: 'approved' | 'revoked'
+    revision: string
+  }
+}
+
+export interface ConnectionAuthorityPartialResult extends ConnectionAuthorityTransitionResult {
+  outcome: 'partial'
+  may_have_happened: true
+}
+
+export type ConnectionAuthorityResult = ConnectionAuthorityTransitionResult | ConnectionAuthorityPartialResult
+
+export type ConnectionAuthorityOutcome =
+  | { status: 'answered'; result: ConnectionAuthorityResult }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+export interface ConnectionAuthorityInspectionRequest {
+  connector: string
+  label: string
+  service: string
+  field: string
+  state: Exclude<ConnectionAuthorityState, 'unset'>
+  revision: string
+}
+
+export interface ConnectionAuthorityInspectionResult {
+  version: typeof CONNECTION_PLAN_VERSION
+  connector: string
+  label: string
+  service: string
+  field: string
+  authority: {
+    state: Exclude<ConnectionAuthorityState, 'unset'>
+    revision: string
+    origin: string
+  }
+}
+
+export type ConnectionAuthorityInspectionOutcome =
+  | { status: 'answered'; result: ConnectionAuthorityInspectionResult }
+  | { status: 'refused'; refusal: ServiceRefusal }
+  | { status: 'failed'; failure: ServiceFailure }
+
+function readAuthorityTransition(
+  body: unknown,
+  transition: ConnectionAuthorityTransition
+): ConnectionAuthorityResult | string {
+  if (!isObject(body)) return 'the authority transition response is not an object'
+  if (body.version !== CONNECTION_PLAN_VERSION) return 'unsupported authority transition response version'
+  const partial = body.outcome === 'partial' || 'may_have_happened' in body
+  const expectedKeys = partial
+    ? ['version', 'connector', 'label', 'service', 'field', 'action', 'authority', 'outcome', 'may_have_happened']
+    : ['version', 'connector', 'label', 'service', 'field', 'action', 'authority']
+  if (!hasOnlyKeys(body, expectedKeys)) {
+    return 'the authority transition response is not a closed value-free object'
+  }
+  for (const key of ['connector', 'label', 'service', 'field'] as const) {
+    if (body[key] !== transition[key]) return `the authority transition response has a mismatched ${key}`
+  }
+  if (!isObject(body.authority) || !canonicalAuthorityRevision(body.authority.revision) ||
+      body.authority.revision !== transition.revision) {
+    return 'the authority transition response has a mismatched revision'
+  }
+  if (!hasOnlyKeys(body.authority, ['state', 'revision'])) {
+    return 'the authority transition response carries unexpected authority data'
+  }
+  const expected = transition.action.method === 'PUT' ? 'approved' : 'revoked'
+  if (body.action !== expected || body.authority.state !== expected) {
+    return `the ${transition.action.method === 'PUT' ? 'approve' : 'revoke'} action did not return ${expected}`
+  }
+  const result: ConnectionAuthorityTransitionResult = {
+    version: CONNECTION_PLAN_VERSION,
+    connector: transition.connector,
+    label: transition.label,
+    service: transition.service,
+    field: transition.field,
+    action: expected,
+    authority: { state: expected, revision: transition.revision },
+  }
+  if (!partial) return result
+  if (body.outcome !== 'partial' || body.may_have_happened !== true) {
+    return 'the partial authority transition response does not say it may have happened'
+  }
+  return { ...result, outcome: 'partial', may_have_happened: true }
+}
+
+function readAuthorityInspection(
+  body: unknown,
+  request: ConnectionAuthorityInspectionRequest,
+): ConnectionAuthorityInspectionResult | string {
+  if (!isObject(body) || body.version !== CONNECTION_PLAN_VERSION) {
+    return 'unsupported authority inspection response version'
+  }
+  if (!hasOnlyKeys(body, ['version', 'connector', 'label', 'service', 'field', 'authority'])) {
+    return 'the authority inspection response is not a closed object'
+  }
+  for (const key of ['connector', 'label', 'service', 'field'] as const) {
+    if (body[key] !== request[key]) return `the authority inspection response has a mismatched ${key}`
+  }
+  if (!isObject(body.authority) || !hasOnlyKeys(body.authority, ['state', 'revision', 'origin']) ||
+      body.authority.state !== request.state || body.authority.revision !== request.revision ||
+      !canonicalAuthorityRevision(body.authority.revision) ||
+      typeof body.authority.origin !== 'string' || body.authority.origin === '') {
+    return 'the authority inspection response has invalid state, revision or origin'
+  }
+  return {
+    version: CONNECTION_PLAN_VERSION,
+    connector: request.connector,
+    label: request.label,
+    service: request.service,
+    field: request.field,
+    authority: {
+      state: request.state,
+      revision: request.revision,
+      origin: body.authority.origin,
+    },
+  }
+}
+
+/** Inspect the exact normalized proposal through the configured-operator-only same-origin read. */
+export async function inspectConnectionAuthority(
+  request: ConnectionAuthorityInspectionRequest,
+  options: LoadOptions = {},
+): Promise<ConnectionAuthorityInspectionOutcome> {
+  const endpoint = connectionAuthorityEndpoint(
+    request.connector, request.label, request.service, request.field,
+  )
+  if (!canonicalAuthorityRevision(request.revision)) {
+    return {
+      status: 'failed',
+      failure: { kind: 'unreadable', endpoint, status: null, detail: 'invalid authority inspection request' },
+    }
+  }
+  const answered = await read(endpoint, options)
+  if (!answered.ok) {
+    const error = serviceError(answered.body)
+    if (error !== null && answered.status !== null) {
+      return { status: 'refused', refusal: { endpoint, status: answered.status, error } }
+    }
+    return { status: 'failed', failure: answered.failure }
+  }
+  const result = readAuthorityInspection(answered.body, request)
+  if (answered.status !== 200 || typeof result === 'string') {
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable', endpoint, status: answered.status,
+        detail: typeof result === 'string' ? result : `HTTP ${answered.status} cannot carry an authority inspection`,
+      },
+    }
+  }
+  return { status: 'answered', result }
+}
+
+/** Execute one compare-and-set authority action without carrying the proposed origin. */
+export async function transitionConnectionAuthority(
+  transition: ConnectionAuthorityTransition,
+  options: LoadOptions = {}
+): Promise<ConnectionAuthorityOutcome> {
+  const endpoint = transition.action.target
+  const expectedMethod = transition.action.method
+  const expectedEndpoint = connectionAuthorityEndpoint(
+    transition.connector, transition.label, transition.service, transition.field,
+  )
+  if (!relativeAuthorityTarget(endpoint) || endpoint !== expectedEndpoint ||
+      (expectedMethod !== 'PUT' && expectedMethod !== 'DELETE') ||
+      !canonicalAuthorityRevision(transition.revision)) {
+    return {
+      status: 'failed',
+      failure: { kind: 'unreadable', endpoint, status: null, detail: 'invalid authority transition request' },
+    }
+  }
+  const answered = await read(endpoint, options, {
+    method: expectedMethod,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ version: CONNECTION_PLAN_VERSION, revision: transition.revision }),
+  })
+
+  if (!answered.ok) {
+    const error = serviceError(answered.body)
+    if (error !== null && answered.status !== null) {
+      return { status: 'refused', refusal: { endpoint, status: answered.status, error } }
+    }
+    return { status: 'failed', failure: answered.failure }
+  }
+  const result = readAuthorityTransition(answered.body, transition)
+  const expectedStatus = typeof result !== 'string' && 'outcome' in result ? 207 : 200
+  if (answered.status !== expectedStatus || typeof result === 'string') {
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable', endpoint, status: answered.status,
+        detail: typeof result === 'string' ? result : `HTTP ${answered.status} cannot carry an authority transition`,
+      },
+    }
+  }
+  return { status: 'answered', result }
+}
+
+function readConnectionPlanResult(body: unknown, expectedConnector: string): ConnectionPlanResult | string {
+  if (!isObject(body)) return 'the apply response is not an object'
+  if (!hasOnlyKeys(body, ['outcome', 'steps', 'plan'])) return 'the apply response is not a closed v1 object'
+  if (!['complete', 'incomplete', 'refused', 'partial'].includes(String(body.outcome))) {
+    return 'the apply response has no valid outcome'
+  }
+  if (!Array.isArray(body.steps)) return 'the apply response has no steps array'
+  const steps: ConnectionPlanStep[] = []
+  for (const [at, value] of body.steps.entries()) {
+    if (!isObject(value) || typeof value.target !== 'string' ||
+        !['applied', 'unchanged', 'refused', 'skipped'].includes(String(value.outcome))) {
+      return `apply step ${at + 1} is malformed`
+    }
+    const stepKeys = new Set(['target', 'outcome', 'reason', 'action', 'revision', 'may_have_happened'])
+    if (Object.keys(value).some((key) => !stepKeys.has(key))) return `apply step ${at + 1} has an unknown member`
+    if ('reason' in value && typeof value.reason !== 'string') return `apply step ${at + 1} has an invalid reason`
+    const authorityMembers = ['action', 'revision', 'may_have_happened']
+    const authorityMemberCount = authorityMembers.filter((key) => key in value).length
+    if (authorityMemberCount !== 0) {
+      if (authorityMemberCount !== authorityMembers.length || body.outcome !== 'partial' ||
+          value.outcome !== 'applied' || value.action !== 'proposed' ||
+          !canonicalAuthorityRevision(value.revision) || value.may_have_happened !== true) {
+        return `apply step ${at + 1} has invalid partial authority proposal metadata`
+      }
+      steps.push({
+        target: value.target,
+        outcome: 'applied',
+        action: 'proposed',
+        revision: value.revision,
+        may_have_happened: true,
+        ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+      })
+      continue
+    }
+    steps.push({
+      target: value.target,
+      outcome: value.outcome as ConnectionPlanStep['outcome'],
+      ...(typeof value.reason === 'string' ? { reason: value.reason } : {}),
+    })
+  }
+  const plan = readConnectionPlan(body.plan, expectedConnector)
+  if (typeof plan === 'string') return `the returned plan is unreadable: ${plan}`
+  if ((body.outcome === 'complete' && plan.state !== 'complete') ||
+      (body.outcome === 'incomplete' && plan.state !== 'incomplete')) {
+    return `the apply outcome \`${body.outcome}\` contradicts the returned \`${plan.state}\` plan`
+  }
+  for (const [at, step] of steps.entries()) {
+    if (!('action' in step)) continue
+    const field = plan.fields.find((candidate) => candidate.target?.id === step.target)
+    if (field?.authority?.state !== 'proposed' || field.authority.revision !== step.revision) {
+      return `apply step ${at + 1} proposal revision does not match the returned authority plan`
+    }
+  }
+  return { outcome: body.outcome as ConnectionPlanResult['outcome'], steps, plan }
+}
+
+/** Apply values once through the composite endpoint; only the body can contain a submitted value. */
+export async function applyConnectionPlan(
+  connector: string,
+  submission: ConnectionPlanSubmission,
+  options: LoadOptions = {}
+): Promise<ConnectionPlanOutcome> {
+  const endpoint = connectionPlanEndpoint(connector)
+  const answered = await read(endpoint, options, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(submission),
+  })
+
+  const result = readConnectionPlanResult(answered.body, connector)
+  if (typeof result !== 'string') {
+    const matches = result.outcome === 'partial'
+      ? answered.status === 207
+      : result.outcome === 'refused'
+        ? answered.status !== null && (answered.status < 200 || answered.status >= 300)
+        : answered.status === 200
+    if (matches) return { status: 'answered', result }
+    return {
+      status: 'failed',
+      failure: {
+        kind: 'unreadable', endpoint, status: answered.status,
+        detail: `HTTP ${answered.status ?? 'failure'} cannot carry outcome \`${result.outcome}\``,
+      },
     }
   }
 
-  return { status: 'connected', connection }
+  if (!answered.ok && answered.status === null) {
+    return { status: 'failed', failure: answered.failure }
+  }
+
+  // The v1 composite route returns the same value-free result shape for its refusals. Do not fall
+  // back to rendering an arbitrary error body here: a malformed server response must not become a
+  // path by which an echoed submitted value reaches the page.
+  return { status: 'failed', failure: { kind: 'unreadable', endpoint, status: answered.status, detail: result } }
 }
 
 /** What became of an atomic credential replacement. */
@@ -1822,7 +2419,7 @@ export async function cancelWorkflowRun(run: string, options: LoadOptions = {}):
 /**
  * What the console knows about a grant that does not exist yet.
  *
- * Four states, and `refused` earns its place for [`DeclarationState`]'s reason: a connector this
+ * Four states, and `refused` earns its place for [`ConnectionPlanState`]'s reason: a connector this
  * build does not carry, or a body naming an operation, is the service answering the question in a
  * sentence an operator acts on, and folding it into `failed` would put that sentence through the
  * summariser that truncates.

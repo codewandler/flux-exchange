@@ -33,7 +33,7 @@ upstream Flux editor schema, and manages the declared event subsets of persisten
 
 ## The engine line
 
-`connector-pack` 0.18 and the engine crates are aligned on Flux 0.54 for X-14. They remain one atomic
+`connector-pack` 0.19 and the engine crates are aligned on Flux 0.54 for X-125. They remain one atomic
 pin set: two engine versions are two incompatible `Tool` traits even when their names are identical.
 The manifest, resolved-lock and compile-time seam tests keep that rule executable.
 
@@ -282,7 +282,7 @@ and placement are X-114–X-116; artifact trust is X-119; and X-120 holds the lo
 migration-corpus proof. Webhook/poll hosting and durable replay remain outside this runtime epic and
 still require their own designs before implementation.
 
-**Current dependency boundary, 2026-08-03.** connector v0.18 and Flux v0.54.4 move as one registry-only
+**Current dependency boundary, 2026-08-04.** connector v0.19 and Flux v0.54.4 move as one registry-only
 graph. `connector-pack` and `flux-runtime` are ordinary host dependencies because Exchange executes
 operations. The manifest, resolved lock and compile-time seam tests prove one engine line; neither a
 path nor a Git override participates in a release.
