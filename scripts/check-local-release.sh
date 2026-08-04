@@ -61,10 +61,20 @@ PY
     '"effective_catalogue_response": "exchange.effective-catalogue-response.v1"' \
     '"invoke_request": "exchange.invoke-request.v1"' \
     '"invoke_response": "exchange.invoke-response.v1"' \
-    '"connection_plan": "exchange.connection-plan.v1"' \
-    '"supervisor": "exchange.supervisor-ready.v1"'; do
+    '"connection_plan": "exchange.connection-plan.v2"' \
+    '"local_management": "exchange.local-management.v1"' \
+    '"service_account_handoff": "exchange.service-account-handoff.v1"' \
+    '"supervisor": "exchange.supervisor-ready.v2"'; do
     grep -Fq "$protocol" "$workflow_path" || fail "native compatibility expectation omits $protocol"
   done
+  checkout_line="$(grep -nF 'uses: actions/checkout@' "$workflow_path" | head -n1 | cut -d: -f1)"
+  readiness_line="$(grep -nF './scripts/check-publication-readiness.sh --self-test' "$workflow_path" | head -n1 | cut -d: -f1)"
+  toolchain_line="$(grep -nF 'uses: dtolnay/rust-toolchain@' "$workflow_path" | head -n1 | cut -d: -f1)"
+  [ -n "$checkout_line" ] && [ -n "$readiness_line" ] && [ -n "$toolchain_line" ] \
+    && [ "$checkout_line" -lt "$readiness_line" ] && [ "$readiness_line" -lt "$toolchain_line" ] \
+    || fail 'publication readiness is not the first preflight action after checkout'
+  grep -Fq './scripts/check-publication-readiness.sh' "$workflow_path" \
+    || fail 'local release preflight omits publication readiness'
   grep -Fq '[ "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" ]' "$workflow_path" || fail 'resumable publication is not bound to the immutable tag ref used by provenance'
   grep -Fq '[ "$GITHUB_SHA" = "$source" ]' "$workflow_path" || fail 'checked-out source is not bound to the workflow provenance SHA'
   if grep -Fq 'gh release download' "$workflow_path"; then

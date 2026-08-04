@@ -5,6 +5,41 @@ set -euo pipefail
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
 fail() { printf 'check-publication-readiness: %s\n' "$*" >&2; exit 1; }
 
+check_wiring() {
+  local tree="$1" local_workflow crates_workflow publish_script
+  local checkout self_test ordinary secret toolchain metadata network
+  local_workflow="$tree/.github/workflows/local-release.yml"
+  crates_workflow="$tree/.github/workflows/crates-io.yml"
+  publish_script="$tree/scripts/publish-crates-io.sh"
+
+  checkout="$(grep -nF 'uses: actions/checkout@' "$local_workflow" | head -n1 | cut -d: -f1)"
+  self_test="$(grep -nF './scripts/check-publication-readiness.sh --self-test' "$local_workflow" | head -n1 | cut -d: -f1)"
+  ordinary="$(grep -nE '^[[:space:]]+\./scripts/check-publication-readiness\.sh$' "$local_workflow" | head -n1 | cut -d: -f1)"
+  secret="$(grep -nF 'secrets.FLUX_EXCHANGE_' "$local_workflow" | head -n1 | cut -d: -f1)"
+  toolchain="$(grep -nF 'uses: dtolnay/rust-toolchain@' "$local_workflow" | head -n1 | cut -d: -f1)"
+  [ -n "$checkout" ] && [ -n "$self_test" ] && [ -n "$ordinary" ] && [ -n "$secret" ] && [ -n "$toolchain" ] \
+    && [ "$checkout" -lt "$self_test" ] && [ "$self_test" -lt "$ordinary" ] \
+    && [ "$ordinary" -lt "$secret" ] && [ "$ordinary" -lt "$toolchain" ] \
+    || { printf '%s\n' 'check-publication-readiness: local-release preflight does not run readiness first after checkout and before secrets/tools' >&2; return 1; }
+
+  checkout="$(grep -nF 'uses: actions/checkout@' "$crates_workflow" | head -n1 | cut -d: -f1)"
+  self_test="$(grep -nF './scripts/check-publication-readiness.sh --self-test' "$crates_workflow" | head -n1 | cut -d: -f1)"
+  ordinary="$(grep -nE '^[[:space:]]+\./scripts/check-publication-readiness\.sh$' "$crates_workflow" | head -n1 | cut -d: -f1)"
+  secret="$(grep -nF 'secrets.CARGO_REGISTRY_TOKEN' "$crates_workflow" | head -n1 | cut -d: -f1)"
+  toolchain="$(grep -nF 'uses: dtolnay/rust-toolchain@' "$crates_workflow" | head -n1 | cut -d: -f1)"
+  [ -n "$checkout" ] && [ -n "$self_test" ] && [ -n "$ordinary" ] && [ -n "$secret" ] && [ -n "$toolchain" ] \
+    && [ "$checkout" -lt "$self_test" ] && [ "$self_test" -lt "$ordinary" ] \
+    && [ "$ordinary" -lt "$secret" ] && [ "$ordinary" -lt "$toolchain" ] \
+    || { printf '%s\n' 'check-publication-readiness: crates.io workflow does not run readiness first after checkout and before tokens/tools' >&2; return 1; }
+
+  ordinary="$(grep -nE '^\./scripts/check-publication-readiness\.sh( \|\| exit 1)?$' "$publish_script" | head -n1 | cut -d: -f1)"
+  metadata="$(grep -nE '^[[:space:]]*cargo metadata ' "$publish_script" | head -n1 | cut -d: -f1)"
+  network="$(grep -nE '^[[:space:]]*curl ' "$publish_script" | head -n1 | cut -d: -f1)"
+  [ -n "$ordinary" ] && [ -n "$metadata" ] && [ -n "$network" ] \
+    && [ "$ordinary" -lt "$metadata" ] && [ "$ordinary" -lt "$network" ] \
+    || { printf '%s\n' 'check-publication-readiness: publish script does not repeat readiness before Cargo metadata and network access' >&2; return 1; }
+}
+
 check_tree() {
   python3 - "$1" <<'PY'
 import hashlib
@@ -165,6 +200,10 @@ for relative, schema in canonical_documents.items():
     if relative.endswith("release-trust.json"):
         if "protocols" in document:
             refuse("release trust must not grow a protocol compatibility claim")
+    elif relative.endswith("release-channel.json"):
+        releases = document.get("releases")
+        if not isinstance(releases, list) or not releases or any(release.get("protocols") != protocols for release in releases if isinstance(release, dict)) or any(not isinstance(release, dict) for release in releases):
+            refuse(f"canonical fixture {relative} does not carry the exact eight-protocol identity in every release")
     elif document.get("protocols") != protocols:
         refuse(f"canonical fixture {relative} does not carry the exact eight-protocol identity")
 
@@ -276,6 +315,35 @@ for relative in (
 ):
     (root / relative).write_text("exchange.release-channel.v2\n", encoding="utf-8")
 
+(root / ".github/workflows/local-release.yml").write_text('''exchange.release-channel.v2
+- uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  with:
+    ref: tag
+- name: readiness
+  run: |
+    ./scripts/check-publication-readiness.sh --self-test
+    ./scripts/check-publication-readiness.sh
+- name: secret
+  env:
+    KEY: ${{ secrets.FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64 }}
+- uses: dtolnay/rust-toolchain@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+''', encoding="utf-8")
+(root / ".github/workflows/crates-io.yml").write_text('''- uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+- name: readiness
+  run: |
+    ./scripts/check-publication-readiness.sh --self-test
+    ./scripts/check-publication-readiness.sh
+- name: token
+  env:
+    TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+- uses: dtolnay/rust-toolchain@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+''', encoding="utf-8")
+(root / "scripts/publish-crates-io.sh").write_text('''#!/usr/bin/env bash
+./scripts/check-publication-readiness.sh || exit 1
+cargo metadata --offline
+curl https://crates.io
+''', encoding="utf-8")
+
 (root / "Cargo.toml").write_text('''[workspace]\n[workspace.dependencies]\nconnector-secrets = { package = "codewandler-connector-secrets", version = "0.20" }\n''')
 checksums = {
     "codewandler-connector-address": "bdee7fb0d488de4ed97dbd3b8414e04138c122ee36b6f9c97a174bb317913d8c",
@@ -298,7 +366,7 @@ protocols = {
 }
 documents = {
     "positive/flux-exchange-release-trust.json": {"schema": "exchange.release-trust.v1"},
-    "positive/flux-exchange-release-channel.json": {"schema": "exchange.release-channel.v2", "protocols": protocols},
+    "positive/flux-exchange-release-channel.json": {"schema": "exchange.release-channel.v2", "releases": [{"protocols": protocols}]},
     "positive/flux-exchange-release-manifest.json": {"schema": "exchange.release-manifest.v2", "protocols": protocols},
     "compatibility.json": {"schema": "exchange.compatibility.v2", "protocols": protocols},
     "readiness-linux.json": {"schema": "exchange.supervisor-ready.v2", "protocols": protocols},
@@ -344,6 +412,7 @@ PY
     chmod +x "$tripwire/$command"
   done
   PATH="$tripwire:$PATH" check_tree "$scratch" >/dev/null
+  check_wiring "$scratch"
   [ ! -e "$marker" ] || fail "self-test: the readiness check executed a Cargo or network-capable command"
 
   expect_refusal() {
@@ -362,6 +431,19 @@ PY
   sed -i.bak 's/version = "0.20"/version = "0.20", path = "..\/provider"/' "$scratch/Cargo.toml"
   if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a path provider dependency"; fi
   mv "$scratch/Cargo.toml.clean" "$scratch/Cargo.toml"
+
+  cp "$scratch/.github/workflows/local-release.yml" "$scratch/local-release.clean"
+  sed -i.bak '/check-publication-readiness/d' "$scratch/.github/workflows/local-release.yml"
+  if check_wiring "$scratch" >/dev/null 2>&1; then fail "self-test: accepted local-release readiness removal"; fi
+  mv "$scratch/local-release.clean" "$scratch/.github/workflows/local-release.yml"
+  cp "$scratch/.github/workflows/crates-io.yml" "$scratch/crates-io.clean"
+  sed -i.bak '/check-publication-readiness/d' "$scratch/.github/workflows/crates-io.yml"
+  if check_wiring "$scratch" >/dev/null 2>&1; then fail "self-test: accepted crates.io readiness removal"; fi
+  mv "$scratch/crates-io.clean" "$scratch/.github/workflows/crates-io.yml"
+  cp "$scratch/scripts/publish-crates-io.sh" "$scratch/publish.clean"
+  sed -i.bak '/check-publication-readiness/d' "$scratch/scripts/publish-crates-io.sh"
+  if check_wiring "$scratch" >/dev/null 2>&1; then fail "self-test: accepted publish-script readiness removal"; fi
+  mv "$scratch/publish.clean" "$scratch/scripts/publish-crates-io.sh"
   mkdir -p "$scratch/tests/fixtures/exchange-release-v1"
   if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted the obsolete v1 fixture tree"; fi
   rm -rf "$scratch/tests/fixtures/exchange-release-v1"
@@ -419,3 +501,4 @@ fi
 
 [ "$#" -eq 0 ] || fail 'usage: check-publication-readiness.sh [--self-test]'
 check_tree "$root"
+check_wiring "$root" || exit 1

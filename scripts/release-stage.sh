@@ -21,8 +21,8 @@ jq -cn \
   --arg version "$version" --arg source "$source_sha" --arg build "$build_id" \
   --arg release_key "$release_key_id" \
   --slurpfile targets <(jq -s 'sort_by(.target)' "$assets_dir"/asset-*.json) \
-  '{schema:"exchange.release-manifest.v1",origin:$origin,tag:("refs/tags/v"+$version),version:$version,source_commit:$source,build_id:$build,
-    protocols:{exchange_api:"exchange.api.v1",effective_catalogue_response:"exchange.effective-catalogue-response.v1",invoke_request:"exchange.invoke-request.v1",invoke_response:"exchange.invoke-response.v1",connection_plan:"exchange.connection-plan.v1",supervisor:"exchange.supervisor-ready.v1"},
+  '{schema:"exchange.release-manifest.v2",origin:$origin,tag:("refs/tags/v"+$version),version:$version,source_commit:$source,build_id:$build,
+    protocols:{exchange_api:"exchange.api.v1",effective_catalogue_response:"exchange.effective-catalogue-response.v1",invoke_request:"exchange.invoke-request.v1",invoke_response:"exchange.invoke-response.v1",connection_plan:"exchange.connection-plan.v2",local_management:"exchange.local-management.v1",service_account_handoff:"exchange.service-account-handoff.v1",supervisor:"exchange.supervisor-ready.v2"},
     signing_key_ids:[$release_key],assets:$targets[0]}' >"$spec"
 
 cargo run --locked -p flux-exchange-release -- stage-release \

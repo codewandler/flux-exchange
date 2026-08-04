@@ -17,15 +17,15 @@ fn noncanonical_json_refuses() {
 
 #[test]
 fn selection_skips_a_newer_incompatible_release() {
-    let supported = Protocols::v1();
+    let supported = Protocols::v2();
     let mut incompatible = supported.clone();
-    incompatible.supervisor = "exchange.supervisor-ready.v2".into();
+    incompatible.supervisor = "exchange.supervisor-ready.v3".into();
     let releases = [
         ReleaseEntry::test("1.0.0", supported),
         ReleaseEntry::test("2.0.0", incompatible),
     ];
     let selected =
-        select_compatible(&releases, &Protocols::v1()).expect("older compatible release");
+        select_compatible(&releases, &Protocols::v2()).expect("older compatible release");
     assert_eq!(selected.version, "1.0.0");
 }
 
@@ -106,7 +106,7 @@ struct RedirectFixture {
 #[test]
 fn rust_and_python_transport_admission_match_the_shared_fixture_inventory() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fixtures = root.join("tests/fixtures/exchange-release-v1");
+    let fixtures = root.join("tests/fixtures/exchange-release-v2");
     let set: FixtureSet = canonical::parse(
         &read_bounded_file(&fixtures.join("fixture-set.json"), 256 * 1024)
             .expect("bounded fixture manifest"),
@@ -321,7 +321,7 @@ fn bounded_reader_and_support_member_contract_refuse_widening() {
     assert!(read_bounded_file(&oversized, 4).is_err());
 
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/exchange-release-v1/positive");
+        .join("../../tests/fixtures/exchange-release-v2/positive");
     let mut manifest: Manifest = canonical::parse(
         &read_bounded_file(
             &fixtures.join("flux-exchange-release-manifest.json"),
@@ -362,7 +362,7 @@ fn packager_refuses_documentation_under_an_unadmitted_basename() {
 #[test]
 fn delegated_signer_uses_a_half_open_validity_interval() {
     let trust_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/exchange-release-v1/positive/flux-exchange-release-trust.json");
+        .join("../../tests/fixtures/exchange-release-v2/positive/flux-exchange-release-trust.json");
     let trust: TrustDocument = canonical::parse(
         &read_bounded_file(&trust_path, 64 * 1024).expect("trust bytes"),
         64 * 1024,

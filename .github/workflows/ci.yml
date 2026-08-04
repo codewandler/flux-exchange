@@ -378,6 +378,11 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
+      - name: Prove and run the offline publication readiness boundary
+        run: |
+          ./scripts/check-publication-readiness.sh --self-test
+          ./scripts/check-publication-readiness.sh
+
       - name: Install release-verifier toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
@@ -400,4 +405,4 @@ jobs:
       - name: Run the provider-owned release fixture set through the production verifier
         run: >-
           cargo run --locked -p flux-exchange-release --
-          self-test tests/fixtures/exchange-release-v1
+          self-test tests/fixtures/exchange-release-v2

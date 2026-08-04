@@ -40,18 +40,23 @@ jobs:
       build_id: ${{ steps.identity.outputs.build_id }}
       channel_key_id: ${{ steps.delegation.outputs.channel_key_id }}
       release_key_id: ${{ steps.delegation.outputs.release_key_id }}
-    env:
-      FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64 }}
-      FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
+      - name: Refuse an unpublished or incomplete tagged tree before secrets or tools
+        run: |
+          ./scripts/check-publication-readiness.sh --self-test
+          ./scripts/check-publication-readiness.sh
+
       - name: Refuse absent production trust inputs and bind the immutable tag
         id: identity
         shell: bash
+        env:
+          FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64 }}
+          FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64 }}
         run: |
           set -euo pipefail
           case "$RELEASE_TAG" in
@@ -94,6 +99,9 @@ jobs:
       - name: Prove both secret-derived keys have distinct current delegated roles
         id: delegation
         shell: bash
+        env:
+          FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64 }}
+          FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64 }}
         run: |
           set -euo pipefail
           now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -247,8 +255,10 @@ jobs:
                   "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
                   "invoke_request": "exchange.invoke-request.v1",
                   "invoke_response": "exchange.invoke-response.v1",
-                  "connection_plan": "exchange.connection-plan.v1",
-                  "supervisor": "exchange.supervisor-ready.v1",
+                  "connection_plan": "exchange.connection-plan.v2",
+                  "local_management": "exchange.local-management.v1",
+                  "service_account_handoff": "exchange.service-account-handoff.v1",
+                  "supervisor": "exchange.supervisor-ready.v2",
               },
           }
           print(json.dumps(entry, ensure_ascii=False, separators=(",", ":"), sort_keys=True))

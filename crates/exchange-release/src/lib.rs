@@ -1,4 +1,4 @@
-//! Provider-owned verifier for the Exchange local release protocol v1.
+//! Provider-owned verifier for the Exchange local release protocol v2.
 
 mod archive;
 pub mod canonical;
@@ -357,9 +357,9 @@ pub fn delegated_signing_key_id(
 /// Validate a manifest's closed provider shape and every archive in `directory`.
 pub fn stage_manifest(directory: &Path, manifest: &Manifest) -> Result<Vec<u8>> {
     policy::validate_manifest(manifest)?;
-    if manifest.protocols != Protocols::v1() {
+    if manifest.protocols != Protocols::v2() {
         return Err(Error::Schema(
-            "staged binary does not advertise the provider v1 protocol set".into(),
+            "staged binary does not advertise the provider v2 protocol set".into(),
         ));
     }
     for asset in &manifest.assets {
@@ -427,7 +427,7 @@ pub fn parse_utc(value: &str) -> Result<OffsetDateTime> {
 /// Verify canonical compatibility output against the selected signed channel identity.
 pub fn verify_compatibility(bytes: &[u8], selected: &ReleaseEntry) -> Result<Compatibility> {
     let compatibility: Compatibility = canonical::parse(bytes, 16 * 1024)?;
-    if compatibility.schema != "exchange.compatibility.v1"
+    if compatibility.schema != "exchange.compatibility.v2"
         || compatibility.release.tag != selected.tag
         || compatibility.release.version != selected.version
         || compatibility.release.source_commit != selected.source_commit
@@ -455,13 +455,13 @@ pub fn verify_readiness(
         &["bind", "process", "protocols", "release", "schema"],
     )?;
     if object.get("schema").and_then(serde_json::Value::as_str)
-        != Some("exchange.supervisor-ready.v1")
+        != Some("exchange.supervisor-ready.v2")
     {
-        return Err(Error::Schema("readiness schema is not v1".into()));
+        return Err(Error::Schema("readiness schema is not v2".into()));
     }
     let protocols: Protocols = serde_json::from_value(object["protocols"].clone())
         .map_err(|error| Error::Schema(error.to_string()))?;
-    if protocols != selected.protocols || protocols.supervisor != "exchange.supervisor-ready.v1" {
+    if protocols != selected.protocols || protocols.supervisor != "exchange.supervisor-ready.v2" {
         return Err(Error::Schema("readiness protocols disagree".into()));
     }
     let release = exact_object(
@@ -569,7 +569,7 @@ fn lower_uuid(value: &str) -> bool {
         })
 }
 
-/// Select the greatest stable SemVer matching all six independently versioned protocols.
+/// Select the greatest stable SemVer matching all eight independently versioned protocols.
 pub fn select_compatible<'a>(
     releases: &'a [ReleaseEntry],
     supported: &Protocols,
@@ -585,7 +585,7 @@ pub fn select_compatible<'a>(
         }
     }
     best.map(|(release, _)| release).ok_or_else(|| {
-        Error::Selection("channel has no entry matching all six protocol ids".into())
+        Error::Selection("channel has no entry matching all eight protocol ids".into())
     })
 }
 

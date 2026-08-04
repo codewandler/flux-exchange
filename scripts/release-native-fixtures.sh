@@ -3,7 +3,7 @@
 set -euo pipefail
 
 root="$(git rev-parse --show-toplevel)"
-fixture="$root/tests/fixtures/exchange-release-v1/fixture-set.json"
+fixture="$root/tests/fixtures/exchange-release-v2/fixture-set.json"
 fail() { printf 'release-native-fixtures: %s\n' "$*" >&2; exit 1; }
 
 inventory() {
@@ -60,7 +60,7 @@ esac
 
 # The portable self-test rejects any mapping other than the reviewed exact IDs, targets and test
 # names before a field from the fixture manifest can influence a Cargo invocation.
-cargo run --quiet --locked -p flux-exchange-release -- self-test "$root/tests/fixtures/exchange-release-v1" >/dev/null
+cargo run --quiet --locked -p flux-exchange-release -- self-test "$root/tests/fixtures/exchange-release-v2" >/dev/null
 count=0
 while IFS=$'\t' read -r case_id test_target exact_test; do
   [ -n "$case_id" ] || continue

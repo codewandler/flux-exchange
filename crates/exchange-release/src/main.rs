@@ -24,7 +24,7 @@ USAGE:
   flux-exchange-release sign <payload> --secret-key-env <NAME> --trust-directory <dir> --root-policy <file> --now <UTC-seconds> --role <channel|release> --output-directory <dir>
   flux-exchange-release verify-transport-fixture <fixture.json>
   flux-exchange-release verify-compatibility --executable <path> --entry <entry.json> --executable-sha256 <digest>
-  flux-exchange-release self-test <tests/fixtures/exchange-release-v1>
+  flux-exchange-release self-test <tests/fixtures/exchange-release-v2>
 
 Every production verification command requires explicit pinned root policy. Policies marked
 test_only are refused unless --allow-test-policy is explicit; self-test is the only command that
@@ -93,7 +93,7 @@ fn verify_set(
         directory,
         &policy,
         now,
-        &Protocols::v1(),
+        &Protocols::v2(),
         &prior,
         archive_target,
     )?;
@@ -282,7 +282,7 @@ fn update_channel(arguments: &[String]) -> anyhow::Result<()> {
     let output = Path::new(required_option(arguments, "--output")?);
     let bytes = if existing_path == "-" {
         canonical::encode(&Channel {
-            schema: "exchange.release-channel.v1".into(),
+            schema: "exchange.release-channel.v2".into(),
             channel: "stable".into(),
             origin: release::ORIGIN.into(),
             generation: 1,
@@ -440,7 +440,7 @@ fn execute_compatibility(
 fn self_test(directory: &Path) -> anyhow::Result<()> {
     let manifest_path = directory.join("fixture-set.json");
     let fixture: FixtureSet = read_canonical(&manifest_path, 256 * 1024)?;
-    if fixture.schema != "exchange.release-fixture-set.v1" {
+    if fixture.schema != "exchange.release-fixture-set.v2" {
         bail!("unknown fixture-set schema");
     }
     let mut actual_files = BTreeMap::new();
@@ -1003,7 +1003,7 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
                     &input,
                     &policy,
                     now,
-                    &Protocols::v1(),
+                    &Protocols::v2(),
                     &case.prior_state,
                     Some(&case.platform),
                 );
@@ -1030,7 +1030,7 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
                     &policy,
                     release::parse_utc(&case.clock)?,
                     release::parse_utc(&expiry.commit_clock)?,
-                    &Protocols::v1(),
+                    &Protocols::v2(),
                     &case.prior_state,
                     Some(&case.platform),
                 );
@@ -1132,7 +1132,7 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
             manifest.origin = "https://example.invalid/foreign".into()
         }
         "unsupported-protocol-set" => {
-            manifest.protocols.supervisor = "exchange.supervisor-ready.v2".into()
+            manifest.protocols.supervisor = "exchange.supervisor-ready.v3".into()
         }
         "id-or-basename-unsafe" => manifest.assets[0].archive = "unsafe/name".into(),
         "basename-empty" => manifest.assets[0].archive.clear(),

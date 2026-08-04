@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 fn main() -> anyhow::Result<()> {
     let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v1");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v2");
     if std::env::args().nth(1).as_deref() == Some("--refresh-manifest") {
         return refresh_manifest(&root);
     }
@@ -133,13 +133,13 @@ fn main() -> anyhow::Result<()> {
     }
     assets.sort_by(|left, right| left.target.cmp(&right.target));
     let manifest = Manifest {
-        schema: "exchange.release-manifest.v1".into(),
+        schema: "exchange.release-manifest.v2".into(),
         origin: ORIGIN.into(),
         tag: format!("refs/tags/v{version}"),
         version: version.into(),
         source_commit: "4e398a73dcb8de17466cbedea77122dd489bed4f".into(),
         build_id: "TEST-ONLY-X126-FIXTURE".into(),
-        protocols: Protocols::v1(),
+        protocols: Protocols::v2(),
         signing_key_ids: vec![release_id.into()],
         assets,
     };
@@ -165,7 +165,7 @@ fn main() -> anyhow::Result<()> {
         protocols: manifest.protocols.clone(),
     };
     let channel = Channel {
-        schema: "exchange.release-channel.v1".into(),
+        schema: "exchange.release-channel.v2".into(),
         channel: "stable".into(),
         origin: ORIGIN.into(),
         generation: 7,
@@ -424,7 +424,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     let mut incompatible_channel = channel.clone();
     incompatible_channel.generation = 8;
-    incompatible_channel.releases[0].protocols.supervisor = "exchange.supervisor-ready.v2".into();
+    incompatible_channel.releases[0].protocols.supervisor = "exchange.supervisor-ready.v3".into();
     signed_channel_variant(
         &root,
         "higher-no-compatible",
@@ -461,7 +461,7 @@ fn main() -> anyhow::Result<()> {
     newer.tag = "refs/tags/v0.18.0".into();
     newer.source_commit = "5e398a73dcb8de17466cbedea77122dd489bed4f".into();
     newer.manifest_sha256 = "d".repeat(64);
-    newer.protocols.supervisor = "exchange.supervisor-ready.v2".into();
+    newer.protocols.supervisor = "exchange.supervisor-ready.v3".into();
     higher_incompatible.releases.push(newer);
     signed_channel_variant(
         &root,
@@ -556,7 +556,7 @@ fn main() -> anyhow::Result<()> {
     write(
         &root.join("compatibility.json"),
         &canonical::encode(&Compatibility {
-            schema: "exchange.compatibility.v1".into(),
+            schema: "exchange.compatibility.v2".into(),
             release: CompatibilityRelease {
                 tag: entry.tag.clone(),
                 version: entry.version.clone(),
@@ -580,7 +580,7 @@ fn main() -> anyhow::Result<()> {
             serde_json::json!({"filetime":"1","kind":"windows-process-creation"}),
         ),
     ] {
-        let readiness = serde_json::json!({"bind":{"host":"127.0.0.1","port":1,"scheme":"http"},"process":{"pid":1,"start_identity":identity},"protocols":entry.protocols,"release":{"build_id":entry.build_id,"executable_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":entry.source_commit,"tag":entry.tag,"version":entry.version},"schema":"exchange.supervisor-ready.v1"});
+        let readiness = serde_json::json!({"bind":{"host":"127.0.0.1","port":1,"scheme":"http"},"process":{"pid":1,"start_identity":identity},"protocols":entry.protocols,"release":{"build_id":entry.build_id,"executable_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":entry.source_commit,"tag":entry.tag,"version":entry.version},"schema":"exchange.supervisor-ready.v2"});
         write(&root.join(name), &canonical::encode(&readiness)?)?;
     }
     let mut bad_bind: serde_json::Value =
@@ -671,7 +671,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     write(
         &root.join("invalid-noncanonical.json"),
-        br#"{ "schema":"exchange.release-manifest.v1"}"#,
+        br#"{ "schema":"exchange.release-manifest.v2"}"#,
     )?;
     let mut unknown_manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
     unknown_manifest["unknown"] = serde_json::json!(true);
@@ -941,7 +941,7 @@ fn main() -> anyhow::Result<()> {
     write(
         &root.join("no-compatible.json"),
         &canonical::encode(
-            &serde_json::json!({"releases":[ReleaseEntry::test("1.0.0", Protocols { supervisor: "exchange.supervisor-ready.v2".into(), ..Protocols::v1() })],"supported":Protocols::v1()}),
+            &serde_json::json!({"releases":[ReleaseEntry::test("1.0.0", Protocols { supervisor: "exchange.supervisor-ready.v3".into(), ..Protocols::v2() })],"supported":Protocols::v2()}),
         )?,
     )?;
 
@@ -979,7 +979,7 @@ fn main() -> anyhow::Result<()> {
     inventory_files(&root, &root, &mut files)?;
     files.remove("fixture-set.json");
     let fixture_set = FixtureSet {
-        schema: "exchange.release-fixture-set.v1".into(),
+        schema: "exchange.release-fixture-set.v2".into(),
         // This is the committed provider/verifier baseline from which these generated bytes were
         // produced. The fixture-set digest identifies this manifest without requiring an
         // impossible self-referential Git commit hash.
@@ -1010,7 +1010,7 @@ fn refresh_manifest(root: &Path) -> anyhow::Result<()> {
     inventory_files(root, root, &mut files)?;
     files.remove("fixture-set.json");
     let fixture_set = FixtureSet {
-        schema: "exchange.release-fixture-set.v1".into(),
+        schema: "exchange.release-fixture-set.v2".into(),
         exchange_commit: "6bf620b91f789303f76a2069d7ef3ff7f1e59eb1".into(),
         files,
         cases,
