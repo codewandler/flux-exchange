@@ -76,7 +76,7 @@ flux-system = { package = "codewandler-flux-system", version = "0.54" }
 flux-web = { package = "codewandler-flux-web", version = "0.54" }
 flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 
-# The connector crates, all on the 0.19 line. `connector-catalog` has no dependencies at all and
+# The connector crates, all on the 0.20 line. `connector-catalog` has no dependencies at all and
 # `connector-secrets` defaults to no features (its Vault client and reqwest sit behind `vault`).
 #
 # `connector-address` is the **address vocabulary**, and it replaces `connector-spec` here.
@@ -89,10 +89,10 @@ flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 #
 # `connector-pack` is an ordinary `exchange-host` dependency: invocation and channel planning both
 # end there, while the composing server owns the guarded transports and never names the pack.
-connector-address = { package = "codewandler-connector-address", version = "0.19" }
-connector-catalog = { package = "codewandler-connector-catalog", version = "0.19" }
-connector-pack = { package = "codewandler-connector-pack", version = "0.19" }
-connector-secrets = { package = "codewandler-connector-secrets", version = "0.19.1" }
+connector-address = { package = "codewandler-connector-address", version = "0.20" }
+connector-catalog = { package = "codewandler-connector-catalog", version = "0.20" }
+connector-pack = { package = "codewandler-connector-pack", version = "0.20" }
+connector-secrets = { package = "codewandler-connector-secrets", version = "0.20" }
 # The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family
 # precedent is sibling flux-connectors, which already uses reqwest and jsonwebtoken for exactly this
 # exchange; the alternative was hand-rolling signature verification, which nobody should do.
