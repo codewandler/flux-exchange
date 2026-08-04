@@ -451,8 +451,9 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
     }
     for (relative, expected) in &fixture.files {
         safe_fixture_path(relative)?;
-        let bytes = std::fs::read(directory.join(relative))
-            .with_context(|| format!("read fixture {relative}"))?;
+        let bytes =
+            release::read_bounded_file(&directory.join(relative), release::MAX_ARCHIVE_BYTES)
+                .with_context(|| format!("read bounded fixture {relative}"))?;
         if release::digest_hex(&bytes) != *expected {
             bail!("fixture digest disagreement for {relative}");
         }
@@ -534,10 +535,16 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
             _ => {}
         }
     }
-    for required in REQUIRED_PROVIDER_CASES {
-        if !case_ids.contains(required) {
-            bail!("fixture-set is missing required provider case {required:?}");
-        }
+    let required_provider: BTreeSet<_> = REQUIRED_PROVIDER_CASES.iter().copied().collect();
+    if required_provider.len() != REQUIRED_PROVIDER_CASES.len() {
+        bail!("compiled required provider inventory contains a duplicate id");
+    }
+    if case_ids != required_provider {
+        let missing: Vec<_> = required_provider.difference(&case_ids).copied().collect();
+        let unexpected: Vec<_> = case_ids.difference(&required_provider).copied().collect();
+        bail!(
+            "fixture-set provider case inventory disagrees; missing={missing:?}; unexpected={unexpected:?}"
+        );
     }
     let mut deferred = BTreeSet::new();
     for id in &fixture.deferred_cases {
@@ -548,16 +555,25 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
             bail!("fixture case {id:?} is both executed and deferred");
         }
     }
-    for native in REQUIRED_NATIVE_CASES {
-        if !case_ids.contains(native) && !deferred.contains(*native) {
-            bail!("fixture-set neither executes nor defers native case {native:?}");
-        }
+    let required_native: BTreeSet<_> = REQUIRED_NATIVE_CASES.iter().copied().collect();
+    if required_native.len() != REQUIRED_NATIVE_CASES.len() {
+        bail!("compiled required native inventory contains a duplicate id");
+    }
+    if deferred != required_native {
+        let missing: Vec<_> = required_native.difference(&deferred).copied().collect();
+        let unexpected: Vec<_> = deferred.difference(&required_native).copied().collect();
+        bail!(
+            "fixture-set deferred native inventory disagrees; missing={missing:?}; unexpected={unexpected:?}"
+        );
     }
     status(&SelfTestStatus {
         schema: "exchange.release-self-test.v1",
         result: "accepted",
         cases: fixture.cases.len(),
-        fixture_set_sha256: release::digest_hex(&std::fs::read(manifest_path)?),
+        fixture_set_sha256: release::digest_hex(&release::read_bounded_file(
+            &manifest_path,
+            256 * 1024,
+        )?),
     })
 }
 
@@ -566,41 +582,87 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
     "positive-macos",
     "positive-windows",
     "positive-signer-overlap",
-    "canonical-duplicate-field",
-    "canonical-unknown-field",
-    "canonical-noncanonical-bytes",
+    "compatibility-positive",
     "integer-over-jcs-safe",
-    "decimal-noncanonical",
-    "root-threshold-failure",
-    "channel-threshold-failure",
-    "release-threshold-failure",
-    "trust-future-issued",
-    "channel-future-issued",
+    "canonical-duplicate-field",
+    "canonical-noncanonical-bytes",
+    "canonical-unknown-field",
     "trust-rollback",
     "trust-equivocation",
     "channel-rollback",
     "channel-equivocation",
+    "minisign-key-malformed",
+    "minisign-key-wrong-length",
+    "minisign-key-wrong-algorithm",
+    "minisign-key-embedded-id-disagreement",
+    "minisign-key-reused",
+    "minisign-key-reused-within-role",
+    "minisign-key-reused-with-root",
+    "delegation-expired",
+    "role-confusion",
+    "key-id-empty",
+    "key-id-overlong",
+    "key-id-slash",
+    "key-id-double-hyphen",
+    "key-id-leading-punctuation",
+    "key-id-trailing-punctuation",
+    "key-id-nonascii",
+    "key-id-uppercase",
+    "trust-future-issued",
+    "root-threshold-failure",
     "trust-signature-missing",
     "trust-signature-substituted",
+    "release-threshold-failure",
+    "channel-expired",
+    "channel-future-issued",
+    "channel-threshold-failure",
     "channel-signature-missing",
     "channel-signature-substituted",
+    "expiry-equality-stopped",
+    "manifest-digest-substituted",
     "manifest-signature-missing",
     "manifest-signature-key-id-disagree",
-    "manifest-tag-disagreement",
-    "manifest-version-disagreement",
-    "manifest-source-sha-disagreement",
-    "archive-path-absolute",
-    "archive-path-parent",
-    "archive-path-backslash",
-    "archive-path-duplicate",
-    "archive-path-case-fold",
-    "archive-link-member",
-    "archive-device-member",
-    "archive-total-expanded-overflow",
-    "archive-trailing-zstd-frame",
-    "archive-trailing-tar-data",
-    "archive-trailing-zip-data",
-    "archive-member-decompression-bound",
+    "channel-release-count-129",
+    "higher-channel-no-compatible",
+    "decimal-noncanonical",
+    "decimal-sign",
+    "decimal-21-digits",
+    "decimal-overflow",
+    "readiness-bind-domain",
+    "readiness-bind-scheme",
+    "readiness-port-zero",
+    "readiness-port-overflow",
+    "readiness-pid-zero",
+    "readiness-pid-overflow",
+    "readiness-start-kind",
+    "readiness-linux-start",
+    "readiness-macos-start",
+    "readiness-windows-start",
+    "github-redirect-positive",
+    "github-redirect-uppercase-host",
+    "github-redirect-status",
+    "github-redirect-scheme",
+    "github-redirect-host",
+    "github-redirect-port",
+    "github-redirect-path",
+    "github-redirect-query-name",
+    "github-redirect-query-bound",
+    "github-redirect-credential",
+    "github-redirect-second-redirect",
+    "github-redirect-userinfo",
+    "github-redirect-fragment",
+    "github-redirect-location-bound",
+    "github-redirect-location-nonascii",
+    "github-redirect-query-empty",
+    "github-redirect-query-value-bound",
+    "github-redirect-query-duplicate",
+    "github-redirect-query-encoded-name",
+    "github-redirect-query-percent",
+    "github-redirect-query-control",
+    "github-redirect-query-raw-character",
+    "github-redirect-path-repository",
+    "github-redirect-path-uuid",
+    "github-redirect-final-status",
     "github-initial-trust",
     "github-initial-channel",
     "github-initial-immutable",
@@ -617,30 +679,66 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
     "github-initial-authorization",
     "github-initial-proxy-authorization",
     "github-initial-cookie",
-    "github-redirect-positive",
-    "github-redirect-status",
-    "github-redirect-scheme",
-    "github-redirect-host",
-    "github-redirect-port",
-    "github-redirect-userinfo",
-    "github-redirect-fragment",
-    "github-redirect-path",
-    "github-redirect-path-repository",
-    "github-redirect-path-uuid",
-    "github-redirect-query-name",
-    "github-redirect-query-bound",
-    "github-redirect-query-empty",
-    "github-redirect-query-value-bound",
-    "github-redirect-query-duplicate",
-    "github-redirect-query-encoded-name",
-    "github-redirect-query-percent",
-    "github-redirect-query-control",
-    "github-redirect-query-raw-character",
-    "github-redirect-location-bound",
-    "github-redirect-location-nonascii",
-    "github-redirect-credential",
-    "github-redirect-second-redirect",
-    "github-redirect-final-status",
+    "higher-incompatible-skipped",
+    "newest-compatible-selected",
+    "delegation-rollback",
+    "provenance-client-input",
+    "plugin-or-connector-executable",
+    "expiry-during-target-download",
+    "channel-floor-survives-rotation",
+    "same-number-different-bytes",
+    "archive-corrupt-after-digest",
+    "asset-missing-platform",
+    "asset-undeclared",
+    "executable-renamed",
+    "manifest-oversized",
+    "archive-oversized",
+    "archive-member-count-17",
+    "archive-member-oversized",
+    "archive-member-path-241",
+    "archive-executable-substituted",
+    "key-id-substituted",
+    "logical-origin-changed",
+    "foreign-origin",
+    "unsupported-protocol-set",
+    "id-or-basename-unsafe",
+    "basename-empty",
+    "basename-overlong",
+    "basename-dotdot",
+    "basename-nonascii",
+    "basename-leading-punctuation",
+    "basename-trailing-punctuation",
+    "protocol-empty",
+    "protocol-overlong",
+    "protocol-no-version",
+    "protocol-version-zero",
+    "protocol-version-leading-zero",
+    "protocol-empty-token",
+    "protocol-double-hyphen",
+    "protocol-uppercase",
+    "protocol-leading-punctuation",
+    "protocol-trailing-punctuation",
+    "protocol-nonascii",
+    "manifest-tag-disagreement",
+    "manifest-version-disagreement",
+    "manifest-source-sha-disagreement",
+    "archive-path-absolute",
+    "archive-path-parent",
+    "archive-path-backslash",
+    "archive-path-duplicate",
+    "archive-path-case-fold",
+    "archive-total-expanded-overflow",
+    "archive-trailing-zstd-frame",
+    "archive-trailing-tar-data",
+    "archive-trailing-zip-data",
+    "archive-member-decompression-bound",
+    "archive-link-member",
+    "archive-device-member",
+    "higher-channel-target-fails",
+    "higher-channel-target-fails-aarch64-unknown-linux-gnu",
+    "higher-channel-target-fails-x86_64-apple-darwin",
+    "higher-channel-target-fails-x86_64-pc-windows-msvc",
+    "higher-channel-target-fails-x86_64-unknown-linux-gnu",
 ];
 
 const REQUIRED_NATIVE_CASES: &[&str] = &[
@@ -669,7 +767,10 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
         let input = directory.join(&case.input);
         match case.operation.as_str() {
             "canonical" => {
-                canonical::parse_value(&std::fs::read(input)?, 256 * 1024)?;
+                canonical::parse_value(
+                    &release::read_bounded_file(&input, 256 * 1024)?,
+                    256 * 1024,
+                )?;
             }
             "transport" => {
                 validate_transport_fixture(&input)?;
@@ -705,6 +806,14 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
                 }
                 let selection: Selection = read_canonical(&input, 256 * 1024)?;
                 release::select_compatible(&selection.releases, &selection.supported)?;
+            }
+            "compatibility" => {
+                let selected: ReleaseEntry =
+                    read_canonical(&directory.join("release-entry.json"), 64 * 1024)?;
+                release::verify_compatibility(
+                    &release::read_bounded_file(&input, 16 * 1024)?,
+                    &selected,
+                )?;
             }
             "floor" => {
                 #[derive(Deserialize)]
@@ -782,7 +891,7 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
                 let entry: ReleaseEntry =
                     read_canonical(&directory.join("release-entry.json"), 64 * 1024)?;
                 release::verify_readiness(
-                    &std::fs::read(&input)?,
+                    &release::read_bounded_file(&input, 16 * 1024)?,
                     &case.platform,
                     &entry,
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -839,14 +948,6 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
             return Ok(());
         }
         "executable-renamed" => manifest.assets[0].executable.path.push_str("-renamed"),
-        "plugin-or-connector-executable" => {
-            let mut member = manifest.assets[0].other_members[0].clone();
-            member.path = member.path.replace("LICENSE-APACHE", "connector-plugin");
-            manifest.assets[0].other_members.push(member);
-            manifest.assets[0]
-                .other_members
-                .sort_by(|a, b| a.path.cmp(&b.path));
-        }
         "archive-oversized" => manifest.assets[0].archive_bytes = release::MAX_ARCHIVE_BYTES + 1,
         "archive-member-count-17" => {
             while manifest.assets[0].other_members.len() < 16 {
@@ -882,7 +983,30 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
         "unsupported-protocol-set" => {
             manifest.protocols.supervisor = "exchange.supervisor-ready.v2".into()
         }
-        "id-or-basename-unsafe" => manifest.assets[0].archive = "../unsafe".into(),
+        "id-or-basename-unsafe" => manifest.assets[0].archive = "unsafe/name".into(),
+        "basename-empty" => manifest.assets[0].archive.clear(),
+        "basename-overlong" => manifest.assets[0].archive = "a".repeat(129),
+        "basename-dotdot" => manifest.assets[0].archive = "unsafe..archive".into(),
+        "basename-nonascii" => manifest.assets[0].archive = "archive-é".into(),
+        "basename-leading-punctuation" => manifest.assets[0].archive = "-unsafe".into(),
+        "basename-trailing-punctuation" => manifest.assets[0].archive = "unsafe-".into(),
+        "protocol-empty" => manifest.protocols.exchange_api.clear(),
+        "protocol-overlong" => manifest.protocols.exchange_api = format!("{}.v1", "a".repeat(126)),
+        "protocol-no-version" => manifest.protocols.exchange_api = "exchange.api".into(),
+        "protocol-version-zero" => manifest.protocols.exchange_api = "exchange.api.v0".into(),
+        "protocol-version-leading-zero" => {
+            manifest.protocols.exchange_api = "exchange.api.v01".into()
+        }
+        "protocol-empty-token" => manifest.protocols.exchange_api = "exchange..api.v1".into(),
+        "protocol-double-hyphen" => manifest.protocols.exchange_api = "exchange.a--pi.v1".into(),
+        "protocol-uppercase" => manifest.protocols.exchange_api = "Exchange.api.v1".into(),
+        "protocol-leading-punctuation" => {
+            manifest.protocols.exchange_api = "exchange.-api.v1".into()
+        }
+        "protocol-trailing-punctuation" => {
+            manifest.protocols.exchange_api = "exchange.api-.v1".into()
+        }
+        "protocol-nonascii" => manifest.protocols.exchange_api = "exchange.apé.v1".into(),
         "manifest-tag-disagreement" => {
             manifest.tag = "refs/tags/v0.18.0".into();
             return release::verify_manifest_identity(&manifest, &selected).map_err(Into::into);
@@ -957,7 +1081,7 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
                 }
             }
             let archive = temporary.path().join(&manifest.assets[0].archive);
-            let mut bytes = std::fs::read(&archive)?;
+            let mut bytes = release::read_bounded_file(&archive, release::MAX_ARCHIVE_BYTES)?;
             bytes.push(0);
             std::fs::write(&archive, bytes)?;
             return release::stage_manifest(temporary.path(), &manifest)
@@ -985,7 +1109,7 @@ fn mutate_archive_and_stage(
     }
     let mut changed = manifest.clone();
     let archive = temporary.path().join(&changed.assets[asset_index].archive);
-    let mut bytes = std::fs::read(&archive)?;
+    let mut bytes = release::read_bounded_file(&archive, release::MAX_ARCHIVE_BYTES)?;
     mutate(&mut bytes)?;
     std::fs::write(&archive, &bytes)?;
     changed.assets[asset_index].archive_bytes = bytes.len() as u64;

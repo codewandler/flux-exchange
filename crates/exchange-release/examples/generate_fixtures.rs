@@ -1,8 +1,9 @@
+use base64::Engine as _;
 use flux_exchange_release as release;
 use minisign::{sign, KeyPair};
 use release::*;
 use std::collections::BTreeMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read as _};
 use std::path::{Path, PathBuf};
 
 // This maintainer-only generator intentionally creates fresh TEST-ONLY minisign keys. CI verifies
@@ -189,16 +190,11 @@ fn main() -> anyhow::Result<()> {
             "flux-exchange-release-channel.json.{new_channel_id}.minisig"
         )),
     )?;
-    let mut malformed_trust = trust.clone();
-    malformed_trust.roles.channel.keys[0].minisign_public_key = "not-base64".into();
-    signed_trust_variant(
-        &root,
-        "trust-key-malformed",
-        &positive,
-        &malformed_trust,
-        &root_key,
-        root_id,
-    )?;
+    for (name, public_key) in malformed_public_keys(&old_channel.pk.to_base64())? {
+        let mut malformed_trust = trust.clone();
+        malformed_trust.roles.channel.keys[0].minisign_public_key = public_key;
+        signed_trust_variant(&root, name, &positive, &malformed_trust, &root_key, root_id)?;
+    }
     let mut reused_trust = trust.clone();
     reused_trust.roles.release.keys[0].minisign_public_key = reused_trust.roles.channel.keys[0]
         .minisign_public_key
@@ -211,8 +207,29 @@ fn main() -> anyhow::Result<()> {
         &root_key,
         root_id,
     )?;
+    let mut reused_within_role = trust.clone();
+    reused_within_role.roles.channel.keys[1].minisign_public_key =
+        reidentify_public_key(&old_channel.pk.to_base64())?;
+    signed_trust_variant(
+        &root,
+        "trust-key-reused-within-role",
+        &positive,
+        &reused_within_role,
+        &root_key,
+        root_id,
+    )?;
+    let mut reused_with_root = trust.clone();
+    reused_with_root.roles.channel.keys[0].minisign_public_key = root_key.pk.to_base64();
+    signed_trust_variant(
+        &root,
+        "trust-key-reused-with-root",
+        &positive,
+        &reused_with_root,
+        &root_key,
+        root_id,
+    )?;
     let mut expired_delegation = trust.clone();
-    expired_delegation.roles.channel.keys[0].not_after = issued.into();
+    expired_delegation.roles.channel.keys[0].not_after = "2026-08-04T12:00:01Z".into();
     signed_trust_variant(
         &root,
         "delegation-expired",
@@ -222,10 +239,7 @@ fn main() -> anyhow::Result<()> {
         root_id,
     )?;
     let mut role_confusion = trust.clone();
-    std::mem::swap(
-        &mut role_confusion.roles.channel.keys[0].key_id,
-        &mut role_confusion.roles.release.keys[0].key_id,
-    );
+    role_confusion.roles.release.keys[0].key_id = old_channel_id.into();
     signed_trust_variant(
         &root,
         "role-confusion",
@@ -234,6 +248,20 @@ fn main() -> anyhow::Result<()> {
         &root_key,
         root_id,
     )?;
+    for (name, key_id) in [
+        ("key-id-empty", "".to_owned()),
+        ("key-id-overlong", "a".repeat(65)),
+        ("key-id-slash", "unsafe/key".to_owned()),
+        ("key-id-double-hyphen", "unsafe--key".to_owned()),
+        ("key-id-leading-punctuation", "-unsafe".to_owned()),
+        ("key-id-trailing-punctuation", "unsafe-".to_owned()),
+        ("key-id-nonascii", "kéy".to_owned()),
+        ("key-id-uppercase", "Unsafe".to_owned()),
+    ] {
+        let mut invalid = trust.clone();
+        invalid.roles.channel.keys[0].key_id = key_id;
+        signed_trust_variant(&root, name, &positive, &invalid, &root_key, root_id)?;
+    }
     let mut future_trust = trust.clone();
     future_trust.issued_at = "2026-08-04T12:05:01Z".into();
     signed_trust_variant(
@@ -406,18 +434,49 @@ fn main() -> anyhow::Result<()> {
     )?;
     let mut multi_channel = channel.clone();
     multi_channel.generation = 11;
+    let mut older = entry.clone();
+    older.version = "0.16.0".into();
+    older.tag = "refs/tags/v0.16.0".into();
+    older.source_commit = "3e398a73dcb8de17466cbedea77122dd489bed4f".into();
+    older.build_id = "TEST-ONLY-X126-OLDER-FIXTURE".into();
+    older.manifest_sha256 = "c".repeat(64);
+    multi_channel.releases.insert(0, older);
+    signed_channel_variant(
+        &root,
+        "selection-multi",
+        &positive,
+        &multi_channel,
+        &[
+            (&old_channel, old_channel_id),
+            (&new_channel, new_channel_id),
+        ],
+    )?;
+    let mut higher_incompatible = channel.clone();
+    higher_incompatible.generation = 12;
     let mut newer = entry.clone();
     newer.version = "0.18.0".into();
     newer.tag = "refs/tags/v0.18.0".into();
     newer.source_commit = "5e398a73dcb8de17466cbedea77122dd489bed4f".into();
     newer.manifest_sha256 = "d".repeat(64);
     newer.protocols.supervisor = "exchange.supervisor-ready.v2".into();
-    multi_channel.releases.push(newer);
+    higher_incompatible.releases.push(newer);
     signed_channel_variant(
         &root,
-        "selection-multi",
+        "selection-higher-incompatible",
         &positive,
-        &multi_channel,
+        &higher_incompatible,
+        &[
+            (&old_channel, old_channel_id),
+            (&new_channel, new_channel_id),
+        ],
+    )?;
+    forbidden_executable_variant(
+        &root,
+        &positive,
+        &manifest,
+        &channel,
+        &release_key,
+        release_id,
         &[
             (&old_channel, old_channel_id),
             (&new_channel, new_channel_id),
@@ -542,6 +601,51 @@ fn main() -> anyhow::Result<()> {
         &root.join("readiness-bad-decimal.json"),
         &canonical::encode(&bad_decimal)?,
     )?;
+    for (name, path, value) in [
+        ("readiness-decimal-sign.json", "ticks", "-1"),
+        (
+            "readiness-decimal-21-digits.json",
+            "ticks",
+            "100000000000000000000",
+        ),
+        (
+            "readiness-decimal-overflow.json",
+            "ticks",
+            "18446744073709551616",
+        ),
+    ] {
+        let mut invalid: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("readiness-linux.json"))?)?;
+        invalid["process"]["start_identity"][path] = serde_json::json!(value);
+        write(&root.join(name), &canonical::encode(&invalid)?)?;
+    }
+    for (name, field, value) in [
+        (
+            "readiness-bad-scheme.json",
+            "scheme",
+            serde_json::json!("https"),
+        ),
+        ("readiness-port-zero.json", "port", serde_json::json!(0)),
+        (
+            "readiness-port-overflow.json",
+            "port",
+            serde_json::json!(65536),
+        ),
+    ] {
+        let mut invalid: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("readiness-linux.json"))?)?;
+        invalid["bind"][field] = value;
+        write(&root.join(name), &canonical::encode(&invalid)?)?;
+    }
+    for (name, pid) in [
+        ("readiness-pid-zero.json", 0_u64),
+        ("readiness-pid-overflow.json", 4_294_967_296_u64),
+    ] {
+        let mut invalid: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("readiness-linux.json"))?)?;
+        invalid["process"]["pid"] = serde_json::json!(pid);
+        write(&root.join(name), &canonical::encode(&invalid)?)?;
+    }
     let mut provenance: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
     provenance["provenance"] = serde_json::json!("forbidden-client-input");
     write(
@@ -854,8 +958,18 @@ fn main() -> anyhow::Result<()> {
         higher_trust: digest_hex(&higher_trust_bytes),
         higher_channel: digest_hex(&higher_channel_bytes),
         multi_channel: digest_hex(&canonical::encode(&multi_channel)?),
+        higher_incompatible_channel: digest_hex(&canonical::encode(&higher_incompatible)?),
         threshold_trust: digest_hex(&canonical::encode(&threshold_trust)?),
         release_threshold: digest_hex(&canonical::encode(&release_threshold)?),
+        embedded_id_trust: digest_hex(&std::fs::read(
+            root.join("trust-key-embedded-id-disagreement/flux-exchange-release-trust.json"),
+        )?),
+        expired_delegation_trust: digest_hex(&std::fs::read(
+            root.join("delegation-expired/flux-exchange-release-trust.json"),
+        )?),
+        forbidden_channel: digest_hex(&std::fs::read(
+            root.join("forbidden-executable/flux-exchange-release-channel.json"),
+        )?),
     };
     let cases = fixture_cases(issued, &accepted_state, &digests);
     let mut files = BTreeMap::new();
@@ -892,8 +1006,12 @@ struct FixtureDigests {
     higher_trust: String,
     higher_channel: String,
     multi_channel: String,
+    higher_incompatible_channel: String,
     threshold_trust: String,
     release_threshold: String,
+    embedded_id_trust: String,
+    expired_delegation_trust: String,
+    forbidden_channel: String,
 }
 
 fn fixture_cases(
@@ -932,7 +1050,6 @@ fn fixture_cases(
         "asset-missing-platform",
         "asset-undeclared",
         "executable-renamed",
-        "plugin-or-connector-executable",
         "manifest-oversized",
         "archive-oversized",
         "archive-member-count-17",
@@ -944,6 +1061,23 @@ fn fixture_cases(
         "foreign-origin",
         "unsupported-protocol-set",
         "id-or-basename-unsafe",
+        "basename-empty",
+        "basename-overlong",
+        "basename-dotdot",
+        "basename-nonascii",
+        "basename-leading-punctuation",
+        "basename-trailing-punctuation",
+        "protocol-empty",
+        "protocol-overlong",
+        "protocol-no-version",
+        "protocol-version-zero",
+        "protocol-version-leading-zero",
+        "protocol-empty-token",
+        "protocol-double-hyphen",
+        "protocol-uppercase",
+        "protocol-leading-punctuation",
+        "protocol-trailing-punctuation",
+        "protocol-nonascii",
         "manifest-tag-disagreement",
         "manifest-version-disagreement",
         "manifest-source-sha-disagreement",
@@ -985,13 +1119,33 @@ fn fixture_cases(
             "x86_64-pc-windows-msvc",
             accepted.clone(),
         ),
+        FixtureCase {
+            prior_state: RollbackState {
+                trust: Some(Floor {
+                    number: 1,
+                    sha256: "0".repeat(64),
+                }),
+                channel: Some(Floor {
+                    number: 6,
+                    sha256: "1".repeat(64),
+                }),
+            },
+            ..case(
+                "positive-signer-overlap",
+                "verify-directory",
+                "positive",
+                "accepted",
+                "aarch64-unknown-linux-gnu",
+                accepted.clone(),
+            )
+        },
         case(
-            "positive-signer-overlap",
-            "verify-directory",
-            "positive",
+            "compatibility-positive",
+            "compatibility",
+            "compatibility.json",
             "accepted",
-            "aarch64-unknown-linux-gnu",
-            accepted.clone(),
+            "none",
+            empty.clone(),
         ),
         case(
             "integer-over-jcs-safe",
@@ -1060,10 +1214,40 @@ fn fixture_cases(
         case(
             "minisign-key-malformed",
             "verify-directory",
-            "trust-key-malformed",
+            "trust-key-base64-noncanonical",
             "refused",
             "x86_64-unknown-linux-gnu",
             empty.clone(),
+        ),
+        case(
+            "minisign-key-wrong-length",
+            "verify-directory",
+            "trust-key-wrong-length",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "minisign-key-wrong-algorithm",
+            "verify-directory",
+            "trust-key-wrong-algorithm",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "minisign-key-embedded-id-disagreement",
+            "verify-directory",
+            "trust-key-embedded-id-disagreement",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            RollbackState {
+                trust: Some(Floor {
+                    number: 2,
+                    sha256: digests.embedded_id_trust.clone(),
+                }),
+                channel: None,
+            },
         ),
         case(
             "minisign-key-reused",
@@ -1074,17 +1258,106 @@ fn fixture_cases(
             empty.clone(),
         ),
         case(
-            "delegation-expired",
+            "minisign-key-reused-within-role",
             "verify-directory",
-            "delegation-expired",
+            "trust-key-reused-within-role",
             "refused",
             "x86_64-unknown-linux-gnu",
             empty.clone(),
         ),
         case(
+            "minisign-key-reused-with-root",
+            "verify-directory",
+            "trust-key-reused-with-root",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        FixtureCase {
+            clock: "2026-08-04T12:00:01Z".into(),
+            ..case(
+                "delegation-expired",
+                "verify-directory",
+                "delegation-expired",
+                "refused",
+                "x86_64-unknown-linux-gnu",
+                RollbackState {
+                    trust: Some(Floor {
+                        number: 2,
+                        sha256: digests.expired_delegation_trust.clone(),
+                    }),
+                    channel: None,
+                },
+            )
+        },
+        case(
             "role-confusion",
             "verify-directory",
             "role-confusion",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "key-id-empty",
+            "verify-directory",
+            "key-id-empty",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "key-id-overlong",
+            "verify-directory",
+            "key-id-overlong",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "key-id-slash",
+            "verify-directory",
+            "key-id-slash",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "key-id-double-hyphen",
+            "verify-directory",
+            "key-id-double-hyphen",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "key-id-leading-punctuation",
+            "verify-directory",
+            "key-id-leading-punctuation",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "key-id-trailing-punctuation",
+            "verify-directory",
+            "key-id-trailing-punctuation",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "key-id-nonascii",
+            "verify-directory",
+            "key-id-nonascii",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "key-id-uppercase",
+            "verify-directory",
+            "key-id-uppercase",
             "refused",
             "x86_64-unknown-linux-gnu",
             empty.clone(),
@@ -1268,9 +1541,73 @@ fn fixture_cases(
             empty.clone(),
         ),
         case(
+            "decimal-sign",
+            "readiness",
+            "readiness-decimal-sign.json",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "decimal-21-digits",
+            "readiness",
+            "readiness-decimal-21-digits.json",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "decimal-overflow",
+            "readiness",
+            "readiness-decimal-overflow.json",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
             "readiness-bind-domain",
             "readiness",
             "readiness-bad-bind.json",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "readiness-bind-scheme",
+            "readiness",
+            "readiness-bad-scheme.json",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "readiness-port-zero",
+            "readiness",
+            "readiness-port-zero.json",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "readiness-port-overflow",
+            "readiness",
+            "readiness-port-overflow.json",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "readiness-pid-zero",
+            "readiness",
+            "readiness-pid-zero.json",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "readiness-pid-overflow",
+            "readiness",
+            "readiness-pid-overflow.json",
             "refused",
             "x86_64-unknown-linux-gnu",
             empty.clone(),
@@ -1638,14 +1975,14 @@ fn fixture_cases(
         case(
             "higher-incompatible-skipped",
             "verify-directory",
-            "selection-multi",
+            "selection-higher-incompatible",
             "accepted",
             "x86_64-unknown-linux-gnu",
             RollbackState {
                 trust: accepted.trust.clone(),
                 channel: Some(Floor {
-                    number: 11,
-                    sha256: digests.multi_channel.clone(),
+                    number: 12,
+                    sha256: digests.higher_incompatible_channel.clone(),
                 }),
             },
         ),
@@ -1692,6 +2029,20 @@ fn fixture_cases(
         "refused",
         "none",
         empty.clone(),
+    ));
+    cases.push(case(
+        "plugin-or-connector-executable",
+        "verify-directory",
+        "forbidden-executable",
+        "refused",
+        "aarch64-apple-darwin",
+        RollbackState {
+            trust: accepted.trust.clone(),
+            channel: Some(Floor {
+                number: 7,
+                sha256: digests.forbidden_channel.clone(),
+            }),
+        },
     ));
     cases.push(FixtureCase {
         id: "expiry-during-target-download".into(),
@@ -1794,6 +2145,112 @@ fn fixture_cases(
     cases
 }
 
+fn malformed_public_keys(valid: &str) -> anyhow::Result<Vec<(&'static str, String)>> {
+    let decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(valid)?;
+    let mut wrong_algorithm = decoded.clone();
+    wrong_algorithm[..2].copy_from_slice(b"ED");
+    let mut embedded_id = decoded;
+    embedded_id[2] ^= 1;
+    Ok(vec![
+        ("trust-key-base64-noncanonical", format!("{valid}=")),
+        ("trust-key-wrong-length", valid[..55].to_owned()),
+        (
+            "trust-key-wrong-algorithm",
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(wrong_algorithm),
+        ),
+        (
+            "trust-key-embedded-id-disagreement",
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(embedded_id),
+        ),
+    ])
+}
+
+fn reidentify_public_key(valid: &str) -> anyhow::Result<String> {
+    let mut decoded = base64::engine::general_purpose::STANDARD_NO_PAD.decode(valid)?;
+    decoded[2] ^= 1;
+    Ok(base64::engine::general_purpose::STANDARD_NO_PAD.encode(decoded))
+}
+
+fn forbidden_executable_variant(
+    root: &Path,
+    positive: &Path,
+    manifest: &Manifest,
+    channel: &Channel,
+    release_signer: &KeyPair,
+    release_id: &str,
+    channel_signers: &[(&KeyPair, &str)],
+) -> anyhow::Result<()> {
+    let directory = root.join("forbidden-executable");
+    copy_directory(positive, &directory)?;
+    let mut changed_manifest = manifest.clone();
+    let asset = &mut changed_manifest.assets[0];
+    if asset.format != "tar.zst" {
+        anyhow::bail!("first fixture asset is not the expected Unix archive");
+    }
+    let archive_bytes = std::fs::read(positive.join(&asset.archive))?;
+    let decoder = zstd::stream::read::Decoder::new(Cursor::new(archive_bytes))?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut members = Vec::new();
+    for member in archive.entries()? {
+        let mut member = member?;
+        let path = member.path()?.to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        member.read_to_end(&mut bytes)?;
+        let mode = if path.ends_with("/LICENSE-APACHE") {
+            0o755
+        } else {
+            member.header().mode()?
+        };
+        members.push((path, bytes, mode));
+    }
+    let mut tar_bytes = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut tar_bytes);
+        for (path, bytes, mode) in &members {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(*mode);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder.append_data(&mut header, path, Cursor::new(bytes))?;
+        }
+        builder.finish()?;
+    }
+    let changed_archive = zstd::stream::encode_all(Cursor::new(tar_bytes), 19)?;
+    write(&directory.join(&asset.archive), &changed_archive)?;
+    asset.archive_bytes = changed_archive.len() as u64;
+    asset.archive_sha256 = digest_hex(&changed_archive);
+    let manifest_bytes = canonical::encode(&changed_manifest)?;
+    write(
+        &directory.join("flux-exchange-release-manifest.json"),
+        &manifest_bytes,
+    )?;
+    sign_file(
+        release_signer,
+        &manifest_bytes,
+        &directory.join(format!(
+            "flux-exchange-release-manifest.json.{release_id}.minisig"
+        )),
+    )?;
+    let mut changed_channel = channel.clone();
+    changed_channel.releases[0].manifest_sha256 = digest_hex(&manifest_bytes);
+    let channel_bytes = canonical::encode(&changed_channel)?;
+    write(
+        &directory.join("flux-exchange-release-channel.json"),
+        &channel_bytes,
+    )?;
+    for (signer, id) in channel_signers {
+        sign_file(
+            signer,
+            &channel_bytes,
+            &directory.join(format!("flux-exchange-release-channel.json.{id}.minisig")),
+        )?;
+    }
+    Ok(())
+}
+
 fn sign_file(pair: &KeyPair, bytes: &[u8], path: &Path) -> anyhow::Result<()> {
     let signature = sign(
         Some(&pair.pk),
@@ -1810,7 +2267,13 @@ fn expected_error(id: &str, operation: &str, result: &str) -> Option<&'static st
     }
     Some(match id {
         "integer-over-jcs-safe" => "bound refused",
-        "minisign-key-malformed" | "minisign-key-reused" => "signature refused",
+        "minisign-key-malformed"
+        | "minisign-key-wrong-length"
+        | "minisign-key-wrong-algorithm"
+        | "minisign-key-embedded-id-disagreement"
+        | "minisign-key-reused"
+        | "minisign-key-reused-within-role"
+        | "minisign-key-reused-with-root" => "signature refused",
         "root-threshold-failure"
         | "trust-signature-missing"
         | "trust-signature-substituted"
@@ -1821,8 +2284,8 @@ fn expected_error(id: &str, operation: &str, result: &str) -> Option<&'static st
         | "manifest-signature-missing"
         | "manifest-signature-key-id-disagree" => "signature refused",
         "trust-future-issued" | "channel-future-issued" => "time refused",
-        "delegation-expired" => "time refused",
-        "role-confusion" => "schema refused",
+        "delegation-expired" => "role/time",
+        "role-confusion" => "signature refused",
         "channel-expired" | "expiry-equality-stopped" | "expiry-during-target-download" => {
             "time refused"
         }
@@ -1857,6 +2320,12 @@ fn expected_error(id: &str, operation: &str, result: &str) -> Option<&'static st
         | "manifest-version-disagreement"
         | "manifest-source-sha-disagreement"
         | "provenance-client-input" => "schema refused",
+        id if id.starts_with("key-id-")
+            || id.starts_with("basename-")
+            || id.starts_with("protocol-") =>
+        {
+            "schema refused"
+        }
         "asset-undeclared" => "undeclared staged asset",
         "plugin-or-connector-executable" | "archive-member-path-241" | "executable-renamed" => {
             "archive refused"
@@ -1869,7 +2338,15 @@ fn expected_error(id: &str, operation: &str, result: &str) -> Option<&'static st
         id if id.starts_with("github-redirect") || id.starts_with("github-initial") => {
             "transport refused"
         }
-        id if id.starts_with("readiness-") || id == "decimal-noncanonical" => "schema refused",
+        "decimal-overflow" => "bound refused",
+        id if id.starts_with("readiness-")
+            || matches!(
+                id,
+                "decimal-noncanonical" | "decimal-sign" | "decimal-21-digits"
+            ) =>
+        {
+            "schema refused"
+        }
         id if id.starts_with("higher-channel-target-fails") => "archive refused",
         _ if operation == "verify-directory" => "refused",
         _ => "refused",
