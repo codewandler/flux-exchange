@@ -134,6 +134,78 @@ fn real_dev_flag_binds_the_complete_default_store_set() {
 }
 
 #[test]
+fn real_dev_flag_keeps_store_defaults_when_an_explicit_roster_takes_identity_precedence() {
+    let scratch = Scratch::new("dev-explicit-roster");
+    let root = scratch.path().join("state");
+    exchange_host::ensure_private_state_directory(&root)
+        .expect("platform owner-only development state root");
+
+    let output = run_to_final_bind(
+        &["--dev"],
+        [
+            ("FLUX_EXCHANGE_STATE", root.display().to_string()),
+            (
+                "FLUX_EXCHANGE_DEV_IDENTITY",
+                "user:x134-owner@dev".to_owned(),
+            ),
+        ],
+    );
+    let refusal = diagnostics(&output);
+
+    assert!(
+        !output.status.success(),
+        "the planted final bind must refuse"
+    );
+    assert!(
+        refusal.contains("development-local durable state defaults requested")
+            && refusal.contains("\"--dev\""),
+        "the real process did not retain the --dev state declaration:\n{refusal}"
+    );
+    assert!(
+        refusal.contains("DEVELOPMENT identity armed")
+            && refusal.contains("FLUX_EXCHANGE_DEV_IDENTITY")
+            && refusal.contains("x134-owner -> user:x134-owner@dev"),
+        "the explicit roster did not retain identity precedence:\n{refusal}"
+    );
+    assert!(
+        refusal.contains("cannot listen on"),
+        "startup did not reach the planted final bind after opening stores:\n{refusal}"
+    );
+    for absent_warning in [
+        "no credential store is bound",
+        "no channel store is bound",
+        "no connection-settings store is bound",
+        "no grant store is bound",
+        "no connection registry is bound",
+        "no workflow store is bound",
+        "no durable audit journal is bound",
+        "no Service Account store is bound",
+    ] {
+        assert!(
+            !refusal.contains(absent_warning),
+            "explicit-roster development silently dropped a durable store ({absent_warning}):\n{refusal}"
+        );
+    }
+    for relative in [
+        "credentials/store.txt",
+        "settings/store.json",
+        "grants/store.json",
+        "connections/store.json",
+        "channels/store.json",
+        "workflows",
+        "audit/events.sqlite3",
+        "service-accounts/store.json",
+    ] {
+        let expected = root.join(relative);
+        assert!(
+            refusal.contains(&expected.display().to_string()),
+            "startup did not report the bound default {}:\n{refusal}",
+            expected.display()
+        );
+    }
+}
+
+#[test]
 fn an_empty_explicit_dev_override_refuses_instead_of_disappearing() {
     let scratch = Scratch::new("empty-override");
     let root = scratch.path().join("state");

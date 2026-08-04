@@ -79,7 +79,12 @@ const USER_ENV: &str = "USER";
 #[derive(Debug, PartialEq, Eq)]
 enum Startup {
     /// The ordinary provider composition, with tenancy selected independently from identity.
-    Configured { tenancy: Tenancy },
+    Configured {
+        tenancy: Tenancy,
+        /// The command-line state declaration survives an explicit identity roster taking
+        /// precedence. Identity and durable-state selection are independent axes.
+        development_requested: bool,
+    },
     /// One loopback-only development principal, fixed to the one `dev` tenant at startup.
     Development {
         roster: String,
@@ -123,6 +128,7 @@ impl Startup {
         if explicit_roster || !requested {
             return Ok(Self::Configured {
                 tenancy: configured_tenancy.unwrap_or_default(),
+                development_requested: requested,
             });
         }
 
@@ -159,7 +165,7 @@ impl Startup {
     /// The runtime class selected by this startup declaration.
     const fn deployment(&self) -> Deployment {
         match self {
-            Self::Configured { tenancy } | Self::Development { tenancy, .. } => {
+            Self::Configured { tenancy, .. } | Self::Development { tenancy, .. } => {
                 tenancy.deployment()
             }
         }
@@ -168,7 +174,7 @@ impl Startup {
     /// The tenancy policy applied at the identity boundary.
     fn tenancy(&self) -> &Tenancy {
         match self {
-            Self::Configured { tenancy } | Self::Development { tenancy, .. } => tenancy,
+            Self::Configured { tenancy, .. } | Self::Development { tenancy, .. } => tenancy,
         }
     }
 
@@ -190,9 +196,15 @@ impl Startup {
         }
     }
 
-    /// Whether this is the zero-configuration durable local composition.
-    const fn is_development(&self) -> bool {
-        matches!(self, Self::Development { .. })
+    /// Whether the command line requested `--dev`, independent from the chosen identity provider.
+    const fn development_requested(&self) -> bool {
+        match self {
+            Self::Configured {
+                development_requested,
+                ..
+            } => *development_requested,
+            Self::Development { .. } => true,
+        }
     }
 }
 
@@ -524,9 +536,9 @@ fn configured_console() -> Option<PathBuf> {
 /// so nothing here has to be turned *off* to be safe — only turned on to be useful.
 ///
 /// The development identity is armed by [`DEV_FLAG`] or [`DEV_IDENTITY_ENV`]; failing that, OIDC
-/// sign-in is offered if it was configured; the credential store and Service Account store are bound by
-/// their own settings. Unset and unconfigured binds nothing, which is the state a reachable bind is
-/// already refused in.
+/// sign-in is offered if it was configured. [`DEV_FLAG`] independently selects the complete
+/// development-local store defaults even when an explicit roster takes identity precedence.
+/// Without that declaration, durable ports remain bound only by their own settings.
 ///
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
@@ -535,12 +547,18 @@ fn compose(
     bind: SocketAddr,
     supervised: bool,
 ) -> Result<AppState, StartupRefusal> {
-    let local_state =
-        local_state::configured(startup.is_development() || supervised).map_err(|source| {
-            StartupRefusal::LocalState {
-                reason: source.to_string(),
-            }
-        })?;
+    if startup.development_requested() {
+        info!(
+            armed_by = DEV_FLAG,
+            "development-local durable state defaults requested"
+        );
+    }
+    let development_state = startup.development_requested() || supervised;
+    let local_state = local_state::configured(development_state).map_err(|source| {
+        StartupRefusal::LocalState {
+            reason: source.to_string(),
+        }
+    })?;
     // Read deployment policy before binding any store or background authority. No released
     // connector declares a hazard yet; X-75 hands this posture to the acquisition binding when the
     // first one does. Parsing it now makes an unknown opt-in a startup refusal instead of a policy
@@ -1292,11 +1310,16 @@ mod tests {
             .expect("a startup user makes the development shorthand usable");
         assert_eq!(dev.deployment(), Deployment::SingleTenant);
         assert_eq!(dev.development_roster(), Some("user:timo@dev"));
+        assert!(dev.development_requested());
 
         let explicit = Startup::select(true, true, Some("timo"), None)
             .expect("an explicit development roster remains authoritative");
         assert_eq!(explicit.deployment(), Deployment::MultiTenant);
         assert_eq!(explicit.development_roster(), None);
+        assert!(
+            explicit.development_requested(),
+            "an explicit identity roster must not erase the --dev state declaration"
+        );
     }
 
     /// The production declaration is independent from the provider: both OIDC/local users and an
@@ -1311,11 +1334,13 @@ mod tests {
             Some("acme")
         );
         assert_eq!(hosted.development_roster(), None);
+        assert!(!hosted.development_requested());
 
         let rostered = Startup::select(true, true, Some("ignored"), Some("acme"))
             .expect("an explicit roster may use the same independent declaration");
         assert_eq!(rostered.deployment(), Deployment::SingleTenant);
         assert_eq!(rostered.development_roster(), None);
+        assert!(rostered.development_requested());
 
         let refusal = Startup::select(true, false, Some("timo"), Some("other"))
             .expect_err("--dev always means dev and must not be silently redefined")
