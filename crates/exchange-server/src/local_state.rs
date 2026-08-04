@@ -131,10 +131,15 @@ fn select(
     let configured = configured?;
 
     if development || root.is_some() {
+        #[cfg(windows)]
+        let account_default = root.is_none();
         let root = match root {
             Some(root) => root,
             None => conventional_root()?,
         };
+        #[cfg(windows)]
+        let root = ensure_owner_only_root(&root, account_default)?;
+        #[cfg(not(windows))]
         let root = ensure_owner_only_root(&root)?;
         return Ok(Some(
             LocalStatePaths::development(&root).with_explicit(&configured),
@@ -345,7 +350,18 @@ fn ensure_owner_only_root(root: &Path) -> Result<PathBuf, LocalStateRefusal> {
 }
 
 #[cfg(windows)]
-fn ensure_owner_only_root(root: &Path) -> Result<PathBuf, LocalStateRefusal> {
+fn ensure_owner_only_root(
+    root: &Path,
+    authenticated_account_default: bool,
+) -> Result<PathBuf, LocalStateRefusal> {
+    if authenticated_account_default {
+        return crate::native_root::ensure_authenticated_account_state_root(root).map_err(
+            |reason| LocalStateRefusal::UnsafeRoot {
+                path: root.to_path_buf(),
+                reason,
+            },
+        );
+    }
     exchange_host::ensure_private_state_directory(root).map_err(|source| {
         LocalStateRefusal::UnsafeRoot {
             path: root.to_path_buf(),
