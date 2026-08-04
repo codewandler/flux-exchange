@@ -23,6 +23,7 @@ mod dev_identity;
 pub use flux_exchange::entropy;
 mod execution;
 mod local_identity;
+mod local_management;
 mod local_state;
 mod managed_apps;
 mod native_root;
