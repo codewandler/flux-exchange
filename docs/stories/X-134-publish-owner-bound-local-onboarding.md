@@ -1,7 +1,7 @@
 ---
 id: X-134
 title: "Publish owner-bound local onboarding without secret JSON"
-status: blocked
+status: ready
 priority: 0
 epic: connections
 areas: [exchange-server, identity, connections, grants, protocol, tests, windows]
@@ -527,6 +527,17 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
 
 ## Progress
 
+- 2026-08-04T18:11:23+02:00 — The coordinator admitted X-134 for implementation after the accepted
+  contract head `9dc414c76f231bd179358fd526019a16872a7be1` merged as
+  `3b16bcb5b1c52984449118775125fe66da1686da` and Connectors `v0.20.0` published from exact commit
+  `c764f5c3b8e745cc65e90a298b04851647b76778`. Tag-triggered crates.io run
+  `30927493484` completed successfully, and API, sparse-index and downloaded-byte SHA-256 values
+  agree for address `bdee7fb0d488de4ed97dbd3b8414e04138c122ee36b6f9c97a174bb317913d8c`,
+  catalog `9a7737659b74876b09ff6e09b253402c5bdfcafcbde89373cb76f689bd8ffed2`,
+  secrets `edf98bece86f6364aba3e7dd48c3b7e161146942e9e8450d5dc286143b627717` and pack
+  `8e858a844dab8324d42bb83c98c4ffb6823681eb1157ddb96a79d5d7a42cff48`; all four are unyanked.
+  The public release is `https://github.com/codewandler/flux-connectors/releases/tag/v0.20.0`.
+  X-134 is ready; every Acceptance item remains open for failing-first implementation evidence.
 - 2026-08-04T17:17:52+02:00 — Reconciled the frozen provider contract to roadmap Decision 0007 at
   `4511f44b4defcb6de92ab8fc1b56bd5b4356ca78` after the final byte audit: secret live presence is
   always null; selected plans and credential proposals carry an opaque credential-head CAS;
@@ -539,9 +550,10 @@ handoff bytes, not publish an exact six-protocol schema and silently change it a
 - Cross-repository authority:
   `../flux-roadmap/decisions/0007-local-onboarding-uses-owner-bound-capabilities.md` at roadmap
   commit `4511f44b4defcb6de92ab8fc1b56bd5b4356ca78`.
-- External implementation dependency: connectors C-515 and the checksummed crates.io release of
-  `codewandler-connector-secrets` 0.20.0. X-134 remains blocked and no code wave starts from an
-  unmerged provider port, unpublished commit, path/git dependency or unmatched lockfile resolution.
+- External implementation dependency satisfied by Connectors `v0.20.0`: implementation must still
+  resolve `codewandler-connector-secrets` 0.20.0 and its transitive address crate from crates.io
+  with the checksums recorded above. A path/git dependency, copied batch representation or
+  unmatched lockfile resolution remains a contract failure.
 - This story owns provider bytes and fixtures. Flux C-509 owns the receiving credential writer,
   owner-only Flux store, opaque resolver, management/runtime client split, CLI projection, concrete
   write approval and retry suppression. Exchange fixtures may use a test sink but never certify
