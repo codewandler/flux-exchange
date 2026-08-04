@@ -793,11 +793,13 @@ async fn a_planted_whole_authority_value_is_refused_on_the_way_out() {
         planted[TENANT]["newrelic"][&declared.service][declared.binds()] = json!(value);
     }
 
-    fs::create_dir_all(path.parent().expect("the store path has a parent"))
-        .expect("a scratch directory");
-    fs::write(
+    exchange_host::ensure_private_state_directory(
+        path.parent().expect("the store path has a parent"),
+    )
+    .expect("an owner-only scratch directory");
+    exchange_host::write_private_state_file(
         &path,
-        serde_json::to_vec_pretty(&planted).expect("a serialisable store"),
+        &serde_json::to_vec_pretty(&planted).expect("a serialisable store"),
     )
     .expect("a planted store file");
     let on_disk = fs::read(&path).expect("the planted file is readable");
@@ -1189,11 +1191,13 @@ fn a_planted_value_is_admitted_only_when_it_is_a_declared_choice() {
 
         let mut file = json!({ TENANT: { "intercom": {} } });
         file[TENANT]["intercom"][&host.service][host.binds()] = json!(planted);
-        fs::create_dir_all(path.parent().expect("the store path has a parent"))
-            .expect("a scratch directory");
-        fs::write(
+        exchange_host::ensure_private_state_directory(
+            path.parent().expect("the store path has a parent"),
+        )
+        .expect("an owner-only scratch directory");
+        exchange_host::write_private_state_file(
             &path,
-            serde_json::to_vec_pretty(&file).expect("a serialisable store"),
+            &serde_json::to_vec_pretty(&file).expect("a serialisable store"),
         )
         .expect("a planted store file");
         let on_disk = fs::read(&path).expect("the planted file is readable");
