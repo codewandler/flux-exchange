@@ -1,0 +1,1 @@
+{"error":"no connection registry is configured. Set `FLUX_EXCHANGE_CONNECTIONS` to a durable path before using labels or multiple connector instances"}

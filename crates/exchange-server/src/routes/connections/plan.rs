@@ -22,7 +22,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::*;
 
-const VERSION: &str = "exchange.connection-plan.v1";
+const VERSION: &str = crate::protocol::CONNECTION_PLAN_V1.as_str();
 
 pub(super) fn read_route() -> MethodRouter<AppState> {
     get(show)
@@ -2138,8 +2138,6 @@ fn preflight_refused(status: StatusCode, reason: impl Into<String>, plan: &Plan)
 mod tests {
     use super::*;
 
-    use std::fs::DirBuilder;
-    use std::os::unix::fs::DirBuilderExt as _;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -2176,10 +2174,7 @@ mod tests {
                 "flux-exchange-x125-{}",
                 crate::entropy::hex::<8>().expect("test entropy")
             ));
-            DirBuilder::new()
-                .mode(0o700)
-                .create(&path)
-                .expect("test directory");
+            exchange_host::ensure_private_state_directory(&path).expect("test directory");
             Self(path)
         }
 

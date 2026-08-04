@@ -245,24 +245,14 @@ mod plan;
 ///
 /// `pub(super)` since X-12: [`invoke`](super::invoke) refuses in the same terms when no store is
 /// bound, and one setting quoted from two places would be two strings to keep in step.
-#[cfg(unix)]
 pub(super) const STORE_SETTING: &str = exchange_host::CREDENTIAL_STORE_SETTING;
-/// The same, where the file store does not exist. Only `FileStore` is `#[cfg(unix)]`; the port is
-/// not, so a composition on another platform binds its own store rather than this one.
-#[cfg(not(unix))]
-pub(super) const STORE_SETTING: &str = "FLUX_EXCHANGE_CREDENTIALS";
 
 /// The setting that names the connection-settings store, quoted when none is bound.
 ///
 /// Spelled through the host's own constant for [`STORE_SETTING`]'s reason. `pub(super)` for its
 /// reason too: [`invoke`](super::invoke) points a refused invocation at this surface, and one
 /// setting quoted from two places would be two strings to keep in step.
-#[cfg(unix)]
 pub(super) const SETTINGS_SETTING: &str = exchange_host::CONNECTION_SETTINGS_SETTING;
-/// The same, where the file store does not exist. Only the file binding is `#[cfg(unix)]`; the port
-/// is not, so a composition on another platform binds its own store rather than this one.
-#[cfg(not(unix))]
-pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
 
 /// **Who may write a connection setting: a `User`, and nothing else.**
 ///
@@ -4280,13 +4270,13 @@ fn no_registry() -> Response {
     let setting = exchange_host::CONNECTION_REGISTRY_SETTING;
     #[cfg(not(unix))]
     let setting = "FLUX_EXCHANGE_CONNECTIONS";
-    refuse(
+    (
         StatusCode::SERVICE_UNAVAILABLE,
-        format!(
+        Json(crate::protocol::ErrorBody::new(format!(
             "no connection registry is configured. Set `{setting}` to a durable path before using labels or multiple connector instances"
-        ),
-        json!({}),
+        ))),
     )
+        .into_response()
 }
 
 fn unknown_label(provider: &'static Provider, label: &ConnectionLabel) -> Response {
@@ -4310,13 +4300,19 @@ fn registry_refused(refusal: &RegistryRefusal) -> Response {
     };
     if matches!(refusal, RegistryRefusal::Unavailable { .. }) {
         error!(%refusal, "the connection registry failed");
-        return refuse(
+        return (
             status,
-            "the connection registry could not be read or written; nothing was repaired. Retrying may work",
-            json!({}),
-        );
+            Json(crate::protocol::ErrorBody::new(
+                "the connection registry could not be read or written; nothing was repaired. Retrying may work",
+            )),
+        )
+            .into_response();
     }
-    refuse(status, refusal.to_string(), json!({}))
+    (
+        status,
+        Json(crate::protocol::ErrorBody::new(refusal.to_string())),
+    )
+        .into_response()
 }
 
 /// The store failed, and *how* it failed survives out to the caller.
@@ -4346,7 +4342,13 @@ fn store_failed(error: &StoreError) -> Response {
 
     error!(%error, "the credential store failed");
 
-    refuse(status, format!("{happened}. {advice}"), json!({}))
+    (
+        status,
+        Json(crate::protocol::ErrorBody::new(format!(
+            "{happened}. {advice}"
+        ))),
+    )
+        .into_response()
 }
 
 /// How a store failure is answered: its status, what happened, and what an operator is to do.
@@ -5137,7 +5139,8 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed),
             ));
-            std::fs::create_dir_all(&path).expect("a scratch directory");
+            exchange_host::ensure_private_state_directory(&path)
+                .expect("an owner-only scratch directory");
             Self(path.canonicalize().expect("a resolvable scratch directory"))
         }
 

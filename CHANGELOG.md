@@ -8,6 +8,26 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Local Exchange state is durable and owner-only on every supported Flux target** (X-127).
+  The complete `--dev` composition binds credentials, settings, grants, labelled connections,
+  channels, workflows, audit evidence and Service Accounts below one conventional per-user root.
+  Unix modes and Windows SID/protected-DACL checks refuse unsafe existing objects without repair;
+  the native gate connects, grants and invokes through a labelled connection, restarts the real
+  process over the same root, and invokes again with the retained Service Account.
+
+- **A Flux supervisor receives one exact readiness proof from the child it owns** (X-128).
+  The machine-only launch ABI uses fixed Unix pipes or an exact two-handle Windows inheritance list,
+  binds only an OS-selected `127.0.0.1`/`::1` port, and emits one bounded canonical record containing
+  release, executable, protocol and native process-start identity. A strict provider verifier
+  refuses malformed or foreign evidence before ownership, while a native liveness thread prevents
+  responsive or Tokio-wedged children surviving supervisor death.
+
+- **The four delivered Exchange HTTP v1 identities are bound to production wire types and routes**
+  (X-129). Service Account authentication, effective catalogue discovery, raw invocation requests,
+  success responses and every reachable bounded refusal now have checked provider fixtures and one
+  SHA-256 inventory. Compatibility/readiness use the same typed protocol constants rather than a
+  package-version inference.
+
 - **One complete declaration-driven labelled connection plan now serves browser and CLI consumers**
   (X-125). Authenticated humans receive the exact `exchange.connection-plan.v1` contract for name,
   credentials, settings, choices and aliases; composite writes report ordered complete, incomplete,

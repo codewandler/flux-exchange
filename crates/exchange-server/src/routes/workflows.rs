@@ -555,20 +555,34 @@ pub(super) async fn invoke_published(
                     exchange_host::WorkflowInvokeRefusal::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
                     exchange_host::WorkflowInvokeRefusal::Execution(_) => StatusCode::BAD_GATEWAY,
                 };
-                (status, Json(json!({ "error": message, "run": run.id }))).into_response()
+                workflow_run_refusal(status, message, run.id)
             }
         },
         _ = &mut cancellation => {
             let _ = runs.finish(&run.id, "cancelled", None, None);
-            (StatusCode::CONFLICT, Json(json!({ "error": "workflow run was cancelled", "run": run.id }))).into_response()
+            workflow_run_refusal(StatusCode::CONFLICT, "workflow run was cancelled", run.id)
         }
     }
+}
+
+fn workflow_run_refusal(
+    status: StatusCode,
+    error: impl Into<String>,
+    run: impl Into<String>,
+) -> Response {
+    (
+        status,
+        Json(crate::protocol::WorkflowRunRefusalBody::new(error, run)),
+    )
+        .into_response()
 }
 
 fn run_store_refusal(error: String) -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({ "error": format!("workflow activity is unavailable: {error}") })),
+        Json(crate::protocol::ErrorBody::new(format!(
+            "workflow activity is unavailable: {error}"
+        ))),
     )
         .into_response()
 }
@@ -576,12 +590,10 @@ fn run_store_refusal(error: String) -> Response {
 fn unavailable() -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "error": format!(
-                "this host has no workflow store; configure {} outside every working tree",
-                exchange_host::WORKFLOW_STORE_SETTING,
-            ),
-        })),
+        Json(crate::protocol::ErrorBody::new(format!(
+            "this host has no workflow store; configure {} outside every working tree",
+            exchange_host::WORKFLOW_STORE_SETTING,
+        ))),
     )
         .into_response()
 }
@@ -608,10 +620,10 @@ fn refusal(error: WorkflowRefusal) -> Response {
     };
     (
         status,
-        Json(json!({
-            "error": error.to_string(),
-            "current_revision": current_revision,
-        })),
+        Json(crate::protocol::WorkflowLookupRefusalBody::new(
+            error.to_string(),
+            current_revision,
+        )),
     )
         .into_response()
 }
@@ -680,6 +692,34 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap()
         };
         (status, value)
+    }
+
+    async fn assert_invoke_v1(response: Response) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        crate::protocol::decode_invoke_response(status.as_u16(), &bytes)
+            .expect("workflow response satisfies exchange.invoke-response.v1");
+    }
+
+    #[tokio::test]
+    async fn workflow_lookup_and_run_refusal_renderers_are_closed_invoke_v1_shapes() {
+        assert_invoke_v1(refusal(exchange_host::WorkflowRefusal::UnknownWorkflow(
+            "missing".to_owned(),
+        )))
+        .await;
+        assert_invoke_v1(workflow_run_refusal(
+            StatusCode::FORBIDDEN,
+            "workflow grant refused",
+            "01J00000000000000000000000",
+        ))
+        .await;
+
+        let response = run_store_refusal(format!("{}quiggle-marrow-plimth-42", "x".repeat(4097)));
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("quiggle-marrow-plimth-42"));
+        crate::protocol::decode_invoke_response(status.as_u16(), &bytes)
+            .expect("run-store refusal is bounded before serialization");
     }
 
     #[tokio::test]

@@ -423,6 +423,83 @@ async fn discovered_read_and_approved_write_invoke_over_the_existing_http_contra
     assert!(!write.to_string().contains(SENTINEL));
 }
 
+/// The provider-owned request inventory drives the production router, identity guard, connection
+/// resolver and connector pack. It is deliberately data rather than a second list in this test.
+#[tokio::test]
+async fn exchange_http_v1_request_outcomes_match_the_checked_provider_fixture() {
+    #[derive(serde::Deserialize)]
+    struct RequestFixtures {
+        cases: Vec<RequestCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RequestCase {
+        id: String,
+        method: String,
+        path: String,
+        authenticated: bool,
+        body: Option<Value>,
+        expected_status: u16,
+        expected_wire_delta: usize,
+    }
+
+    let fixture = Fixture::new(Selector::any());
+    let cases: RequestFixtures = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/exchange-http-v1/requests.json"
+    )))
+    .expect("typed request fixture");
+
+    for case in cases.cases {
+        let method = match case.method.as_str() {
+            "GET" => Method::GET,
+            "POST" => Method::POST,
+            other => panic!("fixture `{}` has unsupported method `{other}`", case.id),
+        };
+        let before = fixture
+            .wire
+            .0
+            .lock()
+            .expect("no test poisons the wire")
+            .len();
+        let token = case.authenticated.then_some(fixture.token.as_str());
+        let (status, response) =
+            call(fixture.state.clone(), token, method, &case.path, case.body).await;
+        assert_eq!(
+            status.as_u16(),
+            case.expected_status,
+            "{}: {response}",
+            case.id
+        );
+        if status == StatusCode::OK && case.id == "effective-authenticated" {
+            crate::protocol::decode_effective_catalogue(response.to_string().as_bytes())
+                .expect("the production response satisfies the provider decoder");
+        }
+        if case.id.starts_with("invoke-") {
+            crate::protocol::decode_invoke_response(
+                status.as_u16(),
+                response.to_string().as_bytes(),
+            )
+            .expect("the production response satisfies the provider decoder");
+        }
+        let after = fixture
+            .wire
+            .0
+            .lock()
+            .expect("no test poisons the wire")
+            .len();
+        assert_eq!(after - before, case.expected_wire_delta, "{}", case.id);
+        let response = response.to_string();
+        for forbidden in [SENTINEL, "attacker.example", INSTANCE] {
+            assert!(
+                !response.contains(forbidden),
+                "{} leaked `{forbidden}`",
+                case.id
+            );
+        }
+    }
+}
+
 /// Malformed authority axes and the principal/refusal classes a Milestone 1 client must preserve
 /// all fail closed as bounded JSON responses.
 #[tokio::test]

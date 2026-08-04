@@ -1347,22 +1347,14 @@ pub fn admit_tenant_settings(held: usize, adding: usize) -> Result<(), SettingsR
 // The file binding
 // ---------------------------------------------------------------------------------------------
 
-#[cfg(unix)]
-pub use file::{SettingsStore, SettingsStoreError, CONNECTION_SETTINGS_SETTING};
+pub use file::{SettingsStore, SettingsStoreError};
 
 /// The file-backed binding of [`ConnectionSettings`].
 ///
-/// `#[cfg(unix)]` for [`crate::credentials`]' reason and with one difference stated plainly: the
-/// modes there are *what protects a credential*, and here they are ordinary hygiene for a
-/// customer's data. A platform without them would get a settings store that is merely readable by
-/// other local users, which is a smaller loss than a credential store would be — but the port above
-/// is not gated, so a composition elsewhere binds its own rather than getting a weaker one silently.
-#[cfg(unix)]
+/// The same portable owner-only filesystem boundary as [`crate::credentials`] protects this
+/// customer configuration even though the values themselves are not credentials.
 mod file {
     use std::collections::BTreeMap;
-    use std::fs;
-    use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, RwLock};
 
@@ -1375,15 +1367,13 @@ mod file {
         OriginPolicyRefusal, PreparedAuthorityProposal, SettingsRefusal, MAX_SETTING_VALUE_BYTES,
     };
     use crate::paths::{enclosing_working_tree, resolve};
-    use crate::Tenant;
+    use crate::{private_fs, Tenant, CONNECTION_SETTINGS_SETTING};
 
     /// The setting a composing binary reads the settings store path from.
     ///
     /// The host does not read the environment itself — a binary passes the value it found to
     /// [`SettingsStore::bind_configured`]. The *name* lives here so the refusal below and the reader
     /// that produced the value cannot drift apart into two different spellings.
-    pub const CONNECTION_SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
-
     /// A location that would have worked, quoted in every refusal.
     ///
     /// Written with `$HOME` rather than expanded: nothing here reads the environment, and a refusal
@@ -1763,14 +1753,12 @@ mod file {
                     path: resolved.display().to_string(),
                     reason: "the store path has no parent directory".to_owned(),
                 })?;
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(directory)
-                .map_err(|error| SettingsStoreError::Unusable {
+            private_fs::ensure_directory(directory).map_err(|error| {
+                SettingsStoreError::Unusable {
                     path: resolved.display().to_string(),
                     reason: error.to_string(),
-                })?;
+                }
+            })?;
 
             let mut document = read(&resolved)?;
             migrate_tagged_custom_origins(&resolved, &mut document, custom_origins.as_ref())?;
@@ -1798,7 +1786,7 @@ mod file {
         /// two hold the same kind of thing — and the whole design here is that they do not.
         pub fn banner(&self) -> String {
             format!(
-                "connection settings: {} (file store, mode 0600, non-secret values only)",
+                "connection settings: {} (platform owner-only file store, non-secret values only)",
                 self.path.display()
             )
         }
@@ -1947,34 +1935,10 @@ mod file {
                 reason,
             };
 
-            let directory = self
-                .path
-                .parent()
-                .ok_or_else(|| unwritable("the store path has no parent directory".to_owned()))?;
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(directory)
-                .map_err(|error| unwritable(error.to_string()))?;
-
             let encoded = serde_json::to_vec_pretty(document)
                 .map_err(|error| unwritable(error.to_string()))?;
-
-            let temporary = self.path.with_extension("tmp");
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)
-                .map_err(|error| unwritable(error.to_string()))?;
-            file.write_all(&encoded)
-                .map_err(|error| unwritable(error.to_string()))?;
-            file.sync_all()
-                .map_err(|error| unwritable(error.to_string()))?;
-            drop(file);
-
-            fs::rename(&temporary, &self.path).map_err(|error| unwritable(error.to_string()))
+            private_fs::write_atomic(&self.path, &encoded)
+                .map_err(|error| unwritable(error.to_string()))
         }
 
         /// Refuse a write this connector does not ask for, and one past the per-value bound.
@@ -2083,17 +2047,13 @@ mod file {
     /// connectors that stopped working for no reason. **Refuse; never repair** — there is no arm
     /// here that starts empty because parsing failed.
     fn read(path: &Path) -> Result<Document, SettingsStoreError> {
-        let raw = match fs::read(path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Document::default())
-            }
-            Err(error) => {
-                return Err(SettingsStoreError::Unusable {
-                    path: path.display().to_string(),
-                    reason: error.to_string(),
-                })
-            }
+        let Some(raw) =
+            private_fs::read(path, 1024 * 1024).map_err(|error| SettingsStoreError::Unusable {
+                path: path.display().to_string(),
+                reason: error.to_string(),
+            })?
+        else {
+            return Ok(Document::default());
         };
 
         if raw.is_empty() {
@@ -3243,10 +3203,11 @@ mod file {
         },
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     mod authority_tests {
         use super::*;
         use crate::HostPinning;
+        use std::fs;
         use std::os::unix::fs::PermissionsExt as _;
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::{Arc, Barrier};
@@ -3336,7 +3297,7 @@ mod file {
                     std::process::id(),
                     NEXT.fetch_add(1, Ordering::Relaxed)
                 ));
-                fs::create_dir_all(&path).expect("scratch");
+                crate::ensure_private_state_directory(&path).expect("scratch");
                 Self(path)
             }
         }
@@ -4152,14 +4113,14 @@ mod file {
         fn legacy_custom_origin_and_unknown_schema_refuse_binding() {
             let scratch = Scratch::new("schema");
             let path = scratch.0.join("settings");
-            fs::write(
+            crate::write_private_state_file(
                 &path,
                 br#"{"schema":"exchange.connection-settings.v999","next_origin_revision":1,"values":{}}"#,
             )
             .expect("unknown schema fixture");
             assert!(SettingsStore::bind(&path).is_err());
 
-            fs::write(
+            crate::write_private_state_file(
                 &path,
                 br#"{"schema":{"ordinary":{"default":{"endpoint.name":"legacy.example"}}}}"#,
             )
@@ -4167,14 +4128,15 @@ mod file {
             SettingsStore::bind(&path).expect("non-string schema is a legacy tenant id");
 
             let declared = setting();
-            fs::write(
+            crate::write_private_state_file(
                 &path,
                 format!(
                     r#"{{"acme":{{"{}":{{"{}":{{"{}":"legacy.example"}}}}}}}}"#,
                     connector(),
                     declared.service,
                     declared.binds(),
-                ),
+                )
+                .as_bytes(),
             )
             .expect("legacy fixture");
             SettingsStore::bind(&path)
@@ -4184,9 +4146,9 @@ mod file {
                 Err(SettingsStoreError::MigrationRequired { .. })
             ));
 
-            fs::write(
+            crate::write_private_state_file(
                 &path,
-                r#"{"acme":{"gitlab":{"default":{"endpoint.origin":"https://legacy.example"}}}}"#,
+                br#"{"acme":{"gitlab":{"default":{"endpoint.origin":"https://legacy.example"}}}}"#,
             )
             .expect("released origin legacy fixture");
             assert!(matches!(
@@ -4221,9 +4183,9 @@ mod file {
                     }
                 }
             });
-            fs::write(
+            crate::write_private_state_file(
                 &path,
-                serde_json::to_vec(&fixture).expect("serialize legacy tagged fixture"),
+                &serde_json::to_vec(&fixture).expect("serialize legacy tagged fixture"),
             )
             .expect("legacy tagged fixture");
 
@@ -4296,7 +4258,8 @@ mod file {
             ];
 
             for (label, fixture) in fixtures {
-                fs::write(&path, fixture).expect("forward-closed fixture");
+                crate::write_private_state_file(&path, fixture.as_bytes())
+                    .expect("forward-closed fixture");
                 assert!(
                     SettingsStore::bind_with_custom_origin_policy(&path, Arc::new(TestPolicy))
                         .is_err(),

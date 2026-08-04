@@ -36,9 +36,8 @@ pub struct AppState {
     sign_in: SignIn,
     /// Where credentials are kept, as the **port** rather than as the concrete store.
     ///
-    /// `exchange_host::CredentialStore` is one binding of this and is `#[cfg(unix)]`, because only
-    /// the file store is; holding the port keeps the surface off that gate and keeps a deployment
-    /// that binds Vault instead able to do so. `None` is a composition that bound none, and every
+    /// `exchange_host::CredentialStore` is the portable local binding; holding the port keeps a
+    /// deployment that binds Vault instead able to do so. `None` is a composition that bound none, and every
     /// route that would reach for one refuses rather than pretending — see
     /// [`crate::routes::connections`].
     credentials: Option<Arc<dyn SecretStore>>,

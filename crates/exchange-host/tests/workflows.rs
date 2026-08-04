@@ -1,4 +1,6 @@
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,6 +28,7 @@ fn pure_tools() -> PureEditorTools {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_widened_workflow_directory_is_refused() {
     let bound = store();
     let root = bound.path().parent().unwrap().to_owned();
@@ -33,10 +36,15 @@ fn a_widened_workflow_directory_is_refused() {
 
     let refusal = WorkflowStore::bind(&root).unwrap_err();
 
-    assert!(refusal.to_string().contains("group or other access"));
+    assert!(refusal.to_string().contains("wider than 0700"));
+    assert_eq!(
+        fs::metadata(root).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
 }
 
 #[test]
+#[cfg(unix)]
 fn a_widened_workflow_file_is_refused() {
     let bound = store();
     let tenant = Tenant::new("acme").unwrap();
@@ -53,7 +61,11 @@ fn a_widened_workflow_file_is_refused() {
 
     let refusal = WorkflowStore::bind(path.parent().unwrap()).unwrap_err();
 
-    assert!(refusal.to_string().contains("group or other access"));
+    assert!(refusal.to_string().contains("wider than 0600"));
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
 }
 
 fn valid(source: &str) -> exchange_host::ValidatedWorkflow {

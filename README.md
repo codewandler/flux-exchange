@@ -17,8 +17,9 @@ live versus target architecture.
 > [!WARNING]
 > **Status: v0.17.0 — Wave #2: canonical callers, complete public boundaries, and instance-bound channels.**
 >
-> `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and serves health, the
-> connector catalogue and a session without OIDC setup. The ordinary composition supports both a
+> `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and binds the
+> complete durable local composition below the conventional per-user state directory without any
+> storage setting. It serves health, the connector catalogue and a session without OIDC setup. The ordinary composition supports both a
 > verifier-only local users file and **complete** OIDC sign-in, and refuses to start on a reachable
 > address while neither safe binding is configured. The authorization code is redeemed back-channel and the id token's signature is
 > verified against the provider's published keys, so `/api/signin` redirects to a real provider —
@@ -216,11 +217,14 @@ change produces a new value.
 
 ### The credential store, and what does not protect it
 
-`exchange_host::CredentialStore` binds the file-backed store from `connector-secrets` rather than
-reimplementing one: a `0600` file in a `0700` directory, both modes set in the `open(2)`/`mkdir(2)`
-call and **re-checked every time the store is opened**. A widened mode is refused, never quietly
-tightened — the file already had that mode while it held values, so tightening it would hide the
-exposure instead of reporting it. A path inside a working tree is refused outright, because a
+`exchange_host::CredentialStore` binds the portable file-backed store from `connector-secrets`
+rather than reimplementing one. On Unix it creates a `0600` file in a `0700` directory and checks
+the effective owner and modes every time the store opens. On Windows it creates the directory and
+file for the process `TokenUser` SID with a protected DACL containing exactly one explicit
+full-control allow entry for that SID, and checks owner, DACL, object kind and non-reparse metadata
+before every read or write. Unsafe existing metadata is refused, never quietly narrowed — the
+object already had that metadata while it held values, so repairing it would hide the exposure
+instead of reporting it. A path inside a working tree is refused outright, because a
 credential under a checkout is one `git add -A` from being committed — and the path is resolved
 through every symlink and every `..` before that check, so what is inspected is where the store
 would land rather than how it was spelt. A write is a whole-file
@@ -228,9 +232,10 @@ rewrite through a sibling temporary, `fsync` and `rename(2)`, so a crash mid-wri
 previous file whole rather than truncated, and a delete rewrites immediately, so a revoked
 credential does not come back on restart.
 
-**What protects a value there is that file mode and nothing else.** There is no encryption at rest,
-no passphrase, no OS keychain integration, and no protection from `root` or from a backup that
-copies the file. That makes it the right store for a single-operator deployment and the wrong one
+**What protects a value there is the platform filesystem boundary and nothing else.** There is no
+encryption at rest, no passphrase, no OS keychain integration, and no protection from Unix `root`,
+Windows administrators or a backup that copies the file. That makes it the right store for a
+single-operator deployment and the wrong one
 for a shared machine, where `connector-secrets`' Vault-backed store is the answer. Nothing ever
 silently selects the in-memory store instead: a configuration naming no path is a **startup error**
 naming what would have worked, because a host that fell back would start, serve every route
@@ -279,8 +284,46 @@ needs named tenants or more than one principal. With `--dev`, follow **Sign in**
 **Continue as the local development user**; the host establishes the sole implied user's browser
 session and returns to the console.
 
+### Flux-supervised local launch
+
+`flux-exchange compatibility --json` is the side-effect-free release/protocol query: it opens no
+store and binds no listener. `--supervised` is a separate machine-only launch mode for the Flux
+local supervisor. It accepts only an OS-selected loopback port (`FLUX_EXCHANGE_BIND` may be absent
+or exactly `127.0.0.1:0` or `[::1]:0`) and emits one bounded canonical
+`exchange.supervisor-ready.v1` object after every store/safety check and the one listener bind have
+succeeded. The record goes only to the inherited one-shot readiness capability; stdout and stderr
+remain ordinary process output, the HTTP listener carries application traffic, and later control is
+not part of this channel.
+
+On Unix the complete ABI is `flux-exchange --supervised`: FD 3 is the readiness pipe's write end and
+FD 4 is the liveness pipe's read end, with no other inherited nonstandard descriptor. On Windows the
+complete hidden ABI also supplies `--supervisor-readiness-handle <H>` and
+`--supervisor-liveness-handle <H>`; Flux places exactly those distinct pipe handles in
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. These numeric non-secret capabilities are the only extra
+supervised arguments. A native thread exits the process without unwinding when liveness reaches EOF,
+receives a byte or fails, so supervisor death cannot leave Exchange or its port behind even when the
+async runtime is wedged. Readiness is not logged or copied to HTTP, no PID file is emitted, and
+`/health` becomes useful only after Flux has validated the one-shot process/start identity.
+
+On Linux the default root is `${XDG_STATE_HOME:-$HOME/.local/state}/flux-exchange`; on macOS it is
+`$HOME/Library/Application Support/Flux/Exchange` unless `XDG_STATE_HOME` is explicitly set; on
+Windows it is `%LOCALAPPDATA%\Flux\Exchange`.
+`FLUX_EXCHANGE_STATE` overrides that root. Every individual storage setting remains authoritative,
+but a non-development persistent composition is all-or-nothing: setting only some of credentials,
+settings, grants, connections, channels, workflows, audit and Service Accounts refuses before the
+server listens. New Unix roots are `0700` and files are `0600`. Windows state objects are owned by
+the process SID and use a protected, owner-only DACL; that policy is not described as a Unix mode.
+Unsafe existing metadata refuses and is never repaired. A path directly below a shared directory
+such as `/tmp` is told to use a private child, never to narrow the shared ancestor.
+
+The supported local targets are `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. CI compiles
+and exercises the storage binding natively on each target; cross-compilation is not treated as
+runtime support.
+
 For a reachable self-hosted console without OIDC, put the generator's JSON entry in an owner-only
-(`0600`) file and set `FLUX_EXCHANGE_LOCAL_USERS` to it. The file stores only a verifier; the opaque
+file (`0600` on Unix, the protected owner-only DACL on Windows) and set
+`FLUX_EXCHANGE_LOCAL_USERS` to it. The file stores only a verifier; the opaque
 secret is shown once and submitted through `/api/signin`'s same-origin form. This is a separate
 secret-backed identity state, not a relaxation of the loopback-only development roster.
 

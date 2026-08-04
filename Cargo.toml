@@ -91,7 +91,7 @@ flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 connector-address = { package = "codewandler-connector-address", version = "0.19" }
 connector-catalog = { package = "codewandler-connector-catalog", version = "0.19" }
 connector-pack = { package = "codewandler-connector-pack", version = "0.19" }
-connector-secrets = { package = "codewandler-connector-secrets", version = "0.19" }
+connector-secrets = { package = "codewandler-connector-secrets", version = "0.19.1" }
 # The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family
 # precedent is sibling flux-connectors, which already uses reqwest and jsonwebtoken for exactly this
 # exchange; the alternative was hand-rolling signature verification, which nobody should do.
@@ -100,6 +100,7 @@ connector-secrets = { package = "codewandler-connector-secrets", version = "0.19
 # acquire a C toolchain dependency for one HTTPS call. `jsonwebtoken` picks the pure-Rust backend for
 # the same reason.
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+libc = "0.2"
 # TLS: `rustls`, so OpenSSL is genuinely absent and there is only one TLS stack in the tree.
 #
 # It does NOT make this build C-free, and an earlier version of this comment wrongly said it did.
@@ -132,3 +133,5 @@ tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal
 tokio-util = "0.7"
 futures-util = "0.3"
 tokio-tungstenite = "0.30"
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+windows-sys = "0.61.2"

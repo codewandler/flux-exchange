@@ -354,21 +354,16 @@ pub enum ChannelRefusal {
     Unavailable,
 }
 
-#[cfg(unix)]
-pub use file::{ChannelStore, ChannelStoreError, CHANNEL_STORE_SETTING};
+pub use file::{ChannelStore, ChannelStoreError};
 
-#[cfg(unix)]
 mod file {
-    use std::fs;
-    use std::io::Write as _;
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
     use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::paths::{enclosing_working_tree, resolve};
+    use crate::{private_fs, CHANNEL_STORE_SETTING};
 
-    /// Configuration setting naming the persistent channel store.
-    pub const CHANNEL_STORE_SETTING: &str = "FLUX_EXCHANGE_CHANNELS";
+    const MAX_STORE_BYTES: usize = 1024 * 1024;
 
     #[derive(Debug, Serialize, Deserialize)]
     struct WireRecord {
@@ -409,7 +404,7 @@ mod file {
         }
     }
 
-    /// File-backed persistent channel records, written atomically with mode `0600`.
+    /// File-backed persistent channel records, written atomically with native owner-only metadata.
     pub struct ChannelStore {
         path: PathBuf,
         held: RwLock<BTreeMap<(String, ChannelId), ChannelRecord>>,
@@ -436,11 +431,7 @@ mod file {
                 return Err(ChannelStoreError::InsideWorkingTree);
             }
             let directory = path.parent().ok_or(ChannelStoreError::Unavailable)?;
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(directory)
-                .map_err(|_| ChannelStoreError::Unavailable)?;
+            private_fs::ensure_directory(directory).map_err(|_| ChannelStoreError::Unavailable)?;
             let held = read(&path)?;
             Ok(Self {
                 path,
@@ -460,31 +451,17 @@ mod file {
             let encoded =
                 serde_json::to_vec_pretty(&held.values().map(WireRecord::from).collect::<Vec<_>>())
                     .map_err(|_| ChannelRefusal::Unavailable)?;
-            let temporary = self.path.with_extension("tmp");
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&temporary)
-                .map_err(|_| ChannelRefusal::Unavailable)?;
-            file.write_all(&encoded)
-                .and_then(|()| file.sync_all())
-                .map_err(|_| ChannelRefusal::Unavailable)?;
-            drop(file);
-            fs::rename(temporary, &self.path).map_err(|_| ChannelRefusal::Unavailable)
+            private_fs::write_atomic(&self.path, &encoded).map_err(|_| ChannelRefusal::Unavailable)
         }
     }
 
     fn read(
         path: &Path,
     ) -> Result<BTreeMap<(String, ChannelId), ChannelRecord>, ChannelStoreError> {
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(BTreeMap::new())
-            }
-            Err(_) => return Err(ChannelStoreError::Unavailable),
+        let Some(bytes) =
+            private_fs::read(path, MAX_STORE_BYTES).map_err(|_| ChannelStoreError::Unavailable)?
+        else {
+            return Ok(BTreeMap::new());
         };
         if bytes.is_empty() {
             return Ok(BTreeMap::new());

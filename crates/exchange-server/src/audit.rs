@@ -4,8 +4,6 @@
 //! credential values and setting values cannot be represented by this module's record vocabulary;
 //! route adapters can supply only a resolved actor and one of the closed target variants below.
 
-use std::fs::{self, DirBuilder, OpenOptions};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -372,6 +370,7 @@ impl AuditJournal {
         })?;
         ensure_directory(parent)?;
         ensure_database_file(path)?;
+        ensure_database_file(&sqlite_journal_path(path))?;
 
         let connection = Connection::open(path).map_err(|source| AuditError::Database {
             path: path.to_path_buf(),
@@ -845,139 +844,39 @@ fn new_record_at(
 }
 
 fn ensure_directory(path: &Path) -> Result<(), AuditError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if !metadata.is_dir() {
-                return Err(AuditError::Path {
-                    path: path.to_path_buf(),
-                    reason: "it is not a directory".to_owned(),
-                });
-            }
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode != 0o700 {
-                return Err(AuditError::Mode {
-                    path: path.to_path_buf(),
-                    actual: mode,
-                    required: 0o700,
-                });
-            }
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            let parent = path.parent().ok_or_else(|| AuditError::Path {
-                path: path.to_path_buf(),
-                reason: "its parent does not exist".to_owned(),
-            })?;
-            if !parent.is_dir() {
-                return Err(AuditError::Path {
-                    path: path.to_path_buf(),
-                    reason: "its parent does not exist".to_owned(),
-                });
-            }
-            DirBuilder::new()
-                .mode(0o700)
-                .create(path)
-                .map_err(|source| AuditError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-        }
-        Err(source) => {
-            return Err(AuditError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        }
-    }
-    Ok(())
+    exchange_host::ensure_private_state_directory(path).map_err(|error| AuditError::Path {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })
 }
 
 fn verify_directory(path: &Path) -> Result<(), AuditError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| AuditError::Io {
+    // The same operation verifies existing state and creates only when absent; the read-only caller
+    // rejects absence at the database-file boundary immediately afterwards.
+    exchange_host::ensure_private_state_directory(path).map_err(|error| AuditError::Path {
         path: path.to_path_buf(),
-        source,
-    })?;
-    if !metadata.is_dir() {
-        return Err(AuditError::Path {
-            path: path.to_path_buf(),
-            reason: "it is not a directory".to_owned(),
-        });
-    }
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode != 0o700 {
-        return Err(AuditError::Mode {
-            path: path.to_path_buf(),
-            actual: mode,
-            required: 0o700,
-        });
-    }
-    Ok(())
+        reason: error.to_string(),
+    })
 }
 
 fn ensure_database_file(path: &Path) -> Result<(), AuditError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if !metadata.is_file() {
-                return Err(AuditError::Path {
-                    path: path.to_path_buf(),
-                    reason: "it is not a regular file".to_owned(),
-                });
-            }
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode != 0o600 {
-                return Err(AuditError::Mode {
-                    path: path.to_path_buf(),
-                    actual: mode,
-                    required: 0o600,
-                });
-            }
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(|source| AuditError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-        }
-        Err(source) => {
-            return Err(AuditError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        }
-    }
-    Ok(())
+    exchange_host::ensure_private_state_file(path).map_err(|error| AuditError::Path {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })
 }
 
 fn verify_database_file(path: &Path) -> Result<(), AuditError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| AuditError::Io {
+    exchange_host::verify_private_state_file(path).map_err(|error| AuditError::Path {
         path: path.to_path_buf(),
-        source,
-    })?;
-    if !metadata.is_file() {
-        return Err(AuditError::Path {
-            path: path.to_path_buf(),
-            reason: "it is not a regular file".to_owned(),
-        });
-    }
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode != 0o600 {
-        return Err(AuditError::Mode {
-            path: path.to_path_buf(),
-            actual: mode,
-            required: 0o600,
-        });
-    }
-    Ok(())
+        reason: error.to_string(),
+    })
 }
 
 fn initialise(connection: &Connection, path: &Path) -> Result<(), AuditError> {
     connection
         .execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA journal_mode = PERSIST;
              PRAGMA synchronous = FULL;
              CREATE TABLE IF NOT EXISTS audit_records (
                  event_id TEXT PRIMARY KEY,
@@ -1007,6 +906,14 @@ fn initialise(connection: &Connection, path: &Path) -> Result<(), AuditError> {
             path: path.to_path_buf(),
             source,
         })
+}
+
+fn sqlite_journal_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!("{file_name}-journal"))
 }
 
 fn now_unix() -> i64 {
@@ -1077,10 +984,12 @@ pub enum AuditError {
     Poisoned,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -1237,7 +1146,8 @@ mod tests {
         let refusal = AuditJournal::bind(&path)
             .err()
             .expect("wide directory must refuse");
-        assert!(matches!(refusal, AuditError::Mode { actual: 0o755, .. }));
+        assert!(matches!(refusal, AuditError::Path { .. }));
+        assert!(refusal.to_string().contains("wider than 0700"), "{refusal}");
         assert_eq!(
             fs::metadata(&directory)
                 .expect("metadata")
@@ -1257,7 +1167,8 @@ mod tests {
         let refusal = AuditJournal::bind(&path)
             .err()
             .expect("wide file must refuse");
-        assert!(matches!(refusal, AuditError::Mode { actual: 0o644, .. }));
+        assert!(matches!(refusal, AuditError::Path { .. }));
+        assert!(refusal.to_string().contains("wider than 0600"), "{refusal}");
         assert_eq!(
             fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
             0o644

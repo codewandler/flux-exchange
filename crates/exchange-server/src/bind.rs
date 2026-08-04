@@ -85,6 +85,11 @@ pub fn admit_audit(bind: SocketAddr, audit_bound: bool) -> Result<(), StartupRef
 /// value, and distinguish failures an operator answers differently — is met below.
 #[derive(Debug)]
 pub enum StartupRefusal {
+    /// The closed supervised launch or readiness protocol was not satisfied.
+    Supervised {
+        /// A value-free ABI, bind or readiness refusal.
+        reason: String,
+    },
     /// The deployment's authentication-hazard policy named a value this build does not know.
     AuthPosture {
         /// The by-name, redaction-safe configuration refusal.
@@ -106,6 +111,12 @@ pub enum StartupRefusal {
     /// The verifier-backed local users file could not be safely loaded.
     LocalUsers {
         /// The redaction-safe file refusal.
+        reason: String,
+    },
+
+    /// The requested durable local composition was incomplete or unsafe.
+    LocalState {
+        /// The value-free path/configuration refusal.
         reason: String,
     },
 
@@ -166,10 +177,9 @@ pub enum StartupRefusal {
 
     /// A credential store was named and could not be bound.
     ///
-    /// Carries the store's refusal already rendered rather than as a typed source, because
-    /// `CredentialStoreError` is `#[cfg(unix)]` — only the file store is — and a cfg-gated variant
-    /// would make this enum two different types depending on the platform. Nothing is lost: that
-    /// refusal names the path, the mode and what would have worked, and never a value.
+    /// Carries the store's refusal already rendered rather than as a typed source. Nothing is lost:
+    /// that refusal names the path, the native owner-only metadata and what would have worked, and
+    /// never a value.
     CredentialStore {
         /// The store's own refusal.
         reason: String,
@@ -191,7 +201,7 @@ pub enum StartupRefusal {
     /// A separate variant from the two above for their reason: an operator fixes it in a different
     /// file, and what is in *this* one is not secret — so a refusal that read like the credential
     /// store's would send somebody looking for a leak that is not there. Rendered rather than typed,
-    /// matching its siblings, because `SettingsStoreError` is `#[cfg(unix)]` too.
+    /// matching its siblings so startup failures keep one value-free representation.
     SettingsStore {
         /// The store's own refusal.
         reason: String,
@@ -210,8 +220,7 @@ pub enum StartupRefusal {
     /// what each tenant may run. A refusal that read like the credential store's would send somebody
     /// looking for a leak; this one is about a policy that could not be loaded, and a host that
     /// started anyway would either run nothing or — if anybody ever "helpfully" defaulted it — run
-    /// everything. Rendered rather than typed, matching its siblings, because `GrantStoreError` is
-    /// `#[cfg(unix)]` too.
+    /// everything. Rendered rather than typed, matching its siblings.
     GrantStore {
         /// The store's own refusal.
         reason: String,
@@ -269,10 +278,12 @@ impl From<DevIdentityRefusal> for StartupRefusal {
 impl fmt::Display for StartupRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Supervised { reason } => write!(f, "refusing supervised startup: {reason}"),
             Self::AuthPosture { reason } => write!(f, "{reason}"),
             Self::DevelopmentMode { reason } => write!(f, "{reason}"),
             Self::Tenancy { reason } => write!(f, "{reason}"),
             Self::LocalUsers { reason } => write!(f, "{reason}"),
+            Self::LocalState { reason } => write!(f, "{reason}"),
             // Names both things that would have worked, because the operator cannot tell from the
             // outside which half of the pair they meant to change.
             Self::ReachableBindWithoutIdentity { bind } => write!(
@@ -334,13 +345,15 @@ impl fmt::Display for StartupRefusal {
 impl std::error::Error for StartupRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::AuthPosture { .. }
+            Self::Supervised { .. }
+            | Self::AuthPosture { .. }
             | Self::ReachableBindWithoutIdentity { .. }
             | Self::ReachableBindWithDevelopmentIdentity { .. }
             | Self::ReachableBindWithoutAudit { .. }
             | Self::DevelopmentMode { .. }
             | Self::Tenancy { .. }
             | Self::LocalUsers { .. }
+            | Self::LocalState { .. }
             | Self::CredentialStore { .. }
             | Self::ServiceAccountStore { .. }
             | Self::SettingsStore { .. }

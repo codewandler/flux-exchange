@@ -1,0 +1,23 @@
+{
+  "protocols": {
+    "exchange_api": "exchange.api.v1",
+    "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
+    "invoke_request": "exchange.invoke-request.v1",
+    "invoke_response": "exchange.invoke-response.v1"
+  },
+  "cases": [
+    {"id":"effective-authenticated","method":"GET","path":"/api/catalogue/effective","authenticated":true,"body":null,"expected_status":200,"expected_wire_delta":0},
+    {"id":"effective-anonymous","method":"GET","path":"/api/catalogue/effective","authenticated":false,"body":null,"expected_status":401,"expected_wire_delta":0},
+    {"id":"effective-tenant-axis","method":"GET","path":"/api/catalogue/effective?tenant=attacker","authenticated":true,"body":null,"expected_status":400,"expected_wire_delta":0},
+    {"id":"effective-authority-axis","method":"GET","path":"/api/catalogue/effective?authority=attacker","authenticated":true,"body":null,"expected_status":400,"expected_wire_delta":0},
+    {"id":"effective-credential-axis","method":"GET","path":"/api/catalogue/effective?credential=attacker","authenticated":true,"body":null,"expected_status":400,"expected_wire_delta":0},
+    {"id":"invoke-released-read","method":"POST","path":"/api/operations/github-repo-get/invoke?connection=prod","authenticated":true,"body":{"owner":"codewandler","repo":"flux-exchange"},"expected_status":200,"expected_wire_delta":1},
+    {"id":"invoke-approved-write","method":"POST","path":"/api/operations/github-issue-create/invoke?connection=prod","authenticated":true,"body":{"owner":"codewandler","repo":"flux-exchange","title":"provider HTTP v1 fixture","body":"approved","labels":[],"assignees":[]},"expected_status":200,"expected_wire_delta":1},
+    {"id":"invoke-anonymous","method":"POST","path":"/api/operations/github-repo-get/invoke?connection=prod","authenticated":false,"body":{"owner":"codewandler","repo":"flux-exchange"},"expected_status":401,"expected_wire_delta":0},
+    {"id":"invoke-unknown-query","method":"POST","path":"/api/operations/github-repo-get/invoke?endpoint=https%3A%2F%2Fattacker.example","authenticated":true,"body":{"owner":"codewandler","repo":"flux-exchange"},"expected_status":400,"expected_wire_delta":0},
+    {"id":"invoke-tenant-query","method":"POST","path":"/api/operations/github-repo-get/invoke?tenant=attacker","authenticated":true,"body":{"owner":"codewandler","repo":"flux-exchange"},"expected_status":400,"expected_wire_delta":0},
+    {"id":"invoke-credential-query","method":"POST","path":"/api/operations/github-repo-get/invoke?credential=attacker","authenticated":true,"body":{"owner":"codewandler","repo":"flux-exchange"},"expected_status":400,"expected_wire_delta":0},
+    {"id":"invoke-wrong-label","method":"POST","path":"/api/operations/github-repo-get/invoke?connection=sandbox","authenticated":true,"body":{"owner":"codewandler","repo":"flux-exchange"},"expected_status":404,"expected_wire_delta":0},
+    {"id":"invoke-body-envelope","method":"POST","path":"/api/operations/github-repo-get/invoke?connection=prod","authenticated":true,"body":{"tenant":"attacker","endpoint":"https://attacker.example","params":{"owner":"codewandler","repo":"flux-exchange"}},"expected_status":422,"expected_wire_delta":0}
+  ]
+}

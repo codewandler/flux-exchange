@@ -42,11 +42,6 @@ lockfile and compile-time tests.
 ### a deployment a stranger can reach
 _Everything this platform does can only be seen on `127.0.0.1`. The getting-started page walks a_
 - [X-126 — Publish verified local Exchange binaries for every Flux platform](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — Flux can manage a separately released, attested Exchange executable on a clean machine without bundling plugins or trusting PATH
-- [X-127 — Persist local Exchange state safely on every Flux platform](X-127-persist-local-state-on-every-flux-platform.md) · Milestone 1 — a five-target binary is support only when every credential-bearing local workflow persists safely and survives restart on that target
-- [X-128 — Emit one trusted readiness record for a supervised Exchange](X-128-emit-one-supervisor-readiness-record.md) · Milestone 1 — Flux owns a child only after that exact process reports its bound address and compiled identity over a dedicated one-shot channel
-
-### rich connector runtimes through Exchange
-- [X-129 — Bind local-release protocol identities to the delivered HTTP wire](X-129-bind-release-protocol-ids-to-the-http-wire.md) · Milestone 1 — compatibility advertises exact tested HTTP wire identities, never placeholders or a package-version guess
 
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
@@ -176,6 +171,9 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-123 — Production refuses an operatorless deployment](X-123-production-refuses-an-operatorless-deployment.md) · The deploy checks Fly's value-free secret metadata before building and after rollout, so an absent operator policy cannot ship silently.
 - [X-124 — Adopt Exchange-only official integration execution](X-124-adopt-exchange-only-integration-execution.md) · Milestone 0 — reconcile X-111 through X-120 with the cross-repository execution decision before runtime implementation
 - [X-125 — Generate one complete labelled connection plan for browser and CLI](X-125-generate-a-complete-labelled-connection-plan.md) · Milestone 1 — one declaration-driven contract asks for the label, every secret and setting, and exposes incomplete or partial state honestly to browser and Flux CLI
+- [X-127 — Persist local Exchange state safely on every Flux platform](X-127-persist-local-state-on-every-flux-platform.md) · Milestone 1 — a five-target binary is support only when every credential-bearing local workflow persists safely and survives restart on that target
+- [X-128 — Emit one trusted readiness record for a supervised Exchange](X-128-emit-one-supervisor-readiness-record.md) · Milestone 1 — Flux owns a child only after that exact process reports its bound address and compiled identity over a dedicated one-shot channel
+- [X-129 — Bind local-release protocol identities to the delivered HTTP wire](X-129-bind-release-protocol-ids-to-the-http-wire.md) · Milestone 1 — compatibility advertises exact tested HTTP wire identities, never placeholders or a package-version guess
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

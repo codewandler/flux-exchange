@@ -1,0 +1,1 @@
+{"error":"the credential store refused this host's own access, so it cannot reach this tenant's credentials. Retrying will not help; an operator has to restore this host's access to the store"}
