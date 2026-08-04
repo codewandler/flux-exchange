@@ -652,11 +652,7 @@ fn discover_capabilities(
     }
     validate_unix_fd(3, libc::O_WRONLY, "readiness")?;
     validate_unix_fd(4, libc::O_RDONLY, "liveness")?;
-    let readiness_stat = fd_stat(3)?;
-    let liveness_stat = fd_stat(4)?;
-    if readiness_stat.st_dev == liveness_stat.st_dev
-        && readiness_stat.st_ino == liveness_stat.st_ino
-    {
+    if unix_fds_alias(3, 4)? {
         return Err("supervisor readiness FD 3 and liveness FD 4 alias one pipe".to_owned());
     }
     refuse_extra_unix_fds()?;
@@ -667,6 +663,114 @@ fn discover_capabilities(
     // SAFETY: as above, for the independently validated liveness descriptor.
     let liveness = unsafe { std::fs::File::from_raw_fd(4) };
     Ok((ReadyWriter(readiness), LivenessReader(liveness)))
+}
+
+#[cfg(target_os = "linux")]
+fn unix_fds_alias(left: libc::c_int, right: libc::c_int) -> Result<bool, String> {
+    let left = fd_stat(left)?;
+    let right = fd_stat(right)?;
+    Ok(left.st_dev == right.st_dev && left.st_ino == right.st_ino)
+}
+
+#[cfg(target_os = "macos")]
+fn unix_fds_alias(left: libc::c_int, right: libc::c_int) -> Result<bool, String> {
+    let left = macos_pipe_identity(left)?;
+    let right = macos_pipe_identity(right)?;
+    Ok(
+        (left.handle == right.handle && left.peer_handle == right.peer_handle)
+            || (left.handle == right.peer_handle && left.peer_handle == right.handle),
+    )
+}
+
+#[cfg(target_os = "macos")]
+struct MacosPipeIdentity {
+    handle: u64,
+    peer_handle: u64,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pipe_identity(fd: libc::c_int) -> Result<MacosPipeIdentity, String> {
+    const PROC_PIDFDPIPEINFO: libc::c_int = 6;
+
+    #[repr(C)]
+    struct ProcFileInfo {
+        _open_flags: u32,
+        _status: u32,
+        _offset: i64,
+        _file_type: i32,
+        _guard_flags: u32,
+    }
+
+    #[repr(C)]
+    struct VinfoStat {
+        _device: u32,
+        _mode: u16,
+        _links: u16,
+        _inode: u64,
+        _user: u32,
+        _group: u32,
+        _access_time: i64,
+        _access_time_nanoseconds: i64,
+        _modification_time: i64,
+        _modification_time_nanoseconds: i64,
+        _change_time: i64,
+        _change_time_nanoseconds: i64,
+        _birth_time: i64,
+        _birth_time_nanoseconds: i64,
+        _size: i64,
+        _blocks: i64,
+        _block_size: i32,
+        _flags: u32,
+        _generation: u32,
+        _raw_device: u32,
+        _spare: [i64; 2],
+    }
+
+    #[repr(C)]
+    struct PipeInfo {
+        _stat: VinfoStat,
+        handle: u64,
+        peer_handle: u64,
+        _status: i32,
+        _reserved: i32,
+    }
+
+    #[repr(C)]
+    struct PipeFdInfo {
+        _file: ProcFileInfo,
+        pipe: PipeInfo,
+    }
+
+    let mut info = std::mem::MaybeUninit::<PipeFdInfo>::zeroed();
+    let size = std::mem::size_of::<PipeFdInfo>();
+    let returned = unsafe {
+        // SAFETY: the buffer has the exact public `pipe_fdinfo` layout and remains valid for the
+        // duration of this read-only query about one descriptor owned by this process.
+        libc::proc_pidfdinfo(
+            libc::getpid(),
+            fd,
+            PROC_PIDFDPIPEINFO,
+            info.as_mut_ptr().cast(),
+            size as libc::c_int,
+        )
+    };
+    if returned != size as libc::c_int {
+        return Err(format!(
+            "cannot identify required supervisor FD {fd} as one native pipe endpoint: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `proc_pidfdinfo` returned the exact complete structure size.
+    let info = unsafe { info.assume_init() };
+    if info.pipe.handle == 0 || info.pipe.peer_handle == 0 {
+        return Err(format!(
+            "cannot identify required supervisor FD {fd} as one native pipe endpoint"
+        ));
+    }
+    Ok(MacosPipeIdentity {
+        handle: info.pipe.handle,
+        peer_handle: info.pipe.peer_handle,
+    })
 }
 
 #[cfg(unix)]
