@@ -370,7 +370,7 @@ fn assert_new_start_refuses_at_metadata_expiry(target: &str) {
         &fixture_root.join(&case.input),
         &policy,
         flux_exchange_release::parse_utc(&case.clock).expect("fixture clock"),
-        &flux_exchange_release::Protocols::v1(),
+        &flux_exchange_release::Protocols::v2(),
         &case.prior_state,
         Some(target),
     );

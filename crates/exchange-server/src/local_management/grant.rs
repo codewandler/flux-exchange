@@ -79,6 +79,7 @@ impl ReceiptIds for OsReceiptIds {
 }
 
 /// One shared grant ceremony over the exact grant port used by invocation.
+#[derive(Clone)]
 pub(crate) struct GrantCeremony {
     audit: Arc<dyn GrantAudit>,
     grants: Arc<dyn GrantTransactions>,

@@ -9,13 +9,16 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 
-use super::codec::{Direction, Frame, Opcode, StreamDecoder};
-use super::TransactionCoordinator;
+use super::codec::{Direction, StreamDecoder};
+use super::dispatcher::Transport;
+use super::{Dispatcher, TransactionCoordinator};
+use crate::state::AppState;
 
 const RUN_DIRECTORY: &str = "run";
 const SOCKET_NAME: &str = "local-management-v1.sock";
 const LOCAL_OWNER_TENANT: &str = "local";
 const LOCAL_OWNER_PRINCIPAL: &str = "local-owner";
+#[cfg(test)]
 const UNAVAILABLE: &[u8] = br#"{"code":"local_management_unavailable","commit":"none","retry":"operator","schema":"exchange.local-management-error.v1","status":503}"#;
 
 /// An owner-authenticated native management listener.
@@ -29,13 +32,14 @@ pub(crate) struct LocalManagement {
     socket_device: u64,
     socket_inode: u64,
     expected_peer_uid: u32,
-    coordinator: Arc<TransactionCoordinator>,
+    dispatcher: Dispatcher,
 }
 
 impl LocalManagement {
     /// Bind the native endpoint only for the supervised local composition.
     pub(crate) fn bind_for_mode(
         supervised: bool,
+        state: AppState,
         coordinator: Option<Arc<TransactionCoordinator>>,
     ) -> Result<Option<Self>, String> {
         if !supervised {
@@ -44,9 +48,13 @@ impl LocalManagement {
         let coordinator = coordinator.ok_or_else(|| {
             "the supervised local-management endpoint has no transaction coordinator".to_owned()
         })?;
+        let dispatcher = Dispatcher::new(state, coordinator);
         let root = endpoint_root()?;
         let startup_euid = effective_uid();
-        let mut endpoint = Self::bind_at(&root, startup_euid, coordinator)?;
+        #[cfg(feature = "native-root-test-seam")]
+        let mut endpoint = Self::bind_at(&root, startup_euid, dispatcher)?;
+        #[cfg(not(feature = "native-root-test-seam"))]
+        let endpoint = Self::bind_at(&root, startup_euid, dispatcher)?;
         #[cfg(feature = "native-root-test-seam")]
         if let Some(value) = std::env::var_os("FLUX_EXCHANGE_TEST_LOCAL_MANAGEMENT_PEER_UID") {
             let value = value
@@ -65,11 +73,7 @@ impl LocalManagement {
         Ok(Some(endpoint))
     }
 
-    fn bind_at(
-        root: &Path,
-        startup_euid: u32,
-        coordinator: Arc<TransactionCoordinator>,
-    ) -> Result<Self, String> {
+    fn bind_at(root: &Path, startup_euid: u32, dispatcher: Dispatcher) -> Result<Self, String> {
         inspect_private_directory(root, startup_euid, 0o700, "native Exchange root")?;
         let run = root.join(RUN_DIRECTORY);
         create_private_run_directory(&run)?;
@@ -163,7 +167,7 @@ impl LocalManagement {
                 socket_device: bound_device,
                 socket_inode: bound_inode,
                 expected_peer_uid: startup_euid,
-                coordinator,
+                dispatcher,
             })
         })();
         if result.is_err() {
@@ -181,13 +185,13 @@ impl LocalManagement {
                 return;
             };
             let expected_peer_uid = self.expected_peer_uid;
-            let coordinator = self.coordinator.clone();
+            let dispatcher = self.dispatcher.clone();
             tokio::spawn(async move {
                 if authenticate_peer(&stream, expected_peer_uid).is_ok() {
                     let owner = LocalOwner::authenticated();
                     let _closed_projection =
                         (owner.tenant, owner.principal, owner.user, owner.operator);
-                    let _ = dispatch_unavailable(stream, coordinator).await;
+                    let _ = dispatch_one(stream, dispatcher).await;
                 }
             });
         }
@@ -241,13 +245,7 @@ impl LocalOwner {
     }
 }
 
-async fn dispatch_unavailable(
-    mut stream: UnixStream,
-    coordinator: Arc<TransactionCoordinator>,
-) -> io::Result<()> {
-    // The authenticated dispatcher retains the exact recovered coordinator that owns every future
-    // connect/credential transaction; transport code never opens or substitutes a secret store.
-    let _coordinator = coordinator;
+async fn dispatch_one(mut stream: UnixStream, dispatcher: Dispatcher) -> io::Result<()> {
     let mut decoder = StreamDecoder::new(Direction::ClientToServer);
     let mut bytes = [0_u8; 4096];
     loop {
@@ -260,14 +258,16 @@ async fn dispatch_unavailable(
             return Ok(());
         }
         match decoder.next_frame() {
-            Ok(Some(_request)) => {
-                let response = Frame::control(
-                    Direction::ServerToClient,
-                    Opcode::Error,
-                    UNAVAILABLE.to_vec(),
-                )
-                .expect("the fixed value-free refusal is within the control bound")
-                .encode();
+            Ok(Some(request)) => {
+                let response = dispatcher
+                    .dispatch_frame(
+                        Transport::Native,
+                        &exchange_host::Tenant::new(LOCAL_OWNER_TENANT)
+                            .expect("the fixed native owner tenant is valid"),
+                        request,
+                    )
+                    .await
+                    .encode();
                 stream.write_all(&response).await?;
                 stream.shutdown().await?;
                 return Ok(());
@@ -417,6 +417,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::local_management::codec::{Frame, Opcode};
 
     fn private_root(name: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -431,22 +432,23 @@ mod tests {
         path
     }
 
-    fn test_coordinator(root: &Path) -> Arc<TransactionCoordinator> {
+    fn test_dispatcher(root: &Path) -> Dispatcher {
         let store = exchange_host::CredentialStore::bind(root.join("test-credentials/store"))
             .expect("one test credential store");
-        Arc::new(
+        let coordinator = Arc::new(
             TransactionCoordinator::bind(
                 root.join("test-coordinator/transactions.sqlite3"),
                 store.prepared_secrets(),
             )
             .expect("test coordinator"),
-        )
+        );
+        Dispatcher::new(AppState::without_identity(), coordinator)
     }
 
     #[tokio::test]
     async fn endpoint_is_owner_only_and_same_owner_receives_closed_fxlm_refusal() {
         let root = private_root("same-owner");
-        let endpoint = LocalManagement::bind_at(&root, effective_uid(), test_coordinator(&root))
+        let endpoint = LocalManagement::bind_at(&root, effective_uid(), test_dispatcher(&root))
             .expect("owner endpoint");
         let path = endpoint.path().to_owned();
         let run = root.join(RUN_DIRECTORY);
@@ -497,9 +499,8 @@ mod tests {
     #[tokio::test]
     async fn injected_wrong_peer_is_closed_before_any_fxlm_byte_is_read() {
         let root = private_root("wrong-peer");
-        let mut endpoint =
-            LocalManagement::bind_at(&root, effective_uid(), test_coordinator(&root))
-                .expect("owner endpoint binds");
+        let mut endpoint = LocalManagement::bind_at(&root, effective_uid(), test_dispatcher(&root))
+            .expect("owner endpoint binds");
         endpoint.expected_peer_uid = effective_uid().wrapping_add(1);
         let path = endpoint.path().to_owned();
         let server = tokio::spawn(endpoint.serve());
@@ -523,9 +524,11 @@ mod tests {
 
     #[test]
     fn dev_and_ordinary_modes_do_not_resolve_or_bind_an_endpoint() {
-        assert!(LocalManagement::bind_for_mode(false, None)
-            .expect("non-supervised mode")
-            .is_none());
+        assert!(
+            LocalManagement::bind_for_mode(false, AppState::without_identity(), None)
+                .expect("non-supervised mode")
+                .is_none()
+        );
     }
 
     #[test]
@@ -536,7 +539,7 @@ mod tests {
         let refusal = match LocalManagement::bind_at(
             &symlink_root,
             effective_uid(),
-            test_coordinator(&symlink_root),
+            test_dispatcher(&symlink_root),
         ) {
             Ok(_) => panic!("run symlink must refuse"),
             Err(refusal) => refusal,
@@ -554,7 +557,7 @@ mod tests {
         let refusal = match LocalManagement::bind_at(
             &stale_root,
             effective_uid(),
-            test_coordinator(&stale_root),
+            test_dispatcher(&stale_root),
         ) {
             Ok(_) => panic!("stale socket must refuse"),
             Err(refusal) => refusal,

@@ -3,8 +3,13 @@
 #[allow(dead_code)]
 mod codec;
 
+mod dispatcher;
+mod grant;
+
 pub mod transaction;
 
+pub(crate) use dispatcher::Dispatcher;
+pub(crate) use dispatcher::Transport;
 pub use transaction::TransactionCoordinator;
 
 #[allow(dead_code)]

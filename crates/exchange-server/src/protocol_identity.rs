@@ -66,7 +66,7 @@ pub struct ProtocolVersions {
     pub supervisor: ProtocolId,
 }
 
-/// The eight exact provider-owned protocol versions supported by this executable.
+/// The exact eight provider-owned protocol versions supported by this executable.
 pub const PROTOCOL_VERSIONS: ProtocolVersions = ProtocolVersions {
     connection_plan: CONNECTION_PLAN_V2,
     exchange_api: EXCHANGE_API_V1,

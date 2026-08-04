@@ -22,6 +22,7 @@ pub mod credential_acquisition;
 mod dev_identity;
 pub use flux_exchange::entropy;
 mod execution;
+mod hosted_origin;
 mod local_identity;
 pub mod local_management;
 mod local_state;
@@ -426,7 +427,9 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
     } else {
         configured_bind()?
     };
-    let composition = compose(&startup, bind, supervised).await?;
+    let hosted_origin = hosted_origin::configured(startup.development_requested(), bind)
+        .map_err(|reason| StartupRefusal::HostedOrigin { reason })?;
+    let composition = compose(&startup, bind, supervised, hosted_origin).await?;
     let state = composition.state;
 
     report_deployment(startup.deployment());
@@ -470,6 +473,7 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
     #[cfg(unix)]
     let local_management = local_management::LocalManagement::bind_for_mode(
         supervised,
+        state.clone(),
         composition.coordinator.clone(),
     )
     .map_err(|reason| StartupRefusal::Supervised { reason })?;
@@ -569,6 +573,7 @@ async fn compose(
     startup: &Startup,
     bind: SocketAddr,
     supervised: bool,
+    hosted_origin: Option<String>,
 ) -> Result<Composition, StartupRefusal> {
     if startup.development_requested() {
         info!(
@@ -596,6 +601,9 @@ async fn compose(
             auth_posture,
             Arc::new(credential_acquisition::AcquisitionBindings::default()),
         );
+    if let Some(origin) = hosted_origin {
+        state = state.with_hosted_origin(origin);
+    }
     let operators = startup
         .development_operator()
         .map_or_else(OperatorPolicy::from_env, |subject| {
@@ -657,6 +665,9 @@ async fn compose(
     // see `grant_store`: an invoker built without one could only be built by choosing what to do in
     // its absence, and the only available choice is to admit everything.
     let grants = grant_store(local_state.as_ref().map(|paths| paths.grants.as_path()))?;
+    if let Some(grants) = grants.as_ref() {
+        state = state.with_grant_transactions(grants.transactions.clone());
+    }
 
     let channels = channel_store(local_state.as_ref().map(|paths| paths.channels.as_path()))?;
     let mut coordinator = None;
@@ -683,6 +694,7 @@ async fn compose(
                         refusal.code, refusal.status, refusal.retry, refusal.commit
                     ),
                 })?;
+            state = state.with_transaction_coordinator(bound.clone());
             coordinator = Some(bound);
         }
         // The invoker is built from the same store the connections surface writes to, and only
@@ -691,7 +703,7 @@ async fn compose(
         // from the vendor, but one an agent treating `401` as retryable loops on forever. Binding
         // nothing means `POST /api/operations/{operation}/invoke` refuses with `503` and names the
         // setting, which is the honest answer rather than a hole.
-        if let Some(grants) = grants {
+        if let Some(grants) = grants.as_ref() {
             // An empty configuration when nothing was bound, and deliberately not a refusal: the
             // settings store is what the *templated* connectors need, and a host without one is
             // still a working host for the rest of the catalogue. What it must not do is pretend —
@@ -701,7 +713,7 @@ async fn compose(
                     startup.deployment(),
                     store.ordinary.clone(),
                     Arc::clone(&configuration),
-                    grants,
+                    grants.ordinary.clone(),
                 )
                 .map_err(|reason| StartupRefusal::Invoker { reason })?,
             ));
@@ -1000,9 +1012,14 @@ fn credential_store(
 ///
 /// The portable file binding applies the same native owner-only boundary as the credential store,
 /// because somebody who can write this file decides what runs with a tenant's credentials.
+struct GrantBinding {
+    ordinary: Arc<dyn exchange_host::Grants>,
+    transactions: Arc<dyn exchange_host::GrantTransactions>,
+}
+
 fn grant_store(
     configured: Option<&std::path::Path>,
-) -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusal> {
+) -> Result<Option<GrantBinding>, StartupRefusal> {
     use exchange_host::{GrantStore, GRANT_STORE_SETTING};
 
     let Some(configured) = configured else {
@@ -1025,7 +1042,11 @@ fn grant_store(
     // Read back off the bound store, so this line cannot name a file this process did not open.
     info!("{}", store.banner());
 
-    Ok(Some(Arc::new(store)))
+    let store = Arc::new(store);
+    Ok(Some(GrantBinding {
+        ordinary: store.clone(),
+        transactions: store,
+    }))
 }
 
 /// Bind the connection-settings store the environment names, or bind none.

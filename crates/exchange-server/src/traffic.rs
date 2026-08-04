@@ -28,6 +28,12 @@ const PRINCIPAL_WINDOWS: usize = 1_024;
 /// Operations allowed to execute at the same time.
 const CONCURRENT_INVOCATIONS: usize = 16;
 
+/// Hosted local-management WebSockets one process admits concurrently.
+const CONCURRENT_LOCAL_MANAGEMENT: usize = 32;
+
+/// Hosted local-management WebSockets one resolved tenant admits concurrently.
+const CONCURRENT_LOCAL_MANAGEMENT_PER_TENANT: usize = 4;
+
 /// The process-wide traffic controls shared by every clone of application state.
 #[derive(Clone)]
 pub(crate) struct Traffic {
@@ -35,6 +41,7 @@ pub(crate) struct Traffic {
     invocations: Arc<Window>,
     principals: Arc<PrincipalWindows>,
     active_invocations: Arc<Concurrent>,
+    local_management: Arc<HostedConcurrent>,
     metrics: Arc<TrafficMetrics>,
 }
 
@@ -69,6 +76,10 @@ impl Traffic {
                 period,
             )),
             active_invocations: Arc::new(Concurrent::new(concurrent_invocations)),
+            local_management: Arc::new(HostedConcurrent::new(
+                CONCURRENT_LOCAL_MANAGEMENT,
+                CONCURRENT_LOCAL_MANAGEMENT_PER_TENANT,
+            )),
             metrics: Arc::new(TrafficMetrics::default()),
         }
     }
@@ -123,6 +134,16 @@ impl Traffic {
             .invocations_admitted
             .fetch_add(1, Ordering::Relaxed);
         Ok(claim)
+    }
+
+    /// Claim one hosted management slot, bounded process-wide and by resolved tenant.
+    pub(crate) fn begin_local_management(
+        &self,
+        principal: &Principal,
+    ) -> Result<HostedClaim, TrafficRefusal> {
+        self.local_management
+            .clone()
+            .try_claim(principal.tenant().as_str())
     }
 
     /// A fixed-cardinality snapshot suitable for an operational metrics endpoint.
@@ -180,6 +201,73 @@ impl Traffic {
             PRINCIPAL_WINDOWS,
             period,
         )
+    }
+}
+
+struct HostedOccupancy {
+    total: usize,
+    tenants: HashMap<String, usize>,
+}
+
+struct HostedConcurrent {
+    process_limit: usize,
+    tenant_limit: usize,
+    occupancy: Mutex<HostedOccupancy>,
+}
+
+impl HostedConcurrent {
+    fn new(process_limit: usize, tenant_limit: usize) -> Self {
+        Self {
+            process_limit,
+            tenant_limit,
+            occupancy: Mutex::new(HostedOccupancy {
+                total: 0,
+                tenants: HashMap::new(),
+            }),
+        }
+    }
+
+    fn try_claim(self: Arc<Self>, tenant: &str) -> Result<HostedClaim, TrafficRefusal> {
+        let mut occupancy = self
+            .occupancy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tenant_active = occupancy.tenants.get(tenant).copied().unwrap_or(0);
+        if occupancy.total >= self.process_limit || tenant_active >= self.tenant_limit {
+            return Err(TrafficRefusal::after(Duration::from_secs(5)));
+        }
+        occupancy.total += 1;
+        occupancy
+            .tenants
+            .insert(tenant.to_owned(), tenant_active + 1);
+        Ok(HostedClaim {
+            concurrent: self.clone(),
+            tenant: tenant.to_owned(),
+        })
+    }
+}
+
+/// One live hosted local-management WebSocket slot.
+pub(crate) struct HostedClaim {
+    concurrent: Arc<HostedConcurrent>,
+    tenant: String,
+}
+
+impl Drop for HostedClaim {
+    fn drop(&mut self) {
+        let mut occupancy = self
+            .concurrent
+            .occupancy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        occupancy.total = occupancy.total.saturating_sub(1);
+        let Some(active) = occupancy.tenants.get_mut(&self.tenant) else {
+            return;
+        };
+        *active = active.saturating_sub(1);
+        if *active == 0 {
+            occupancy.tenants.remove(&self.tenant);
+        }
     }
 }
 
@@ -441,10 +529,14 @@ mod tests {
     use super::*;
 
     fn principal(id: &str) -> Principal {
+        principal_in(id, "acme")
+    }
+
+    fn principal_in(id: &str, tenant: &str) -> Principal {
         Principal::new(
             exchange_host::PrincipalKind::User,
             id,
-            exchange_host::Tenant::new("acme").expect("tenant"),
+            exchange_host::Tenant::new(tenant).expect("tenant"),
         )
     }
 
@@ -508,6 +600,51 @@ mod tests {
         assert!(
             traffic.begin_invocation(&principal("carol")).is_err(),
             "distinct principal keys do not bypass the process ceiling"
+        );
+    }
+
+    #[test]
+    fn hosted_management_has_exact_tenant_and_process_occupancy_without_a_queue() {
+        let traffic = Traffic::default();
+        let alice = principal("alice");
+        let mut tenant_claims = Vec::new();
+        for _ in 0..CONCURRENT_LOCAL_MANAGEMENT_PER_TENANT {
+            tenant_claims.push(
+                traffic
+                    .begin_local_management(&alice)
+                    .expect("one of four tenant slots"),
+            );
+        }
+        assert_eq!(
+            traffic.begin_local_management(&alice).err(),
+            Some(TrafficRefusal { retry_after: 5 })
+        );
+        drop(tenant_claims.pop());
+        tenant_claims.push(
+            traffic
+                .begin_local_management(&alice)
+                .expect("drop immediately reopens the tenant slot"),
+        );
+        drop(tenant_claims);
+
+        let mut process_claims = Vec::new();
+        for tenant_number in 0..8 {
+            let tenant = format!("tenant-{tenant_number}");
+            let principal = principal_in("operator", &tenant);
+            for _ in 0..CONCURRENT_LOCAL_MANAGEMENT_PER_TENANT {
+                process_claims.push(
+                    traffic
+                        .begin_local_management(&principal)
+                        .expect("one of exactly 32 process slots"),
+                );
+            }
+        }
+        assert_eq!(process_claims.len(), CONCURRENT_LOCAL_MANAGEMENT);
+        assert_eq!(
+            traffic
+                .begin_local_management(&principal_in("operator", "tenant-9"))
+                .err(),
+            Some(TrafficRefusal { retry_after: 5 })
         );
     }
 }
