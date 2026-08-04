@@ -291,7 +291,10 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
-    use futures_util::{SinkExt as _, StreamExt as _};
+    use exchange_host::{
+        GrantReceiptId, GrantSelector, GrantStore, GrantTransactions as _, PrincipalKind,
+    };
+    use futures_util::{FutureExt as _, SinkExt as _, StreamExt as _};
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
     use tokio_tungstenite::tungstenite::http::{header as ws_header, HeaderValue};
     use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -301,6 +304,88 @@ mod tests {
     use crate::audit::AuditJournal;
     use crate::dev_identity::DevIdentity;
     use crate::local_management::TransactionCoordinator;
+    use crate::local_management::{ReceiptIdentity, Unresolved};
+
+    #[derive(Clone)]
+    struct DeadlineRouteState {
+        app: AppState,
+        receipt: ReceiptIdentity,
+        decision_anchor: Arc<tokio::sync::Notify>,
+    }
+
+    async fn postdecision_upgrade(
+        State(state): State<DeadlineRouteState>,
+        upgrade: WebSocketUpgrade,
+    ) -> Response {
+        let dispatcher = Dispatcher::from_state(state.app.clone()).expect("test dispatcher");
+        let tenant = exchange_host::Tenant::new("local").expect("tenant");
+        let principal = Principal::new(PrincipalKind::User, "local-owner", tenant.clone());
+        let claim = state
+            .app
+            .begin_local_management(&principal)
+            .expect("hosted slot");
+        let deadline = DeadlineController::start();
+        let decision_anchor = state.decision_anchor.clone();
+        let receipt = state.receipt;
+        upgrade
+            .protocols([PROTOCOL])
+            .on_upgrade(move |socket| async move {
+                decision_anchor.notified().await;
+                deadline
+                    .decided(receipt, Unresolved::Store)
+                    .expect("pre-existing durable decision");
+                serve(socket, dispatcher, tenant, claim, deadline).await;
+            })
+    }
+
+    async fn replay_upgrade(
+        State(state): State<DeadlineRouteState>,
+        upgrade: WebSocketUpgrade,
+    ) -> Response {
+        let dispatcher = Dispatcher::from_state(state.app.clone()).expect("test dispatcher");
+        let tenant = exchange_host::Tenant::new("local").expect("tenant");
+        let principal = Principal::new(PrincipalKind::User, "local-owner", tenant.clone());
+        let claim = state
+            .app
+            .begin_local_management(&principal)
+            .expect("hosted slot");
+        let deadline = DeadlineController::start();
+        upgrade
+            .protocols([PROTOCOL])
+            .on_upgrade(move |socket| serve(socket, dispatcher, tenant, claim, deadline))
+    }
+
+    async fn test_socket(
+        address: std::net::SocketAddr,
+        path: &str,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        let mut request = format!("ws://{address}{path}")
+            .into_client_request()
+            .expect("WebSocket request");
+        request.headers_mut().insert(
+            ws_header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(PROTOCOL),
+        );
+        let (socket, response) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("test WebSocket upgrade");
+        assert_eq!(
+            response.headers().get(ws_header::SEC_WEBSOCKET_PROTOCOL),
+            Some(&HeaderValue::from_static(PROTOCOL))
+        );
+        socket
+    }
+
+    fn client_control(opcode: u16, payload: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(12 + payload.len());
+        frame.extend_from_slice(b"FXLM");
+        frame.extend_from_slice(&[1, 1]);
+        frame.extend_from_slice(&opcode.to_be_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
 
     fn private_root() -> std::path::PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -404,7 +489,153 @@ mod tests {
         assert!(close.reason.is_empty());
 
         server.abort();
+
+        let post_root = root.join("post-decision");
+        std::fs::create_dir(&post_root).expect("post-decision root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&post_root, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only post-decision root");
+        }
+        let post_credentials =
+            exchange_host::CredentialStore::bind(post_root.join("credentials/store"))
+                .expect("post-decision credential store");
+        let post_coordinator = Arc::new(
+            TransactionCoordinator::bind(
+                post_root.join("transactions/journal.sqlite3"),
+                post_credentials.prepared_secrets(),
+            )
+            .expect("post-decision coordinator"),
+        );
+        let post_audit = Arc::new(
+            AuditJournal::bind(post_root.join("audit/events.jsonl")).expect("post-decision audit"),
+        );
+        let grants = Arc::new(GrantStore::bind(post_root.join("grants.json")).expect("grants"));
+        let tenant = exchange_host::Tenant::new("local").expect("tenant");
+        let selector: GrantSelector = serde_json::from_slice(
+            br#"{"effects_within":null,"idempotency":null,"max_risk":"low"}"#,
+        )
+        .expect("selector");
+        let candidate = grants
+            .preview(&tenant, "github", selector)
+            .expect("grant candidate");
+        let receipt = GrantReceiptId::from_protocol_bytes([0x42; 32]).expect("receipt");
+        grants
+            .apply(
+                &tenant,
+                &candidate.candidate,
+                candidate.revision,
+                candidate.proposal_digest,
+                receipt,
+            )
+            .expect("durable grant decision");
+        let receipt_identity =
+            ReceiptIdentity::from_protocol_bytes(receipt.protocol_bytes()).expect("receipt");
+        let post_state = AppState::without_identity()
+            .with_transaction_coordinator(post_coordinator)
+            .with_audit(post_audit)
+            .with_grant_transactions(grants);
+        let decision_anchor = Arc::new(tokio::sync::Notify::new());
+        let deadline_state = DeadlineRouteState {
+            app: post_state,
+            receipt: receipt_identity,
+            decision_anchor: decision_anchor.clone(),
+        };
+        let app = axum::Router::new()
+            .route("/post", axum::routing::get(postdecision_upgrade))
+            .route("/replay", axum::routing::get(replay_upgrade))
+            .with_state(deadline_state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("post-decision listener");
+        let address = listener.local_addr().expect("listener address");
+        let post_server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server");
+        });
+
+        tokio::time::pause();
+        let mut socket = test_socket(address, "/post").await;
+        decision_anchor.notify_one();
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(29)).await;
+        socket
+            .send(ClientMessage::Ping(Vec::new().into()))
+            .await
+            .expect("post-decision traffic at 29 seconds");
+        tokio::task::yield_now().await;
+        match socket.next().now_or_never() {
+            None => {}
+            Some(Some(Ok(ClientMessage::Pong(_)))) => assert!(
+                socket.next().now_or_never().is_none(),
+                "a pong cannot hide an early terminal response"
+            ),
+            Some(other) => panic!("unexpected value-free traffic at 29 seconds: {other:?}"),
+        }
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let terminal = socket
+            .next()
+            .await
+            .expect("post-decision terminal message")
+            .expect("post-decision terminal frame");
+        let ClientMessage::Binary(terminal) = terminal else {
+            panic!("expected post-decision FXLM refusal");
+        };
+        let terminal = String::from_utf8_lossy(&terminal);
+        assert!(terminal.contains("\"code\":\"store_unavailable\""));
+        assert!(terminal.contains(&receipt_identity.encoded()));
+        let mut close = socket
+            .next()
+            .await
+            .expect("normal close")
+            .expect("normal close frame");
+        while matches!(close, ClientMessage::Ping(_) | ClientMessage::Pong(_)) {
+            close = socket
+                .next()
+                .await
+                .expect("normal close after control traffic")
+                .expect("normal close frame after control traffic");
+        }
+        let ClientMessage::Close(Some(close)) = close else {
+            panic!("expected a close frame after post-decision expiry");
+        };
+        assert_eq!(close.code, CloseCode::Normal);
+        assert!(close.reason.is_empty());
+
+        let mut replay = test_socket(address, "/replay").await;
+        let query = format!(r#"{{"receipt_id":"{}"}}"#, receipt_identity.encoded());
+        replay
+            .send(ClientMessage::Binary(
+                client_control(0x0013, query.as_bytes()).into(),
+            ))
+            .await
+            .expect("receipt QUERY");
+        let replayed = replay
+            .next()
+            .await
+            .expect("replay response")
+            .expect("replay frame");
+        let ClientMessage::Binary(replayed) = replayed else {
+            panic!("expected receipt replay frame");
+        };
+        let replayed = String::from_utf8_lossy(&replayed);
+        assert!(replayed.contains(&receipt_identity.encoded()));
+        assert!(replayed.contains("\"replayed\":true"));
+        let close = replay
+            .next()
+            .await
+            .expect("replay close")
+            .expect("replay close frame");
+        let ClientMessage::Close(Some(close)) = close else {
+            panic!("expected normal close after replay");
+        };
+        assert_eq!(close.code, CloseCode::Normal);
+        assert!(close.reason.is_empty());
+
+        post_server.abort();
         drop(credentials);
+        drop(post_credentials);
         let _ = std::fs::remove_dir_all(root);
     }
 }

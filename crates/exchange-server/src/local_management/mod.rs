@@ -15,6 +15,8 @@ pub mod transaction;
 
 pub(crate) use deadline::DeadlineController;
 #[cfg(test)]
+pub(crate) use deadline::{ReceiptIdentity, Unresolved};
+#[cfg(test)]
 pub(crate) use dispatcher::deadline_frame;
 pub(crate) use dispatcher::expired_reply;
 pub(crate) use dispatcher::ActiveSession;
