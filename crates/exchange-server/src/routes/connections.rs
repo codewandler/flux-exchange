@@ -9081,8 +9081,8 @@ mod tests {
         );
     }
 
-    /// **X-91.** Every connection route is administrative and declares operator authority at the
-    /// route-table boundary.
+    /// **X-91/X-125.** Every connection mutation is administrative; the value-free plan read is
+    /// deliberately available to any authenticated human at the route-table boundary.
     ///
     /// Asserted here as well as in the surface-wide enumeration, because that one compares against a
     /// list somebody edits and this one cannot be satisfied by editing a list: [`Access::Anonymous`]
@@ -9101,14 +9101,24 @@ mod tests {
     /// that, since this test alone cannot tell a path gated for one verb from one gated whole.
     #[test]
     fn every_connection_route_declares_operator_authority() {
+        let mut human_reads = Vec::new();
         for route in MODULE.routes {
-            assert_eq!(
-                route.access,
-                Access::Operator,
-                "{} must remain operator-only",
-                route.path
-            );
+            if route.access == Access::User {
+                human_reads.push(route.path);
+            } else {
+                assert_eq!(
+                    route.access,
+                    Access::Operator,
+                    "{} must remain operator-only",
+                    route.path
+                );
+            }
         }
+        assert_eq!(
+            human_reads,
+            vec!["/api/connections/{connector}/plan"],
+            "only the value-free connection-plan read is human-visible"
+        );
     }
 
     /// What a listing actually costs, and the invariant underneath it.
