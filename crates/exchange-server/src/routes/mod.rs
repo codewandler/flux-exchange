@@ -15,7 +15,7 @@
 //! construction. The seam is the same; only the direction of the dependency changed.
 
 mod apps;
-mod catalogue;
+pub(crate) mod catalogue;
 mod channels;
 mod connections;
 mod grants;

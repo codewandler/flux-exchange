@@ -26,6 +26,7 @@ mod local_identity;
 mod managed_apps;
 mod oidc;
 mod operator;
+pub mod protocol;
 mod routes;
 mod service_account;
 mod session;

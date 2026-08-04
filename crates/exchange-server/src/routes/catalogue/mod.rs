@@ -61,7 +61,7 @@ use serde::Deserialize;
 use super::{Access, Module, Route};
 use crate::state::AppState;
 
-mod view;
+pub(crate) mod view;
 
 #[cfg(test)]
 mod effective_tests;

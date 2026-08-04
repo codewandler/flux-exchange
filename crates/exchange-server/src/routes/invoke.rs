@@ -247,14 +247,7 @@ fn refuse(refusal: InvokeRefusal) -> Response {
         InvokeRefusal::Transport { .. } => StatusCode::BAD_GATEWAY,
     };
 
-    let body = json!({
-        "refusal": refusal.label(),
-        "operation": refusal.operation(),
-        "sent": refusal.sent(),
-        "retryable": refusal.retryable(),
-        "message": refusal.to_string(),
-        "supply_at": supply_at(&refusal),
-    });
+    let body = crate::protocol::InvocationRefusalBody::from_refusal(&refusal, supply_at(&refusal));
 
     (status, Json(body)).into_response()
 }

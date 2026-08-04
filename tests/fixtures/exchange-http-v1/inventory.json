@@ -1,0 +1,9 @@
+{
+  "schema": "exchange.http-fixtures.v1",
+  "files": [
+    {"name":"effective-catalogue-response.json","sha256":"593455777ecc62d038af1b2e005f8c5268837d040300882bf2ae06a987e8e715","expected":"effective_catalogue_accepted"},
+    {"name":"invoke-refusal.json","sha256":"c1c0a6ad73708df32dacaa9525c129becf91ed1600300adecffb163533aa3b06","expected":"retryable_transport_refusal_accepted"},
+    {"name":"invoke-success.json","sha256":"60fb00cd4d38c05067636b3e2a1b40ae7e362a1892a76f92a48c12c002db5931","expected":"invocation_success_accepted"},
+    {"name":"requests.json","sha256":"cefa7a1bba65f791a607fbac4ba1c1f033f1c421edcb4a7709d6f580fe04b2eb","expected":"request_case_outcomes_checked"}
+  ]
+}

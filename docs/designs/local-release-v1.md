@@ -57,6 +57,24 @@ X-129 binds the four already-delivered HTTP identities to those exact routes/typ
 wire tests. X-125 binds the plan id when it delivers that still-ready protocol. An implementation
 cannot substitute a package version or advertise an id whose provider fixture/type test is absent.
 
+### HTTP v1 compatible-change policy
+
+The four HTTP v1 identities are strict wire identities, not an additive schema promise. A change is
+compatible under an existing id only when every checked request receives the same status and a body
+which round-trips through the same production type, with the same members, member types,
+omission/null rules, bounds and authority derivation. Internal implementation changes, diagnostics
+whose text stays within the declared bounded class, and catalogue *content* changes represented by a
+new stable `generation` are compatible. Adding provider fixtures or adversarial cases without
+weakening an existing outcome is compatible too.
+
+Adding even an optional response member, accepting an unknown request/query member, changing a
+status/body pairing, widening a diagnostic, adding an envelope around operation arguments, changing
+authentication, or adding any tenant, authority, credential, endpoint, host, runtime or UUID axis is
+not compatible. Such a change receives a new protocol id and is served in parallel with v1 until
+every supported consumer can select the new id. Release automation may advertise the new id only
+after its own provider fixture and production serializer/deserializer gate exist; it never changes a
+v1 fixture to make an incompatible implementation appear compatible.
+
 ## Trust delegation
 
 The root-signed document is named `flux-exchange-release-trust.json`, is at most 64 KiB, and has

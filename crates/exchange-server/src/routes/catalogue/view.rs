@@ -28,7 +28,7 @@
 //!    [`ConnectorCredentials`].
 
 use exchange_host::{operation_input_schema, InputSchemaError, OperationFacts};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -100,7 +100,7 @@ pub struct ChannelEventView {
 }
 
 /// One operation, with the metadata a `Selector` reads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationView {
     /// `id`, `risk`, `idempotency` and `effects`, flattened into this object.
     ///
@@ -140,7 +140,7 @@ pub struct OperationView {
 }
 
 /// The authenticated operation projection consumed by Flux.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectiveCatalogue {
     /// Content identity of the complete effective projection.
     ///
@@ -169,7 +169,7 @@ impl EffectiveCatalogue {
 /// Multiple labelled connections produce multiple rows. A Flux tool binds the row's selector when
 /// it is registered; the model supplies only the operation's declared arguments and can never put
 /// a label, UUID, endpoint, authority or credential address into them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EffectiveOperationView {
     /// The same declaration the anonymous catalogue publishes, now positively admitted.
     #[serde(flatten)]

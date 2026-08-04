@@ -758,7 +758,8 @@ pub enum WorkflowInvokeRefusal {
 /// Whatever `http.request` returned, redacted and otherwise **whole**. A vendor's `404` is an
 /// *answer*, and flattening it into a host error would destroy the distinction between "the vendor
 /// said no" and "we could not ask".
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Invocation {
     /// The operation that ran, as the catalogue spells it.
     pub operation: String,
@@ -775,7 +776,7 @@ pub struct Invocation {
 ///
 /// The question an agent actually needs and the one the HTTP status space cannot express — a `502`
 /// says nothing about whether the effect happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sent {
     /// The refusal **provably precedes dispatch**. Nothing left this process.
