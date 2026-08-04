@@ -204,17 +204,7 @@ pub(crate) fn verify_manifest(
             "manifest schema or origin is not provider v1".into(),
         ));
     }
-    if manifest.tag != selected.tag
-        || manifest.version != selected.version
-        || manifest.source_commit != selected.source_commit
-        || manifest.build_id != selected.build_id
-        || manifest.protocols != selected.protocols
-        || manifest.signing_key_ids != selected.release_key_ids
-    {
-        return Err(Error::Schema(
-            "manifest identity disagrees with selected channel entry".into(),
-        ));
-    }
+    crate::verify_manifest_identity(&manifest, selected)?;
     let keys = valid_role_keys(&trust.document.roles.release, now)?;
     verify_signatures(
         directory,
@@ -330,6 +320,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             )));
         }
         validate_member(asset.executable.bytes, &asset.executable.sha256)?;
+        let mut expanded = asset.executable.bytes;
         let mut prior = None;
         for member in &asset.other_members {
             if prior.is_some_and(|path: &str| path >= member.path.as_str()) {
@@ -339,6 +330,14 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
             }
             prior = Some(&member.path);
             validate_member(member.bytes, &member.sha256)?;
+            expanded = expanded
+                .checked_add(member.bytes)
+                .ok_or_else(|| Error::Bounds("declared expanded size overflow".into()))?;
+            if expanded > crate::MAX_EXPANDED_BYTES {
+                return Err(Error::Bounds(
+                    "archive declares more than 512 MiB expanded bytes".into(),
+                ));
+            }
         }
     }
     Ok(())
@@ -463,6 +462,11 @@ fn verify_signatures<'a>(
             Error::Signature(format!("signer {id} is not valid for this role/time"))
         })?;
         let path = directory.join(format!("{basename}.{id}.minisig"));
+        if !path.is_file() {
+            return Err(Error::Signature(format!(
+                "required signature {basename}.{id}.minisig is absent"
+            )));
+        }
         let bytes = read_bounded(&path, 4096)?;
         let text = std::str::from_utf8(&bytes)
             .map_err(|_| Error::Signature("signature is not UTF-8".into()))?;

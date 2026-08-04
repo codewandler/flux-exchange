@@ -299,6 +299,22 @@ pub fn stage_manifest(directory: &Path, manifest: &Manifest) -> Result<Vec<u8>> 
     canonical::encode(manifest)
 }
 
+/// Verify the signed manifest identity against the selected signed channel entry.
+pub fn verify_manifest_identity(manifest: &Manifest, selected: &ReleaseEntry) -> Result<()> {
+    if manifest.tag != selected.tag
+        || manifest.version != selected.version
+        || manifest.source_commit != selected.source_commit
+        || manifest.build_id != selected.build_id
+        || manifest.protocols != selected.protocols
+        || manifest.signing_key_ids != selected.release_key_ids
+    {
+        return Err(Error::Schema(
+            "manifest identity disagrees with selected channel entry".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Produce one deterministic, closed three-member platform archive and its manifest asset record.
 pub fn package_archive(
     version: &str,

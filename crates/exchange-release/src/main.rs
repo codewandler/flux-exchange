@@ -7,7 +7,7 @@ use release::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 const HELP: &str = r#"Provider verifier for Exchange local release protocol v1.
@@ -387,6 +387,14 @@ struct TransportFixture {
     second_redirect: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitialTransportFixture {
+    credential_kind: String,
+    kind: String,
+    url: String,
+}
+
 fn verify_transport_fixture(path: &Path) -> anyhow::Result<()> {
     validate_transport_fixture(path)?;
     status(&SimpleStatus {
@@ -460,9 +468,9 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
             bail!("fixture digest disagreement for {relative}");
         }
     }
-    let mut case_ids = BTreeSet::new();
+    let mut case_ids: BTreeSet<&str> = BTreeSet::new();
     for case in &fixture.cases {
-        if !case_ids.insert(&case.id) {
+        if !case_ids.insert(case.id.as_str()) {
             bail!("duplicate fixture case id {:?}", case.id);
         }
         safe_fixture_path(&case.input)?;
@@ -537,6 +545,25 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
             _ => {}
         }
     }
+    for required in REQUIRED_PROVIDER_CASES {
+        if !case_ids.contains(required) {
+            bail!("fixture-set is missing required provider case {required:?}");
+        }
+    }
+    let mut deferred = BTreeSet::new();
+    for id in &fixture.deferred_cases {
+        if !deferred.insert(id.as_str()) {
+            bail!("fixture-set has duplicate deferred case {id:?}");
+        }
+        if case_ids.contains(id.as_str()) {
+            bail!("fixture case {id:?} is both executed and deferred");
+        }
+    }
+    for native in REQUIRED_NATIVE_CASES {
+        if !case_ids.contains(native) && !deferred.contains(*native) {
+            bail!("fixture-set neither executes nor defers native case {native:?}");
+        }
+    }
     status(&SelfTestStatus {
         schema: "exchange.release-self-test.v1",
         result: "accepted",
@@ -544,6 +571,100 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
         fixture_set_sha256: release::digest_hex(&std::fs::read(manifest_path)?),
     })
 }
+
+const REQUIRED_PROVIDER_CASES: &[&str] = &[
+    "positive-linux",
+    "positive-macos",
+    "positive-windows",
+    "positive-signer-overlap",
+    "canonical-duplicate-field",
+    "canonical-unknown-field",
+    "canonical-noncanonical-bytes",
+    "integer-over-jcs-safe",
+    "decimal-noncanonical",
+    "root-threshold-failure",
+    "channel-threshold-failure",
+    "release-threshold-failure",
+    "trust-future-issued",
+    "channel-future-issued",
+    "trust-rollback",
+    "trust-equivocation",
+    "channel-rollback",
+    "channel-equivocation",
+    "trust-signature-missing",
+    "trust-signature-substituted",
+    "channel-signature-missing",
+    "channel-signature-substituted",
+    "manifest-signature-missing",
+    "manifest-signature-key-id-disagree",
+    "manifest-tag-disagreement",
+    "manifest-version-disagreement",
+    "manifest-source-sha-disagreement",
+    "archive-path-absolute",
+    "archive-path-parent",
+    "archive-path-backslash",
+    "archive-path-duplicate",
+    "archive-path-case-fold",
+    "archive-link-member",
+    "archive-device-member",
+    "archive-total-expanded-overflow",
+    "archive-trailing-zstd-frame",
+    "archive-trailing-tar-data",
+    "archive-trailing-zip-data",
+    "archive-member-decompression-bound",
+    "github-initial-trust",
+    "github-initial-channel",
+    "github-initial-immutable",
+    "github-initial-scheme",
+    "github-initial-host",
+    "github-initial-port",
+    "github-initial-userinfo",
+    "github-initial-fragment",
+    "github-initial-query",
+    "github-initial-repository",
+    "github-initial-tag",
+    "github-initial-basename",
+    "github-initial-mutable-form",
+    "github-initial-authorization",
+    "github-initial-proxy-authorization",
+    "github-initial-cookie",
+    "github-redirect-positive",
+    "github-redirect-status",
+    "github-redirect-scheme",
+    "github-redirect-host",
+    "github-redirect-port",
+    "github-redirect-userinfo",
+    "github-redirect-fragment",
+    "github-redirect-path",
+    "github-redirect-path-repository",
+    "github-redirect-path-uuid",
+    "github-redirect-query-name",
+    "github-redirect-query-bound",
+    "github-redirect-query-empty",
+    "github-redirect-query-value-bound",
+    "github-redirect-query-duplicate",
+    "github-redirect-query-encoded-name",
+    "github-redirect-query-percent",
+    "github-redirect-query-control",
+    "github-redirect-query-raw-character",
+    "github-redirect-location-bound",
+    "github-redirect-location-nonascii",
+    "github-redirect-credential",
+    "github-redirect-second-redirect",
+    "github-redirect-final-status",
+];
+
+const REQUIRED_NATIVE_CASES: &[&str] = &[
+    "expiry-equality-live",
+    "supervisor-death-normal-responsive-unix",
+    "supervisor-death-normal-wedged-unix",
+    "supervisor-death-sigkill-responsive-unix",
+    "supervisor-death-sigkill-wedged-unix",
+    "supervisor-death-terminate-responsive-windows",
+    "supervisor-death-terminate-wedged-windows",
+    "unix-inherited-abi",
+    "windows-inherited-abi",
+];
 
 struct CaseObservation {
     state: RollbackState,
@@ -563,6 +684,28 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
             }
             "transport" => {
                 validate_transport_fixture(&input)?;
+            }
+            "initial-transport" => {
+                let fixture: InitialTransportFixture = read_canonical(&input, 16 * 1024)?;
+                let resource = match fixture.kind.as_str() {
+                    "trust" => release::transport::InitialResource::Trust,
+                    "channel" => release::transport::InitialResource::Channel,
+                    "immutable" => release::transport::InitialResource::Immutable {
+                        version: "0.17.0",
+                        basename: "flux-exchange-release-manifest.json",
+                    },
+                    unknown => bail!("unknown initial transport kind {unknown:?}"),
+                };
+                let credentials_present = match fixture.credential_kind.as_str() {
+                    "none" => false,
+                    "authorization" | "proxy-authorization" | "cookie" => true,
+                    unknown => bail!("unknown credential kind {unknown:?}"),
+                };
+                release::transport::validate_initial_request(
+                    &fixture.url,
+                    resource,
+                    credentials_present,
+                )?;
             }
             "selection" => {
                 #[derive(Deserialize)]
@@ -589,6 +732,14 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
                     value.number,
                     &value.sha256,
                     &value.kind,
+                )?;
+            }
+            "root-threshold" => {
+                let policy = read_policy(&input.display().to_string())?;
+                release::verify_trust_document(
+                    &directory.join("positive"),
+                    &policy,
+                    release::parse_utc(&case.clock)?,
                 )?;
             }
             "verify-directory" => {
@@ -674,6 +825,7 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
         &positive.join("flux-exchange-release-manifest.json"),
         256 * 1024,
     )?;
+    let selected: ReleaseEntry = read_canonical(&directory.join("release-entry.json"), 64 * 1024)?;
     match id {
         "asset-missing-platform" => {
             manifest.assets.pop();
@@ -742,6 +894,71 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
             manifest.protocols.supervisor = "exchange.supervisor-ready.v2".into()
         }
         "id-or-basename-unsafe" => manifest.assets[0].archive = "../unsafe".into(),
+        "manifest-tag-disagreement" => {
+            manifest.tag = "refs/tags/v0.18.0".into();
+            return release::verify_manifest_identity(&manifest, &selected).map_err(Into::into);
+        }
+        "manifest-version-disagreement" => {
+            manifest.version = "0.18.0".into();
+            return release::verify_manifest_identity(&manifest, &selected).map_err(Into::into);
+        }
+        "manifest-source-sha-disagreement" => {
+            manifest.source_commit = "5e398a73dcb8de17466cbedea77122dd489bed4f".into();
+            return release::verify_manifest_identity(&manifest, &selected).map_err(Into::into);
+        }
+        "archive-path-absolute" => manifest.assets[0].other_members[0].path = "/absolute".into(),
+        "archive-path-parent" => manifest.assets[0].other_members[0].path = "root/../escape".into(),
+        "archive-path-backslash" => {
+            manifest.assets[0].other_members[0].path = "root\\escape".into()
+        }
+        "archive-path-duplicate" => {
+            manifest.assets[0].other_members[0].path = manifest.assets[0].executable.path.clone()
+        }
+        "archive-path-case-fold" => {
+            let mut duplicate = manifest.assets[0].other_members[0].clone();
+            duplicate.path = duplicate.path.to_ascii_lowercase();
+            manifest.assets[0].other_members.push(duplicate);
+            manifest.assets[0]
+                .other_members
+                .sort_by(|left, right| left.path.cmp(&right.path));
+        }
+        "archive-total-expanded-overflow" => {
+            manifest.assets[0].other_members[0].bytes = release::MAX_MEMBER_BYTES;
+            manifest.assets[0].other_members[1].bytes = release::MAX_MEMBER_BYTES;
+        }
+        "archive-trailing-zstd-frame" => {
+            return mutate_archive_and_stage(&positive, &manifest, 0, |bytes| {
+                bytes.extend(zstd::stream::encode_all(Cursor::new(b"second-frame"), 19)?);
+                Ok(())
+            });
+        }
+        "archive-trailing-tar-data" => {
+            return mutate_archive_and_stage(&positive, &manifest, 0, |bytes| {
+                let mut expanded = Vec::new();
+                zstd::stream::read::Decoder::new(Cursor::new(bytes.as_slice()))?
+                    .read_to_end(&mut expanded)?;
+                expanded.extend_from_slice(b"nonzero trailing tar bytes");
+                *bytes = zstd::stream::encode_all(Cursor::new(expanded), 19)?;
+                Ok(())
+            });
+        }
+        "archive-trailing-zip-data" => {
+            let index = manifest
+                .assets
+                .iter()
+                .position(|asset| asset.format == "zip")
+                .ok_or_else(|| anyhow!("fixture manifest has no zip asset"))?;
+            return mutate_archive_and_stage(&positive, &manifest, index, |bytes| {
+                bytes.extend_from_slice(b"trailing zip bytes");
+                Ok(())
+            });
+        }
+        "archive-member-decompression-bound" => {
+            manifest.assets[0].executable.bytes -= 1;
+        }
+        "archive-link-member" | "archive-device-member" => {
+            return execute_special_tar_member(id);
+        }
         "archive-corrupt-after-digest" => {
             let temporary = tempfile::tempdir()?;
             for entry in std::fs::read_dir(&positive)? {
@@ -761,6 +978,57 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
         unknown => bail!("unknown manifest mutation {unknown}"),
     }
     release::stage_manifest(&positive, &manifest)?;
+    Ok(())
+}
+
+fn mutate_archive_and_stage(
+    positive: &Path,
+    manifest: &Manifest,
+    asset_index: usize,
+    mutate: impl FnOnce(&mut Vec<u8>) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    for entry in std::fs::read_dir(positive)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            std::fs::copy(entry.path(), temporary.path().join(entry.file_name()))?;
+        }
+    }
+    let mut changed = manifest.clone();
+    let archive = temporary.path().join(&changed.assets[asset_index].archive);
+    let mut bytes = std::fs::read(&archive)?;
+    mutate(&mut bytes)?;
+    std::fs::write(&archive, &bytes)?;
+    changed.assets[asset_index].archive_bytes = bytes.len() as u64;
+    changed.assets[asset_index].archive_sha256 = release::digest_hex(&bytes);
+    release::stage_manifest(temporary.path(), &changed)?;
+    Ok(())
+}
+
+fn execute_special_tar_member(id: &str) -> anyhow::Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let path = temporary.path().join("special.tar.zst");
+    let file = std::fs::File::create(&path)?;
+    let encoder = zstd::stream::write::Encoder::new(file, 19)?;
+    let mut archive = tar::Builder::new(encoder);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(0);
+    header.set_mode(0o777);
+    header.set_mtime(0);
+    header.set_entry_type(if id == "archive-link-member" {
+        tar::EntryType::Symlink
+    } else {
+        tar::EntryType::Char
+    });
+    header.set_cksum();
+    archive.append_data(&mut header, "root/special", Cursor::new(Vec::<u8>::new()))?;
+    archive.into_inner()?.finish()?;
+    release::verify_archive(
+        &path,
+        "tar.zst",
+        release::Platform::Unix,
+        &[("root/special".into(), 0, release::digest_hex(&[]))],
+    )?;
     Ok(())
 }
 

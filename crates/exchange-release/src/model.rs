@@ -204,6 +204,9 @@ pub struct FixtureSet {
     pub exchange_commit: String,
     pub files: BTreeMap<String, String>,
     pub cases: Vec<FixtureCase>,
+    /// Native process cases which are intentionally bound by platform workflow jobs, not this
+    /// platform-independent verifier self-test.
+    pub deferred_cases: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

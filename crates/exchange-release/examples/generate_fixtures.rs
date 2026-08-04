@@ -5,6 +5,10 @@ use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+// This maintainer-only generator intentionally creates fresh TEST-ONLY minisign keys. CI verifies
+// the committed bytes and inventory with `self-test`; it never regenerates fixtures or compares a
+// regenerated signature set for byte equality.
+
 fn main() -> anyhow::Result<()> {
     let root =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v1");
@@ -230,6 +234,70 @@ fn main() -> anyhow::Result<()> {
         &root_key,
         root_id,
     )?;
+    let mut future_trust = trust.clone();
+    future_trust.issued_at = "2026-08-04T12:05:01Z".into();
+    signed_trust_variant(
+        &root,
+        "trust-future-issued",
+        &positive,
+        &future_trust,
+        &root_key,
+        root_id,
+    )?;
+
+    let missing_trust_signature = root.join("trust-signature-missing");
+    copy_directory(&positive, &missing_trust_signature)?;
+    std::fs::remove_file(missing_trust_signature.join(format!(
+        "flux-exchange-release-trust.json.{root_id}.minisig"
+    )))?;
+    let substituted_trust_signature = root.join("trust-signature-substituted");
+    copy_directory(&positive, &substituted_trust_signature)?;
+    std::fs::copy(
+        positive.join(format!(
+            "flux-exchange-release-channel.json.{old_channel_id}.minisig"
+        )),
+        substituted_trust_signature.join(format!(
+            "flux-exchange-release-trust.json.{root_id}.minisig"
+        )),
+    )?;
+
+    let root_two = KeyPair::generate_unencrypted_keypair()?;
+    write(
+        &root.join("root-policy-threshold-two.test.json"),
+        &canonical::encode(&RootPolicy {
+            schema: "exchange.release-root-policy.v1".into(),
+            threshold: 2,
+            test_only: true,
+            keys: vec![
+                RootKey {
+                    key_id: root_id.into(),
+                    minisign_public_key: root_key.pk.to_base64(),
+                },
+                RootKey {
+                    key_id: "test-only-root-2026-02".into(),
+                    minisign_public_key: root_two.pk.to_base64(),
+                },
+            ],
+        })?,
+    )?;
+
+    let release_two = KeyPair::generate_unencrypted_keypair()?;
+    let mut release_threshold = trust.clone();
+    release_threshold.roles.release.threshold = 2;
+    release_threshold.roles.release.keys.push(DelegatedKey {
+        key_id: "test-only-release-2026-02".into(),
+        minisign_public_key: release_two.pk.to_base64(),
+        not_before: issued.into(),
+        not_after: trust_expires.into(),
+    });
+    signed_trust_variant(
+        &root,
+        "release-threshold-failure",
+        &positive,
+        &release_threshold,
+        &root_key,
+        root_id,
+    )?;
 
     let mut expired_channel = channel.clone();
     expired_channel.expires_at = issued.into();
@@ -242,6 +310,74 @@ fn main() -> anyhow::Result<()> {
             (&old_channel, old_channel_id),
             (&new_channel, new_channel_id),
         ],
+    )?;
+    let mut future_channel = channel.clone();
+    future_channel.issued_at = "2026-08-04T12:05:01Z".into();
+    future_channel.expires_at = "2026-08-05T12:05:01Z".into();
+    signed_channel_variant(
+        &root,
+        "channel-future-issued",
+        &positive,
+        &future_channel,
+        &[
+            (&old_channel, old_channel_id),
+            (&new_channel, new_channel_id),
+        ],
+    )?;
+    let mut threshold_trust = trust.clone();
+    threshold_trust.roles.channel.threshold = 2;
+    let threshold_directory = root.join("channel-threshold-failure");
+    signed_trust_variant(
+        &root,
+        "channel-threshold-failure",
+        &positive,
+        &threshold_trust,
+        &root_key,
+        root_id,
+    )?;
+    let mut one_signature_channel = channel.clone();
+    one_signature_channel.signing_key_ids = vec![old_channel_id.into()];
+    let one_signature_bytes = canonical::encode(&one_signature_channel)?;
+    write(
+        &threshold_directory.join("flux-exchange-release-channel.json"),
+        &one_signature_bytes,
+    )?;
+    sign_file(
+        &old_channel,
+        &one_signature_bytes,
+        &threshold_directory.join(format!(
+            "flux-exchange-release-channel.json.{old_channel_id}.minisig"
+        )),
+    )?;
+    let missing_channel_signature = root.join("channel-signature-missing");
+    copy_directory(&positive, &missing_channel_signature)?;
+    std::fs::remove_file(missing_channel_signature.join(format!(
+        "flux-exchange-release-channel.json.{old_channel_id}.minisig"
+    )))?;
+    let substituted_channel_signature = root.join("channel-signature-substituted");
+    copy_directory(&positive, &substituted_channel_signature)?;
+    std::fs::copy(
+        positive.join(format!(
+            "flux-exchange-release-manifest.json.{release_id}.minisig"
+        )),
+        substituted_channel_signature.join(format!(
+            "flux-exchange-release-channel.json.{old_channel_id}.minisig"
+        )),
+    )?;
+    let missing_manifest_signature = root.join("manifest-signature-missing");
+    copy_directory(&positive, &missing_manifest_signature)?;
+    std::fs::remove_file(missing_manifest_signature.join(format!(
+        "flux-exchange-release-manifest.json.{release_id}.minisig"
+    )))?;
+    let disagree_manifest_signature = root.join("manifest-signature-key-id-disagree");
+    copy_directory(&positive, &disagree_manifest_signature)?;
+    std::fs::copy(
+        positive.join(format!(
+            "flux-exchange-release-channel.json.{old_channel_id}.minisig"
+        )),
+        disagree_manifest_signature.join(format!(
+            "flux-exchange-release-manifest.json.{release_id}.minisig"
+        )),
     )?;
     let mut digest_channel = channel.clone();
     digest_channel.releases[0].manifest_sha256 = "b".repeat(64);
@@ -427,6 +563,16 @@ fn main() -> anyhow::Result<()> {
         br#"{"schema":"x","schema":"x"}"#,
     )?;
     write(
+        &root.join("invalid-noncanonical.json"),
+        br#"{ "schema":"exchange.release-manifest.v1"}"#,
+    )?;
+    let mut unknown_manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+    unknown_manifest["unknown"] = serde_json::json!(true);
+    write(
+        &root.join("invalid-unknown-manifest.json"),
+        &canonical::encode(&unknown_manifest)?,
+    )?;
+    write(
         &root.join("redirect-positive.json"),
         &canonical::encode(
             &serde_json::json!({"final_status":200,"forwarded_credentials":false,"location":"https://release-assets.githubusercontent.com:443/github-production-release-asset/1/00000000-0000-0000-0000-000000000001?sig=x&sp=r","second_redirect":false,"status":302}),
@@ -512,6 +658,121 @@ fn main() -> anyhow::Result<()> {
             302,
             true,
         ),
+        (
+            "redirect-userinfo.json",
+            302,
+            base.replacen("https://", "https://user@", 1),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-fragment.json",
+            302,
+            format!("{base}#fragment"),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-location-bound.json",
+            302,
+            format!("{}{}", base.replace("sig=x", "sig="), "x".repeat(8193)),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-location-nonascii.json",
+            302,
+            base.replace("sig=x", "sig=é"),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-query-empty.json",
+            302,
+            base.replace("sig=x", "sig="),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-query-value-bound.json",
+            302,
+            format!("{}{}", base.replace("sig=x", "sig="), "x".repeat(2049)),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-query-duplicate.json",
+            302,
+            format!("{base}&sig=y"),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-query-encoded-name.json",
+            302,
+            base.replace("sig=x", "s%69g=x"),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-query-percent.json",
+            302,
+            base.replace("sig=x", "sig=%x0"),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-query-control.json",
+            302,
+            base.replace("sig=x", "sig=%00"),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-query-raw-character.json",
+            302,
+            base.replace("sig=x", "sig=raw[value"),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-path-repository.json",
+            302,
+            base.replace("release-asset/1/", "release-asset/01/"),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-path-uuid.json",
+            302,
+            base.replace(
+                "00000000-0000-0000-0000-000000000001",
+                "00000000-0000-0000-0000-00000000000G",
+            ),
+            false,
+            200,
+            false,
+        ),
+        (
+            "redirect-final-status.json",
+            302,
+            base.to_owned(),
+            false,
+            206,
+            false,
+        ),
     ];
     for (name, status, location, forwarded_credentials, final_status, second_redirect) in redirects
     {
@@ -520,6 +781,30 @@ fn main() -> anyhow::Result<()> {
             &canonical::encode(
                 &serde_json::json!({"final_status":final_status,"forwarded_credentials":forwarded_credentials,"location":location,"second_redirect":second_redirect,"status":status}),
             )?,
+        )?;
+    }
+    let immutable = "https://github.com/codewandler/flux-exchange/releases/download/v0.17.0/flux-exchange-release-manifest.json";
+    for (name, kind, credential_kind, url) in [
+        ("initial-trust-positive.json", "trust", "none", "https://github.com/codewandler/flux-exchange/releases/download/exchange-trust-v1/flux-exchange-release-trust.json".to_owned()),
+        ("initial-channel-positive.json", "channel", "none", "https://github.com/codewandler/flux-exchange/releases/download/exchange-stable-v1/flux-exchange-release-channel.json".to_owned()),
+        ("initial-immutable-positive.json", "immutable", "none", immutable.to_owned()),
+        ("initial-scheme.json", "immutable", "none", immutable.replacen("https", "http", 1)),
+        ("initial-host.json", "immutable", "none", immutable.replace("github.com", "www.github.com")),
+        ("initial-port.json", "immutable", "none", immutable.replace("github.com/", "github.com:443/")),
+        ("initial-userinfo.json", "immutable", "none", immutable.replacen("https://", "https://user@", 1)),
+        ("initial-fragment.json", "immutable", "none", format!("{immutable}#x")),
+        ("initial-query.json", "immutable", "none", format!("{immutable}?x=1")),
+        ("initial-repository.json", "immutable", "none", immutable.replace("codewandler/flux-exchange", "codewandler/flux")),
+        ("initial-tag.json", "immutable", "none", immutable.replace("v0.17.0", "v0.18.0")),
+        ("initial-basename.json", "immutable", "none", immutable.replace("manifest.json", "channel.json")),
+        ("initial-mutable-latest.json", "immutable", "none", immutable.replace("releases/download/v0.17.0", "releases/latest/download")),
+        ("initial-authorization.json", "immutable", "authorization", immutable.to_owned()),
+        ("initial-proxy-authorization.json", "immutable", "proxy-authorization", immutable.to_owned()),
+        ("initial-cookie.json", "immutable", "cookie", immutable.to_owned()),
+    ] {
+        write(
+            &root.join(name),
+            &canonical::encode(&serde_json::json!({"credential_kind":credential_kind,"kind":kind,"url":url}))?,
         )?;
     }
     write(
@@ -532,6 +817,18 @@ fn main() -> anyhow::Result<()> {
         &root.join("channel-equivocation.json"),
         &canonical::encode(
             &serde_json::json!({"kind":"channel","number":7,"prior":{"number":7,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}),
+        )?,
+    )?;
+    write(
+        &root.join("trust-rollback.json"),
+        &canonical::encode(
+            &serde_json::json!({"kind":"trust","number":2,"prior":{"number":3,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}),
+        )?,
+    )?;
+    write(
+        &root.join("trust-equivocation.json"),
+        &canonical::encode(
+            &serde_json::json!({"kind":"trust","number":2,"prior":{"number":2,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}),
         )?,
     )?;
     write(
@@ -551,15 +848,16 @@ fn main() -> anyhow::Result<()> {
             sha256: digest_hex(&channel_bytes),
         }),
     };
-    let cases = fixture_cases(
-        issued,
-        &accepted_state,
-        &digest_hex(&canonical::encode(&incompatible_channel)?),
-        &digest_hex(&canonical::encode(&digest_channel)?),
-        &digest_hex(&higher_trust_bytes),
-        &digest_hex(&higher_channel_bytes),
-        &digest_hex(&canonical::encode(&multi_channel)?),
-    );
+    let digests = FixtureDigests {
+        incompatible_channel: digest_hex(&canonical::encode(&incompatible_channel)?),
+        digest_channel: digest_hex(&canonical::encode(&digest_channel)?),
+        higher_trust: digest_hex(&higher_trust_bytes),
+        higher_channel: digest_hex(&higher_channel_bytes),
+        multi_channel: digest_hex(&canonical::encode(&multi_channel)?),
+        threshold_trust: digest_hex(&canonical::encode(&threshold_trust)?),
+        release_threshold: digest_hex(&canonical::encode(&release_threshold)?),
+    };
+    let cases = fixture_cases(issued, &accepted_state, &digests);
     let mut files = BTreeMap::new();
     inventory_files(&root, &root, &mut files)?;
     files.remove("fixture-set.json");
@@ -568,6 +866,17 @@ fn main() -> anyhow::Result<()> {
         exchange_commit: "4e398a73dcb8de17466cbedea77122dd489bed4f".into(),
         files,
         cases,
+        deferred_cases: vec![
+            "expiry-equality-live".into(),
+            "supervisor-death-normal-responsive-unix".into(),
+            "supervisor-death-normal-wedged-unix".into(),
+            "supervisor-death-sigkill-responsive-unix".into(),
+            "supervisor-death-sigkill-wedged-unix".into(),
+            "supervisor-death-terminate-responsive-windows".into(),
+            "supervisor-death-terminate-wedged-windows".into(),
+            "unix-inherited-abi".into(),
+            "windows-inherited-abi".into(),
+        ],
     };
     write(
         &root.join("fixture-set.json"),
@@ -577,14 +886,20 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+struct FixtureDigests {
+    incompatible_channel: String,
+    digest_channel: String,
+    higher_trust: String,
+    higher_channel: String,
+    multi_channel: String,
+    threshold_trust: String,
+    release_threshold: String,
+}
+
 fn fixture_cases(
     now: &str,
     accepted: &RollbackState,
-    incompatible_channel_sha256: &str,
-    digest_channel_sha256: &str,
-    higher_trust_sha256: &str,
-    higher_channel_sha256: &str,
-    multi_channel_sha256: &str,
+    digests: &FixtureDigests,
 ) -> Vec<FixtureCase> {
     let empty = RollbackState::default();
     let installed = InstalledIdentity {
@@ -629,6 +944,21 @@ fn fixture_cases(
         "foreign-origin",
         "unsupported-protocol-set",
         "id-or-basename-unsafe",
+        "manifest-tag-disagreement",
+        "manifest-version-disagreement",
+        "manifest-source-sha-disagreement",
+        "archive-path-absolute",
+        "archive-path-parent",
+        "archive-path-backslash",
+        "archive-path-duplicate",
+        "archive-path-case-fold",
+        "archive-total-expanded-overflow",
+        "archive-trailing-zstd-frame",
+        "archive-trailing-tar-data",
+        "archive-trailing-zip-data",
+        "archive-member-decompression-bound",
+        "archive-link-member",
+        "archive-device-member",
     ];
     let mut cases = vec![
         case(
@@ -672,6 +1002,62 @@ fn fixture_cases(
             empty.clone(),
         ),
         case(
+            "canonical-duplicate-field",
+            "canonical",
+            "invalid-duplicate.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "canonical-noncanonical-bytes",
+            "canonical",
+            "invalid-noncanonical.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "canonical-unknown-field",
+            "manifest-document",
+            "invalid-unknown-manifest.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "trust-rollback",
+            "floor",
+            "trust-rollback.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "trust-equivocation",
+            "floor",
+            "trust-equivocation.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "channel-rollback",
+            "floor",
+            "channel-rollback.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "channel-equivocation",
+            "floor",
+            "channel-equivocation.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
             "minisign-key-malformed",
             "verify-directory",
             "trust-key-malformed",
@@ -704,6 +1090,52 @@ fn fixture_cases(
             empty.clone(),
         ),
         case(
+            "trust-future-issued",
+            "verify-directory",
+            "trust-future-issued",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "root-threshold-failure",
+            "root-threshold",
+            "root-policy-threshold-two.test.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "trust-signature-missing",
+            "verify-directory",
+            "trust-signature-missing",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "trust-signature-substituted",
+            "verify-directory",
+            "trust-signature-substituted",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            empty.clone(),
+        ),
+        case(
+            "release-threshold-failure",
+            "verify-directory",
+            "release-threshold-failure",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            RollbackState {
+                trust: Some(Floor {
+                    number: 2,
+                    sha256: digests.release_threshold.clone(),
+                }),
+                channel: None,
+            },
+        ),
+        case(
             "channel-expired",
             "verify-directory",
             "channel-expired",
@@ -711,6 +1143,53 @@ fn fixture_cases(
             "x86_64-unknown-linux-gnu",
             RollbackState {
                 trust: Some(accepted.trust.clone().expect("trust floor")),
+                channel: None,
+            },
+        ),
+        case(
+            "channel-future-issued",
+            "verify-directory",
+            "channel-future-issued",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            RollbackState {
+                trust: accepted.trust.clone(),
+                channel: None,
+            },
+        ),
+        case(
+            "channel-threshold-failure",
+            "verify-directory",
+            "channel-threshold-failure",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            RollbackState {
+                trust: Some(Floor {
+                    number: 2,
+                    sha256: digests.threshold_trust.clone(),
+                }),
+                channel: None,
+            },
+        ),
+        case(
+            "channel-signature-missing",
+            "verify-directory",
+            "channel-signature-missing",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            RollbackState {
+                trust: accepted.trust.clone(),
+                channel: None,
+            },
+        ),
+        case(
+            "channel-signature-substituted",
+            "verify-directory",
+            "channel-signature-substituted",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            RollbackState {
+                trust: accepted.trust.clone(),
                 channel: None,
             },
         ),
@@ -735,9 +1214,25 @@ fn fixture_cases(
                 trust: accepted.trust.clone(),
                 channel: Some(Floor {
                     number: 7,
-                    sha256: digest_channel_sha256.into(),
+                    sha256: digests.digest_channel.clone(),
                 }),
             },
+        ),
+        case(
+            "manifest-signature-missing",
+            "verify-directory",
+            "manifest-signature-missing",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            accepted.clone(),
+        ),
+        case(
+            "manifest-signature-key-id-disagree",
+            "verify-directory",
+            "manifest-signature-key-id-disagree",
+            "refused",
+            "x86_64-unknown-linux-gnu",
+            accepted.clone(),
         ),
         case(
             "channel-release-count-129",
@@ -760,7 +1255,7 @@ fn fixture_cases(
                 trust: accepted.trust.clone(),
                 channel: Some(Floor {
                     number: 8,
-                    sha256: incompatible_channel_sha256.into(),
+                    sha256: digests.incompatible_channel.clone(),
                 }),
             },
         ),
@@ -901,6 +1396,246 @@ fn fixture_cases(
             empty.clone(),
         ),
         case(
+            "github-redirect-userinfo",
+            "transport",
+            "redirect-userinfo.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-fragment",
+            "transport",
+            "redirect-fragment.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-location-bound",
+            "transport",
+            "redirect-location-bound.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-location-nonascii",
+            "transport",
+            "redirect-location-nonascii.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-query-empty",
+            "transport",
+            "redirect-query-empty.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-query-value-bound",
+            "transport",
+            "redirect-query-value-bound.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-query-duplicate",
+            "transport",
+            "redirect-query-duplicate.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-query-encoded-name",
+            "transport",
+            "redirect-query-encoded-name.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-query-percent",
+            "transport",
+            "redirect-query-percent.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-query-control",
+            "transport",
+            "redirect-query-control.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-query-raw-character",
+            "transport",
+            "redirect-query-raw-character.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-path-repository",
+            "transport",
+            "redirect-path-repository.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-path-uuid",
+            "transport",
+            "redirect-path-uuid.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-redirect-final-status",
+            "transport",
+            "redirect-final-status.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-trust",
+            "initial-transport",
+            "initial-trust-positive.json",
+            "accepted",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-channel",
+            "initial-transport",
+            "initial-channel-positive.json",
+            "accepted",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-immutable",
+            "initial-transport",
+            "initial-immutable-positive.json",
+            "accepted",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-scheme",
+            "initial-transport",
+            "initial-scheme.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-host",
+            "initial-transport",
+            "initial-host.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-port",
+            "initial-transport",
+            "initial-port.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-userinfo",
+            "initial-transport",
+            "initial-userinfo.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-fragment",
+            "initial-transport",
+            "initial-fragment.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-query",
+            "initial-transport",
+            "initial-query.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-repository",
+            "initial-transport",
+            "initial-repository.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-tag",
+            "initial-transport",
+            "initial-tag.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-basename",
+            "initial-transport",
+            "initial-basename.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-mutable-form",
+            "initial-transport",
+            "initial-mutable-latest.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-authorization",
+            "initial-transport",
+            "initial-authorization.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-proxy-authorization",
+            "initial-transport",
+            "initial-proxy-authorization.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
+            "github-initial-cookie",
+            "initial-transport",
+            "initial-cookie.json",
+            "refused",
+            "none",
+            empty.clone(),
+        ),
+        case(
             "higher-incompatible-skipped",
             "verify-directory",
             "selection-multi",
@@ -910,7 +1645,7 @@ fn fixture_cases(
                 trust: accepted.trust.clone(),
                 channel: Some(Floor {
                     number: 11,
-                    sha256: multi_channel_sha256.into(),
+                    sha256: digests.multi_channel.clone(),
                 }),
             },
         ),
@@ -924,7 +1659,7 @@ fn fixture_cases(
                 trust: accepted.trust.clone(),
                 channel: Some(Floor {
                     number: 11,
-                    sha256: multi_channel_sha256.into(),
+                    sha256: digests.multi_channel.clone(),
                 }),
             },
         ),
@@ -1033,11 +1768,11 @@ fn fixture_cases(
     let higher_state = RollbackState {
         trust: Some(Floor {
             number: 3,
-            sha256: higher_trust_sha256.into(),
+            sha256: digests.higher_trust.clone(),
         }),
         channel: Some(Floor {
             number: 10,
-            sha256: higher_channel_sha256.into(),
+            sha256: digests.higher_channel.clone(),
         }),
     };
     for (index, target) in SUPPORTED_TARGETS.iter().enumerate() {
@@ -1076,18 +1811,41 @@ fn expected_error(id: &str, operation: &str, result: &str) -> Option<&'static st
     Some(match id {
         "integer-over-jcs-safe" => "bound refused",
         "minisign-key-malformed" | "minisign-key-reused" => "signature refused",
+        "root-threshold-failure"
+        | "trust-signature-missing"
+        | "trust-signature-substituted"
+        | "channel-threshold-failure"
+        | "channel-signature-missing"
+        | "channel-signature-substituted"
+        | "release-threshold-failure"
+        | "manifest-signature-missing"
+        | "manifest-signature-key-id-disagree" => "signature refused",
+        "trust-future-issued" | "channel-future-issued" => "time refused",
         "delegation-expired" => "time refused",
         "role-confusion" => "schema refused",
         "channel-expired" | "expiry-equality-stopped" | "expiry-during-target-download" => {
             "time refused"
         }
         "manifest-digest-substituted" => "digest refused",
-        "archive-corrupt-after-digest" | "archive-executable-substituted" => "archive refused",
+        "archive-corrupt-after-digest"
+        | "archive-executable-substituted"
+        | "archive-path-absolute"
+        | "archive-path-parent"
+        | "archive-path-backslash"
+        | "archive-path-duplicate"
+        | "archive-path-case-fold"
+        | "archive-trailing-zstd-frame"
+        | "archive-trailing-tar-data"
+        | "archive-trailing-zip-data"
+        | "archive-link-member"
+        | "archive-device-member" => "archive refused",
         "channel-release-count-129"
         | "manifest-oversized"
         | "archive-oversized"
         | "archive-member-count-17"
         | "archive-member-oversized"
+        | "archive-total-expanded-overflow"
+        | "archive-member-decompression-bound"
         | "asset-missing-platform" => "bound refused",
         "higher-channel-no-compatible" => "no compatible Exchange release",
         "key-id-substituted"
@@ -1095,13 +1853,22 @@ fn expected_error(id: &str, operation: &str, result: &str) -> Option<&'static st
         | "foreign-origin"
         | "unsupported-protocol-set"
         | "id-or-basename-unsafe"
+        | "manifest-tag-disagreement"
+        | "manifest-version-disagreement"
+        | "manifest-source-sha-disagreement"
         | "provenance-client-input" => "schema refused",
         "asset-undeclared" => "undeclared staged asset",
         "plugin-or-connector-executable" | "archive-member-path-241" | "executable-renamed" => {
             "archive refused"
         }
         "github-redirect-query-bound" => "bound refused",
-        id if id.starts_with("github-redirect") => "transport refused",
+        "github-redirect-location-bound"
+        | "github-redirect-location-nonascii"
+        | "github-redirect-query-empty"
+        | "github-redirect-query-value-bound" => "bound refused",
+        id if id.starts_with("github-redirect") || id.starts_with("github-initial") => {
+            "transport refused"
+        }
         id if id.starts_with("readiness-") || id == "decimal-noncanonical" => "schema refused",
         id if id.starts_with("higher-channel-target-fails") => "archive refused",
         _ if operation == "verify-directory" => "refused",

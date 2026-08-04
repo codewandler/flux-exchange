@@ -3,6 +3,8 @@ use flux_exchange_release::{
     ReleaseEntry,
 };
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 
 #[test]
 fn noncanonical_json_refuses() {
@@ -44,6 +46,48 @@ fn redirect_policy_is_closed() {
     .is_err());
     transport::validate_redirect(302, &accepted.replace(".com/", ".com:443/"), false)
         .expect("explicit default port");
+}
+
+#[test]
+fn github_initial_urls_are_closed() {
+    use transport::InitialResource;
+
+    transport::validate_initial_url(
+        "https://github.com/codewandler/flux-exchange/releases/download/exchange-trust-v1/flux-exchange-release-trust.json",
+        InitialResource::Trust,
+    )
+    .expect("fixed trust URL");
+    transport::validate_initial_url(
+        "https://github.com/codewandler/flux-exchange/releases/download/v0.17.0/flux-exchange-release-manifest.json",
+        InitialResource::Immutable {
+            version: "0.17.0",
+            basename: "flux-exchange-release-manifest.json",
+        },
+    )
+    .expect("immutable tag URL");
+    assert!(transport::validate_initial_url(
+        "https://github.com/codewandler/flux-exchange/releases/latest/download/flux-exchange-release-manifest.json",
+        InitialResource::Immutable {
+            version: "0.17.0",
+            basename: "flux-exchange-release-manifest.json",
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn rust_and_download_validator_refuse_the_same_raw_query_character() {
+    let url = "https://release-assets.githubusercontent.com/github-production-release-asset/1/00000000-0000-0000-0000-000000000001?sig=raw[value";
+    assert!(transport::validate_redirect(302, url, false).is_err());
+
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/release-validate-redirect.py");
+    let status = Command::new("python3")
+        .arg(script)
+        .arg(url)
+        .status()
+        .expect("run download redirect validator");
+    assert!(!status.success());
 }
 
 #[test]

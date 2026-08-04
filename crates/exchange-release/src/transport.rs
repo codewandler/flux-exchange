@@ -5,6 +5,77 @@ use url::Url;
 
 use crate::{Error, Result};
 
+/// The three immutable/fixed GitHub release namespaces admitted by the provider protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InitialResource<'a> {
+    Trust,
+    Channel,
+    Immutable { version: &'a str, basename: &'a str },
+}
+
+/// Validate an initial GitHub request before any connection is opened.
+pub fn validate_initial_url(url: &str, resource: InitialResource<'_>) -> Result<()> {
+    if url.len() > 8192 || !url.is_ascii() {
+        return Err(Error::Bounds("initial URL exceeds 8192 ASCII bytes".into()));
+    }
+    let prefix = "https://github.com/codewandler/flux-exchange/releases/download/";
+    let suffix = url
+        .strip_prefix(prefix)
+        .ok_or_else(|| Error::Transport("initial URL origin/path prefix is not exact".into()))?;
+    if suffix.contains(['?', '#', '\\']) || suffix.contains("//") {
+        return Err(Error::Transport(
+            "initial URL contains query, fragment or noncanonical path syntax".into(),
+        ));
+    }
+    let expected = match resource {
+        InitialResource::Trust => "exchange-trust-v1/flux-exchange-release-trust.json".to_owned(),
+        InitialResource::Channel => {
+            "exchange-stable-v1/flux-exchange-release-channel.json".to_owned()
+        }
+        InitialResource::Immutable { version, basename } => {
+            let parsed = semver::Version::parse(version)
+                .map_err(|_| Error::Transport("immutable release version is invalid".into()))?;
+            if !parsed.pre.is_empty() || !parsed.build.is_empty() {
+                return Err(Error::Transport(
+                    "immutable release version must be stable SemVer".into(),
+                ));
+            }
+            if basename.is_empty()
+                || basename.contains('/')
+                || basename.contains('\\')
+                || basename == "."
+                || basename == ".."
+                || !basename.is_ascii()
+            {
+                return Err(Error::Transport(
+                    "immutable release basename is unsafe".into(),
+                ));
+            }
+            format!("v{version}/{basename}")
+        }
+    };
+    if suffix != expected {
+        return Err(Error::Transport(
+            "initial URL is not the exact fixed or immutable release asset".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the initial URL and prove that no ambient/request credential is attached.
+pub fn validate_initial_request(
+    url: &str,
+    resource: InitialResource<'_>,
+    credentials_present: bool,
+) -> Result<()> {
+    if credentials_present {
+        return Err(Error::Transport(
+            "authorization, proxy authorization and cookies are forbidden".into(),
+        ));
+    }
+    validate_initial_url(url, resource)
+}
+
 const QUERY_NAMES: &[&str] = &[
     "jwt",
     "response-content-disposition",
@@ -146,9 +217,9 @@ fn validate_percent_value(value: &str) -> Result<()> {
             decoded.push((high << 4) | low);
             index += 3;
         } else {
-            if !bytes[index].is_ascii() {
+            if !raw_query_value_byte(bytes[index]) {
                 return Err(Error::Transport(
-                    "query values must be raw ASCII or percent encoded".into(),
+                    "query value contains a raw byte outside RFC 3986 policy".into(),
                 ));
             }
             decoded.push(bytes[index]);
@@ -161,6 +232,30 @@ fn validate_percent_value(value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn raw_query_value_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'.' | b'_'
+                | b'~'
+                | b'!'
+                | b'$'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+                | b'@'
+                | b'/'
+                | b'?'
+                | b'-'
+        )
 }
 
 fn hex(byte: u8) -> Result<u8> {
