@@ -1,0 +1,29 @@
+[package]
+name = "flux-exchange-release"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+minisign.workspace = true
+minisign-verify.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_json_canonicalizer.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+time.workspace = true
+url.workspace = true
+zip.workspace = true
+zstd.workspace = true
+
+[[bin]]
+name = "flux-exchange-release"
+path = "src/main.rs"
