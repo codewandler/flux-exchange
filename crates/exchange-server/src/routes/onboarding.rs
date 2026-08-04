@@ -663,7 +663,7 @@ mod tests {
         ),
         (
             "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
-            "as above; explicit approval or revocation of a custom origin is an operator action.",
+            "as above; exact normalized-origin review and explicit approval or revocation are operator actions.",
         ),
         (
             "/api/connections/{connector}/instances/{label}/credentials/{credential}",

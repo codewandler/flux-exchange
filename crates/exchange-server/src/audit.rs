@@ -181,6 +181,12 @@ pub enum Target {
         service: String,
         field: String,
     },
+    SettingAuthority {
+        connector: String,
+        service: String,
+        field: String,
+        revision: String,
+    },
     Grants {
         tenant: String,
     },
@@ -230,6 +236,15 @@ impl Target {
             } => (
                 "instance_setting",
                 format!("{connector}/{label}/{service}/{field}"),
+            ),
+            Self::SettingAuthority {
+                connector,
+                service,
+                field,
+                revision,
+            } => (
+                "setting_authority",
+                format!("{connector}/{service}/{field}/{revision}"),
             ),
             Self::Grants { tenant } => ("grants", tenant.clone()),
             Self::Invocation { operation } => ("invocation", operation.clone()),

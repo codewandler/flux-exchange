@@ -10,7 +10,7 @@ use std::fmt;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put, MethodRouter};
+use axum::routing::{get, post, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{ConfigField, Provider};
 use exchange_host::{
@@ -33,7 +33,9 @@ pub(super) fn write_route() -> MethodRouter<AppState> {
 }
 
 pub(super) fn authority_route() -> MethodRouter<AppState> {
-    put(approve_authority).delete(revoke_authority)
+    get(inspect_authority)
+        .put(approve_authority)
+        .delete(revoke_authority)
 }
 
 #[derive(Default, Deserialize)]
@@ -46,6 +48,7 @@ struct Selection {
 ///
 /// No `Debug`, deliberately: adding `debug!(?body)` must remain a compile error.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Submission {
     version: String,
     name: String,
@@ -53,6 +56,8 @@ struct Submission {
     current_name: Option<String>,
     #[serde(default)]
     values: SubmittedValues,
+    #[serde(default)]
+    expected_revisions: SubmittedValues,
 }
 
 #[derive(Deserialize)]
@@ -69,7 +74,38 @@ struct AuthorityResponse {
     label: String,
     service: String,
     field: String,
+    action: &'static str,
     authority: AuthorityTransition,
+}
+
+#[derive(Serialize)]
+struct AuthorityInspectionResponse {
+    version: &'static str,
+    connector: String,
+    label: String,
+    service: String,
+    field: String,
+    authority: AuthorityInspection,
+}
+
+#[derive(Serialize)]
+struct AuthorityInspection {
+    state: AuthorityViewState,
+    revision: String,
+    origin: String,
+}
+
+#[derive(Serialize)]
+struct AuthorityPartialResponse {
+    version: &'static str,
+    connector: String,
+    label: String,
+    service: String,
+    field: String,
+    action: &'static str,
+    authority: AuthorityTransition,
+    outcome: &'static str,
+    may_have_happened: bool,
 }
 
 #[derive(Serialize)]
@@ -178,9 +214,15 @@ enum AuthorityViewState {
 }
 
 #[derive(Clone, Serialize)]
-struct AuthorityActions {
-    approve: AuthorityAction,
-    revoke: AuthorityAction,
+#[serde(untagged)]
+enum AuthorityActions {
+    Proposed {
+        approve: AuthorityAction,
+        revoke: AuthorityAction,
+    },
+    Approved {
+        revoke: AuthorityAction,
+    },
 }
 
 #[derive(Clone, Serialize)]
@@ -230,6 +272,12 @@ struct StepView {
     outcome: StepOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    may_have_happened: Option<bool>,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -252,6 +300,7 @@ struct TargetSpec {
     id: String,
     destination: Destination,
     choices: Option<Vec<String>>,
+    custom_origin: bool,
 }
 
 struct DescribedField {
@@ -387,6 +436,86 @@ async fn apply(
             return preflight_refused(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!("`{target}` must be one of its published choices"),
+                &unselected,
+            );
+        }
+    }
+
+    let mut expected_authority_revisions = BTreeMap::new();
+    for (target, revision) in &body.expected_revisions.0 {
+        let Some(spec) = targets.iter().find(|candidate| candidate.id == *target) else {
+            return preflight_refused(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("`{target}` is not a routable target in this connection plan"),
+                &unselected,
+            );
+        };
+        if !spec.custom_origin || !body.values.0.contains_key(target) {
+            return preflight_refused(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "`{target}` may name an expected revision only beside a submitted custom-origin value"
+                ),
+                &unselected,
+            );
+        }
+        let Some(revision) = canonical_revision(revision) else {
+            return preflight_refused(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("`{target}` has a non-canonical authority revision"),
+                &unselected,
+            );
+        };
+        expected_authority_revisions.insert(target.clone(), revision);
+    }
+
+    let existing_instance = if exists {
+        match invocation_instance(&state, &principal, provider, Some(existing)).await {
+            Ok(instance) => instance,
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+    for target in targets
+        .iter()
+        .filter(|target| target.custom_origin && body.values.0.contains_key(&target.id))
+    {
+        let Destination::Settings(declared) = &target.destination else {
+            unreachable!("custom-origin targets are settings")
+        };
+        let expected = expected_authority_revisions.get(&target.id).copied();
+        let current = if exists {
+            match settings_store.authority_status_for_instance(
+                principal.tenant(),
+                provider.id,
+                existing_instance.as_ref(),
+                &declared[0],
+            ) {
+                Ok(status) => status.revision,
+                Err(refusal) => return authority_refused(&refusal),
+            }
+        } else {
+            None
+        };
+        if current != expected {
+            return preflight_refused(
+                StatusCode::CONFLICT,
+                match (current, expected) {
+                    (Some(current), None) => format!(
+                        "`{}` requires its current authority revision `{current}` for replacement",
+                        target.id
+                    ),
+                    (Some(current), Some(expected)) => format!(
+                        "`{}` authority revision conflict: expected `{expected}`, current `{current}`",
+                        target.id
+                    ),
+                    (None, Some(expected)) => format!(
+                        "`{}` has no authority proposal at expected revision `{expected}`",
+                        target.id
+                    ),
+                    (None, None) => unreachable!("equal revisions were handled above"),
+                },
                 &unselected,
             );
         }
@@ -664,6 +793,8 @@ async fn apply(
         };
         let mut target_applied = false;
         let mut audit_refused = false;
+        let mut audit_finalization_refused = false;
+        let mut proposal_revision = None;
         for setting in settings {
             let audit = match begin_audit(
                 &state,
@@ -685,20 +816,47 @@ async fn apply(
                     break;
                 }
             };
-            let response = set_instance_setting(
-                State(state.clone()),
-                Extension(principal.clone()),
-                Path((
-                    provider.id.to_owned(),
-                    working_label.clone(),
-                    setting.service.clone(),
-                    setting.binds(),
-                )),
-                Json(SuppliedSetting {
-                    value: value.clone(),
-                }),
-            )
-            .await;
+            let response = if target.custom_origin {
+                let instance =
+                    match invocation_instance(&state, &principal, provider, Some(&working_label))
+                        .await
+                    {
+                        Ok(instance) => instance,
+                        Err(response) => return response,
+                    };
+                match settings_store.propose_authority_for_instance(
+                    principal.tenant(),
+                    provider.id,
+                    instance.as_ref(),
+                    setting,
+                    value,
+                    expected_authority_revisions.get(&target.id).copied(),
+                ) {
+                    Ok(status) => {
+                        proposal_revision = status.revision;
+                        if let Some(channels) = state.channels() {
+                            channels.restart(principal.tenant(), provider.id);
+                        }
+                        StatusCode::OK.into_response()
+                    }
+                    Err(refusal) => authority_refused(&refusal),
+                }
+            } else {
+                set_instance_setting(
+                    State(state.clone()),
+                    Extension(principal.clone()),
+                    Path((
+                        provider.id.to_owned(),
+                        working_label.clone(),
+                        setting.service.clone(),
+                        setting.binds(),
+                    )),
+                    Json(SuppliedSetting {
+                        value: value.clone(),
+                    }),
+                )
+                .await
+            };
             let write_status = response.status();
             let audit_failure = audit
                 .finish(&state, &request_id, &principal, write_status)
@@ -711,6 +869,7 @@ async fn apply(
                     refusal_status = Some(status);
                     stopped = true;
                     audit_refused = true;
+                    audit_finalization_refused = true;
                     break;
                 }
             } else {
@@ -720,7 +879,21 @@ async fn apply(
                 break;
             }
         }
-        if stopped {
+        if stopped && target_applied && audit_finalization_refused {
+            steps.push(if target.custom_origin {
+                proposal_step(
+                    &target.id,
+                    proposal_revision.expect("a persisted proposal has a revision"),
+                    "the authority proposal persisted, but audit finalization refused completion",
+                )
+            } else {
+                step(
+                    &target.id,
+                    StepOutcome::Applied,
+                    Some("the setting write persisted, but audit finalization refused completion"),
+                )
+            });
+        } else if stopped {
             steps.push(step(
                 &target.id,
                 StepOutcome::Refused,
@@ -896,6 +1069,64 @@ async fn approve_authority(
     transition_authority(state, principal, request_id, path, body, true).await
 }
 
+async fn inspect_authority(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label, service, field)): Path<(String, String, String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(settings) = state.settings() else {
+        return no_settings_store();
+    };
+    let Some(declared) = DeclaredSetting::parse(&service, &field) else {
+        return unreadable_field(provider, &service, &field);
+    };
+    let declarations = match declared_settings(provider) {
+        Ok(declarations) => declarations,
+        Err(refusal) => return settings_refused(&refusal),
+    };
+    if !declarations.contains(&declared) || !settings.is_custom_origin(provider.id, &declared) {
+        return settings_refused(&SettingsRefusal::AuthorityUnsupported {
+            connector: provider.id.to_owned(),
+            setting: declared.binds(),
+        });
+    }
+    let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(instance) => instance,
+        Err(response) => return response,
+    };
+    let status = match settings.authority_status_for_instance(
+        principal.tenant(),
+        provider.id,
+        instance.as_ref(),
+        &declared,
+    ) {
+        Ok(status) => status,
+        Err(refusal) => return authority_refused(&refusal),
+    };
+    let (Some(revision), Some(origin)) = (status.revision, status.origin) else {
+        return authority_refused(&SettingsRefusal::AuthorityUnset {
+            connector: provider.id.to_owned(),
+            setting: declared.binds(),
+        });
+    };
+    Json(AuthorityInspectionResponse {
+        version: VERSION,
+        connector: provider.id.to_owned(),
+        label,
+        service: declared.service.clone(),
+        field: declared.binds(),
+        authority: AuthorityInspection {
+            state: status.state.into(),
+            revision: revision.to_string(),
+            origin,
+        },
+    })
+    .into_response()
+}
+
 async fn revoke_authority(
     state: State<AppState>,
     principal: Extension<Principal>,
@@ -957,16 +1188,17 @@ async fn transition_authority(
     } else {
         AuditAction::SettingAuthorityRevoked
     };
+    let action_name = if approve { "approved" } else { "revoked" };
     let audit = match begin_audit(
         &state,
         &request_id,
         &principal,
         action,
-        AuditTarget::InstanceSetting {
+        AuditTarget::SettingAuthority {
             connector: provider.id.to_owned(),
-            label: label.clone(),
             service: declared.service.clone(),
             field: declared.binds(),
+            revision: revision.to_string(),
         },
     ) {
         Ok(audit) => audit,
@@ -1006,22 +1238,42 @@ async fn transition_authority(
     if let Some(channels) = state.channels() {
         channels.restart(principal.tenant(), provider.id);
     }
-    if let Err(response) = audit.finish(&state, &request_id, &principal, StatusCode::OK) {
-        return *response;
+    let revision = transition
+        .revision
+        .expect("transition has revision")
+        .to_string();
+    let authority = AuthorityTransition {
+        state: transition.state.into(),
+        revision,
     };
+    if audit
+        .finish(&state, &request_id, &principal, StatusCode::OK)
+        .is_err()
+    {
+        return (
+            StatusCode::MULTI_STATUS,
+            Json(AuthorityPartialResponse {
+                version: VERSION,
+                connector: provider.id.to_owned(),
+                label,
+                service: declared.service.clone(),
+                field: declared.binds(),
+                action: action_name,
+                authority,
+                outcome: "partial",
+                may_have_happened: true,
+            }),
+        )
+            .into_response();
+    }
     Json(AuthorityResponse {
         version: VERSION,
         connector: provider.id.to_owned(),
         label,
         service: declared.service.clone(),
         field: declared.binds(),
-        authority: AuthorityTransition {
-            state: transition.state.into(),
-            revision: transition
-                .revision
-                .expect("transition has revision")
-                .to_string(),
-        },
+        action: action_name,
+        authority,
     })
     .into_response()
 }
@@ -1209,6 +1461,20 @@ fn step(target: &str, outcome: StepOutcome, reason: Option<&str>) -> StepView {
         target: target.to_owned(),
         outcome,
         reason: reason.map(str::to_owned),
+        action: None,
+        revision: None,
+        may_have_happened: None,
+    }
+}
+
+fn proposal_step(target: &str, revision: u64, reason: &str) -> StepView {
+    StepView {
+        target: target.to_owned(),
+        outcome: StepOutcome::Applied,
+        reason: Some(reason.to_owned()),
+        action: Some("proposed"),
+        revision: Some(revision.to_string()),
+        may_have_happened: Some(true),
     }
 }
 
@@ -1218,7 +1484,7 @@ fn same_target(left: &TargetSpec, right: &TargetSpec) -> bool {
         (Destination::Settings(left), Destination::Settings(right)) => left == right,
         _ => false,
     };
-    same_destination && left.choices == right.choices
+    same_destination && left.choices == right.choices && left.custom_origin == right.custom_origin
 }
 
 fn submission_targets(
@@ -1549,6 +1815,7 @@ fn describe_with_policy(
                 id: target,
                 destination: Destination::Credential(credential.name.to_owned()),
                 choices: None,
+                custom_origin: false,
             }),
             custom_origin: false,
         });
@@ -1576,6 +1843,7 @@ fn describe_config(
                     id: id.clone(),
                     destination: Destination::Credential(credential.to_owned()),
                     choices: choice_values(&choices),
+                    custom_origin: false,
                 }),
                 None,
             )
@@ -1605,6 +1873,7 @@ fn describe_config(
                         id: id.clone(),
                         destination: Destination::Settings(vec![primary]),
                         choices: choice_values(&choices),
+                        custom_origin,
                     }),
                     None,
                 )
@@ -1675,7 +1944,7 @@ fn authority_view(
 ) -> AuthorityView {
     let revision = status.revision.map(|revision| revision.to_string());
     let actions = match status.state {
-        AuthorityState::Proposed | AuthorityState::Approved => revision.as_ref().map(|_| {
+        AuthorityState::Proposed => revision.as_ref().map(|_| {
             let target = format!(
                 "/api/connections/{}/instances/{}/settings/{}/{}/authority",
                 encode_segment(connector),
@@ -1683,7 +1952,7 @@ fn authority_view(
                 encode_segment(&declared.service),
                 encode_segment(&declared.binds()),
             );
-            AuthorityActions {
+            AuthorityActions::Proposed {
                 approve: AuthorityAction {
                     method: "PUT",
                     target: target.clone(),
@@ -1693,6 +1962,18 @@ fn authority_view(
                     target,
                 },
             }
+        }),
+        AuthorityState::Approved => revision.as_ref().map(|_| AuthorityActions::Approved {
+            revoke: AuthorityAction {
+                method: "DELETE",
+                target: format!(
+                    "/api/connections/{}/instances/{}/settings/{}/{}/authority",
+                    encode_segment(connector),
+                    encode_segment(label),
+                    encode_segment(&declared.service),
+                    encode_segment(&declared.binds()),
+                ),
+            },
         }),
         AuthorityState::Unset | AuthorityState::Revoked => None,
     };
@@ -1805,7 +2086,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use tower::Service;
 
-    use crate::audit::{Action, AuditJournal};
+    use crate::audit::{Action, AuditJournal, Target};
     use crate::channel::{
         ChannelDeclarations, ChannelEventSink, ChannelPlacement, ChannelPlacementResolver,
         ChannelRunError, ChannelRunner, ChannelStatus, ChannelSupervisor,
@@ -1943,7 +2224,7 @@ mod tests {
                 *self.status.lock().expect("authority status") = AuthorityStatus {
                     state: AuthorityState::Proposed,
                     revision: Some(revision),
-                    origin: None,
+                    origin: Some(format!("https://{value}")),
                 };
                 Ok(())
             } else {
@@ -2024,6 +2305,53 @@ mod tests {
                 });
             }
             Ok(self.status.lock().expect("authority status").clone())
+        }
+
+        fn propose_authority_for_instance(
+            &self,
+            _tenant: &Tenant,
+            connector: &str,
+            _instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            value: &str,
+            expected_revision: Option<u64>,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            if !self.matches(connector, declared) {
+                return Err(SettingsRefusal::AuthorityUnsupported {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                });
+            }
+            let mut status = self.status.lock().expect("authority status");
+            if status.revision != expected_revision {
+                return match (expected_revision, status.revision) {
+                    (None, Some(current)) => Err(SettingsRefusal::AuthorityRevisionRequired {
+                        connector: connector.to_owned(),
+                        setting: declared.binds(),
+                        current,
+                    }),
+                    (Some(expected), Some(current)) => {
+                        Err(SettingsRefusal::AuthorityRevisionConflict {
+                            connector: connector.to_owned(),
+                            setting: declared.binds(),
+                            expected,
+                            current,
+                        })
+                    }
+                    (Some(_), None) => Err(SettingsRefusal::AuthorityUnset {
+                        connector: connector.to_owned(),
+                        setting: declared.binds(),
+                    }),
+                    (None, None) => unreachable!("equal revisions were handled above"),
+                };
+            }
+            let revision = self.next_revision.fetch_add(1, Ordering::SeqCst);
+            *status = AuthorityStatus {
+                state: AuthorityState::Proposed,
+                revision: Some(revision),
+                origin: Some(format!("https://{value}")),
+            };
+            Ok(status.clone())
         }
 
         fn approve_authority_for_instance(
@@ -2598,6 +2926,7 @@ mod tests {
             id: "credential.example.token".to_owned(),
             destination: Destination::Credential("example.token".to_owned()),
             choices: Some(choices.iter().map(|choice| (*choice).to_owned()).collect()),
+            custom_origin: false,
         };
         assert!(same_target(&target(&["one"]), &target(&["one"])));
         assert!(!same_target(&target(&["one"]), &target(&["two"])));
@@ -2735,7 +3064,7 @@ mod tests {
 
         let fixture: Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/fixtures/connection-plan.v1.json"
+            "/../../tests/fixtures/exchange-connection-plan-v1/connection-plan.v1.json"
         )))
         .expect("the committed browser fixture is JSON");
         assert_eq!(fixture["version"], VERSION);
@@ -2993,6 +3322,44 @@ mod tests {
             json!({"method":"PUT","target":target})
         );
 
+        let (status, inspected) = call(&harness.app, "alice", Method::GET, &target, None).await;
+        assert_eq!(status, StatusCode::OK, "{inspected}");
+        assert_eq!(
+            inspected,
+            json!({
+                "version":VERSION,
+                "connector":provider.id,
+                "label":"production",
+                "service":declared.service,
+                "field":declared.binds(),
+                "authority":{
+                    "state":"proposed",
+                    "revision":"1",
+                    "origin":"https://custom.example.test"
+                }
+            })
+        );
+        for caller in ["bob", "worker"] {
+            let (status, refused) = call(&harness.app, caller, Method::GET, &target, None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{caller}: {refused}");
+            assert!(!refused.to_string().contains("custom.example.test"));
+        }
+
+        let (status, stale_replacement) = call(
+            &harness.app,
+            "alice",
+            Method::POST,
+            &plan_path,
+            Some(json!({
+                "version": VERSION,
+                "name": "production",
+                "values": { setting_target.clone(): "replacement.example.test" },
+                "expected_revisions": { setting_target.clone(): "99" }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale_replacement}");
+
         let transition = json!({"version":VERSION,"revision":"1"});
         let (status, _) = call(
             &harness.app,
@@ -3020,6 +3387,7 @@ mod tests {
                 "label":"production",
                 "service":declared.service,
                 "field":declared.binds(),
+                "action":"approved",
                 "authority":{"state":"approved","revision":"1"}
             })
         );
@@ -3039,6 +3407,10 @@ mod tests {
             .expect("authority field");
         assert_eq!(approved_field["set"], true);
         assert_eq!(approved_field["authority"]["state"], "approved");
+        assert_eq!(
+            approved_field["authority"]["actions"],
+            json!({"revoke":{"method":"DELETE","target":target}})
+        );
         let (status, stale) = call(
             &harness.app,
             "alice",
@@ -3059,8 +3431,16 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{revoked}");
         assert_eq!(
-            revoked["authority"],
-            json!({"state":"revoked","revision":"1"})
+            revoked,
+            json!({
+                "version":VERSION,
+                "connector":provider.id,
+                "label":"production",
+                "service":declared.service,
+                "field":declared.binds(),
+                "action":"revoked",
+                "authority":{"state":"revoked","revision":"1"}
+            })
         );
         let (_, revoked_plan) = call(
             &harness.app,
@@ -3097,12 +3477,26 @@ mod tests {
             .audit
             .by_actor("acme", "user", "alice", 100)
             .expect("audit records");
-        assert!(records
-            .iter()
-            .any(|record| record.action == Action::SettingAuthorityApproved));
-        assert!(records
-            .iter()
-            .any(|record| record.action == Action::SettingAuthorityRevoked));
+        assert!(records.iter().any(|record| {
+            record.action == Action::SettingAuthorityApproved
+                && record.target
+                    == Target::SettingAuthority {
+                        connector: provider.id.to_owned(),
+                        service: declared.service.clone(),
+                        field: declared.binds(),
+                        revision: "1".to_owned(),
+                    }
+        }));
+        assert!(records.iter().any(|record| {
+            record.action == Action::SettingAuthorityRevoked
+                && record.target
+                    == Target::SettingAuthority {
+                        connector: provider.id.to_owned(),
+                        service: declared.service.clone(),
+                        field: declared.binds(),
+                        revision: "1".to_owned(),
+                    }
+        }));
     }
 
     #[tokio::test]
@@ -3146,7 +3540,7 @@ mod tests {
 
         supervisor.stop(&channel_id);
         assert_eq!(supervisor.status(&channel_id), ChannelStatus::Stopped);
-        let (status, _) = call(
+        let (status, partial) = call(
             &harness.app,
             "alice",
             Method::DELETE,
@@ -3154,7 +3548,11 @@ mod tests {
             Some(transition),
         )
         .await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(status, StatusCode::MULTI_STATUS, "{partial}");
+        assert_eq!(partial["outcome"], "partial");
+        assert_eq!(partial["may_have_happened"], true);
+        assert_eq!(partial["action"], "revoked");
+        assert_eq!(partial["authority"]["revision"], "1");
         assert_ne!(
             supervisor.status(&channel_id),
             ChannelStatus::Stopped,
@@ -3164,6 +3562,65 @@ mod tests {
             settings.status.lock().expect("authority status").state,
             AuthorityState::Revoked,
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_authority_proposal_reports_revisioned_partial_audit_outcome() {
+        let candidate = origin_candidate();
+        let provider = candidate.provider;
+        let declared = candidate.declared.clone();
+        let credential = provider.auth[0].name;
+        let harness = authority_harness(candidate);
+        let plan_path = format!("/api/connections/{}/plan", provider.id);
+        let (status, created) = call(
+            &harness.app,
+            "alice",
+            Method::POST,
+            &plan_path,
+            Some(json!({
+                "version":VERSION,
+                "name":"production",
+                "values":{(format!("credential.{credential}")):SENTINEL}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+
+        rusqlite::Connection::open(harness.audit.path())
+            .expect("open audit database")
+            .execute_batch(
+                "CREATE TRIGGER fail_x125_origin_audit_finish BEFORE UPDATE ON audit_records \
+                 BEGIN SELECT RAISE(FAIL, 'deliberate authority audit finish refusal'); END;",
+            )
+            .expect("install audit finish refusal");
+        let target = format!("setting.{}.{}", declared.service, declared.binds());
+        let (status, partial) = call(
+            &harness.app,
+            "alice",
+            Method::POST,
+            &plan_path,
+            Some(json!({
+                "version":VERSION,
+                "name":"production",
+                "values":{target.clone():"partial.example.test"},
+                "expected_revisions":{}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::MULTI_STATUS, "{partial}");
+        assert_eq!(partial["outcome"], "partial");
+        let step = partial["steps"]
+            .as_array()
+            .expect("steps")
+            .iter()
+            .find(|step| step["target"] == target)
+            .expect("proposal step");
+        assert_eq!(step["outcome"], "applied");
+        assert_eq!(step["action"], "proposed");
+        assert_eq!(step["revision"], "1");
+        assert_eq!(step["may_have_happened"], true);
+        assert_eq!(partial["plan"]["state"], "incomplete");
+        assert!(!partial.to_string().contains("partial.example.test"));
     }
 
     #[tokio::test]
@@ -3508,6 +3965,11 @@ mod tests {
                     "name": "company",
                     "values": {"credential.jira.api_token": SENTINEL}
                 })),
+            ),
+            (
+                Method::GET,
+                "/api/connections/jira/instances/company/settings/default/endpoint.site/authority",
+                None,
             ),
             (
                 Method::PUT,
