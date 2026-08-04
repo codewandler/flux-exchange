@@ -25,6 +25,7 @@ pub use flux_exchange::entropy;
 mod execution;
 mod hosted_origin;
 mod local_helper;
+mod local_helper_plan;
 #[cfg(unix)]
 mod local_helper_unix;
 #[cfg(windows)]

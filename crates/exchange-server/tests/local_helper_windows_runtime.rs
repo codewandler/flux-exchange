@@ -3,6 +3,8 @@
 #[path = "../src/local_helper.rs"]
 #[allow(dead_code)]
 mod local_helper;
+#[path = "../src/local_helper_plan.rs"]
+mod local_helper_plan;
 #[path = "../src/local_helper_windows.rs"]
 mod local_helper_windows;
 

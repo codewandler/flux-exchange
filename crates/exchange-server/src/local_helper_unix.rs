@@ -26,6 +26,7 @@ use crate::local_helper::{
     HELPER_SETUP_DEADLINE, MAX_HELPER_FRAME_BYTES, UNIX_MINT_WRITER_FD, UNIX_VENDOR_REQUEST_FD,
     UNIX_VENDOR_RESPONSE_FD,
 };
+use crate::local_helper_plan::{VendorBegin, VendorOperation};
 use crate::local_management::service_account_handoff::unix_transfer::{
     HelperWriter, UnixHandoffError,
 };
@@ -187,13 +188,24 @@ impl VendorCeremony for NativeVendorCeremony {
         request: &VendorRequest,
         ready_by: Instant,
     ) -> Result<Vec<u8>, Self::Error> {
-        let begin = BeginFacts::parse(request)?;
+        let operation = match request.kind() {
+            VendorRequestKind::Connect => VendorOperation::Connect,
+            VendorRequestKind::Credential => VendorOperation::Credential,
+        };
+        let begin = VendorBegin::parse(
+            request
+                .bytes()
+                .get(HEADER_BYTES..)
+                .ok_or(UnixHelperError::Protocol)?,
+            operation,
+        )
+        .ok_or(UnixHelperError::Protocol)?;
         let mut plan_stream = endpoint.connect_before(ready_by)?;
         let plan_query = serde_json::to_vec(&PlanQuery {
-            connector: &begin.connector,
+            connector: begin.connector(),
             selection: match request.kind() {
                 VendorRequestKind::Connect => None,
-                VendorRequestKind::Credential => Some(begin.label.as_str()),
+                VendorRequestKind::Credential => Some(begin.label()),
             },
         })
         .map_err(|_| UnixHelperError::Protocol)?;
@@ -209,7 +221,7 @@ impl VendorCeremony for NativeVendorCeremony {
         if plan.opcode == ERROR {
             return Ok(plan.bytes);
         }
-        if plan.opcode != PLAN_RESPONSE || !begin.admits_plan(&plan.payload, request.kind()) {
+        if plan.opcode != PLAN_RESPONSE || !begin.admits_plan(&plan.payload) {
             return Err(UnixHelperError::Protocol);
         }
 
@@ -281,93 +293,6 @@ impl MintTransfer for HelperWriter {
 struct PlanQuery<'a> {
     connector: &'a str,
     selection: Option<&'a str>,
-}
-
-struct BeginFacts {
-    connector: String,
-    credential_revision: Option<String>,
-    label: String,
-    plan_revision: String,
-}
-
-impl BeginFacts {
-    fn parse(request: &VendorRequest) -> Result<Self, UnixHelperError> {
-        let payload = request
-            .bytes()
-            .get(HEADER_BYTES..)
-            .ok_or(UnixHelperError::Protocol)?;
-        let value: serde_json::Value =
-            serde_json::from_slice(payload).map_err(|_| UnixHelperError::Protocol)?;
-        let object = value.as_object().ok_or(UnixHelperError::Protocol)?;
-        let connector = required_string(object, "connector")?;
-        let label = required_string(object, "label")?;
-        let plan_revision = required_string(object, "plan_revision")?;
-        let credential_revision = match object.get("credential_revision") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(serde_json::Value::String(value)) => Some(value.clone()),
-            _ => return Err(UnixHelperError::Protocol),
-        };
-        match request.kind() {
-            VendorRequestKind::Connect if credential_revision.is_some() => {
-                return Err(UnixHelperError::Protocol);
-            }
-            VendorRequestKind::Credential
-                if !credential_revision
-                    .as_deref()
-                    .is_some_and(is_nonzero_lowerhex_32) =>
-            {
-                return Err(UnixHelperError::Protocol);
-            }
-            _ => {}
-        }
-        Ok(Self {
-            connector,
-            credential_revision,
-            label,
-            plan_revision,
-        })
-    }
-
-    fn admits_plan(&self, payload: &[u8], kind: VendorRequestKind) -> bool {
-        let Ok(plan) = serde_json::from_slice::<serde_json::Value>(payload) else {
-            return false;
-        };
-        plan.get("version").and_then(serde_json::Value::as_str)
-            == Some("exchange.connection-plan.v2")
-            && plan.get("connector").and_then(serde_json::Value::as_str)
-                == Some(self.connector.as_str())
-            && plan
-                .get("plan_revision")
-                .and_then(serde_json::Value::as_str)
-                == Some(self.plan_revision.as_str())
-            && match kind {
-                VendorRequestKind::Connect => {
-                    plan.get("selection") == Some(&serde_json::Value::Null)
-                        && plan.get("credential_revision") == Some(&serde_json::Value::Null)
-                }
-                VendorRequestKind::Credential => {
-                    plan.get("selection").and_then(serde_json::Value::as_str)
-                        == Some(self.label.as_str())
-                        && plan
-                            .get("credential_revision")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(is_nonzero_lowerhex_32)
-                        && self.credential_revision.is_some()
-                }
-            }
-    }
-}
-
-fn required_string(
-    object: &serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Result<String, UnixHelperError> {
-    object
-        .get(field)
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .ok_or(UnixHelperError::Protocol)
 }
 
 fn is_nonzero_lowerhex_32(value: &str) -> bool {

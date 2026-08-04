@@ -3,6 +3,8 @@
 
 #[path = "../src/local_helper.rs"]
 mod local_helper;
+#[path = "../src/local_helper_plan.rs"]
+mod local_helper_plan;
 #[path = "../src/local_helper_unix.rs"]
 mod local_helper_unix;
 #[path = "support/local_helper_unix_runtime_shim.rs"]
