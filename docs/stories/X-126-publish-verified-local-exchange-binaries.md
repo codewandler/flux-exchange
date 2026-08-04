@@ -273,7 +273,8 @@ implements its manager in C-510.
 ## Notes
 
 - Cross-repository authority:
-  `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at `013a2ab`.
+  `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at frozen roadmap
+  authority `22a8754`.
 - Flux C-510 consumes this channel and owns rollback state, compatible selection, verified
   cache/install/start/status/stop and audit of the installed exact identity. X-126 does not add a
   downloader or lifecycle manager to Exchange.
