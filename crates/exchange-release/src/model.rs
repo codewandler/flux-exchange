@@ -204,9 +204,23 @@ pub struct FixtureSet {
     pub exchange_commit: String,
     pub files: BTreeMap<String, String>,
     pub cases: Vec<FixtureCase>,
-    /// Native process cases which are intentionally bound by platform workflow jobs, not this
-    /// platform-independent verifier self-test.
-    pub deferred_cases: Vec<String>,
+    /// Native process cases bound to exact tests on the five release runners.
+    pub native_cases: Vec<NativeFixtureCase>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeFixtureCase {
+    pub id: String,
+    pub evidence: Vec<NativeFixtureEvidence>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeFixtureEvidence {
+    pub targets: Vec<String>,
+    pub test_target: String,
+    pub exact_test: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

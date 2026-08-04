@@ -328,6 +328,92 @@ impl Drop for NativeProcess {
     }
 }
 
+fn assert_new_start_refuses_at_metadata_expiry() {
+    let fixture_root =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v1");
+    let fixture: flux_exchange_release::FixtureSet = flux_exchange_release::canonical::parse(
+        &flux_exchange_release::read_bounded_file(
+            &fixture_root.join("fixture-set.json"),
+            256 * 1024,
+        )
+        .expect("bounded fixture-set read"),
+        256 * 1024,
+    )
+    .expect("canonical fixture-set");
+    let case = fixture
+        .cases
+        .iter()
+        .find(|case| case.id == "expiry-equality-stopped")
+        .expect("expiry-equality-stopped provider case");
+    let policy: flux_exchange_release::RootPolicy = flux_exchange_release::canonical::parse(
+        &flux_exchange_release::read_bounded_file(
+            &fixture_root.join("root-policy.test.json"),
+            64 * 1024,
+        )
+        .expect("bounded root-policy read"),
+        64 * 1024,
+    )
+    .expect("canonical root policy");
+    let attempt = flux_exchange_release::verify_directory_layered(
+        &fixture_root.join(&case.input),
+        &policy,
+        flux_exchange_release::parse_utc(&case.clock).expect("fixture clock"),
+        &flux_exchange_release::Protocols::v1(),
+        &case.prior_state,
+        Some("x86_64-pc-windows-msvc"),
+    );
+    assert!(matches!(
+        attempt.outcome,
+        Err(flux_exchange_release::Error::Time(_))
+    ));
+    assert_eq!(attempt.state, case.expected_state);
+}
+
+fn readiness_address(bytes: &[u8]) -> SocketAddr {
+    let ready: serde_json::Value = serde_json::from_slice(bytes).expect("readiness object");
+    format!(
+        "{}:{}",
+        ready["bind"]["host"].as_str().expect("host"),
+        ready["bind"]["port"].as_u64().expect("port")
+    )
+    .parse()
+    .expect("reported address")
+}
+
+fn assert_port_released(address: SocketAddr) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while TcpStream::connect_timeout(&address, Duration::from_millis(20)).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "supervised Exchange process died without releasing its port"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
+    let mut server = NativeProcess::spawn(false);
+    let pid = server.pid;
+    let bytes = server.readiness();
+    let address = readiness_address(&bytes);
+
+    assert_new_start_refuses_at_metadata_expiry();
+    assert_eq!(server.pid, pid, "the owned child identity changed");
+    // SAFETY: process is the still-open handle returned by CreateProcessW.
+    assert_ne!(
+        unsafe { WaitForSingleObject(server.process, 0) },
+        WAIT_OBJECT_0,
+        "metadata expiry terminated the already healthy child"
+    );
+    TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .expect("same healthy child remains reachable after metadata expiry");
+
+    server.close_liveness();
+    server.wait_dead();
+    assert_port_released(address);
+}
+
 #[test]
 fn real_windows_handle_list_readiness_identity_and_native_liveness() {
     let mut server = NativeProcess::spawn(false);
@@ -404,8 +490,10 @@ fn windows_tokio_wedge_still_dies_through_native_liveness() {
     let mut server = NativeProcess::spawn(true);
     let bytes = server.readiness();
     assert!(!bytes.is_empty());
+    let address = readiness_address(&bytes);
     server.close_liveness();
     server.wait_dead();
+    assert_port_released(address);
 }
 
 #[test]

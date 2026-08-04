@@ -390,6 +390,7 @@ jobs:
           ./scripts/check-local-release.sh --self-test
           ./scripts/check-local-release.sh
           ./scripts/release-check-assets.sh --self-test
+          ./scripts/release-native-fixtures.sh --self-test
           ./scripts/release-download.sh --self-test
           ./scripts/release-validate-redirect.py --self-test
 

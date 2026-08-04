@@ -546,25 +546,70 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
             "fixture-set provider case inventory disagrees; missing={missing:?}; unexpected={unexpected:?}"
         );
     }
-    let mut deferred = BTreeSet::new();
-    for id in &fixture.deferred_cases {
-        if !deferred.insert(id.as_str()) {
-            bail!("fixture-set has duplicate deferred case {id:?}");
+    let mut native_ids = BTreeSet::new();
+    let mut native_bindings = BTreeSet::new();
+    for native in &fixture.native_cases {
+        if !native_ids.insert(native.id.as_str()) {
+            bail!("fixture-set has duplicate native case {:?}", native.id);
         }
-        if case_ids.contains(id.as_str()) {
-            bail!("fixture case {id:?} is both executed and deferred");
+        if case_ids.contains(native.id.as_str()) {
+            bail!("fixture case {:?} is both portable and native", native.id);
+        }
+        if native.evidence.is_empty() {
+            bail!(
+                "native fixture case {:?} has no process evidence",
+                native.id
+            );
+        }
+        for evidence in &native.evidence {
+            let targets: BTreeSet<_> = evidence.targets.iter().map(String::as_str).collect();
+            if targets.len() != evidence.targets.len()
+                || targets
+                    .iter()
+                    .any(|target| !release::SUPPORTED_TARGETS.contains(target))
+            {
+                bail!(
+                    "native fixture case {:?} has duplicate or unsupported targets",
+                    native.id
+                );
+            }
+            let target_list = targets.into_iter().collect::<Vec<_>>().join(",");
+            if !native_bindings.insert((
+                native.id.as_str(),
+                target_list,
+                evidence.test_target.as_str(),
+                evidence.exact_test.as_str(),
+            )) {
+                bail!("fixture-set has duplicate native process evidence");
+            }
         }
     }
     let required_native: BTreeSet<_> = REQUIRED_NATIVE_CASES.iter().copied().collect();
     if required_native.len() != REQUIRED_NATIVE_CASES.len() {
         bail!("compiled required native inventory contains a duplicate id");
     }
-    if deferred != required_native {
-        let missing: Vec<_> = required_native.difference(&deferred).copied().collect();
-        let unexpected: Vec<_> = deferred.difference(&required_native).copied().collect();
+    if native_ids != required_native {
+        let missing: Vec<_> = required_native.difference(&native_ids).copied().collect();
+        let unexpected: Vec<_> = native_ids.difference(&required_native).copied().collect();
         bail!(
-            "fixture-set deferred native inventory disagrees; missing={missing:?}; unexpected={unexpected:?}"
+            "fixture-set native inventory disagrees; missing={missing:?}; unexpected={unexpected:?}"
         );
+    }
+    let required_bindings: BTreeSet<_> = REQUIRED_NATIVE_BINDINGS
+        .iter()
+        .map(|binding| {
+            (
+                binding.id,
+                binding.targets.join(","),
+                binding.test_target,
+                binding.exact_test,
+            )
+        })
+        .collect();
+    if required_bindings.len() != REQUIRED_NATIVE_BINDINGS.len()
+        || native_bindings != required_bindings
+    {
+        bail!("fixture-set native cases are not bound to the exact reviewed process tests");
     }
     status(&SelfTestStatus {
         schema: "exchange.release-self-test.v1",
@@ -751,6 +796,112 @@ const REQUIRED_NATIVE_CASES: &[&str] = &[
     "supervisor-death-terminate-wedged-windows",
     "unix-inherited-abi",
     "windows-inherited-abi",
+];
+
+struct RequiredNativeBinding {
+    id: &'static str,
+    targets: &'static [&'static str],
+    test_target: &'static str,
+    exact_test: &'static str,
+}
+
+const UNIX_RELEASE_TARGETS: &[&str] = &[
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+];
+const WINDOWS_RELEASE_TARGETS: &[&str] = &["x86_64-pc-windows-msvc"];
+
+const REQUIRED_NATIVE_BINDINGS: &[RequiredNativeBinding] = &[
+    RequiredNativeBinding {
+        id: "expiry-equality-live",
+        targets: UNIX_RELEASE_TARGETS,
+        test_target: "supervised_unix",
+        exact_test: "verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop",
+    },
+    RequiredNativeBinding {
+        id: "expiry-equality-live",
+        targets: WINDOWS_RELEASE_TARGETS,
+        test_target: "supervised_windows",
+        exact_test: "verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop",
+    },
+    RequiredNativeBinding {
+        id: "supervisor-death-normal-responsive-unix",
+        targets: UNIX_RELEASE_TARGETS,
+        test_target: "supervised_unix",
+        exact_test: "real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof",
+    },
+    RequiredNativeBinding {
+        id: "supervisor-death-normal-wedged-unix",
+        targets: UNIX_RELEASE_TARGETS,
+        test_target: "supervised_unix",
+        exact_test: "native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged",
+    },
+    RequiredNativeBinding {
+        id: "supervisor-death-sigkill-responsive-unix",
+        targets: UNIX_RELEASE_TARGETS,
+        test_target: "supervised_unix",
+        exact_test:
+            "sigkill_of_the_real_supervisor_kills_a_responsive_exchange_and_releases_its_port",
+    },
+    RequiredNativeBinding {
+        id: "supervisor-death-sigkill-wedged-unix",
+        targets: UNIX_RELEASE_TARGETS,
+        test_target: "supervised_unix",
+        exact_test:
+            "sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its_port",
+    },
+    RequiredNativeBinding {
+        id: "supervisor-death-terminate-responsive-windows",
+        targets: WINDOWS_RELEASE_TARGETS,
+        test_target: "supervised_windows",
+        exact_test: "terminate_process_of_supervisor_kills_responsive_exchange_and_releases_port",
+    },
+    RequiredNativeBinding {
+        id: "supervisor-death-terminate-wedged-windows",
+        targets: WINDOWS_RELEASE_TARGETS,
+        test_target: "supervised_windows",
+        exact_test: "terminate_process_of_supervisor_kills_wedged_exchange_and_releases_port",
+    },
+    RequiredNativeBinding {
+        id: "unix-inherited-abi",
+        targets: UNIX_RELEASE_TARGETS,
+        test_target: "supervised_unix",
+        exact_test: "exact_unix_abi_refuses_missing_and_wrong_capabilities",
+    },
+    RequiredNativeBinding {
+        id: "unix-inherited-abi",
+        targets: UNIX_RELEASE_TARGETS,
+        test_target: "supervised_unix",
+        exact_test: "unix_abi_refuses_alias_wrong_kind_direction_and_extra_inherited_fd",
+    },
+    RequiredNativeBinding {
+        id: "unix-inherited-abi",
+        targets: UNIX_RELEASE_TARGETS,
+        test_target: "supervised_unix",
+        exact_test: "unix_abi_refuses_each_missing_fd_and_does_not_discover_env_other_fd_or_stdout",
+    },
+    RequiredNativeBinding {
+        id: "windows-inherited-abi",
+        targets: WINDOWS_RELEASE_TARGETS,
+        test_target: "supervised_windows",
+        exact_test: "malformed_windows_handle_flags_refuse_without_stdout_readiness",
+    },
+    RequiredNativeBinding {
+        id: "windows-inherited-abi",
+        targets: WINDOWS_RELEASE_TARGETS,
+        test_target: "supervised_windows",
+        exact_test:
+            "environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities",
+    },
+    RequiredNativeBinding {
+        id: "windows-inherited-abi",
+        targets: WINDOWS_RELEASE_TARGETS,
+        test_target: "lib",
+        exact_test:
+            "supervisor::tests::windows_validator_refuses_noninherited_nonpipe_and_each_wrong_direction",
+    },
 ];
 
 struct CaseObservation {

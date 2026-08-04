@@ -1718,6 +1718,7 @@ dependencies = [
  "codewandler-flux-system",
  "codewandler-flux-tools",
  "codewandler-flux-web",
+ "flux-exchange-release",
  "futures-util",
  "jsonwebtoken",
  "libc",

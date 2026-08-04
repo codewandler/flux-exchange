@@ -46,6 +46,11 @@ PY
   grep -Fq 'group: flux-exchange-stable-channel' "$workflow_path" || fail 'stable-channel writes are not serialized'
   grep -Fq 'scripts/release-download.sh' "$workflow_path" || fail 'post-publication verification bypasses the one-302 transport'
   grep -Fq 'cargo run --locked -p flux-exchange-release -- verify-compatibility' "$workflow_path" || fail 'native artifacts bypass the production compatibility verifier'
+  grep -Fq "./scripts/release-native-fixtures.sh '\${{ matrix.target }}'" "$workflow_path" || fail 'native fixture cases are not executed on each release target'
+  grep -Fq './scripts/release-native-fixtures.sh --self-test' "$workflow_path" || fail 'native fixture mapping is not self-tested'
+  if grep -Eq 'cargo test -p flux-exchange --(test supervised_(unix|windows)|lib).*matrix.target' "$workflow_path"; then
+    fail 'release workflow uses a broad native test command instead of exact fixture bindings'
+  fi
   grep -Fq -- '--executable-sha256 "$executable_sha256"' "$workflow_path" || fail 'compatibility verification is not bound to independently digested executable bytes'
   grep -Fq '"tag": f"refs/tags/{tag}"' "$workflow_path" || fail 'native compatibility expectation is not bound to the exact tag'
   grep -Fq '"version": version' "$workflow_path" || fail 'native compatibility expectation is not bound to the exact version'
@@ -132,6 +137,9 @@ if [ "${1:-}" = --self-test ]; then
   cp "$workflow" "$scratch/workflow.yml"
   sed -i.bak '/verify-compatibility/d' "$scratch/workflow.yml"
   if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted native production compatibility-verifier removal'; fi
+  cp "$workflow" "$scratch/workflow.yml"
+  sed -i.bak "/release-native-fixtures.sh.*matrix.target/d" "$scratch/workflow.yml"
+  if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted native fixture workflow-binding removal'; fi
   cp "$workflow" "$scratch/workflow.yml"
   sed -i.bak '/exchange\.invoke-response\.v1/d' "$scratch/workflow.yml"
   if (check "$scratch/workflow.yml" "$targets" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted a missing native protocol binding'; fi

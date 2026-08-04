@@ -139,6 +139,7 @@ jobs:
           ./scripts/check-local-release.sh --self-test
           ./scripts/check-local-release.sh
           ./scripts/release-check-assets.sh --self-test
+          ./scripts/release-native-fixtures.sh --self-test
           ./scripts/release-download.sh --self-test
           ./scripts/release-validate-redirect.py --self-test
           cargo build --workspace --locked
@@ -205,14 +206,12 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/release-download.sh --self-test
+          ./scripts/release-native-fixtures.sh --self-test
           cargo test -p codewandler-flux-exchange-host --locked private_fs
           cargo test -p flux-exchange --bin flux-exchange --locked local_state
+          ./scripts/release-native-fixtures.sh '${{ matrix.target }}'
           if [ "$RUNNER_OS" = Windows ]; then
-            cargo test -p flux-exchange --test supervised_windows --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target '${{ matrix.target }}'
-            cargo test -p flux-exchange --lib --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target '${{ matrix.target }}' supervisor::tests::windows_validator_refuses_noninherited_nonpipe_and_each_wrong_direction
             pwsh -File ./scripts/check-windows-state-refusals.ps1
-          else
-            cargo test -p flux-exchange --test supervised_unix --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target '${{ matrix.target }}'
           fi
           ./scripts/check-dev-signin.sh
 
