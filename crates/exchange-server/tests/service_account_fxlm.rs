@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use exchange_host::{Principal, PrincipalKind, Tenant};
 use flux_exchange::service_account::{Expiry, ServiceAccountStore};
 use service_account::{
-    BindingRefusal, MintOutcome, MintPort, MintPortRefusal, MintRequest, OneShotWriter, ReceiptId,
+    MintOutcome, MintPort, MintPortRefusal, MintRequest, OneShotWriter, ReceiptId,
     ServiceAccountCeremony, TokenHandoff, WriterRefusal, ERROR_OPCODE, MINT_OPCODE, QUERY_OPCODE,
     RECEIPT_OPCODE,
 };
@@ -80,9 +80,24 @@ struct CapturedWriter {
 
 struct RefusingWriter(WriterRefusal);
 
+struct CapturedRefusingWriter {
+    frames: Arc<Mutex<Vec<Vec<u8>>>>,
+    refusal: WriterRefusal,
+}
+
 impl OneShotWriter for RefusingWriter {
     fn write_once(self: Box<Self>, _frame: &[u8]) -> Result<(), WriterRefusal> {
         Err(self.0)
+    }
+}
+
+impl OneShotWriter for CapturedRefusingWriter {
+    fn write_once(self: Box<Self>, frame: &[u8]) -> Result<(), WriterRefusal> {
+        self.frames
+            .lock()
+            .expect("writer lock")
+            .push(frame.to_vec());
+        Err(self.refusal)
     }
 }
 
@@ -418,14 +433,192 @@ fn writer_and_atomic_port_refusals_use_only_the_closed_value_free_tuples() {
     }
 }
 
+fn near_future_mint(id: &str) -> (Vec<u8>, i64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall clock after Unix epoch")
+        .as_secs() as i64;
+    let expires_at = now + 3600;
+    (
+        format!(r#"{{"expires_at":"{expires_at}","id":"{id}"}}"#).into_bytes(),
+        now,
+    )
+}
+
+fn extract_receipt_id(frame: &service_account::ServiceAccountFrame) -> String {
+    serde_json::from_slice::<serde_json::Value>(frame.payload())
+        .expect("receipt JSON")
+        .get("receipt_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("receipt identity")
+        .to_owned()
+}
+
 #[test]
-fn current_retained_store_surfaces_the_atomic_receipt_integration_need() {
-    let scratch = Scratch::new("binding");
+fn retained_store_atomically_survives_response_loss_restart_query_and_replay() {
+    let scratch = Scratch::new("retained-restart");
+    let path = scratch.0.join("service-accounts.json");
+    let store = Arc::new(ServiceAccountStore::open(&path).expect("private store"));
+    let ceremony = ServiceAccountCeremony::bind_retained(store.clone()).expect("retained binding");
+    let actor = Principal::new(
+        PrincipalKind::User,
+        "local-owner",
+        Tenant::new("local").expect("tenant"),
+    );
+    let (mint, now) = near_future_mint("runtime");
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let committed = ceremony.handle(
+        &actor,
+        MINT_OPCODE,
+        &mint,
+        Some(Box::new(CapturedWriter {
+            frames: frames.clone(),
+        })),
+    );
+    assert_eq!(committed.opcode(), RECEIPT_OPCODE);
+    let receipt_id = extract_receipt_id(&committed);
+    let token = {
+        let frames = frames.lock().expect("frames");
+        assert_eq!(frames.len(), 1);
+        std::str::from_utf8(&frames[0][12..])
+            .expect("current token encoding")
+            .to_owned()
+    };
+
+    // Model a process crash after durable commit but before the terminal response is observed.
+    drop(ceremony);
+    drop(store);
+    let persisted = std::fs::read_to_string(&path).expect("one durable store image");
+    assert!(!persisted.contains(&token), "the token is never retained");
+    assert!(persisted.contains("proposal_identity"));
+    assert!(persisted.contains("mint_receipts"));
+    assert!(persisted.contains("committed"));
+
+    let restarted = Arc::new(ServiceAccountStore::open(&path).expect("restart store"));
+    assert!(restarted.resolve(&token, now).is_some());
+    let ceremony = ServiceAccountCeremony::bind_retained(restarted).expect("restart binding");
+    let query = ceremony.handle(
+        &actor,
+        QUERY_OPCODE,
+        format!(r#"{{"receipt_id":"{receipt_id}"}}"#).as_bytes(),
+        None,
+    );
+    assert_eq!(query.opcode(), RECEIPT_OPCODE);
+    assert!(std::str::from_utf8(query.payload())
+        .expect("query receipt")
+        .contains("\"replayed\":true"));
+
+    let replay_frames = Arc::new(Mutex::new(Vec::new()));
+    let replay = ceremony.handle(
+        &actor,
+        MINT_OPCODE,
+        &mint,
+        Some(Box::new(CapturedWriter {
+            frames: replay_frames.clone(),
+        })),
+    );
+    assert_eq!(extract_receipt_id(&replay), receipt_id);
+    assert!(replay_frames.lock().expect("replay frames").is_empty());
+}
+
+#[test]
+fn a_failed_one_shot_writer_publishes_neither_verifier_nor_receipt() {
+    let scratch = Scratch::new("retained-writer-failure");
+    let path = scratch.0.join("service-accounts.json");
+    let store = Arc::new(ServiceAccountStore::open(&path).expect("private store"));
+    let ceremony = ServiceAccountCeremony::bind_retained(store.clone()).expect("retained binding");
+    let actor = Principal::new(
+        PrincipalKind::User,
+        "local-owner",
+        Tenant::new("local").expect("tenant"),
+    );
+    let (mint, now) = near_future_mint("runtime");
+    let attempted = Arc::new(Mutex::new(Vec::new()));
+    let refused = ceremony.handle(
+        &actor,
+        MINT_OPCODE,
+        &mint,
+        Some(Box::new(CapturedRefusingWriter {
+            frames: attempted.clone(),
+            refusal: WriterRefusal::Closed,
+        })),
+    );
+    assert_eq!(refused.opcode(), ERROR_OPCODE);
+    assert!(std::str::from_utf8(refused.payload())
+        .expect("writer refusal")
+        .contains("\"code\":\"writer_closed\""));
+    assert!(store.list(&actor, now).expect("list").is_empty());
+    let attempted_token = {
+        let attempted = attempted.lock().expect("attempted frame");
+        assert_eq!(attempted.len(), 1);
+        std::str::from_utf8(&attempted[0][12..])
+            .expect("current token encoding")
+            .to_owned()
+    };
+    assert!(store.resolve(&attempted_token, now).is_none());
+
+    drop(ceremony);
+    drop(store);
+    let reopened = ServiceAccountStore::open(&path).expect("restart after writer failure");
+    assert!(reopened
+        .list(&actor, now)
+        .expect("list after restart")
+        .is_empty());
+    assert!(reopened.resolve(&attempted_token, now).is_none());
+    if let Ok(persisted) = std::fs::read_to_string(path) {
+        assert!(!persisted.contains("mint_receipts"));
+    }
+}
+
+#[test]
+fn retained_replay_is_exact_and_a_changed_proposal_conflicts_without_disclosure() {
+    let scratch = Scratch::new("retained-conflict");
     let store = Arc::new(
         ServiceAccountStore::open(scratch.0.join("service-accounts.json")).expect("private store"),
     );
-    assert!(matches!(
-        ServiceAccountCeremony::bind_retained(store),
-        Err(BindingRefusal::AtomicReceiptStoreRequired { .. })
-    ));
+    let ceremony = ServiceAccountCeremony::bind_retained(store).expect("retained binding");
+    let actor = Principal::new(
+        PrincipalKind::User,
+        "local-owner",
+        Tenant::new("local").expect("tenant"),
+    );
+    let (mint, _) = near_future_mint("runtime");
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    assert_eq!(
+        ceremony
+            .handle(
+                &actor,
+                MINT_OPCODE,
+                &mint,
+                Some(Box::new(CapturedWriter {
+                    frames: frames.clone(),
+                })),
+            )
+            .opcode(),
+        RECEIPT_OPCODE
+    );
+    let mut changed: serde_json::Value = serde_json::from_slice(&mint).expect("mint JSON");
+    changed["expires_at"] = serde_json::Value::String(
+        (changed["expires_at"]
+            .as_str()
+            .expect("expiry")
+            .parse::<i64>()
+            .expect("decimal")
+            + 1)
+        .to_string(),
+    );
+    let changed = serde_json::to_vec(&changed).expect("canonical object order");
+    let conflict = ceremony.handle(
+        &actor,
+        MINT_OPCODE,
+        &changed,
+        Some(Box::new(CapturedWriter {
+            frames: frames.clone(),
+        })),
+    );
+    assert_eq!(conflict.opcode(), ERROR_OPCODE);
+    assert!(std::str::from_utf8(conflict.payload())
+        .expect("conflict")
+        .contains("\"code\":\"service_account_conflict\""));
+    assert_eq!(frames.lock().expect("frames").len(), 1);
 }

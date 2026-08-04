@@ -3,15 +3,16 @@
 //! This module owns the closed control and receipt objects and the one-shot FXSA writer boundary.
 //! The durable port deliberately includes the terminal receipt in the same mutation authority as
 //! the verifier: composing [`ServiceAccountStore`] with an unrelated receipt file would create a
-//! crash window in which either a principal or a receipt exists alone. The retained v0.17 store has
-//! no such transaction seam, so [`ServiceAccountCeremony::bind_retained`] reports that precise
-//! integration requirement instead of manufacturing a second ledger.
+//! crash window in which either a principal or a receipt exists alone. The retained store exposes
+//! that atomic seam directly, so this adapter never opens or maintains a second ledger.
 
-use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use exchange_host::{Principal, Tenant};
-use flux_exchange::service_account::{ServiceAccountStore, ServiceAccountToken};
+use flux_exchange::service_account::{
+    DurableMintError, DurableMintOutcome, Expiry, ServiceAccountStore, ServiceAccountToken,
+};
 use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -26,15 +27,8 @@ const MAX_CONTROL_BYTES: usize = 65_536;
 const RECEIPT_SCHEMA: &str = "exchange.service-account-mint-receipt.v1";
 const ERROR_SCHEMA: &str = "exchange.local-management-error.v1";
 
-/// Why the retained Service Account store cannot yet bind this ceremony.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum BindingRefusal {
-    /// The verifier store cannot atomically publish/query the terminal proposal receipt.
-    #[error(
-        "Service Account store {path} has no atomic verifier/proposal/receipt transaction seam"
-    )]
-    AtomicReceiptStoreRequired { path: PathBuf },
-}
+/// Binding is infallible because the already-open retained store is the atomic authority.
+pub(crate) type BindingRefusal = std::convert::Infallible;
 
 /// One server-to-client Service Account control frame before its shared FXLM header.
 pub(crate) struct ServiceAccountFrame {
@@ -84,6 +78,10 @@ impl ReceiptId {
             encoded.push(HEX[usize::from(byte & 0x0f)] as char);
         }
         encoded
+    }
+
+    fn bytes(&self) -> [u8; 32] {
+        self.0
     }
 }
 
@@ -276,6 +274,66 @@ impl ReceiptIds for OsReceiptIds {
     }
 }
 
+struct RetainedMintPort {
+    store: Arc<ServiceAccountStore>,
+}
+
+impl MintPort for RetainedMintPort {
+    fn mint(
+        &self,
+        actor: &Principal,
+        request: &MintRequest,
+        receipt_id: ReceiptId,
+        handoff: &mut dyn TokenHandoff,
+    ) -> Result<MintOutcome, MintPortRefusal> {
+        let as_of = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| MintPortRefusal::Internal)?;
+        let as_of = i64::try_from(as_of.as_secs()).map_err(|_| MintPortRefusal::Internal)?;
+        let outcome = self.store.mint_with_receipt(
+            actor,
+            request.id(),
+            Expiry {
+                expires_at: request.expires_at(),
+                as_of,
+            },
+            receipt_id.bytes(),
+            |token| handoff.write_token(token),
+        );
+        match outcome {
+            Ok(DurableMintOutcome::Committed { id, receipt_id }) => Ok(MintOutcome::Committed {
+                id,
+                receipt_id: ReceiptId::from_bytes(receipt_id).ok_or(MintPortRefusal::Internal)?,
+            }),
+            Ok(DurableMintOutcome::Replay { id, receipt_id }) => Ok(MintOutcome::Replay {
+                id,
+                receipt_id: ReceiptId::from_bytes(receipt_id).ok_or(MintPortRefusal::Internal)?,
+            }),
+            Err(DurableMintError::Conflict) => Err(MintPortRefusal::Conflict),
+            Err(DurableMintError::InvalidRequest) => Err(MintPortRefusal::InvalidRequest),
+            Err(DurableMintError::Handoff(refusal)) => Err(refusal),
+            Err(DurableMintError::StoreUnavailable) => Err(MintPortRefusal::StoreUnavailable),
+            Err(DurableMintError::Internal) => Err(MintPortRefusal::Internal),
+        }
+    }
+
+    fn query(
+        &self,
+        tenant: &Tenant,
+        receipt_id: &ReceiptId,
+    ) -> Result<Option<MintOutcome>, MintPortRefusal> {
+        let Some(outcome) = self.store.query_mint_receipt(tenant, receipt_id.bytes()) else {
+            return Ok(None);
+        };
+        let (id, receipt_id) = match outcome {
+            DurableMintOutcome::Committed { id, receipt_id }
+            | DurableMintOutcome::Replay { id, receipt_id } => (id, receipt_id),
+        };
+        let receipt_id = ReceiptId::from_bytes(receipt_id).ok_or(MintPortRefusal::Internal)?;
+        Ok(Some(MintOutcome::Replay { id, receipt_id }))
+    }
+}
+
 #[cfg(test)]
 struct FixedReceiptId([u8; 32]);
 
@@ -300,11 +358,9 @@ impl ServiceAccountCeremony {
         }
     }
 
-    /// The retained store cannot be adapted safely until it owns the terminal receipt atomically.
+    /// Bind the already-open retained store as the sole verifier/proposal/receipt authority.
     pub(crate) fn bind_retained(store: Arc<ServiceAccountStore>) -> Result<Self, BindingRefusal> {
-        Err(BindingRefusal::AtomicReceiptStoreRequired {
-            path: store.path().to_path_buf(),
-        })
+        Ok(Self::new(Arc::new(RetainedMintPort { store })))
     }
 
     #[cfg(test)]
