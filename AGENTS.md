@@ -57,7 +57,9 @@ activity. Since X-101 it persists
 and supervises generated connector WebSocket channels, gates closed declared event sets, and fans
 them out through authenticated `/api/subscribe`. Since X-14 a tenant may hold several labelled
 connections to one connector; invocation selects one explicitly and the first-to-second credential
-migration is atomic.** `cargo run` binds loopback and refuses to start
+migration is atomic. Since X-127 the complete local composition persists owner-only on all five Flux
+targets, and since X-128/X-129 its supervised readiness and four delivered HTTP contracts have exact
+provider-owned v1 identities and conformance fixtures.** `cargo run` binds loopback and refuses to start
 on a reachable address with no identity provider configured.
 
 **Signing in without an identity provider works on loopback** (X-57, v0.9.0+). Arm
@@ -65,9 +67,10 @@ on a reachable address with no identity provider configured.
 handle as a bearer token, `POST /api/session` exchanges it for a cookie. `sign_in_available` now means
 *this deployment can turn a caller into a principal*, not *OIDC is configured*.
 
-**X-59's delivered local slice removes even that roster setup:** `cargo run -- --dev` implies
-`user:${USER}@dev`, keeps the identity loopback-only, and selects `Deployment::SingleTenant` for the
-invoker while preserving the ordinary `tenants/dev/...` address layout. An explicit
+**X-59's local identity slice removes even that roster setup, and X-127 makes its state complete:**
+`cargo run -- --dev` implies `user:${USER}@dev`, keeps the identity loopback-only, selects
+`Deployment::SingleTenant` for the invoker, and binds every durable store below the conventional
+per-user state root while preserving the ordinary `tenants/dev/...` address layout. An explicit
 `FLUX_EXCHANGE_DEV_IDENTITY` roster still takes precedence and remains the multi-tenant development
 path. X-59 stays in progress for selecting one tenant independently of the authentication provider.
 

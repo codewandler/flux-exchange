@@ -289,7 +289,7 @@ session and returns to the console.
 `flux-exchange compatibility --json` is the side-effect-free release/protocol query: it opens no
 store and binds no listener. `--supervised` is a separate machine-only launch mode for the Flux
 local supervisor. It accepts only an OS-selected loopback port (`FLUX_EXCHANGE_BIND` may be absent
-or a literal loopback address with port `0`) and emits one bounded canonical
+or exactly `127.0.0.1:0` or `[::1]:0`) and emits one bounded canonical
 `exchange.supervisor-ready.v1` object after every store/safety check and the one listener bind have
 succeeded. The record goes only to the inherited one-shot readiness capability; stdout and stderr
 remain ordinary process output, the HTTP listener carries application traffic, and later control is
