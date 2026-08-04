@@ -6,6 +6,9 @@
 
 use std::fmt;
 
+#[cfg(unix)]
+pub(super) mod unix_transfer;
+
 const MAGIC: &[u8; 4] = b"FXSA";
 const VERSION: u8 = 1;
 const DIRECTION_EXCHANGE_TO_WRITER: u8 = 1;
