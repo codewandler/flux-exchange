@@ -1,7 +1,7 @@
 ---
 id: X-129
 title: "Bind local-release protocol identities to the delivered HTTP wire"
-status: ready
+status: in-progress
 priority: 0
 epic: rich-connector-runtimes
 areas: [exchange-host, exchange-server, protocol, tests]

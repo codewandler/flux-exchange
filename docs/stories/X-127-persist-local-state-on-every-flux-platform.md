@@ -1,7 +1,7 @@
 ---
 id: X-127
 title: "Persist local Exchange state safely on every Flux platform"
-status: ready
+status: in-progress
 priority: 0
 epic: remote-deployment
 areas: [ci, exchange-host, exchange-server, persistence, windows]

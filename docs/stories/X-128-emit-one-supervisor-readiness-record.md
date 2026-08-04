@@ -1,7 +1,7 @@
 ---
 id: X-128
 title: "Emit one trusted readiness record for a supervised Exchange"
-status: ready
+status: in-progress
 priority: 0
 epic: remote-deployment
 areas: [exchange-server, lifecycle, linux, macos, protocol, windows]
