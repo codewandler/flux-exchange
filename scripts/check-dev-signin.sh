@@ -6,6 +6,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 run_dir="$(mktemp -d)"
 server_log="$run_dir/server.log"
+first_server_log="$run_dir/server-first.log"
 cookie_jar="$run_dir/cookies"
 server_pid=""
 
@@ -122,6 +123,43 @@ for path in settings grants connections channels workflows service-accounts; do
   }
 done
 
+# Exercise a released connector through the real connection, grant and invocation surfaces. Slack
+# documents that its Web API answers HTTP 200 with `ok:false` for invalid authentication, so this
+# deliberately fake credential makes `slack-users-info` a harmless network fixture: the released
+# Flux executes, but no vendor state can change and no real authority is needed.
+credential_sentinel="X127-SENTINEL-NOT-A-REAL-SECRET"
+connection_response="$(curl --fail --silent --show-error \
+  --cookie "$cookie_jar" \
+  --header 'content-type: application/json' \
+  --data "{\"version\":\"exchange.connection-plan.v1\",\"name\":\"restart-proof\",\"values\":{\"credential.slack.bot_token\":\"$credential_sentinel\"}}" \
+  "$origin/api/connections/slack/plan")"
+grep -Fq '"outcome":"complete"' <<<"$connection_response"
+grep -Fq '"selection":"restart-proof"' <<<"$connection_response"
+grep -Fq '"state":"complete"' <<<"$connection_response"
+
+grant_response="$(curl --fail --silent --show-error \
+  --request PUT \
+  --cookie "$cookie_jar" \
+  --header 'content-type: application/json' \
+  --data '{"grants":[{"connector":"slack","selector":{"max_risk":"medium"}}]}' \
+  "$origin/api/grants")"
+grep -Fq '"id":"slack-users-info"' <<<"$grant_response"
+
+invoke_response="$(curl --fail --silent --show-error \
+  --cookie "$cookie_jar" \
+  --header 'content-type: application/json' \
+  --data '{"user":"U00000000","include_locale":false}' \
+  "$origin/api/operations/slack-users-info/invoke?connection=restart-proof")"
+grep -Fq '"operation":"slack-users-info"' <<<"$invoke_response"
+grep -Fq '"is_error":false' <<<"$invoke_response"
+
+for response in "$connection_response" "$grant_response" "$invoke_response"; do
+  if grep -Fq "$credential_sentinel" <<<"$response"; then
+    echo "a connection credential entered an Exchange response" >&2
+    exit 1
+  fi
+done
+
 # Mint one durable bearer identity, restart the real process over the same root, and prove the
 # second process accepts it. The response is kept only in this private scratch directory and never
 # printed; the store itself contains only the verifier.
@@ -138,9 +176,13 @@ test -n "$service_account_token" || {
 }
 
 kill "$server_pid"
-wait "$server_pid"
+wait "$server_pid" || true
 server_pid=""
-: >"$server_log"
+if grep -Fq "$credential_sentinel" "$server_log"; then
+  echo "a connection credential entered server stdout or stderr" >&2
+  exit 1
+fi
+mv "$server_log" "$first_server_log"
 
 env \
   -u FLUX_EXCHANGE_DEV_IDENTITY \
@@ -188,3 +230,16 @@ test -n "$port" || {
 curl --fail --silent --show-error \
   --header "Authorization: Bearer $service_account_token" \
   "http://127.0.0.1:$port/api/catalogue/effective" >/dev/null
+
+restarted_invoke_response="$(curl --fail --silent --show-error \
+  --header "Authorization: Bearer $service_account_token" \
+  --header 'content-type: application/json' \
+  --data '{"user":"U00000000","include_locale":false}' \
+  "http://127.0.0.1:$port/api/operations/slack-users-info/invoke?connection=restart-proof")"
+grep -Fq '"operation":"slack-users-info"' <<<"$restarted_invoke_response"
+grep -Fq '"is_error":false' <<<"$restarted_invoke_response"
+if grep -Fq "$credential_sentinel" <<<"$restarted_invoke_response" || \
+   grep -Fq "$credential_sentinel" "$first_server_log" "$server_log"; then
+  echo "a connection credential entered server output or the post-restart response" >&2
+  exit 1
+fi
