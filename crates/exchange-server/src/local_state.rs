@@ -41,6 +41,8 @@ pub struct LocalStatePaths {
     pub workflows: PathBuf,
     pub audit: PathBuf,
     pub service_accounts: PathBuf,
+    /// Value-free prepared-transaction recovery state below the authenticated owner root.
+    pub coordinator: Option<PathBuf>,
     pub apps: Option<PathBuf>,
 }
 
@@ -56,6 +58,7 @@ impl LocalStatePaths {
             workflows: root.join("workflows"),
             audit: root.join("audit/events.sqlite3"),
             service_accounts: root.join("service-accounts/store.json"),
+            coordinator: Some(root.join("coordinator/transactions.sqlite3")),
             apps: Some(root.join("apps")),
         }
     }
@@ -108,6 +111,7 @@ impl LocalStatePaths {
             workflows: PathBuf::from(&configured[WORKFLOW_STORE_SETTING]),
             audit: PathBuf::from(&configured[AUDIT_SETTING]),
             service_accounts: PathBuf::from(&configured[SERVICE_ACCOUNT_STORE_SETTING]),
+            coordinator: None,
             apps: None,
         })
     }

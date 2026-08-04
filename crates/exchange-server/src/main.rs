@@ -23,7 +23,7 @@ mod dev_identity;
 pub use flux_exchange::entropy;
 mod execution;
 mod local_identity;
-mod local_management;
+pub mod local_management;
 mod local_state;
 mod managed_apps;
 mod native_root;
@@ -45,7 +45,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use exchange_host::{Deployment, Runtime};
+use exchange_host::{Deployment, PreparedSecretStore, Runtime, SecretStore};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -61,6 +61,7 @@ use crate::execution::{channel_execution_system, invoker};
 use crate::local_identity::{
     generate as generate_local_user, LocalUserRefusal, LocalUsers, LOCAL_USERS_SETTING,
 };
+use crate::local_management::TransactionCoordinator;
 use crate::managed_apps::ManagedAppSupervisor;
 use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
@@ -425,7 +426,8 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
     } else {
         configured_bind()?
     };
-    let state = compose(&startup, bind, supervised)?;
+    let composition = compose(&startup, bind, supervised).await?;
+    let state = composition.state;
 
     report_deployment(startup.deployment());
     report_surface();
@@ -466,8 +468,11 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
         .map_err(|source| StartupRefusal::BindUnavailable { bind, source })?;
 
     #[cfg(unix)]
-    let local_management = local_management::LocalManagement::bind_for_mode(supervised)
-        .map_err(|reason| StartupRefusal::Supervised { reason })?;
+    let local_management = local_management::LocalManagement::bind_for_mode(
+        supervised,
+        composition.coordinator.clone(),
+    )
+    .map_err(|reason| StartupRefusal::Supervised { reason })?;
     #[cfg(unix)]
     let local_management_task = local_management.map(|endpoint| tokio::spawn(endpoint.serve()));
 
@@ -555,11 +560,16 @@ fn configured_console() -> Option<PathBuf> {
 ///
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
-fn compose(
+struct Composition {
+    state: AppState,
+    coordinator: Option<Arc<TransactionCoordinator>>,
+}
+
+async fn compose(
     startup: &Startup,
     bind: SocketAddr,
     supervised: bool,
-) -> Result<AppState, StartupRefusal> {
+) -> Result<Composition, StartupRefusal> {
     if startup.development_requested() {
         info!(
             armed_by = DEV_FLAG,
@@ -649,9 +659,32 @@ fn compose(
     let grants = grant_store(local_state.as_ref().map(|paths| paths.grants.as_path()))?;
 
     let channels = channel_store(local_state.as_ref().map(|paths| paths.channels.as_path()))?;
+    let mut coordinator = None;
     if let Some(store) =
         credential_store(local_state.as_ref().map(|paths| paths.credential.as_path()))?
     {
+        if let Some(path) = local_state
+            .as_ref()
+            .and_then(|paths| paths.coordinator.as_deref())
+        {
+            let bound = Arc::new(
+                TransactionCoordinator::bind(path, store.prepared.clone()).map_err(|error| {
+                    StartupRefusal::TransactionCoordinator {
+                        reason: error.to_string(),
+                    }
+                })?,
+            );
+            bound
+                .recover()
+                .await
+                .map_err(|refusal| StartupRefusal::TransactionCoordinator {
+                    reason: format!(
+                        "transaction recovery refused with {}/{}/{}/{}",
+                        refusal.code, refusal.status, refusal.retry, refusal.commit
+                    ),
+                })?;
+            coordinator = Some(bound);
+        }
         // The invoker is built from the same store the connections surface writes to, and only
         // when there is one. A composition with no store could still resolve a principal and look
         // an operation up, and would then send every request unauthenticated — a fail-closed `401`
@@ -666,7 +699,7 @@ fn compose(
             state = state.with_invoker(Arc::new(
                 invoker(
                     startup.deployment(),
-                    store.clone(),
+                    store.ordinary.clone(),
                     Arc::clone(&configuration),
                     grants,
                 )
@@ -676,7 +709,7 @@ fn compose(
 
         if let Some(channels) = channels {
             let planner = Arc::new(exchange_host::ConnectorChannelPlanner::new(
-                store.clone(),
+                store.ordinary.clone(),
                 Arc::clone(&configuration),
             ));
             let execution_system = channel_execution_system()
@@ -700,7 +733,7 @@ fn compose(
         // than an oversight: a host with credentials and no grants is one an operator can connect a
         // vendor to and nobody can run anything on, which is the honest state to be in on the way
         // to granting something.
-        state = state.with_credentials(store);
+        state = state.with_credentials(store.ordinary);
     } else if channels.is_some() {
         warn!(
             "a channel store is bound but no credential store is available, so channel management \
@@ -719,7 +752,7 @@ fn compose(
         state = state.with_apps(apps);
     }
 
-    Ok(state)
+    Ok(Composition { state, coordinator })
 }
 
 /// Bind installed App declarations and the per-App durable Flux event logs, or bind neither.
@@ -917,9 +950,14 @@ fn service_account_store_path(canonical: Option<&str>) -> Result<Option<String>,
 ///
 /// `connector-secrets` owns the platform binding: Unix owner/mode checks and Windows process-SID /
 /// protected-DACL checks reach this composition through the same safe [`CredentialStore`] API.
+struct CredentialBinding {
+    ordinary: Arc<dyn SecretStore>,
+    prepared: Arc<dyn PreparedSecretStore>,
+}
+
 fn credential_store(
     configured: Option<&std::path::Path>,
-) -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
+) -> Result<Option<CredentialBinding>, StartupRefusal> {
     use exchange_host::{CredentialStore, CREDENTIAL_STORE_SETTING};
 
     let Some(configured) = configured else {
@@ -941,7 +979,10 @@ fn credential_store(
     // Read back off the bound store, so this line cannot name a file this process did not open.
     info!("{}", store.banner());
 
-    Ok(Some(store.secrets()))
+    Ok(Some(CredentialBinding {
+        ordinary: store.secrets(),
+        prepared: store.prepared_secrets(),
+    }))
 }
 
 /// Bind the grant store the environment names, or bind none.

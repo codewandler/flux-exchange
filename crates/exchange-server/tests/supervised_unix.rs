@@ -410,6 +410,15 @@ fn supervised_unix_binds_owner_authenticated_fxlm_before_readiness() {
     let mut server = SupervisedChild::spawn(0o700);
     let ready: serde_json::Value =
         serde_json::from_slice(&server.readiness()).expect("readiness object");
+    let journal = server.state_root.join("coordinator/transactions.sqlite3");
+    assert!(
+        journal.is_file(),
+        "coordinator recovery journal must be bound before readiness"
+    );
+    let credential_path = server.state_root.join("credentials/store.txt");
+    let contention = exchange_host::CredentialStore::bind(&credential_path)
+        .expect_err("the serving process retains its one credential-store lease");
+    assert!(contention.to_string().contains("lease"), "{contention}");
     let socket = server.state_root.join("run/local-management-v1.sock");
     let run_metadata = std::fs::symlink_metadata(server.state_root.join("run"))
         .expect("run existed when readiness was emitted");

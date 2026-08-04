@@ -3,8 +3,9 @@
 #[allow(dead_code)]
 mod codec;
 
-#[allow(dead_code)]
-mod transaction;
+pub mod transaction;
+
+pub use transaction::TransactionCoordinator;
 
 #[cfg(unix)]
 mod unix;

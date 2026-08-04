@@ -16,7 +16,7 @@ const SCHEMA_VERSION: &str = "exchange.transaction-journal.v1";
 
 /// One admitted value-free proposal kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TransactionKind {
+pub enum TransactionKind {
     Connect,
     Credential,
 }
@@ -32,7 +32,7 @@ impl TransactionKind {
 
 /// The opaque identities returned before any secret bytes are accepted.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Allocation {
+pub struct Allocation {
     id: SecretTransactionId,
     generation: SecretTransactionGeneration,
     proposal: SecretProposalDigest,
@@ -40,18 +40,18 @@ pub(crate) struct Allocation {
 }
 
 impl Allocation {
-    pub(crate) const fn transaction_id(&self) -> SecretTransactionId {
+    pub const fn transaction_id(&self) -> SecretTransactionId {
         self.id
     }
 
-    pub(crate) const fn receipt_id(&self) -> ReceiptId {
+    pub const fn receipt_id(&self) -> ReceiptId {
         self.receipt
     }
 }
 
 /// A separate opaque receipt identity. The all-zero value is reserved and never emitted.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ReceiptId([u8; 32]);
+pub struct ReceiptId([u8; 32]);
 
 impl std::fmt::Debug for ReceiptId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -60,24 +60,24 @@ impl std::fmt::Debug for ReceiptId {
 }
 
 impl ReceiptId {
-    pub(crate) fn from_protocol_bytes(bytes: [u8; 32]) -> Option<Self> {
+    pub fn from_protocol_bytes(bytes: [u8; 32]) -> Option<Self> {
         bytes.iter().any(|byte| *byte != 0).then_some(Self(bytes))
     }
 
-    pub(crate) const fn protocol_bytes(self) -> [u8; 32] {
+    pub const fn protocol_bytes(self) -> [u8; 32] {
         self.0
     }
 }
 
 /// Whether an exact proposal is unresolved or already has its terminal receipt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProposalState {
+pub enum ProposalState {
     Active,
     Committed(ReceiptId),
 }
 
 /// Durable coordinator around one process-lifetime prepared-store port.
-pub(crate) struct TransactionCoordinator {
+pub struct TransactionCoordinator {
     provider: Arc<dyn PreparedSecretStore>,
     journal: Mutex<Connection>,
     path: PathBuf,
@@ -85,7 +85,7 @@ pub(crate) struct TransactionCoordinator {
 
 impl TransactionCoordinator {
     /// Bind one owner-only journal without opening the credential store a second time.
-    pub(crate) fn bind(
+    pub fn bind(
         path: impl AsRef<Path>,
         provider: Arc<dyn PreparedSecretStore>,
     ) -> Result<Self, CoordinatorError> {
@@ -128,14 +128,14 @@ impl TransactionCoordinator {
     }
 
     /// Allocate both provider transaction components and a distinct receipt id durably.
-    pub(crate) fn allocate(
+    pub fn allocate(
         &self,
         kind: TransactionKind,
         connector: &str,
         label: &str,
         proposal: SecretProposalDigest,
     ) -> Result<Allocation, CoordinatorError> {
-        let nonce = crate::entropy::bytes::<24>().map_err(CoordinatorError::Entropy)?;
+        let nonce = nonzero_nonce()?;
         let receipt = nonzero_receipt()?;
         self.allocate_with(kind, connector, label, proposal, nonce, receipt)
     }
@@ -149,6 +149,9 @@ impl TransactionCoordinator {
         nonce: [u8; 24],
         receipt: ReceiptId,
     ) -> Result<Allocation, CoordinatorError> {
+        if nonce.iter().all(|byte| *byte == 0) {
+            return Err(CoordinatorError::IdentityCollision);
+        }
         let mut journal = self.lock()?;
         let transaction = journal
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -214,7 +217,7 @@ impl TransactionCoordinator {
     }
 
     /// Return exact same-proposal state without allocating or prompting again.
-    pub(crate) fn proposal_state(
+    pub fn proposal_state(
         &self,
         kind: TransactionKind,
         connector: &str,
@@ -248,7 +251,7 @@ impl TransactionCoordinator {
     }
 
     /// Prepare the complete provider-owned candidate. Exchange never inspects its mutations.
-    pub(crate) async fn prepare(
+    pub async fn prepare(
         &self,
         allocation: Allocation,
         batch: &SecretBatch,
@@ -292,26 +295,32 @@ impl TransactionCoordinator {
     }
 
     /// Persist the one-way commit decision before asking the provider to publish anything.
-    pub(crate) fn decide_commit(&self, allocation: Allocation) -> Result<(), CoordinatorRefusal> {
+    pub fn decide_commit(&self, allocation: Allocation) -> Result<(), CoordinatorRefusal> {
         self.set_phase(allocation, "decided", true)
             .map_err(CoordinatorRefusal::internal_predecision)
     }
 
     /// Roll the provider forward after the durable decision and publish the receipt lookup.
-    pub(crate) async fn commit(
-        &self,
-        allocation: Allocation,
-    ) -> Result<ReceiptId, CoordinatorRefusal> {
+    pub async fn commit(&self, allocation: Allocation) -> Result<ReceiptId, CoordinatorRefusal> {
         self.require_decided(allocation).map_err(|error| {
             CoordinatorRefusal::internal_postdecision(error, allocation.receipt)
         })?;
         let state = match self.provider.commit(allocation.id).await {
             Ok(state) => state,
-            Err(PreparedSecretError::Backend) => {
-                self.provider.state(allocation.id).await.map_err(|error| {
-                    CoordinatorRefusal::provider_postdecision(error, allocation.receipt)
-                })?
-            }
+            Err(PreparedSecretError::Backend) => match self.provider.state(allocation.id).await {
+                Ok(SecretTransactionState::Prepared) => {
+                    self.provider.commit(allocation.id).await.map_err(|error| {
+                        CoordinatorRefusal::provider_postdecision(error, allocation.receipt)
+                    })?
+                }
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(CoordinatorRefusal::provider_postdecision(
+                        error,
+                        allocation.receipt,
+                    ));
+                }
+            },
             Err(error) => {
                 return Err(CoordinatorRefusal::provider_postdecision(
                     error,
@@ -333,7 +342,7 @@ impl TransactionCoordinator {
     }
 
     /// Abort/tombstone an allocated id only while no durable decision exists.
-    pub(crate) async fn abort_before_decision(
+    pub async fn abort_before_decision(
         &self,
         allocation: Allocation,
     ) -> Result<(), CoordinatorRefusal> {
@@ -362,7 +371,7 @@ impl TransactionCoordinator {
     }
 
     /// Recover every unresolved row before readiness. Pre-decision work aborts; decisions commit.
-    pub(crate) async fn recover(&self) -> Result<(), CoordinatorRefusal> {
+    pub async fn recover(&self) -> Result<(), CoordinatorRefusal> {
         let rows = self
             .rows()
             .map_err(CoordinatorRefusal::internal_predecision)?;
@@ -413,7 +422,7 @@ impl TransactionCoordinator {
     }
 
     /// Query a terminal receipt without exposing transaction identity or proposal digest.
-    pub(crate) fn receipt(&self, receipt: ReceiptId) -> Result<bool, CoordinatorError> {
+    pub fn receipt(&self, receipt: ReceiptId) -> Result<bool, CoordinatorError> {
         let journal = self.lock()?;
         journal
             .query_row(
@@ -429,7 +438,7 @@ impl TransactionCoordinator {
     /// The journal boundary is committed before the provider call. A provider failure is therefore
     /// safely retryable, while receipt and same-proposal lookup can no longer ask about an id that
     /// the provider may already have retired. No clock, count or opaque-id ordering triggers this.
-    pub(crate) async fn reclaim(
+    pub async fn reclaim(
         &self,
         through: SecretTransactionGeneration,
     ) -> Result<(), CoordinatorRefusal> {
@@ -632,7 +641,7 @@ impl TransactionCoordinator {
         let mut statement = journal
             .prepare(
                 "SELECT transaction_id, generation, proposal_digest, receipt_id, decided, phase
-                 FROM transactions ORDER BY rowid",
+                 FROM transactions ORDER BY decided DESC, rowid",
             )
             .map_err(|source| self.database(source))?;
         let rows = statement
@@ -697,12 +706,12 @@ enum DecisionPhase {
 
 /// One exact value-free local-management refusal tuple.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CoordinatorRefusal {
-    pub(crate) code: &'static str,
-    pub(crate) status: u16,
-    pub(crate) retry: &'static str,
-    pub(crate) commit: &'static str,
-    pub(crate) receipt: Option<ReceiptId>,
+pub struct CoordinatorRefusal {
+    pub code: &'static str,
+    pub status: u16,
+    pub retry: &'static str,
+    pub commit: &'static str,
+    pub receipt: Option<ReceiptId>,
 }
 
 impl CoordinatorRefusal {
@@ -728,15 +737,15 @@ impl CoordinatorRefusal {
                 }
             },
             DecisionPhase::After(receipt) => match error {
-                PreparedSecretError::Backend
-                | PreparedSecretError::NotPrepared
-                | PreparedSecretError::Retired
-                | PreparedSecretError::Capacity => Self::after("store_unavailable", 503, receipt),
+                PreparedSecretError::Backend => Self::after("store_unavailable", 503, receipt),
                 PreparedSecretError::Unsupported
                 | PreparedSecretError::Busy
                 | PreparedSecretError::DigestMismatch
                 | PreparedSecretError::TransactionIdReused
+                | PreparedSecretError::NotPrepared
                 | PreparedSecretError::AlreadyCommitted
+                | PreparedSecretError::Retired
+                | PreparedSecretError::Capacity
                 | PreparedSecretError::InvalidBatch => {
                     Self::after("internal_refusal", 500, receipt)
                 }
@@ -779,7 +788,7 @@ impl CoordinatorRefusal {
 
 /// Binding/allocation failures never carry secret or proposal bytes in their Display output.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum CoordinatorError {
+pub enum CoordinatorError {
     #[error("refusing transaction journal `{path}`: {reason}")]
     UnsafeJournal { path: PathBuf, reason: String },
     #[error("transaction journal `{path}` is unavailable: {source}")]
@@ -870,6 +879,16 @@ fn nonzero_receipt() -> Result<ReceiptId, CoordinatorError> {
     Err(CoordinatorError::IdentityCollision)
 }
 
+fn nonzero_nonce() -> Result<[u8; 24], CoordinatorError> {
+    for _ in 0..4 {
+        let bytes = crate::entropy::bytes::<24>().map_err(CoordinatorError::Entropy)?;
+        if bytes.iter().any(|byte| *byte != 0) {
+            return Ok(bytes);
+        }
+    }
+    Err(CoordinatorError::IdentityCollision)
+}
+
 fn decode_transaction(bytes: &[u8]) -> Result<SecretTransactionId, CoordinatorError> {
     SecretTransactionId::from_protocol_bytes(array(bytes)?)
         .ok_or(CoordinatorError::GenerationCorrupt)
@@ -905,8 +924,13 @@ fn sqlite_journal_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    use exchange_host::{CredentialRef, CredentialScope, CredentialStore, Secret, SecretStore};
+    use exchange_host::{
+        async_trait, CredentialRef, CredentialScope, CredentialStore, Secret, SecretStore,
+        StoreError,
+    };
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -983,6 +1007,111 @@ mod tests {
         (bound.secrets(), bound.prepared_secrets(), bound)
     }
 
+    struct BackendOnce {
+        ordinary: Arc<dyn SecretStore>,
+        prepared: Arc<dyn PreparedSecretStore>,
+        prepare_failures: AtomicU64,
+        commit_failures: AtomicU64,
+    }
+
+    impl BackendOnce {
+        fn new(
+            ordinary: Arc<dyn SecretStore>,
+            prepared: Arc<dyn PreparedSecretStore>,
+            prepare_failures: u64,
+            commit_failures: u64,
+        ) -> Self {
+            Self {
+                ordinary,
+                prepared,
+                prepare_failures: AtomicU64::new(prepare_failures),
+                commit_failures: AtomicU64::new(commit_failures),
+            }
+        }
+
+        fn fail_once(counter: &AtomicU64) -> bool {
+            counter
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_sub(1)
+                })
+                .is_ok()
+        }
+    }
+
+    #[async_trait]
+    impl SecretStore for BackendOnce {
+        async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+            self.ordinary.get(reference).await
+        }
+
+        async fn put(&self, reference: &CredentialRef, secret: &Secret) -> Result<(), StoreError> {
+            self.ordinary.put(reference, secret).await
+        }
+
+        async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+            self.ordinary.delete(reference).await
+        }
+
+        async fn references(
+            &self,
+            scope: &CredentialScope,
+        ) -> Result<Vec<CredentialRef>, StoreError> {
+            self.ordinary.references(scope).await
+        }
+
+        async fn apply(&self, batch: &SecretBatch) -> Result<(), StoreError> {
+            self.ordinary.apply(batch).await
+        }
+    }
+
+    #[async_trait]
+    impl PreparedSecretStore for BackendOnce {
+        async fn prepare(
+            &self,
+            id: SecretTransactionId,
+            proposal: SecretProposalDigest,
+            batch: &SecretBatch,
+        ) -> Result<SecretTransactionState, PreparedSecretError> {
+            if Self::fail_once(&self.prepare_failures) {
+                Err(PreparedSecretError::Backend)
+            } else {
+                self.prepared.prepare(id, proposal, batch).await
+            }
+        }
+
+        async fn state(
+            &self,
+            id: SecretTransactionId,
+        ) -> Result<SecretTransactionState, PreparedSecretError> {
+            self.prepared.state(id).await
+        }
+
+        async fn commit(
+            &self,
+            id: SecretTransactionId,
+        ) -> Result<SecretTransactionState, PreparedSecretError> {
+            if Self::fail_once(&self.commit_failures) {
+                Err(PreparedSecretError::Backend)
+            } else {
+                self.prepared.commit(id).await
+            }
+        }
+
+        async fn abort(
+            &self,
+            id: SecretTransactionId,
+        ) -> Result<SecretTransactionState, PreparedSecretError> {
+            self.prepared.abort(id).await
+        }
+
+        async fn reclaim(
+            &self,
+            through: SecretTransactionGeneration,
+        ) -> Result<(), PreparedSecretError> {
+            self.prepared.reclaim(through).await
+        }
+    }
+
     #[tokio::test]
     async fn commit_decision_recovers_to_one_provider_commit_and_queryable_receipt() {
         let scratch = Scratch::new();
@@ -1012,6 +1141,64 @@ mod tests {
             Some(ProposalState::Committed(allocation.receipt_id()))
         );
         assert_journal_excludes(&scratch, b"coordinator-test-sentinel");
+    }
+
+    #[tokio::test]
+    async fn recovery_rolls_decisions_forward_before_aborting_older_allocations() {
+        let scratch = Scratch::new();
+        let (ordinary, prepared, _bound) = stores(&scratch);
+        let coordinator =
+            TransactionCoordinator::bind(scratch.journal(), prepared.clone()).expect("coordinator");
+        let older = fixed_allocation(&coordinator, digest(21), 21, 22);
+        let decided = fixed_allocation(&coordinator, digest(23), 23, 24);
+        coordinator
+            .prepare(decided, &batch("decision-first-sentinel"))
+            .await
+            .expect("newer provider prepare");
+        coordinator.decide_commit(decided).expect("newer decision");
+        drop(coordinator);
+
+        let restarted = TransactionCoordinator::bind(scratch.journal(), prepared.clone())
+            .expect("restarted coordinator");
+        restarted
+            .recover()
+            .await
+            .expect("decision before cross-id abort");
+        assert_eq!(
+            prepared.state(decided.transaction_id()).await,
+            Ok(SecretTransactionState::Committed)
+        );
+        assert_eq!(
+            prepared.state(older.transaction_id()).await,
+            Ok(SecretTransactionState::Absent)
+        );
+        assert!(ordinary.get(&reference()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn backend_resolution_retries_absent_prepare_and_prepared_commit() {
+        let scratch = Scratch::new();
+        let (ordinary, prepared, _bound) = stores(&scratch);
+        let faulting: Arc<dyn PreparedSecretStore> =
+            Arc::new(BackendOnce::new(ordinary.clone(), prepared.clone(), 1, 1));
+        let coordinator =
+            TransactionCoordinator::bind(scratch.journal(), faulting).expect("coordinator");
+        let allocation = fixed_allocation(&coordinator, digest(25), 25, 26);
+        assert_eq!(
+            coordinator
+                .prepare(allocation, &batch("backend-retry-sentinel"))
+                .await,
+            Ok(SecretTransactionState::Prepared)
+        );
+        coordinator.decide_commit(allocation).expect("decision");
+        assert_eq!(
+            coordinator.commit(allocation).await,
+            Ok(allocation.receipt_id())
+        );
+        assert_eq!(
+            prepared.state(allocation.transaction_id()).await,
+            Ok(SecretTransactionState::Committed)
+        );
     }
 
     #[tokio::test]
@@ -1066,6 +1253,17 @@ mod tests {
             &second.transaction_id().protocol_bytes()[..8],
             &2_u64.to_be_bytes()
         );
+        assert!(matches!(
+            restarted.allocate_with(
+                TransactionKind::Connect,
+                "example",
+                "zero-nonce",
+                digest(31),
+                [0; 24],
+                ReceiptId::from_protocol_bytes([31; 32]).expect("receipt"),
+            ),
+            Err(CoordinatorError::IdentityCollision)
+        ));
     }
 
     #[test]
@@ -1092,6 +1290,16 @@ mod tests {
             assert_eq!(after.commit, "query_receipt");
             assert_eq!(after.retry, "same_proposal");
             assert_eq!(after.receipt, Some(receipt));
+        }
+        for error in [
+            PreparedSecretError::NotPrepared,
+            PreparedSecretError::Retired,
+        ] {
+            let after = CoordinatorRefusal::provider(error, DecisionPhase::After(receipt));
+            assert_eq!(after.code, "internal_refusal");
+            assert_eq!(after.status, 500);
+            assert_eq!(after.commit, "query_receipt");
+            assert_eq!(after.retry, "same_proposal");
         }
     }
 
@@ -1154,5 +1362,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn legacy_writer_child() {
+        if std::env::var_os("FLUX_EXCHANGE_LEGACY_WRITER_CHILD").is_none() {
+            return;
+        }
+        let store = PathBuf::from(
+            std::env::var_os("FLUX_EXCHANGE_LEGACY_WRITER_STORE").expect("legacy store"),
+        );
+        let ready = PathBuf::from(
+            std::env::var_os("FLUX_EXCHANGE_LEGACY_WRITER_READY").expect("ready path"),
+        );
+        let release = PathBuf::from(
+            std::env::var_os("FLUX_EXCHANGE_LEGACY_WRITER_RELEASE").expect("release path"),
+        );
+        let opened = std::fs::read(&store).expect("released 0.19 writer opened v1 bytes");
+        std::fs::write(&ready, b"ready").expect("signal legacy open");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !release.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(release.exists(), "legacy writer was not released");
+        std::fs::write(store, opened).expect("released 0.19 whole-image rewrite");
+    }
+
+    #[test]
+    fn released_019_writer_exits_before_the_first_020_store_open() {
+        let scratch = Scratch::new();
+        let store = scratch.0.join("legacy/credentials");
+        exchange_host::ensure_private_state_file(&store).expect("private legacy store");
+        std::fs::write(&store, b"# codewandler-connector-secrets file store, v1\n")
+            .expect("released v1 fixture");
+        let ready = scratch.0.join("legacy.ready");
+        let release = scratch.0.join("legacy.release");
+        let mut legacy = Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("local_management::transaction::tests::legacy_writer_child")
+            .arg("--nocapture")
+            .env("FLUX_EXCHANGE_LEGACY_WRITER_CHILD", "1")
+            .env("FLUX_EXCHANGE_LEGACY_WRITER_STORE", &store)
+            .env("FLUX_EXCHANGE_LEGACY_WRITER_READY", &ready)
+            .env("FLUX_EXCHANGE_LEGACY_WRITER_RELEASE", &release)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn released 0.19 writer fixture");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready.exists(), "legacy writer did not open v1");
+
+        std::fs::write(&release, b"quiesce").expect("release legacy writer");
+        assert!(
+            legacy.wait().expect("wait for legacy writer").success(),
+            "legacy writer must be reaped before 0.20 opens"
+        );
+        let current = crate::credential_store(Some(&store))
+            .expect("production credential binding after quiescence")
+            .expect("configured production credential binding");
+        let generation =
+            SecretTransactionGeneration::from_protocol_bytes(1_u64.to_be_bytes()).expect("gen");
+        let id = SecretTransactionId::new(generation, [1; 24]);
+        assert_eq!(
+            block_on(current.prepared.abort(id)),
+            Ok(SecretTransactionState::Absent)
+        );
+        let contending = CredentialStore::bind(&store)
+            .expect_err("the production ordinary/prepared ports retain the 0.20 lease");
+        assert!(contending.to_string().contains("lease"), "{contending}");
+        assert!(block_on(current.ordinary.get(&reference())).is_err());
+        let migrated = std::fs::read_to_string(&store).expect("migrated store");
+        assert!(migrated.starts_with("# codewandler-connector-secrets file store, v2\n"));
+        drop(current);
+        CredentialStore::bind(&store).expect("the final production port releases the lease");
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(future)
     }
 }

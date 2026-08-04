@@ -4,11 +4,13 @@ use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{UnixListener, UnixStream};
 
 use super::codec::{Direction, Frame, Opcode, StreamDecoder};
+use super::TransactionCoordinator;
 
 const RUN_DIRECTORY: &str = "run";
 const SOCKET_NAME: &str = "local-management-v1.sock";
@@ -27,17 +29,24 @@ pub(crate) struct LocalManagement {
     socket_device: u64,
     socket_inode: u64,
     expected_peer_uid: u32,
+    coordinator: Arc<TransactionCoordinator>,
 }
 
 impl LocalManagement {
     /// Bind the native endpoint only for the supervised local composition.
-    pub(crate) fn bind_for_mode(supervised: bool) -> Result<Option<Self>, String> {
+    pub(crate) fn bind_for_mode(
+        supervised: bool,
+        coordinator: Option<Arc<TransactionCoordinator>>,
+    ) -> Result<Option<Self>, String> {
         if !supervised {
             return Ok(None);
         }
+        let coordinator = coordinator.ok_or_else(|| {
+            "the supervised local-management endpoint has no transaction coordinator".to_owned()
+        })?;
         let root = endpoint_root()?;
         let startup_euid = effective_uid();
-        let mut endpoint = Self::bind_at(&root, startup_euid)?;
+        let mut endpoint = Self::bind_at(&root, startup_euid, coordinator)?;
         #[cfg(feature = "native-root-test-seam")]
         if let Some(value) = std::env::var_os("FLUX_EXCHANGE_TEST_LOCAL_MANAGEMENT_PEER_UID") {
             let value = value
@@ -56,7 +65,11 @@ impl LocalManagement {
         Ok(Some(endpoint))
     }
 
-    fn bind_at(root: &Path, startup_euid: u32) -> Result<Self, String> {
+    fn bind_at(
+        root: &Path,
+        startup_euid: u32,
+        coordinator: Arc<TransactionCoordinator>,
+    ) -> Result<Self, String> {
         inspect_private_directory(root, startup_euid, 0o700, "native Exchange root")?;
         let run = root.join(RUN_DIRECTORY);
         create_private_run_directory(&run)?;
@@ -150,6 +163,7 @@ impl LocalManagement {
                 socket_device: bound_device,
                 socket_inode: bound_inode,
                 expected_peer_uid: startup_euid,
+                coordinator,
             })
         })();
         if result.is_err() {
@@ -167,12 +181,13 @@ impl LocalManagement {
                 return;
             };
             let expected_peer_uid = self.expected_peer_uid;
+            let coordinator = self.coordinator.clone();
             tokio::spawn(async move {
                 if authenticate_peer(&stream, expected_peer_uid).is_ok() {
                     let owner = LocalOwner::authenticated();
                     let _closed_projection =
                         (owner.tenant, owner.principal, owner.user, owner.operator);
-                    let _ = dispatch_unavailable(stream).await;
+                    let _ = dispatch_unavailable(stream, coordinator).await;
                 }
             });
         }
@@ -226,7 +241,13 @@ impl LocalOwner {
     }
 }
 
-async fn dispatch_unavailable(mut stream: UnixStream) -> io::Result<()> {
+async fn dispatch_unavailable(
+    mut stream: UnixStream,
+    coordinator: Arc<TransactionCoordinator>,
+) -> io::Result<()> {
+    // The authenticated dispatcher retains the exact recovered coordinator that owns every future
+    // connect/credential transaction; transport code never opens or substitutes a secret store.
+    let _coordinator = coordinator;
     let mut decoder = StreamDecoder::new(Direction::ClientToServer);
     let mut bytes = [0_u8; 4096];
     loop {
@@ -410,10 +431,23 @@ mod tests {
         path
     }
 
+    fn test_coordinator(root: &Path) -> Arc<TransactionCoordinator> {
+        let store = exchange_host::CredentialStore::bind(root.join("test-credentials/store"))
+            .expect("one test credential store");
+        Arc::new(
+            TransactionCoordinator::bind(
+                root.join("test-coordinator/transactions.sqlite3"),
+                store.prepared_secrets(),
+            )
+            .expect("test coordinator"),
+        )
+    }
+
     #[tokio::test]
     async fn endpoint_is_owner_only_and_same_owner_receives_closed_fxlm_refusal() {
         let root = private_root("same-owner");
-        let endpoint = LocalManagement::bind_at(&root, effective_uid()).expect("owner endpoint");
+        let endpoint = LocalManagement::bind_at(&root, effective_uid(), test_coordinator(&root))
+            .expect("owner endpoint");
         let path = endpoint.path().to_owned();
         let run = root.join(RUN_DIRECTORY);
         let run_metadata = std::fs::symlink_metadata(&run).expect("run metadata");
@@ -464,7 +498,8 @@ mod tests {
     async fn injected_wrong_peer_is_closed_before_any_fxlm_byte_is_read() {
         let root = private_root("wrong-peer");
         let mut endpoint =
-            LocalManagement::bind_at(&root, effective_uid()).expect("owner endpoint binds");
+            LocalManagement::bind_at(&root, effective_uid(), test_coordinator(&root))
+                .expect("owner endpoint binds");
         endpoint.expected_peer_uid = effective_uid().wrapping_add(1);
         let path = endpoint.path().to_owned();
         let server = tokio::spawn(endpoint.serve());
@@ -488,7 +523,7 @@ mod tests {
 
     #[test]
     fn dev_and_ordinary_modes_do_not_resolve_or_bind_an_endpoint() {
-        assert!(LocalManagement::bind_for_mode(false)
+        assert!(LocalManagement::bind_for_mode(false, None)
             .expect("non-supervised mode")
             .is_none());
     }
@@ -498,7 +533,11 @@ mod tests {
         let symlink_root = private_root("planted-symlink");
         let symlink_run = symlink_root.join(RUN_DIRECTORY);
         symlink(&symlink_root, &symlink_run).expect("planted run symlink");
-        let refusal = match LocalManagement::bind_at(&symlink_root, effective_uid()) {
+        let refusal = match LocalManagement::bind_at(
+            &symlink_root,
+            effective_uid(),
+            test_coordinator(&symlink_root),
+        ) {
             Ok(_) => panic!("run symlink must refuse"),
             Err(refusal) => refusal,
         };
@@ -512,7 +551,11 @@ mod tests {
             .expect("private stale run directory");
         let stale_path = stale_run.join(SOCKET_NAME);
         let stale = std::os::unix::net::UnixListener::bind(&stale_path).expect("stale socket");
-        let refusal = match LocalManagement::bind_at(&stale_root, effective_uid()) {
+        let refusal = match LocalManagement::bind_at(
+            &stale_root,
+            effective_uid(),
+            test_coordinator(&stale_root),
+        ) {
             Ok(_) => panic!("stale socket must refuse"),
             Err(refusal) => refusal,
         };
