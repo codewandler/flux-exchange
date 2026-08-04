@@ -40,6 +40,9 @@ lockfile and compile-time tests.
 
 ## Next (ready — take the top one unless the user named a story)
 
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-134 — Publish owner-bound local onboarding without secret JSON](X-134-publish-owner-bound-local-onboarding.md) · Milestone 1 — OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public local release
+
 ### a deployment a stranger can reach
 _Everything this platform does can only be seen on `127.0.0.1`. The getting-started page walks a_
 
