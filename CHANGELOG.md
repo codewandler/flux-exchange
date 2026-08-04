@@ -8,6 +8,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **One complete declaration-driven labelled connection plan now serves browser and CLI consumers**
+  (X-125). Authenticated humans receive the exact `exchange.connection-plan.v1` contract for name,
+  credentials, settings, choices and aliases; composite writes report ordered complete, incomplete,
+  refused or partial outcomes, and the console consumes the same committed adversarial fixture.
+  Connector 0.19 also activates GitLab's typed custom HTTPS origin through value-free revisioned
+  proposal, operator inspection, approval, replacement and revocation. Persisted authority is
+  revalidated through the real connector pack, direct setting writes cannot bypass the lifecycle,
+  and long-lived channel replacement waits for old projections to terminate.
+
 - **Connection setting reads publish catalogue-declared closed choices** (X-80). A client can build
   Intercom's region picker from one successful `GET` instead of provoking a refused write; fields
   without a closed set omit `choices`, and stored tenant values remain unreadable. The same response

@@ -25,7 +25,7 @@ with its stable service-qualified identity, human label, requiredness, input kin
 additional bindings, closed choices, submission target, and a `set` boolean. No Exchange-owned
 connector or vendor field list participates.
 
-Catalogue 0.18 still carries some credentials only in `Provider::auth`, with no `ConfigField` form
+Catalogue 0.19 still carries some credentials only in `Provider::auth`, with no `ConfigField` form
 metadata. Dropping them would make Slack, OpenAI, Intercom and other connectors look complete while
 their declared credential address is empty. The projection therefore synthesizes a conservative
 secret row for every auth target no routable config row binds. Its label falls back to the declared
@@ -248,13 +248,13 @@ carrying `unsupported_connection_plan_version`, `requested` and `supported` — 
 plan that could be mistaken for the requested contract. A consumer receiving another response
 version refuses it before rendering or submitting; the console tests that closed-version check.
 
-Catalogue 0.18 does not yet publish the typed custom-origin rule delivered by upstream C-87. The
-dependency-independent lifecycle and wire contract can be developed against a vendor-neutral test
-rule, but the production projection stays fail closed until connector 0.19.0 is published and
-Exchange consumes that released declaration. No connector id, vendor field, local boolean, sibling
-path dependency or git dependency substitutes for that release seam. The connector-shared rule owns
-value grammar, normalization, API-path composition and HTTPS requirements; the egress
-private-network/DNS guard remains a separate dispatch control.
+Catalogue 0.19 publishes the typed operator-approved origin declaration delivered by upstream C-87
+and C-508. Production derives its policy only from that closed metadata and validates candidate and
+persisted values by rehearsing the connector's declared verification operation through the released
+`connector_pack`; no connector id, vendor field, local boolean or second URL parser substitutes for
+that release seam. GitLab's connector-owned `/api/v4` path is appended only after the approved HTTPS
+origin passes the pack's grammar. The egress private-network/DNS guard remains a separate dispatch
+control.
 
 That release boundary changes Exchange's connector pins and compatible Flux engine line together as
 required by the repository dependency contract. It does not create the inverse coupling: Flux pins
@@ -289,9 +289,10 @@ The shared `exchange.connection-plan.v1` fixture carries the complete alias arra
 duplicates. The server projection and console parser consume that same artifact: missing, malformed
 or duplicate aliases are refusals, not client defaults.
 
-The final production proof waits for published connector 0.19 rather than a sibling checkout. It
+The final production proof consumes published connector 0.19 rather than a sibling checkout. It
 exercises unsupported, malformed and normalized origins through the released typed rule and the
-real `connector_pack`: proposed and revoked values are inert and absent from permission subjects,
-intents and dispatch evidence, while only the approved normalized value becomes active. Only after
-that proof moves the connector and compatible Flux engine pins together does the repository run its
-full gate. This evidence does not make Flux depend on an Exchange or connector release number.
+real `connector_pack`: proposed and revoked values are inert, while only the approved normalized
+value builds the exact declared GitLab request. Runtime resolution carries the pack's explicit
+operator-approved bit, and the connector pins moved together while Flux remained on its compatible
+0.54 engine line. This evidence does not make Flux depend on an Exchange or connector release
+number.

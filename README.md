@@ -26,6 +26,12 @@ live versus target architecture.
 > created, listed, **rotated** and deleted per tenant. With `FLUX_EXCHANGE_CONNECTIONS` bound, one
 > tenant can hold several labelled instances of the same connector; invocation selects one with
 > `?connection=<label>` and refuses ambiguity rather than choosing an account. A signed-in human
+> can fetch and apply one declaration-driven `exchange.connection-plan.v1` contract that names the
+> label, every credential and setting, choices and CLI aliases. The console renders that same
+> contract and reports incomplete, refused and partially-persisted outcomes honestly. GitLab's
+> connector-declared custom HTTPS origin is a revisioned proposal until a configured operator
+> reviews and approves it; proposed and revoked values cannot reach request projection.
+> A signed-in human
 > can create, list and revoke
 > **Service Accounts**, whose `fxsa_…` bearer tokens authenticate at the same guarded API boundary
 > as browser sessions. An authenticated `GET /api/catalogue/effective` returns exactly the
@@ -143,8 +149,8 @@ boot. No released connector declares a hazard yet; upstream C-440 will make the 
 | | |
 |---|---|
 | `crates/exchange-host` | Principal-derived tenancy, grants, connection-instance naming, runtime admission, credential/settings/channel stores, ordinary invocation, immutable App Packages, atomic installed-App bindings and durable Event Deliveries, plus tenant-scoped workflow drafts and versions. Execution still ends in Flux and `connector_pack`; this crate holds no transport of its own. |
-| `crates/exchange-server` | Health, catalogues, identity, connections/grants, Service Accounts, invocation, workflows, channel supervision, and installed Flux App supervision over tenant/App-isolated durable Flux event logs. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
-| `console/` | A Vue 3 **admin surface**: Connect → Grant → Invoke plus Workflows, Activity, Channels and Apps. The Apps surface installs the Slack-bot-style template, freezes Connection/access/model/risk/scope choices, chats with its Managed Agent and inspects activation Activity. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
+| `crates/exchange-server` | Health, catalogues, identity, generated labelled connection plans, connections/grants, Service Accounts, invocation, workflows, channel supervision, and installed Flux App supervision over tenant/App-isolated durable Flux event logs. It is the **only crate here that holds transports**, and deliberately never names `connector_pack` — tests assert both halves. |
+| `console/` | A Vue 3 **admin surface**: declaration-driven labelled connection setup, Connect → Grant → Invoke, Workflows, Activity, Channels and Apps. The Apps surface installs the Slack-bot-style template, freezes Connection/access/model/risk/scope choices, chats with its Managed Agent and inspects activation Activity. Failed reads name their endpoint and can be retried — never an empty answer or false "signed out". |
 
 **Not built, despite being described in the design:** rich outbound runtime-plan dispatch, webhook
 channels, general channel replay,

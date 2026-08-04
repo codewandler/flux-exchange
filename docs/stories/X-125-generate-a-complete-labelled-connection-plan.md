@@ -1,7 +1,7 @@
 ---
 id: X-125
 title: "Generate one complete labelled connection plan for browser and CLI"
-status: in-progress
+status: done
 priority: 0
 epic: connections
 areas: [console, exchange-server, catalogue]
@@ -33,70 +33,70 @@ label from X-14, not a host, authority, credential address, instance UUID or run
 
 ## Acceptance
 
-- [ ] An authenticated human can fetch a machine-readable connection plan generated from the
+- [x] An authenticated human can fetch a machine-readable connection plan generated from the
       connector's declared credentials and configuration metadata. **Failing-first contract test:**
       adding a required declared field to a fixture makes the plan test fail until that field is
       projected; no Exchange-maintained connector or vendor field list may satisfy the test.
-- [ ] The plan asks for `name` first and maps it to X-14's existing label/instance lifecycle. It can
+- [x] The plan asks for `name` first and maps it to X-14's existing label/instance lifecycle. It can
       create a labelled connection, list its existing labels, select one for editing, and rename a
       label without moving the host-minted instance UUID, credential or settings.
-- [ ] Every required secret and non-secret setting is present exactly once, with stable field
+- [x] Every required secret and non-secret setting is present exactly once, with stable field
       identity, service, human label, required/optional status, input kind, submission target and
       zero or more machine-readable CLI aliases. Aliases are projected generically from declaration
       metadata or one documented field-identity rule; Exchange carries no connector-specific alias
       table. A duplicate alias or a declared required field that cannot be rendered or routed makes
       the plan refuse or remain visibly incomplete; it is never silently omitted.
-- [ ] **Failing-first census test:** the generated contract includes Jira Cloud's declared site,
+- [x] **Failing-first census test:** the generated contract includes Jira Cloud's declared site,
       account email and API token, and Zendesk's declared subdomain/domain, account email and API
       token. The test derives those expectations from the shipped connector declarations and fails
       if either browser or CLI projection drops one.
-- [ ] When the upstream GitLab declaration supports an operator-pinned custom HTTPS endpoint, the
+- [x] When the upstream GitLab declaration supports an operator-pinned custom HTTPS endpoint, the
       same generic projection exposes it without a GitLab-only Exchange schema. The connector owns
       its API path and the host's operator policy admits the origin; neither model input nor a
       Service Account can choose or change the origin.
-- [ ] A custom authority has durable, explicit `proposed`, `approved` and `revoked` lifecycle state
+- [x] A custom authority has durable, explicit `proposed`, `approved` and `revoked` lifecycle state
       scoped to the tenant and host-minted connection instance. The plan reports the value-free
       state to an eligible connection owner and lets an authorized operator review the exact
       normalized origin before approval. Writing a credential or ordinary setting never implies
       approval, and restart never turns a proposal into active authority.
-- [ ] Proposal, approval, replacement and revocation are separate checked transitions. Only the
+- [x] Proposal, approval, replacement and revocation are separate checked transitions. Only the
       configured operator authority can activate, replace or revoke a custom origin; every
       transition revalidates the connector declaration and deployment policy, is recorded without
       credential-shaped values, and refuses before transport on an unsupported scheme, malformed
       origin, stale proposal, unknown state or unauthorized principal. Revocation does not silently
       fall back to a different origin.
-- [ ] A closed declared set carries its permitted choices in the plan and both clients render it as
+- [x] A closed declared set carries its permitted choices in the plan and both clients render it as
       a choice/dropdown rather than unrestricted text. [[X-80]] is a prerequisite and retains its
       complete acceptance: clients learn choices from one successful read, while fields without a
       closed set publish no choices.
-- [ ] Secret field descriptors may be returned, but secret **values** travel directly from the
+- [x] Secret field descriptors may be returned, but secret **values** travel directly from the
       human-controlled input to an Exchange-owned write surface. They never appear in the plan, any
       response, URL/query, Flux argument or configuration, application log, activity record, or
       browser navigation/history. Non-interactive Flux CLI use does not accept a vendor secret on
       argv; secure stdin/prompt or an Exchange-owned browser handoff is required.
-- [ ] Non-secret settings use the existing tenant-, connector-, service- and label-scoped settings
+- [x] Non-secret settings use the existing tenant-, connector-, service- and label-scoped settings
       route and persistence from X-47/X-14. Reloading the plan reports whether each required field is
       set without returning the stored value, and a missing setting keeps the connection visibly
       incomplete.
-- [ ] Applying the composite plan cannot report a misleading complete connection after only some
+- [x] Applying the composite plan cannot report a misleading complete connection after only some
       writes land. Either one checked atomic operation commits label, settings and credentials
       together, or the API publishes an explicit ordered apply plan with per-step outcomes,
       retry/compensation semantics and an overall incomplete/partial state until every required step
       succeeds. A failing-first persistence test drives a refusal in the middle and proves the
       reported state matches what survived.
-- [ ] The response and submission identity is exactly `exchange.connection-plan.v1`, matching the
+- [x] The response and submission identity is exactly `exchange.connection-plan.v1`, matching the
       `connection_plan` value in X-126's provider contract. An unsupported or missing identity is
       refused before accepting any value, with no best-effort downgrade. The server projection and
       Exchange console exercise one committed, vendor-neutral positive/adversarial fixture under
       `tests/fixtures/exchange-connection-plan-v1/`; its exact wire type/test is the prerequisite that
       permits X-126 to advertise this id. Neither client maintains vendor-specific required-field,
       alias, routing or completion logic.
-- [ ] Flux C-509 owns the actual CLI consumer proof against that same committed fixture and
+- [x] Flux C-509 owns the actual CLI consumer proof against that same committed fixture and
       submission semantics. X-125 publishes the fixture for that downstream proof but does not wait
       for Flux to complete before its Exchange API and console can be delivered. Interactive flags
       such as `--endpoint`, `--site` or `--domain` resolve through aliases in the plan onto declared
       field identities; they are not a second schema.
-- [ ] The console renders existing labels and allows a human to rename them, shows required versus
+- [x] The console renders existing labels and allows a human to rename them, shows required versus
       optional fields and choice controls, and distinguishes complete, incomplete, refused and
       partially-applied states without displaying any stored value.
 
@@ -117,6 +117,10 @@ label from X-14, not a host, authority, credential address, instance UUID or run
 - 2026-08-04: X-126's implementation audit fixed the provider identity to
   `exchange.connection-plan.v1`. X-125 must materialize that exact fixture/type before the local
   release manifest may advertise it; a package version or placeholder is not a protocol id.
+- 2026-08-04: Delivered the versioned declaration-driven API, shared adversarial fixture and console
+  consumer. Connector 0.19 activates GitLab's typed operator-approved origin through revisioned
+  proposal/audit/approval/revocation, current-policy revalidation and an acknowledged channel
+  replacement barrier; direct setting writes cannot bypass that authority lifecycle.
 
 ## Notes
 
