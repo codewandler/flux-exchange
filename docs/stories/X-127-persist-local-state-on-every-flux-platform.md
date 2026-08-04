@@ -13,9 +13,11 @@ note: "Milestone 1 — a five-target binary is support only when every credentia
 ## Goal
 
 Make the local Exchange composition genuinely runnable on all five Flux platforms, not merely
-cross-compilable. Credentials, settings, grants, labelled connections and Service Accounts remain
-durable and owner-only on Windows as well as Unix, with every unsafe or unavailable store refusing
-instead of falling back to memory.
+cross-compilable. Credentials, settings, grants, labelled connections, channels, workflows, audit
+evidence and Service Accounts remain durable and owner-only on Windows as well as Unix, with every
+unsafe or unavailable store refusing instead of falling back to memory. The `--dev` composition is
+the zero-configuration entrance to that same durable local state, not an identity-only shorthand
+that starts successfully and then refuses the first connection.
 
 ## Why this is Milestone 1 work
 
@@ -39,9 +41,15 @@ ownership and DACLs rather than emulated mode bits.
       bindings; a cross-check alone, a skipped store module or a server that only answers health is
       not evidence of support.
 - [ ] One portable composition binds the existing credential, connection-settings, grant,
-      connection-registry and Service Account ports to explicit durable paths. It preserves each
-      store's current address, tenant, atomic-replacement, bounded-write and refusal semantics; no
-      route or connector runtime learns a platform-specific storage API.
+      connection-registry, channel, workflow, audit and Service Account ports to explicit durable
+      paths. It preserves each store's current address, tenant, atomic-replacement, bounded-write
+      and refusal semantics; no route or connector runtime learns a platform-specific storage API.
+- [ ] `flux-exchange --dev`, with the local-state settings unset, selects one conventional
+      per-user state root outside every working tree, creates it owner-only, and binds the complete
+      portable composition beneath it. A fresh `--dev` process can sign in, create a labelled
+      connection, grant and invoke without any `FLUX_EXCHANGE_*` storage variable and without a
+      `no ... store is bound` warning. Explicit storage settings remain authoritative and are never
+      silently replaced by development defaults.
 - [ ] On Unix, newly created state roots are owner-only `0700` directories and state files are
       owner-only `0600` files. An existing object with a different owner, wider mode, wrong object
       kind or uninspectable metadata refuses without chmod, replacement or another repair.
@@ -56,9 +64,15 @@ ownership and DACLs rather than emulated mode bits.
       with the affected store/path and no value. Restoring the owner-only metadata is the only path
       to a successful reopen; the test proves the refusal did not modify the planted metadata.
 - [ ] A requested persistent local composition is all-or-nothing. A missing, denied, malformed or
-      unsafe credential, settings, grant, connection-registry or Service Account path refuses
-      startup and names the store. No production or supervised-local branch substitutes a memory
-      store, creates an unprotected sibling file, or continues with only the stores that opened.
+      unsafe credential, settings, grant, connection-registry, channel, workflow, audit or Service
+      Account path refuses startup and names the store. No production or supervised-local branch
+      substitutes a memory store, creates an unprotected sibling file, or continues with only the
+      stores that opened.
+- [ ] Refusals for a path under a shared or broadly accessible ancestor never advise narrowing that
+      shared directory. In particular, a credential path directly under `/tmp` is refused without
+      suggesting `chmod 700 /tmp`; the diagnostic instead names a conventional owner-only state
+      root or tells the operator to create a private child directory. Failing-first tests cover the
+      diagnostic as well as proving that Exchange did not modify the unsafe metadata.
 - [ ] **Native Windows restart proof:** from a clean owner-only state root, start the real server,
       create a labelled connection with every required credential and setting, write a grant, mint
       a Service Account, and invoke a harmless released fixture successfully. Stop the process,
@@ -75,6 +89,10 @@ ownership and DACLs rather than emulated mode bits.
 - 2026-08-04: Filed from cross-repository Decision 0004 after the local-release audit found that
   X-126 named a Windows artifact before the credential-bearing server composition could safely run
   and persist there.
+- 2026-08-04: Expanded after the real `--dev` path started with no channel store, refused connection
+  management when `FLUX_EXCHANGE_CREDENTIALS` was unset, and told an operator who tried
+  `/tmp/flux-secret` to narrow the shared `/tmp` directory. Development now has to bind the same
+  durable local composition and must never recommend changing a shared ancestor's permissions.
 
 ## Notes
 
