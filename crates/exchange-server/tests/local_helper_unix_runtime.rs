@@ -5,6 +5,8 @@
 mod local_helper;
 #[path = "../src/local_helper_unix.rs"]
 mod local_helper_unix;
+#[path = "local_helper_unix_runtime_shim.rs"]
+mod local_management;
 #[path = "../src/native_root.rs"]
 mod native_root;
 
