@@ -20,11 +20,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::local_helper::{
-    validate_unix_vendor_capabilities, ExpiresAt, HelperExit, LocalHelperInvocation,
-    MintWriterCapability, PipeCapabilityFacts, PipeDirection, ServiceAccountId,
-    UnixVendorCapabilityFacts, VendorSecretCapabilities, HELPER_RESULT_DEADLINE,
-    HELPER_SETUP_DEADLINE, MAX_HELPER_FRAME_BYTES, UNIX_MINT_WRITER_FD, UNIX_VENDOR_REQUEST_FD,
-    UNIX_VENDOR_RESPONSE_FD,
+    validate_unix_vendor_capabilities, ExpiresAt, HelperDeadlineSchedule, HelperExit,
+    LocalHelperInvocation, MintWriterCapability, PipeCapabilityFacts, PipeDirection,
+    ServiceAccountId, UnixVendorCapabilityFacts, VendorSecretCapabilities, HELPER_SETUP_DEADLINE,
+    MAX_HELPER_FRAME_BYTES, UNIX_MINT_WRITER_FD, UNIX_VENDOR_REQUEST_FD, UNIX_VENDOR_RESPONSE_FD,
 };
 use crate::local_helper_plan::{VendorBegin, VendorOperation};
 use crate::local_management::service_account_handoff::unix_transfer::{
@@ -173,7 +172,7 @@ pub(crate) trait VendorCeremony {
         &mut self,
         endpoint: &PinnedEndpoint,
         request: &VendorRequest,
-        ready_by: Instant,
+        deadlines: HelperDeadlineSchedule,
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
@@ -186,8 +185,9 @@ impl VendorCeremony for NativeVendorCeremony {
         &mut self,
         endpoint: &PinnedEndpoint,
         request: &VendorRequest,
-        ready_by: Instant,
+        deadlines: HelperDeadlineSchedule,
     ) -> Result<Vec<u8>, Self::Error> {
+        let ready_by = deadlines.setup_by();
         let operation = match request.kind() {
             VendorRequestKind::Connect => VendorOperation::Connect,
             VendorRequestKind::Credential => VendorOperation::Credential,
@@ -227,7 +227,8 @@ impl VendorCeremony for NativeVendorCeremony {
 
         let mut mutation = endpoint.connect_before(ready_by)?;
         write_before(&mut mutation, request.bytes(), ready_by)?;
-        let need = read_frame_before(&mut mutation, ready_by)?;
+        let result_by = deadlines.result_by();
+        let need = read_frame_before(&mut mutation, result_by)?;
         if need.opcode == ERROR {
             mutation
                 .shutdown(Shutdown::Write)
@@ -244,16 +245,13 @@ impl VendorCeremony for NativeVendorCeremony {
             return Err(UnixHelperError::Protocol);
         }
 
-        let predecision = Instant::now()
-            .checked_add(Duration::from_secs(300))
-            .ok_or(UnixHelperError::Deadline)?;
         for (index, secret) in need.secrets.iter().enumerate() {
             if usize::from(secret.ordinal) != index + 1 || secret.target.is_empty() {
                 return Err(UnixHelperError::Protocol);
             }
-            let mut value = read_private_tty_line(predecision)?;
+            let mut value = read_private_tty_line(result_by)?;
             let frame = encode_secret(secret.ordinal, &value)?;
-            let result = write_before(&mut mutation, &frame, predecision);
+            let result = write_before(&mut mutation, &frame, result_by);
             value.fill(0);
             result?;
         }
@@ -269,15 +267,12 @@ impl VendorCeremony for NativeVendorCeremony {
         write_before(
             &mut mutation,
             &encode_frame(CLIENT_DIRECTION, opcode, &commit),
-            predecision,
+            result_by,
         )?;
         mutation
             .shutdown(Shutdown::Write)
             .map_err(|_| UnixHelperError::Transport)?;
-        let postdecision = Instant::now()
-            .checked_add(Duration::from_secs(30))
-            .ok_or(UnixHelperError::Deadline)?;
-        Ok(read_terminal_before(&mut mutation, postdecision)?.bytes)
+        Ok(read_terminal_before(&mut mutation, result_by)?.bytes)
     }
 }
 
@@ -552,7 +547,6 @@ pub(crate) fn run_vendor<C: VendorCeremony>(ceremony: &mut C) -> HelperExit {
         ceremony,
         HELPER_SETUP_DEADLINE,
         HELPER_SETUP_DEADLINE,
-        HELPER_RESULT_DEADLINE,
     )
 }
 
@@ -584,7 +578,6 @@ pub(crate) fn run_vendor_at_for_test<C: VendorCeremony>(
         ceremony,
         request_deadline,
         setup_deadline,
-        setup_deadline,
     )
 }
 
@@ -611,7 +604,6 @@ fn run_vendor_with<C, E>(
     ceremony: &mut C,
     request_budget: Duration,
     setup_budget: Duration,
-    result_budget: Duration,
 ) -> HelperExit
 where
     C: VendorCeremony,
@@ -622,34 +614,57 @@ where
         Err(_) => return HelperExit::CapabilityOrTransportFailure,
     };
     let VendorCapabilities { request, response } = capabilities;
-    let parsed_request = read_request(&request, request_budget);
+    let request_by = Instant::now()
+        .checked_add(request_budget)
+        .unwrap_or_else(Instant::now);
+    let parsed_request = read_request(&request, request_by);
     drop(request);
+    let deadlines = if setup_budget == HELPER_SETUP_DEADLINE {
+        HelperDeadlineSchedule::from_request_eof(Instant::now())
+    } else {
+        HelperDeadlineSchedule::from_request_eof_with_setup(Instant::now(), setup_budget)
+    };
+    let Some(deadlines) = deadlines else {
+        return HelperExit::CapabilityOrTransportFailure;
+    };
     let request = match parsed_request {
         Ok(request) => request,
-        Err(refusal) => return finish_response(response, refusal.frame()),
+        Err(refusal) => {
+            return finish_response(response, refusal.frame(), deadlines.result_by());
+        }
     };
     // Request EOF starts a separate absolute pre-ceremony budget; traffic never resets it.
-    let ready_by = Instant::now()
-        .checked_add(setup_budget)
-        .unwrap_or_else(Instant::now);
-    let result_by = Instant::now()
-        .checked_add(result_budget)
-        .unwrap_or_else(Instant::now);
+    let ready_by = deadlines.setup_by();
     let endpoint = match endpoint() {
         Ok(endpoint) if Instant::now() < ready_by => endpoint,
-        Ok(_) => return finish_response(response, Refusal::Deadline.frame()),
-        Err(_) => return finish_response(response, Refusal::LocalManagementUnavailable.frame()),
+        Ok(_) => {
+            return finish_response(response, Refusal::Deadline.frame(), deadlines.result_by());
+        }
+        Err(_) => {
+            return finish_response(
+                response,
+                Refusal::LocalManagementUnavailable.frame(),
+                deadlines.result_by(),
+            );
+        }
     };
-    let terminal = match ceremony.execute(&endpoint, &request, ready_by) {
-        Ok(bytes) if Instant::now() < result_by => bytes,
-        Ok(_) => return finish_response(response, Refusal::LocalManagementUnavailable.frame()),
-        Err(_) => return finish_response(response, Refusal::LocalManagementUnavailable.frame()),
+    let terminal = match ceremony.execute(&endpoint, &request, deadlines) {
+        Ok(bytes) if HelperDeadlineSchedule::permits(deadlines.result_by(), Instant::now()) => {
+            bytes
+        }
+        Ok(_) | Err(_) => {
+            return finish_response(
+                response,
+                Refusal::LocalManagementUnavailable.frame(),
+                deadlines.result_by(),
+            );
+        }
     };
     let terminal = match validate_terminal(&terminal, request.kind) {
         Ok(()) => terminal,
         Err(refusal) => refusal.frame(),
     };
-    finish_response(response, terminal)
+    finish_response(response, terminal, deadlines.result_by())
 }
 
 fn run_mint_with<T, E>(
@@ -663,9 +678,12 @@ where
     T: MintTransfer,
     E: FnOnce() -> Result<PinnedEndpoint, UnixHelperError>,
 {
-    let ready_by = Instant::now()
-        .checked_add(setup_budget)
-        .unwrap_or_else(Instant::now);
+    let Some(deadlines) =
+        HelperDeadlineSchedule::from_request_eof_with_setup(Instant::now(), setup_budget)
+    else {
+        return HelperExit::CapabilityOrTransportFailure;
+    };
+    let ready_by = deadlines.setup_by();
     let endpoint = match endpoint() {
         Ok(endpoint) if Instant::now() < ready_by => endpoint,
         _ => return HelperExit::CapabilityOrTransportFailure,
@@ -683,11 +701,8 @@ where
     if transfer.transfer(&stream, &frame).is_err() || Instant::now() >= ready_by {
         return HelperExit::CapabilityOrTransportFailure;
     }
-    let terminal_by = Instant::now()
-        .checked_add(Duration::from_secs(30))
-        .unwrap_or_else(Instant::now);
     let mut stream = stream;
-    match read_terminal_before(&mut stream, terminal_by) {
+    match read_terminal_before(&mut stream, deadlines.result_by()) {
         Ok(frame) if matches!(frame.opcode, SERVICE_ACCOUNT_RECEIPT | ERROR) => {
             HelperExit::TerminalFrameWritten
         }
@@ -839,10 +854,7 @@ fn set_close_on_exec(descriptor: RawFd) -> Result<(), UnixHelperError> {
     }
 }
 
-fn read_request(descriptor: &OwnedFd, budget: Duration) -> Result<VendorRequest, Refusal> {
-    let deadline = Instant::now()
-        .checked_add(budget)
-        .unwrap_or_else(Instant::now);
+fn read_request(descriptor: &OwnedFd, deadline: Instant) -> Result<VendorRequest, Refusal> {
     let mut bytes = Vec::with_capacity(HEADER_BYTES);
     let mut expected = None;
     loop {
@@ -998,10 +1010,25 @@ fn known_opcode(opcode: u16) -> bool {
     )
 }
 
-fn finish_response(response: OwnedFd, bytes: Vec<u8>) -> HelperExit {
+fn finish_response(response: OwnedFd, bytes: Vec<u8>, deadline: Instant) -> HelperExit {
     let descriptor = response.into_raw_fd();
+    // SAFETY: F_GETFL reads flags from one live descriptor.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags == -1
+        // SAFETY: F_SETFL updates status flags on the same live descriptor.
+        || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+    {
+        // SAFETY: ownership was extracted exactly once.
+        unsafe { libc::close(descriptor) };
+        return HelperExit::CapabilityOrTransportFailure;
+    }
     let mut written = 0;
     while written < bytes.len() {
+        if !wait_writable(descriptor, deadline) {
+            // SAFETY: ownership was extracted exactly once.
+            unsafe { libc::close(descriptor) };
+            return HelperExit::CapabilityOrTransportFailure;
+        }
         // SAFETY: the descriptor is a validated write end and the remaining bytes are live.
         let result = unsafe {
             libc::write(
@@ -1014,18 +1041,63 @@ fn finish_response(response: OwnedFd, bytes: Vec<u8>) -> HelperExit {
             written += result as usize;
             continue;
         }
-        if result < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
+        if result < 0 {
+            let kind = io::Error::last_os_error().kind();
+            if matches!(kind, io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) {
+                continue;
+            }
         }
         // SAFETY: ownership was extracted exactly once and the helper exits after this failure.
         unsafe { libc::close(descriptor) };
         return HelperExit::CapabilityOrTransportFailure;
     }
-    // A close failure prevents the one-frame-plus-EOF contract and is the fixed transport exit.
-    if unsafe { libc::close(descriptor) } == 0 {
+    // A pipe close itself is non-blocking; checking immediately beforehand keeps EOF inside the
+    // unchanged result deadline rather than accepting a write that completed on the boundary.
+    if Instant::now() < deadline && unsafe { libc::close(descriptor) } == 0 {
         HelperExit::TerminalFrameWritten
     } else {
         HelperExit::CapabilityOrTransportFailure
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // Called by the integration runtime harness through this source module.
+pub(crate) fn finish_response_before_for_test(
+    response: OwnedFd,
+    bytes: Vec<u8>,
+    deadline: Instant,
+) -> HelperExit {
+    finish_response(response, bytes, deadline)
+}
+
+fn wait_writable(descriptor: RawFd, deadline: Instant) -> bool {
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return false;
+        };
+        if remaining.is_zero() {
+            return false;
+        }
+        let milliseconds = remaining
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32;
+        let mut poll = libc::pollfd {
+            fd: descriptor,
+            events: libc::POLLOUT | libc::POLLHUP,
+            revents: 0,
+        };
+        // SAFETY: poll references one live pollfd for the bounded timeout.
+        let result = unsafe { libc::poll(&mut poll, 1, milliseconds) };
+        if result > 0 {
+            return poll.revents & libc::POLLOUT != 0;
+        }
+        if result == 0 {
+            return false;
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return false;
+        }
     }
 }
 

@@ -12,6 +12,7 @@
 use std::fmt;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, IntoRawHandle as _, OwnedHandle};
 use std::ptr::null_mut;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -20,9 +21,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, CompareObjectHandles, GetHandleInformation, GetLastError, SetHandleInformation,
-    ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    CloseHandle, CompareObjectHandles, DuplicateHandle, GetHandleInformation, GetLastError,
+    SetHandleInformation, DUPLICATE_SAME_ACCESS, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER,
+    FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, TokenSessionId, TokenUser, TOKEN_QUERY,
@@ -39,10 +41,11 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetProcessTimes, OpenProcess, OpenProcessToken, WaitForSingleObject,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows_sys::Win32::System::IO::CancelSynchronousIo;
 
 use crate::local_helper::{
-    ExpiresAt, HelperExit, LocalHelperInvocation, MintWriterCapability, ServiceAccountId,
-    VendorSecretCapabilities, WindowsHandle, HELPER_RESULT_DEADLINE, HELPER_SETUP_DEADLINE,
+    ExpiresAt, HelperDeadlineSchedule, HelperExit, LocalHelperInvocation, MintWriterCapability,
+    ServiceAccountId, VendorSecretCapabilities, WindowsHandle, HELPER_SETUP_DEADLINE,
     MAX_HELPER_FRAME_BYTES,
 };
 use crate::local_helper_plan::{VendorBegin, VendorOperation};
@@ -140,8 +143,11 @@ pub(crate) struct PrivateConsole;
 
 impl PrivateConsole {
     /// Open `CONIN$` directly and read one non-empty, bounded line without terminal echo.
-    pub(crate) fn read_secret(&mut self) -> Result<ConsoleSecret, WindowsHelperError> {
-        read_console_secret_with(&mut KernelConsole)
+    pub(crate) fn read_secret(
+        &mut self,
+        result_by: Instant,
+    ) -> Result<ConsoleSecret, WindowsHelperError> {
+        read_console_secret_with(&mut KernelConsole, result_by)
     }
 }
 
@@ -154,7 +160,7 @@ pub(crate) trait VendorCeremony {
     fn prepare(
         &mut self,
         request: &VendorRequest,
-        ready_by: Instant,
+        deadlines: HelperDeadlineSchedule,
     ) -> Result<VendorPreparation<Self::Session>, Self::Error>;
 
     /// Own connection 2 through its server-bounded prompt/decision/roll-forward phases.
@@ -193,6 +199,7 @@ struct NativeVendorSession {
     _endpoint: PinnedEndpoint,
     pipe: NamedPipeClient,
     kind: VendorRequestKind,
+    deadlines: HelperDeadlineSchedule,
 }
 
 impl VendorCeremony for NativeVendorCeremony {
@@ -202,8 +209,9 @@ impl VendorCeremony for NativeVendorCeremony {
     fn prepare(
         &mut self,
         request: &VendorRequest,
-        ready_by: Instant,
+        deadlines: HelperDeadlineSchedule,
     ) -> Result<VendorPreparation<Self::Session>, Self::Error> {
+        let ready_by = deadlines.setup_by();
         let operation = match request.kind() {
             VendorRequestKind::Connect => VendorOperation::Connect,
             VendorRequestKind::Credential => VendorOperation::Credential,
@@ -248,6 +256,7 @@ impl VendorCeremony for NativeVendorCeremony {
                 _endpoint: endpoint,
                 pipe: mutation,
                 kind: request.kind(),
+                deadlines,
             }))
         })
     }
@@ -258,13 +267,8 @@ impl VendorCeremony for NativeVendorCeremony {
         input: &mut PrivateConsole,
     ) -> Result<Vec<u8>, Self::Error> {
         self.runtime.block_on(async {
-            let need = read_frame_before_async(
-                &mut session.pipe,
-                Instant::now()
-                    .checked_add(Duration::from_secs(300))
-                    .ok_or(WindowsHelperError::Deadline)?,
-            )
-            .await?;
+            let result_by = session.deadlines.result_by();
+            let need = read_frame_before_async(&mut session.pipe, result_by).await?;
             if need.opcode == ERROR {
                 return Ok(need.bytes);
             }
@@ -278,19 +282,16 @@ impl VendorCeremony for NativeVendorCeremony {
                 return Err(WindowsHelperError::Protocol);
             }
 
-            let predecision = Instant::now()
-                .checked_add(Duration::from_secs(300))
-                .ok_or(WindowsHelperError::Deadline)?;
             for (index, secret) in need.secrets.iter().enumerate() {
                 if usize::from(secret.ordinal) != index + 1 || secret.target.is_empty() {
                     return Err(WindowsHelperError::Protocol);
                 }
-                if Instant::now() >= predecision {
+                if Instant::now() >= result_by {
                     return Err(WindowsHelperError::Deadline);
                 }
-                let value = input.read_secret()?;
+                let value = input.read_secret(result_by)?;
                 let mut frame = encode_secret(secret.ordinal, value.bytes())?;
-                let result = write_before_async(&mut session.pipe, &frame, predecision).await;
+                let result = write_before_async(&mut session.pipe, &frame, result_by).await;
                 frame.fill(0);
                 result?;
             }
@@ -306,13 +307,10 @@ impl VendorCeremony for NativeVendorCeremony {
             write_before_async(
                 &mut session.pipe,
                 &encode_frame(CLIENT_DIRECTION, opcode, &commit),
-                predecision,
+                result_by,
             )
             .await?;
-            let postdecision = Instant::now()
-                .checked_add(Duration::from_secs(30))
-                .ok_or(WindowsHelperError::Deadline)?;
-            Ok(read_terminal_before_async(&mut session.pipe, postdecision)
+            Ok(read_terminal_before_async(&mut session.pipe, result_by)
                 .await?
                 .bytes)
         })
@@ -699,28 +697,43 @@ pub(crate) fn run_vendor<C: VendorCeremony>(
         Err(_) => return HelperExit::CapabilityOrTransportFailure,
     };
     let VendorCapabilities { request, response } = capabilities;
-    let request = match read_request(&request, HELPER_SETUP_DEADLINE) {
-        Ok(request) => request,
-        Err(refusal) => return finish_response(response, &refusal.frame()),
-    };
-    // EOF starts both caps. Setup covers endpoint/plan/connection-2 readiness; result completion
-    // separately admits the server's 300-second pre-decision and 30-second post-decision budgets.
-    let result_by = Instant::now()
-        .checked_add(HELPER_RESULT_DEADLINE)
-        .unwrap_or_else(Instant::now);
-    let ready_by = Instant::now()
+    let request_by = Instant::now()
         .checked_add(HELPER_SETUP_DEADLINE)
         .unwrap_or_else(Instant::now);
-    let preparation = match ceremony.prepare(&request, ready_by) {
-        Ok(preparation) if Instant::now() < ready_by => preparation,
-        _ => return finish_response(response, &Refusal::LocalManagementUnavailable.frame()),
+    let parsed_request = read_request(&request, request_by);
+    let Some(deadlines) = HelperDeadlineSchedule::from_request_eof(Instant::now()) else {
+        return HelperExit::CapabilityOrTransportFailure;
+    };
+    let request = match parsed_request {
+        Ok(request) => request,
+        Err(refusal) => return finish_response(response, refusal.frame(), deadlines.result_by()),
+    };
+    // EOF starts both helper caps. Only the server observes decision fsync and owns its 300/30
+    // phase transition; the helper retains one non-resetting 335-second result cap.
+    let preparation = match ceremony.prepare(&request, deadlines) {
+        Ok(preparation)
+            if HelperDeadlineSchedule::permits(deadlines.setup_by(), Instant::now()) =>
+        {
+            preparation
+        }
+        _ => {
+            return finish_response(
+                response,
+                Refusal::LocalManagementUnavailable.frame(),
+                deadlines.result_by(),
+            );
+        }
     };
     let terminal = match preparation {
         VendorPreparation::Terminal(terminal) => terminal,
         VendorPreparation::Ready(session) => {
             let mut input = PrivateConsole;
             match ceremony.exchange(session, &mut input) {
-                Ok(terminal) if Instant::now() < result_by => terminal,
+                Ok(terminal)
+                    if HelperDeadlineSchedule::permits(deadlines.result_by(), Instant::now()) =>
+                {
+                    terminal
+                }
                 _ => return HelperExit::CapabilityOrTransportFailure,
             }
         }
@@ -729,7 +742,7 @@ pub(crate) fn run_vendor<C: VendorCeremony>(
         Ok(()) => terminal,
         Err(refusal) => refusal.frame(),
     };
-    finish_response(response, &terminal)
+    finish_response(response, terminal, deadlines.result_by())
 }
 
 /// One owner-authenticated Windows mint session.
@@ -750,7 +763,7 @@ pub(crate) trait AuthenticatedMintPort {
         &mut self,
         session: Self::Session,
         request: &[u8],
-        ready_by: Instant,
+        result_by: Instant,
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
@@ -793,11 +806,11 @@ impl AuthenticatedMintPort for NativeMintPort {
         &mut self,
         mut session: Self::Session,
         request: &[u8],
-        ready_by: Instant,
+        result_by: Instant,
     ) -> Result<Vec<u8>, Self::Error> {
         self.runtime.block_on(async {
-            write_before_async(&mut session.pipe, request, ready_by).await?;
-            Ok(read_terminal_before_async(&mut session.pipe, ready_by)
+            write_before_async(&mut session.pipe, request, result_by).await?;
+            Ok(read_terminal_before_async(&mut session.pipe, result_by)
                 .await?
                 .bytes)
         })
@@ -815,9 +828,10 @@ pub(crate) fn run_mint<P: AuthenticatedMintPort>(
         Ok(writer) => writer,
         Err(_) => return HelperExit::CapabilityOrTransportFailure,
     };
-    let ready_by = Instant::now()
-        .checked_add(HELPER_SETUP_DEADLINE)
-        .unwrap_or_else(Instant::now);
+    let Some(deadlines) = HelperDeadlineSchedule::from_request_eof(Instant::now()) else {
+        return HelperExit::CapabilityOrTransportFailure;
+    };
+    let ready_by = deadlines.setup_by();
     let session = match port.open_owner_session(ready_by) {
         Ok(session) if Instant::now() < ready_by => session,
         _ => return HelperExit::CapabilityOrTransportFailure,
@@ -836,8 +850,10 @@ pub(crate) fn run_mint<P: AuthenticatedMintPort>(
     request.extend_from_slice(&mint);
     // Keep the source live until the server has consumed the attachment and returned a terminal
     // response. Closing it earlier races the server-side DuplicateHandle.
-    let terminal = match port.exchange_mint(session, &request, ready_by) {
-        Ok(terminal) if Instant::now() < ready_by => terminal,
+    let terminal = match port.exchange_mint(session, &request, deadlines.result_by()) {
+        Ok(terminal) if HelperDeadlineSchedule::permits(deadlines.result_by(), Instant::now()) => {
+            terminal
+        }
         _ => return HelperExit::CapabilityOrTransportFailure,
     };
     drop(writer);
@@ -993,10 +1009,7 @@ fn clear_inheritance(handle: HANDLE) -> Result<(), WindowsHelperError> {
     }
 }
 
-fn read_request(descriptor: &OwnedHandle, budget: Duration) -> Result<VendorRequest, Refusal> {
-    let deadline = Instant::now()
-        .checked_add(budget)
-        .unwrap_or_else(Instant::now);
+fn read_request(descriptor: &OwnedHandle, deadline: Instant) -> Result<VendorRequest, Refusal> {
     let raw = descriptor.as_raw_handle() as HANDLE;
     let mut bytes = Vec::with_capacity(HEADER_BYTES);
     let mut expected = None;
@@ -1134,7 +1147,33 @@ fn known_opcode(opcode: u16) -> bool {
     )
 }
 
-fn finish_response(response: OwnedHandle, bytes: &[u8]) -> HelperExit {
+fn finish_response(response: OwnedHandle, bytes: Vec<u8>, deadline: Instant) -> HelperExit {
+    let (sent, received) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        let result = write_response_and_close(response, &bytes);
+        let _ = sent.send(result);
+    });
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        cancel_blocking_worker(worker);
+        return HelperExit::CapabilityOrTransportFailure;
+    };
+    match received.recv_timeout(remaining) {
+        Ok(true) => {
+            let _ = worker.join();
+            HelperExit::TerminalFrameWritten
+        }
+        Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+            HelperExit::CapabilityOrTransportFailure
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            cancel_blocking_worker(worker);
+            HelperExit::CapabilityOrTransportFailure
+        }
+    }
+}
+
+fn write_response_and_close(response: OwnedHandle, bytes: &[u8]) -> bool {
     let raw = response.into_raw_handle() as HANDLE;
     let mut written = 0_usize;
     while written < bytes.len() {
@@ -1153,15 +1192,59 @@ fn finish_response(response: OwnedHandle, bytes: &[u8]) -> HelperExit {
         {
             // SAFETY: ownership was extracted once and this branch terminates its use.
             unsafe { CloseHandle(raw) };
-            return HelperExit::CapabilityOrTransportFailure;
+            return false;
         }
         written += count as usize;
     }
     // SAFETY: ownership was extracted once; successful close produces the required EOF.
-    if unsafe { CloseHandle(raw) } != 0 {
-        HelperExit::TerminalFrameWritten
-    } else {
-        HelperExit::CapabilityOrTransportFailure
+    (unsafe { CloseHandle(raw) }) != 0
+}
+
+fn cancel_blocking_worker(worker: thread::JoinHandle<()>) {
+    // SAFETY: the standard-library thread handle remains live until `join`; cancellation targets
+    // only its synchronous WriteFile/ReadConsoleW operation.
+    unsafe { CancelSynchronousIo(worker.as_raw_handle() as HANDLE) };
+    let _ = worker.join();
+}
+
+#[cfg(test)]
+#[allow(dead_code)] // Called by the native Windows integration harness through this source module.
+pub(crate) fn blocking_read_before_for_test(
+    input: OwnedHandle,
+    deadline: Instant,
+) -> Result<(), WindowsHelperError> {
+    let (sent, received) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
+        let mut byte = 0_u8;
+        let mut read = 0_u32;
+        let result = unsafe {
+            ReadFile(
+                input.as_raw_handle() as HANDLE,
+                (&mut byte as *mut u8).cast(),
+                1,
+                &mut read,
+                null_mut(),
+            )
+        };
+        let _ = sent.send(result != 0 && read == 1);
+    });
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        cancel_blocking_worker(worker);
+        return Err(WindowsHelperError::Deadline);
+    };
+    match received.recv_timeout(remaining) {
+        Ok(true) => {
+            let _ = worker.join();
+            Ok(())
+        }
+        Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = worker.join();
+            Err(WindowsHelperError::Console)
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            cancel_blocking_worker(worker);
+            Err(WindowsHelperError::Deadline)
+        }
     }
 }
 
@@ -1237,6 +1320,7 @@ pub(crate) trait ConsolePort {
         &mut self,
         input: &Self::Input,
         maximum_utf16_units: usize,
+        deadline: Instant,
     ) -> Result<Vec<u16>, WindowsHelperError>;
 }
 
@@ -1246,11 +1330,15 @@ pub(crate) trait ConsolePort {
 /// input. Echo is restored on every return path after the console mode was changed.
 pub(crate) fn read_console_secret_with<P: ConsolePort>(
     port: &mut P,
+    deadline: Instant,
 ) -> Result<ConsoleSecret, WindowsHelperError> {
+    if Instant::now() >= deadline {
+        return Err(WindowsHelperError::Deadline);
+    }
     let input = port.open_current_input()?;
     let original = port.mode(&input)?;
     port.set_mode(&input, original & !ENABLE_ECHO_INPUT)?;
-    let result = port.read_line(&input, 8_194);
+    let result = port.read_line(&input, 8_194, deadline);
     let restored = port.set_mode(&input, original);
     let mut units = match result {
         Ok(units) => units,
@@ -1326,24 +1414,65 @@ impl ConsolePort for KernelConsole {
         &mut self,
         input: &Self::Input,
         maximum_utf16_units: usize,
+        deadline: Instant,
     ) -> Result<Vec<u16>, WindowsHelperError> {
-        let mut units = vec![0_u16; maximum_utf16_units];
-        let mut read = 0_u32;
+        let mut raw = null_mut();
         if unsafe {
-            ReadConsoleW(
+            DuplicateHandle(
+                GetCurrentProcess(),
                 input.as_raw_handle() as HANDLE,
-                units.as_mut_ptr(),
-                maximum_utf16_units as u32,
-                &mut read,
-                null_mut(),
+                GetCurrentProcess(),
+                &mut raw,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
             )
         } == 0
         {
-            units.fill(0);
             return Err(WindowsHelperError::Console);
         }
-        units.truncate(read as usize);
-        Ok(units)
+        // SAFETY: successful DuplicateHandle returned one owned handle in this process.
+        let input = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+        let (sent, received) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let mut units = vec![0_u16; maximum_utf16_units];
+            let mut read = 0_u32;
+            let result = if unsafe {
+                ReadConsoleW(
+                    input.as_raw_handle() as HANDLE,
+                    units.as_mut_ptr(),
+                    maximum_utf16_units as u32,
+                    &mut read,
+                    null_mut(),
+                )
+            } == 0
+            {
+                units.fill(0);
+                Err(WindowsHelperError::Console)
+            } else {
+                units.truncate(read as usize);
+                Ok(units)
+            };
+            let _ = sent.send(result);
+        });
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            cancel_blocking_worker(worker);
+            return Err(WindowsHelperError::Deadline);
+        };
+        match received.recv_timeout(remaining) {
+            Ok(result) => {
+                let _ = worker.join();
+                result
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = worker.join();
+                Err(WindowsHelperError::Console)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                cancel_blocking_worker(worker);
+                Err(WindowsHelperError::Deadline)
+            }
+        }
     }
 }
 

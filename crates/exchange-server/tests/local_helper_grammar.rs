@@ -2,17 +2,47 @@
 mod local_helper;
 
 use std::ffi::OsString;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use local_helper::{
     validate_complete_frame_size, validate_unix_vendor_capabilities,
     validate_windows_vendor_capabilities, CapabilityRefusal, ExpiresAt, FrameSizeRefusal,
-    HelperExit, HelperGrammarRefusal, HelperPlatform, LocalHelperEndpointPort,
-    LocalHelperInvocation, MintWriterCapability, PipeCapabilityFacts, PipeDirection,
-    ServiceAccountId, UnixVendorCapabilityFacts, VendorSecretCapabilities,
+    HelperDeadlineSchedule, HelperExit, HelperGrammarRefusal, HelperPlatform,
+    LocalHelperEndpointPort, LocalHelperInvocation, MintWriterCapability, PipeCapabilityFacts,
+    PipeDirection, ServiceAccountId, UnixVendorCapabilityFacts, VendorSecretCapabilities,
     WindowsVendorCapabilityFacts, HELPER_RESULT_DEADLINE, HELPER_SETUP_DEADLINE,
     MAX_HELPER_FRAME_BYTES, UNIX_MINT_WRITER_FD, UNIX_VENDOR_REQUEST_FD, UNIX_VENDOR_RESPONSE_FD,
 };
+
+#[test]
+fn absolute_helper_deadlines_close_the_4_5_and_334_335_boundaries() {
+    let request_eof = Instant::now();
+    let request_by = request_eof + Duration::from_secs(5);
+    assert!(HelperDeadlineSchedule::permits(
+        request_by,
+        request_eof + Duration::from_secs(4)
+    ));
+    assert!(!HelperDeadlineSchedule::permits(request_by, request_by));
+
+    let schedule = HelperDeadlineSchedule::from_request_eof(request_eof).expect("deadlines");
+    assert!(HelperDeadlineSchedule::permits(
+        schedule.setup_by(),
+        request_eof + Duration::from_secs(4)
+    ));
+    assert!(!HelperDeadlineSchedule::permits(
+        schedule.setup_by(),
+        request_eof + Duration::from_secs(5)
+    ));
+
+    assert!(HelperDeadlineSchedule::permits(
+        schedule.result_by(),
+        request_eof + Duration::from_secs(334)
+    ));
+    assert!(!HelperDeadlineSchedule::permits(
+        schedule.result_by(),
+        request_eof + Duration::from_secs(335)
+    ));
+}
 
 fn args(values: &[&str]) -> Vec<OsString> {
     values.iter().map(OsString::from).collect()

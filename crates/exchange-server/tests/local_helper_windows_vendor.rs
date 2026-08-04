@@ -15,11 +15,12 @@ use std::ptr::null_mut;
 use std::time::Instant;
 
 use local_helper::{
-    parse_local_helper, HelperExit, HelperPlatform, LocalHelperInvocation, VendorSecretCapabilities,
+    parse_local_helper, HelperDeadlineSchedule, HelperExit, HelperPlatform, LocalHelperInvocation,
+    VendorSecretCapabilities,
 };
 use local_helper_windows::{
-    read_console_secret_with, ConsolePort, VendorCeremony, VendorPreparation, VendorRequest,
-    WindowsHelperError,
+    blocking_read_before_for_test, read_console_secret_with, ConsolePort, VendorCeremony,
+    VendorPreparation, VendorRequest, WindowsHelperError,
 };
 use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -104,9 +105,9 @@ impl VendorCeremony for RecordingCeremony {
     fn prepare(
         &mut self,
         request: &VendorRequest,
-        ready_by: Instant,
+        deadlines: HelperDeadlineSchedule,
     ) -> Result<VendorPreparation<Self::Session>, Self::Error> {
-        assert!(Instant::now() < ready_by);
+        assert!(Instant::now() < deadlines.setup_by());
         self.request.extend_from_slice(request.bytes());
         Ok(VendorPreparation::Ready(()))
     }
@@ -222,6 +223,7 @@ impl ConsolePort for FakeConsole {
         &mut self,
         _input: &Self::Input,
         maximum_utf16_units: usize,
+        _deadline: Instant,
     ) -> Result<Vec<u16>, WindowsHelperError> {
         self.calls.push(format!("read-{maximum_utf16_units}"));
         self.line.clone()
@@ -235,7 +237,11 @@ fn private_input_opens_current_console_disables_echo_and_restores_it() {
         original_mode: 0x0007,
         line: Ok("sëcret\r\n".encode_utf16().collect()),
     };
-    let secret = read_console_secret_with(&mut console).expect("private console secret");
+    let secret = read_console_secret_with(
+        &mut console,
+        Instant::now() + std::time::Duration::from_secs(1),
+    )
+    .expect("private console secret");
     assert_eq!(secret.bytes(), "sëcret".as_bytes());
     assert_eq!(
         console.calls,
@@ -256,6 +262,21 @@ fn private_input_restores_echo_after_console_read_failure() {
         original_mode: 0x0007,
         line: Err(WindowsHelperError::Console),
     };
-    assert!(read_console_secret_with(&mut console).is_err());
+    assert!(read_console_secret_with(
+        &mut console,
+        Instant::now() + std::time::Duration::from_secs(1)
+    )
+    .is_err());
     assert_eq!(console.calls.last().map(String::as_str), Some("set-mode-7"));
+}
+
+#[test]
+fn blocked_console_read_is_cancelled_at_the_unchanged_outer_deadline() {
+    let (read, _held_write) = inheritable_pipe();
+    let started = Instant::now();
+    assert!(matches!(
+        blocking_read_before_for_test(read, started + std::time::Duration::from_millis(25)),
+        Err(WindowsHelperError::Deadline)
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }

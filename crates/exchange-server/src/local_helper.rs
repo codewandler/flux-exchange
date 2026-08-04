@@ -21,6 +21,41 @@ pub const HELPER_SETUP_DEADLINE: Duration = Duration::from_secs(5);
 /// Flux's absolute result deadline after request EOF.
 pub const HELPER_RESULT_DEADLINE: Duration = Duration::from_secs(335);
 
+/// Absolute helper deadlines derived once from request EOF; traffic never replaces them.
+#[derive(Clone, Copy)]
+pub(crate) struct HelperDeadlineSchedule {
+    result_by: std::time::Instant,
+    setup_by: std::time::Instant,
+}
+
+impl HelperDeadlineSchedule {
+    pub(crate) fn from_request_eof(now: std::time::Instant) -> Option<Self> {
+        Self::from_request_eof_with_setup(now, HELPER_SETUP_DEADLINE)
+    }
+
+    pub(crate) fn from_request_eof_with_setup(
+        now: std::time::Instant,
+        setup: Duration,
+    ) -> Option<Self> {
+        Some(Self {
+            result_by: now.checked_add(HELPER_RESULT_DEADLINE)?,
+            setup_by: now.checked_add(setup)?,
+        })
+    }
+
+    pub(crate) const fn setup_by(self) -> std::time::Instant {
+        self.setup_by
+    }
+
+    pub(crate) const fn result_by(self) -> std::time::Instant {
+        self.result_by
+    }
+
+    pub(crate) fn permits(deadline: std::time::Instant, now: std::time::Instant) -> bool {
+        now < deadline
+    }
+}
+
 /// Platform whose exact helper argv contract is being parsed.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HelperPlatform {

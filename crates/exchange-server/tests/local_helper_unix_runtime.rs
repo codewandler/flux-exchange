@@ -25,7 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use local_helper::{
-    parse_local_helper, HelperExit, HelperPlatform, LocalHelperInvocation, MintWriterCapability,
+    parse_local_helper, HelperDeadlineSchedule, HelperExit, HelperPlatform, LocalHelperInvocation,
+    MintWriterCapability,
 };
 use local_helper_unix::{MintTransfer, PinnedEndpoint, VendorCeremony, VendorRequest};
 
@@ -190,6 +191,45 @@ fn oversized_declared_request_refuses_without_reading_its_body() {
 }
 
 #[test]
+fn terminal_response_write_and_eof_share_the_absolute_result_deadline() {
+    let (read, write) = pipe();
+    let flags = unsafe { libc::fcntl(write.as_raw_fd(), libc::F_GETFL) };
+    assert_ne!(flags, -1);
+    assert_ne!(
+        unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        -1
+    );
+    let fill = [0x5a_u8; 4096];
+    loop {
+        let written = unsafe { libc::write(write.as_raw_fd(), fill.as_ptr().cast(), fill.len()) };
+        if written > 0 {
+            continue;
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        break;
+    }
+    let started = std::time::Instant::now();
+    let exit = local_helper_unix::finish_response_before_for_test(
+        write,
+        server_frame(0x7fff, br#"{"code":"deadline_exceeded"}"#),
+        started + Duration::from_millis(25),
+    );
+    assert!(
+        exit == HelperExit::CapabilityOrTransportFailure,
+        "a blocked response cannot be reported as frame+EOF"
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let mut drained = Vec::new();
+    File::from(read)
+        .read_to_end(&mut drained)
+        .expect("writer closure produces EOF after queued bytes");
+    assert!(!drained.is_empty());
+}
+
+#[test]
 fn service_account_mode_builds_exact_mint_frame_for_the_fd5_transfer_seam() {
     let fixture = EndpointFixture::new();
     let invocation = parse_local_helper(
@@ -261,9 +301,11 @@ impl VendorCeremony for ConnectAndReturn {
         &mut self,
         endpoint: &PinnedEndpoint,
         _request: &VendorRequest,
-        ready_by: std::time::Instant,
+        deadlines: HelperDeadlineSchedule,
     ) -> Result<Vec<u8>, Self::Error> {
-        let stream = endpoint.connect_before(ready_by).map_err(|_| ())?;
+        let stream = endpoint
+            .connect_before(deadlines.setup_by())
+            .map_err(|_| ())?;
         drop(stream);
         Ok(self.response.clone())
     }
