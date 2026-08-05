@@ -58,13 +58,20 @@ def refuse(message):
     raise SystemExit(1)
 
 
-checksums = {
-    "codewandler-connector-address": "bdee7fb0d488de4ed97dbd3b8414e04138c122ee36b6f9c97a174bb317913d8c",
-    "codewandler-connector-catalog": "9a7737659b74876b09ff6e09b253402c5bdfcafcbde89373cb76f689bd8ffed2",
-    "codewandler-connector-secrets": "edf98bece86f6364aba3e7dd48c3b7e161146942e9e8450d5dc286143b627717",
-    "codewandler-connector-pack": "8e858a844dab8324d42bb83c98c4ffb6823681eb1157ddb96a79d5d7a42cff48",
-}
 registry = "registry+https://github.com/rust-lang/crates.io-index"
+
+try:
+    authority_bytes = (root / "crates/exchange-release/native-evidence-v1.json").read_bytes()
+    authority = json.loads(authority_bytes)
+except (OSError, json.JSONDecodeError) as error:
+    refuse(f"cannot read the canonical native-evidence authority: {error}")
+authority_canonical = json.dumps(authority, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+if authority_bytes != authority_canonical or authority.get("schema") != "exchange.native-evidence.v1":
+    refuse("native-evidence authority is not canonical schema v1 JSON")
+upstream = [item for item in authority.get("authorities", {}).values() if item.get("class") == "inherited_upstream"]
+if len(upstream) != 1 or not isinstance(upstream[0].get("package"), dict):
+    refuse("native-evidence authority lacks one inherited upstream package identity")
+upstream_package = upstream[0]["package"]
 
 try:
     manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
@@ -83,15 +90,23 @@ if any(key in dependency for key in ("path", "git", "registry")):
     refuse("workspace connector-secrets uses a path, git, or alternate-registry source")
 
 packages = lock.get("package", [])
-for name, checksum in checksums.items():
+connector_dependencies = sorted(
+    value["package"] for value in manifest.get("workspace", {}).get("dependencies", {}).values()
+    if isinstance(value, dict) and str(value.get("package", "")).startswith("codewandler-connector-")
+)
+if not connector_dependencies or len(connector_dependencies) != len(set(connector_dependencies)):
+    refuse("workspace connector-family selection is absent or duplicated")
+for name in connector_dependencies:
     selected = [package for package in packages if package.get("name") == name]
     if len(selected) != 1:
         refuse(f"Cargo.lock contains {len(selected)} instances of {name}, want exactly one")
     package = selected[0]
     if package.get("version") != "0.20.0":
         refuse(f"Cargo.lock selects {name} {package.get('version')!r}, want 0.20.0")
-    if package.get("source") != registry or package.get("checksum") != checksum:
-        refuse(f"Cargo.lock does not authenticate the crates.io bytes for {name} 0.20.0")
+    if package.get("source") != registry or not re.fullmatch(r"[0-9a-f]{64}", package.get("checksum", "")):
+        refuse(f"Cargo.lock does not authenticate crates.io bytes for {name} 0.20.0")
+    if name == upstream_package.get("name") and package.get("checksum") != upstream_package.get("registry_sha256"):
+        refuse("Cargo.lock connector-secrets checksum disagrees with its canonical upstream authority")
 
 obsolete = root / "tests/fixtures/exchange-release-v1"
 if obsolete.exists() or obsolete.is_symlink():
@@ -230,130 +245,116 @@ missing_cases = sorted(required_trust_cases - set(case_ids))
 if missing_cases:
     refuse(f"v2 fixtures dropped trust-v1 refusal cases: {missing_cases}")
 
-targets = {
-    "aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu",
-    "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc",
-}
-native = fixture.get("native_cases")
-if not isinstance(native, list) or len(native) != 13:
-    refuse("fixture-set must retain the nine X-128 mappings plus the four ratcheted X-134 case ids")
-native_ids = [case.get("id") for case in native if isinstance(case, dict)]
-if len(native_ids) != 13 or len(set(native_ids)) != 13:
-    refuse("native case ids are absent or duplicated")
-expected_native_ids = {
-    "four-form-secret-sentinel-process-scan",
-    "production-root-inherited-environment",
-    "windows-production-root-unsafe-metadata",
-    "c515-server-lifetime-lease",
-    "expiry-equality-live",
-    "supervisor-death-normal-responsive-unix",
-    "supervisor-death-normal-wedged-unix",
-    "supervisor-death-sigkill-responsive-unix",
-    "supervisor-death-sigkill-wedged-unix",
-    "supervisor-death-terminate-responsive-windows",
-    "supervisor-death-terminate-wedged-windows",
-    "unix-inherited-abi",
-    "windows-inherited-abi",
-}
-if set(native_ids) != expected_native_ids:
-    refuse(f"the X-128 plus ratcheted X-134 native case identities changed: {sorted(set(native_ids) ^ expected_native_ids)}")
-sentinel_case = next(case for case in native if case.get("id") == "four-form-secret-sentinel-process-scan")
-expected_sentinel_evidence = [{
-    "targets": sorted(targets),
-    "test_target": "x134_sentinel_evidence",
-    "exact_test": "transformed_secret_sentinels_never_enter_refusal_abort_crash_or_restart_outputs",
-}]
-if sentinel_case.get("evidence") != expected_sentinel_evidence:
-    refuse("four-form process scanning is not bound to its exact corrected test on all five targets")
-root_case = next(case for case in native if case.get("id") == "production-root-inherited-environment")
-expected_root_evidence = [{
-    "targets": sorted(targets),
-    "test_target": "local_state_regressions",
-    "exact_test": "native_process_derives_production_root_from_the_authenticated_os_account",
-}]
-if root_case.get("evidence") != expected_root_evidence:
-    refuse("production-root poisoning is not bound to its exact real-process test on all five targets")
-windows_root_case = next(case for case in native if case.get("id") == "windows-production-root-unsafe-metadata")
-expected_windows_root_evidence = [
-    {
-        "targets": ["x86_64-pc-windows-msvc"],
-        "test_target": "windows_native_root_poisoning",
-        "exact_test": "windows_supervised_startup_refuses_reparse_point_owner_root_ancestor_without_repair",
-    },
-    {
-        "targets": ["x86_64-pc-windows-msvc"],
-        "test_target": "windows_native_root_poisoning",
-        "exact_test": "windows_supervised_startup_refuses_untrusted_writable_owner_root_ancestor_without_repair",
-    },
-]
-if windows_root_case.get("evidence") != expected_windows_root_evidence:
-    refuse("Windows root poisoning is not bound to its exact two native MSVC process tests")
-lease_case = next(case for case in native if case.get("id") == "c515-server-lifetime-lease")
-expected_lease_evidence = [{
-    "targets": sorted(targets),
-    "test_target": "credential_store_process_lease",
-    "exact_test": "real_server_retains_the_c515_lease_through_recovery_and_readiness",
-}]
-if lease_case.get("evidence") != expected_lease_evidence:
-    refuse("C-515 server lifetime lease is not bound to its exact real-process test on all five targets")
-bindings = []
-covered = set()
-for case in native:
-    evidence = case.get("evidence")
-    if not isinstance(evidence, list) or not evidence:
-        refuse(f"native case {case.get('id')!r} has no exact evidence binding")
-    for binding in evidence:
-        selected = binding.get("targets")
-        if not isinstance(selected, list) or not selected or not set(selected) <= targets:
-            refuse(f"native case {case.get('id')!r} has an invalid target set")
-        if not isinstance(binding.get("test_target"), str) or not binding["test_target"]:
-            refuse(f"native case {case.get('id')!r} has no Cargo test target")
-        if not isinstance(binding.get("exact_test"), str) or not binding["exact_test"]:
-            refuse(f"native case {case.get('id')!r} has no exact test name")
-        identity = (binding["test_target"], binding["exact_test"], tuple(selected))
-        if identity in bindings:
-            refuse(f"native case {case.get('id')!r} duplicates an evidence binding")
-        bindings.append(identity)
+def has_gap(value):
+    if isinstance(value, dict):
+        return any(key == "gap" or has_gap(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(has_gap(item) for item in value)
+    return value == "gap"
+
+
+if has_gap(authority):
+    refuse("native-evidence authority contains a publication gap")
+targets = authority.get("targets")
+target_sets = authority.get("target_sets")
+bindings = authority.get("bindings")
+release_evidence = authority.get("release_evidence")
+obligations = authority.get("obligations")
+if not all(isinstance(value, dict) and value for value in (targets, target_sets, bindings, release_evidence, obligations)):
+    refuse("native-evidence authority omits targets, sets, bindings, release evidence or obligations")
+target_ids = set(targets)
+for set_id, selected in target_sets.items():
+    if not isinstance(selected, list) or selected != sorted(set(selected)) or not set(selected) <= target_ids:
+        refuse(f"native target set {set_id!r} is empty, duplicated or unknown")
+used_bindings = set()
+used_release_evidence = set()
+expected_native = []
+for obligation_id, obligation in obligations.items():
+    if not isinstance(obligation, dict) or obligation.get("target_set") not in target_sets:
+        refuse(f"native obligation {obligation_id!r} has no authoritative target set")
+    binding_ids = obligation.get("bindings")
+    inherited_ids = obligation.get("release_evidence")
+    adversarial = obligation.get("adversarial_cases")
+    if not isinstance(binding_ids, list) or not isinstance(inherited_ids, list) or not isinstance(adversarial, list) or not adversarial:
+        refuse(f"native obligation {obligation_id!r} is incomplete")
+    evidence = []
+    covered = set()
+    for binding_id in binding_ids:
+        binding = bindings.get(binding_id)
+        if not isinstance(binding, dict) or binding.get("target_set") not in target_sets:
+            refuse(f"native obligation {obligation_id!r} names an invalid Cargo binding")
+        selected = target_sets[binding["target_set"]]
+        cargo_target = binding.get("cargo_target")
+        if not isinstance(cargo_target, dict) or not binding.get("exact_test"):
+            refuse(f"native binding {binding_id!r} lacks one exact Cargo test")
+        test_target = "lib" if cargo_target.get("kind") == "lib" else cargo_target.get("name")
+        if not test_target:
+            refuse(f"native binding {binding_id!r} lacks one Cargo target")
+        evidence.append({
+            "targets": selected,
+            "test_target": test_target,
+            "exact_test": binding["exact_test"],
+        })
         covered.update(selected)
-if len(bindings) != 19 or covered != targets:
-    refuse(f"native fixture mapping has {len(bindings)} bindings over {sorted(covered)}, want 19 over all five targets")
+        used_bindings.add(binding_id)
+    for evidence_id in inherited_ids:
+        inherited = release_evidence.get(evidence_id)
+        if not isinstance(inherited, dict) or inherited.get("target_set") not in target_sets:
+            refuse(f"native obligation {obligation_id!r} names invalid inherited evidence")
+        covered.update(target_sets[inherited["target_set"]])
+        used_release_evidence.add(evidence_id)
+    if covered != set(target_sets[obligation["target_set"]]):
+        refuse(f"native obligation {obligation_id!r} does not exactly cover its target set")
+    expected_native.append({
+        "id": obligation_id,
+        "authority": obligation.get("authority"),
+        "evidence": evidence,
+        "release_evidence": inherited_ids,
+    })
+if used_bindings != set(bindings) or used_release_evidence != set(release_evidence):
+    refuse("native authority contains unreferenced Cargo or inherited evidence")
+native_identity = hashlib.sha256(authority_canonical).hexdigest()
+if fixture.get("native_evidence_sha256") != native_identity:
+    refuse("fixture-set does not name the canonical native-evidence authority identity")
+if fixture.get("native_cases") != expected_native:
+    refuse("fixture-set native cases are not the exact authority-derived projection")
+native_ids = {case["id"] for case in expected_native}
 
 required_contract_cases = {
     "positive-linux", "positive-macos", "positive-windows", "positive-signer-overlap",
     "integer-over-jcs-safe", "decimal-noncanonical", "id-or-basename-unsafe",
     "minisign-key-malformed", "minisign-key-reused", "channel-floor-survives-rotation",
     "higher-channel-no-compatible", "higher-channel-target-fails", "same-number-different-bytes",
-    "expiry-equality-stopped", "expiry-equality-live", "readiness-bind-domain",
-    "readiness-start-kind", "four-form-secret-sentinel-process-scan",
-    "production-root-inherited-environment",
-    "windows-production-root-unsafe-metadata",
-    "c515-server-lifetime-lease",
-    "unix-inherited-abi", "windows-inherited-abi",
+    "expiry-equality-stopped", "readiness-bind-domain", "readiness-start-kind",
     "provenance-client-input",
 }
 missing_contract_cases = sorted(required_contract_cases - set(case_ids) - set(native_ids))
 if missing_contract_cases:
     refuse(f"v2 fixtures omit minimum contract cases: {missing_contract_cases}")
 
-print("PASS publication readiness: registry 0.20, v2 producers/fixtures, eight protocols, trust and five-target native inventory")
+print("PASS publication readiness: registry 0.20, v2 producers/fixtures, eight protocols and authority-derived native evidence")
 PY
 }
 
 if [ "${1:-}" = "--self-test" ]; then
   scratch="$(mktemp -d "${TMPDIR:-/tmp}/flux-exchange-publication-readiness.XXXXXX")"
   trap 'rm -rf -- "$scratch"' EXIT
-  python3 - "$scratch" <<'PY'
+  python3 - "$scratch" "$root" <<'PY'
 import hashlib
 import json
 from pathlib import Path
 import sys
 
 root = Path(sys.argv[1])
+source_root = Path(sys.argv[2])
 (root / "scripts").mkdir(parents=True)
 (root / ".github/workflows").mkdir(parents=True)
 (root / "crates/exchange-release/src").mkdir(parents=True)
 (root / "crates/exchange-release/examples").mkdir(parents=True)
 (root / "crates/exchange-server/src").mkdir(parents=True)
+authority_bytes = (source_root / "crates/exchange-release/native-evidence-v1.json").read_bytes()
+authority = json.loads(authority_bytes)
+(root / "crates/exchange-release/native-evidence-v1.json").write_bytes(authority_bytes)
 for relative in (
     ".github/workflows/local-release.yml", "scripts/check-local-release.sh",
     "scripts/release-stage.sh", "crates/exchange-release/src/model.rs",
@@ -392,15 +393,9 @@ curl https://crates.io
 ''', encoding="utf-8")
 
 (root / "Cargo.toml").write_text('''[workspace]\n[workspace.dependencies]\nconnector-secrets = { package = "codewandler-connector-secrets", version = "0.20" }\n''')
-checksums = {
-    "codewandler-connector-address": "bdee7fb0d488de4ed97dbd3b8414e04138c122ee36b6f9c97a174bb317913d8c",
-    "codewandler-connector-catalog": "9a7737659b74876b09ff6e09b253402c5bdfcafcbde89373cb76f689bd8ffed2",
-    "codewandler-connector-secrets": "edf98bece86f6364aba3e7dd48c3b7e161146942e9e8450d5dc286143b627717",
-    "codewandler-connector-pack": "8e858a844dab8324d42bb83c98c4ffb6823681eb1157ddb96a79d5d7a42cff48",
-}
+upstream = next(item for item in authority["authorities"].values() if item["class"] == "inherited_upstream")["package"]
 lock = "version = 4\n\n"
-for name, checksum in checksums.items():
-    lock += f'[[package]]\nname = "{name}"\nversion = "0.20.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{checksum}"\n\n'
+lock += f'[[package]]\nname = "{upstream["name"]}"\nversion = "{upstream["version"]}"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{upstream["registry_sha256"]}"\n\n'
 (root / "Cargo.lock").write_text(lock, encoding="utf-8")
 
 fixtures = root / "tests/fixtures/exchange-release-v2"
@@ -426,58 +421,30 @@ for relative, document in documents.items():
     path.write_text(json.dumps(document, separators=(",", ":"), sort_keys=True), encoding="utf-8")
 
 trust_cases = '''trust-rollback trust-equivocation minisign-key-malformed minisign-key-wrong-length minisign-key-wrong-algorithm minisign-key-embedded-id-disagreement minisign-key-reused minisign-key-reused-within-role minisign-key-reused-with-root role-confusion key-id-empty key-id-overlong key-id-slash key-id-double-hyphen key-id-leading-punctuation key-id-trailing-punctuation key-id-nonascii key-id-uppercase trust-future-issued root-threshold-failure trust-signature-missing trust-signature-substituted release-threshold-failure channel-threshold-failure channel-signature-missing channel-signature-substituted manifest-signature-missing manifest-signature-key-id-disagree github-initial-trust key-id-substituted positive-linux positive-macos positive-windows positive-signer-overlap integer-over-jcs-safe decimal-noncanonical id-or-basename-unsafe channel-floor-survives-rotation higher-channel-no-compatible higher-channel-target-fails same-number-different-bytes expiry-equality-stopped readiness-bind-domain readiness-start-kind provenance-client-input'''.split()
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
-native_ids = [
-    "four-form-secret-sentinel-process-scan",
-    "production-root-inherited-environment",
-    "windows-production-root-unsafe-metadata",
-    "c515-server-lifetime-lease",
-    "expiry-equality-live", "supervisor-death-normal-responsive-unix",
-    "supervisor-death-normal-wedged-unix", "supervisor-death-sigkill-responsive-unix",
-    "supervisor-death-sigkill-wedged-unix", "supervisor-death-terminate-responsive-windows",
-    "supervisor-death-terminate-wedged-windows", "unix-inherited-abi", "windows-inherited-abi",
-]
 native = []
-for index, case_id in enumerate(native_ids):
-    count = 3 if case_id in {"unix-inherited-abi", "windows-inherited-abi"} else (2 if case_id in {"expiry-equality-live", "windows-production-root-unsafe-metadata"} else 1)
+for case_id, obligation in authority["obligations"].items():
     evidence = []
-    for item in range(count):
-        if case_id == "four-form-secret-sentinel-process-scan":
-            evidence.append({
-                "test_target": "x134_sentinel_evidence",
-                "exact_test": "transformed_secret_sentinels_never_enter_refusal_abort_crash_or_restart_outputs",
-                "targets": sorted(targets),
-            })
-        elif case_id == "production-root-inherited-environment":
-            evidence.append({
-                "test_target": "local_state_regressions",
-                "exact_test": "native_process_derives_production_root_from_the_authenticated_os_account",
-                "targets": sorted(targets),
-            })
-        elif case_id == "windows-production-root-unsafe-metadata":
-            evidence.append({
-                "test_target": "windows_native_root_poisoning",
-                "exact_test": [
-                    "windows_supervised_startup_refuses_reparse_point_owner_root_ancestor_without_repair",
-                    "windows_supervised_startup_refuses_untrusted_writable_owner_root_ancestor_without_repair",
-                ][item],
-                "targets": ["x86_64-pc-windows-msvc"],
-            })
-        elif case_id == "c515-server-lifetime-lease":
-            evidence.append({
-                "test_target": "credential_store_process_lease",
-                "exact_test": "real_server_retains_the_c515_lease_through_recovery_and_readiness",
-                "targets": sorted(targets),
-            })
-        else:
-            evidence.append({"test_target": f"target-{index}-{item}", "exact_test": f"test-{index}-{item}", "targets": [targets[(index + item) % len(targets)]]})
-    native.append({"id": case_id, "evidence": evidence})
+    for binding_id in obligation["bindings"]:
+        binding = authority["bindings"][binding_id]
+        target = binding["cargo_target"]
+        evidence.append({
+            "targets": authority["target_sets"][binding["target_set"]],
+            "test_target": "lib" if target["kind"] == "lib" else target["name"],
+            "exact_test": binding["exact_test"],
+        })
+    native.append({
+        "id": case_id,
+        "authority": obligation["authority"],
+        "evidence": evidence,
+        "release_evidence": obligation["release_evidence"],
+    })
 files = {}
 for path in sorted(candidate for candidate in fixtures.rglob("*") if candidate.is_file()):
     relative = path.relative_to(fixtures).as_posix()
     files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
 fixture = {
     "schema": "exchange.release-fixture-set.v2", "exchange_commit": "a" * 40,
+    "native_evidence_sha256": hashlib.sha256(authority_bytes).hexdigest(),
     "cases": [{"id": case} for case in dict.fromkeys(trust_cases)], "native_cases": native, "files": files,
 }
 (fixtures / "fixture-set.json").write_text(json.dumps(fixture, separators=(",", ":"), sort_keys=True), encoding="utf-8")
@@ -559,47 +526,48 @@ PY
   cp "$fixture_set" "$fixture_set.clean"
   python3 - "$fixture_set" <<'PY'
 import json, sys
-path=sys.argv[1]; value=json.load(open(path)); value["native_cases"][0]["evidence"].pop()
+path=sys.argv[1]; value=json.load(open(path)); next(case for case in value["native_cases"] if case["evidence"])["evidence"].pop()
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
-  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted eighteen native bindings"; fi
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a missing authority-derived native binding"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
   cp "$fixture_set" "$fixture_set.clean"
   python3 - "$fixture_set" <<'PY'
 import json, sys
-path=sys.argv[1]; value=json.load(open(path)); value["native_cases"][0]["evidence"][0]["exact_test"]="renamed_or_substituted_test"
+path=sys.argv[1]; value=json.load(open(path)); next(case for case in value["native_cases"] if case["evidence"])["evidence"][0]["exact_test"]="renamed_or_substituted_test"
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
-  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted four-form sentinel process test"; fi
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted authority-derived exact test"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
-  cp "$fixture_set" "$fixture_set.clean"
-  python3 - "$fixture_set" <<'PY'
+  authority="$scratch/crates/exchange-release/native-evidence-v1.json"
+  cp "$authority" "$authority.clean"
+  python3 - "$authority" <<'PY'
 import json, sys
-path=sys.argv[1]; value=json.load(open(path)); case=next(item for item in value["native_cases"] if item["id"] == "production-root-inherited-environment"); case["evidence"][0]["exact_test"]="renamed_or_substituted_test"
+path=sys.argv[1]; value=json.load(open(path)); next(iter(value["bindings"].values()))["exact_test"]="renamed_or_substituted_test"
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
-  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted production-root process test"; fi
-  mv "$fixture_set.clean" "$fixture_set"
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted canonical Cargo binding"; fi
+  mv "$authority.clean" "$authority"
 
-  cp "$fixture_set" "$fixture_set.clean"
-  python3 - "$fixture_set" <<'PY'
+  cp "$authority" "$authority.clean"
+  python3 - "$authority" <<'PY'
 import json, sys
-path=sys.argv[1]; value=json.load(open(path)); case=next(item for item in value["native_cases"] if item["id"] == "windows-production-root-unsafe-metadata"); case["evidence"][1]["targets"]=["x86_64-unknown-linux-gnu"]
+path=sys.argv[1]; value=json.load(open(path)); next(iter(value["targets"].values()))["runner"] += "-substituted"
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
-  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted Windows root poisoning on a non-Windows target"; fi
-  mv "$fixture_set.clean" "$fixture_set"
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted canonical native runner"; fi
+  mv "$authority.clean" "$authority"
 
-  cp "$fixture_set" "$fixture_set.clean"
-  python3 - "$fixture_set" <<'PY'
+  cp "$authority" "$authority.clean"
+  python3 - "$authority" <<'PY'
 import json, sys
-path=sys.argv[1]; value=json.load(open(path)); case=next(item for item in value["native_cases"] if item["id"] == "c515-server-lifetime-lease"); case["evidence"][0]["exact_test"]="renamed_or_substituted_test"
+path=sys.argv[1]; value=json.load(open(path)); value["obligations"].pop(next(iter(value["obligations"])))
 open(path,"w").write(json.dumps(value,separators=(",",":"),sort_keys=True))
 PY
-  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a substituted C-515 server lease process test"; fi
-  mv "$fixture_set.clean" "$fixture_set"
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a missing canonical native family"; fi
+  mv "$authority.clean" "$authority"
 
   cp "$fixture_set" "$fixture_set.clean"
   python3 - "$fixture_set" <<'PY'

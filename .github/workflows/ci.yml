@@ -153,25 +153,31 @@ jobs:
       - name: Build on the declared MSRV
         run: cargo build --workspace --locked
 
+  native-authority-matrix:
+    name: derive native evidence runners
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.authority.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Project the sole native authority
+        id: authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix="$(jq -ce '[.targets | to_entries[] | {target: .key, runner: .value.runner}]' crates/exchange-release/native-evidence-v1.json)"
+          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+
   native-local-state:
     name: local state · ${{ matrix.target }}
     # Platform support is the real credential-bearing composition, not a cross-compiled health
     # handler. Each row runs on its target architecture and exercises the shared logical formats,
     # the native owner-only filesystem binding and the real --dev process restart.
+    needs: native-authority-matrix
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
+        include: ${{ fromJson(needs.native-authority-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -191,42 +197,9 @@ jobs:
       - name: Compile the complete server and local composition
         run: cargo check --workspace --all-targets --locked --target ${{ matrix.target }}
 
-      - name: Exercise native owner-only storage fixtures
-        run: cargo test -p codewandler-flux-exchange-host --locked private_fs
-
-      - name: Exercise zero-configuration state selection
-        run: cargo test -p flux-exchange --bin flux-exchange --locked local_state
-
-      - name: Prove production root discovery ignores inherited home variables
-        run: cargo test -p flux-exchange --test local_state_regressions --features native-root-test-seam --locked --target ${{ matrix.target }} native_process_derives_production_root_from_the_authenticated_os_account
-
-      - name: Exercise the native Unix supervisor ABI and owner-death path
-        if: runner.os != 'Windows'
-        run: cargo test -p flux-exchange --test supervised_unix --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }}
-
-      - name: Exercise the native Windows supervisor ABI and owner-death path
-        if: runner.os == 'Windows'
-        run: cargo test -p flux-exchange --test supervised_windows --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }}
-
-      - name: Prove the exact production Windows local-management deadline path
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $name = 'supervised_windows_local_management_deadlines_are_phase_exact'
-          $list = cargo test -p flux-exchange --test local_management_windows_deadline --features native-deadline-test-seam --locked --target '${{ matrix.target }}' -- --list --format terse 2>&1 | Out-String
-          if (($list | Select-String -SimpleMatch "${name}: test" -AllMatches).Matches.Count -ne 1) {
-            Write-Error "the exact Windows deadline test was not listed exactly once`n$list"
-            exit 1
-          }
-          $result = cargo test -p flux-exchange --test local_management_windows_deadline --features native-deadline-test-seam --locked --target '${{ matrix.target }}' -- --exact $name --nocapture 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error $result
-            exit $LASTEXITCODE
-          }
-          if ($result -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out') {
-            Write-Error "the Windows deadline report was not one-passed/zero-ignored/zero-filtered`n$result"
-            exit 1
-          }
+      - name: Execute every authority-selected native process proof exactly
+        shell: bash
+        run: ./scripts/release-native-fixtures.sh '${{ matrix.target }}'
 
       - name: Prove the exact Unix helper private-input and outer-result envelope
         if: runner.os != 'Windows'

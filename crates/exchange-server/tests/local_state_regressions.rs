@@ -76,6 +76,10 @@ fn diagnostics(output: &Output) -> String {
     )
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn real_dev_flag_binds_the_complete_default_store_set() {
     let scratch = Scratch::new("dev-defaults");
@@ -139,6 +143,10 @@ fn real_dev_flag_binds_the_complete_default_store_set() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn real_dev_flag_keeps_store_defaults_when_an_explicit_roster_takes_identity_precedence() {
     let scratch = Scratch::new("dev-explicit-roster");
@@ -211,6 +219,10 @@ fn real_dev_flag_keeps_store_defaults_when_an_explicit_roster_takes_identity_pre
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn an_empty_explicit_dev_override_refuses_instead_of_disappearing() {
     let scratch = Scratch::new("empty-override");
@@ -237,6 +249,10 @@ fn an_empty_explicit_dev_override_refuses_instead_of_disappearing() {
 }
 
 #[cfg(unix)]
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn a_credential_directly_below_tmp_refuses_without_repair() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -293,6 +309,10 @@ fn a_credential_directly_below_tmp_refuses_without_repair() {
     );
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn a_safe_explicit_dev_store_keeps_every_unset_sibling_default() {
     let scratch = Scratch::new("safe-explicit");
@@ -341,6 +361,10 @@ fn a_safe_explicit_dev_store_keeps_every_unset_sibling_default() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn configured_non_dev_partial_store_set_enumerates_every_missing_sibling() {
     let scratch = Scratch::new("partial-production");
@@ -376,6 +400,10 @@ fn configured_non_dev_partial_store_set_enumerates_every_missing_sibling() {
     );
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn production_root_discovery_does_not_consult_inherited_home_variables() {
     let discovery =
@@ -398,6 +426,11 @@ fn production_root_discovery_does_not_consult_inherited_home_variables() {
 }
 
 #[cfg(feature = "native-root-test-seam")]
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-root-account"
+))]
 #[test]
 fn native_process_derives_production_root_from_the_authenticated_os_account() {
     let scratch = Scratch::new("poisoned-inherited-homes");
@@ -488,6 +521,11 @@ fn complete_explicit_store_environment(root: &Path) -> Vec<(&'static str, String
 }
 
 #[cfg(all(feature = "native-root-test-seam", unix))]
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-unix-root-symlink"
+))]
 #[test]
 fn production_account_root_refuses_a_symlinked_home_without_repair() {
     use std::os::unix::fs::{symlink, PermissionsExt as _};
@@ -529,6 +567,11 @@ fn production_account_root_refuses_a_symlinked_home_without_repair() {
 }
 
 #[cfg(all(feature = "native-root-test-seam", unix))]
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-unix-root-writable"
+))]
 #[test]
 fn production_account_root_refuses_an_untrusted_writable_home_without_repair() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -597,6 +640,10 @@ fn authenticated_account_root() -> PathBuf {
 }
 
 #[cfg(unix)]
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn configured_state_root_refuses_a_symlinked_ancestor_without_repair() {
     use std::os::unix::fs::{symlink, PermissionsExt as _};
@@ -638,6 +685,10 @@ fn configured_state_root_refuses_a_symlinked_ancestor_without_repair() {
 }
 
 #[cfg(unix)]
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn configured_state_root_refuses_an_untrusted_writable_ancestor_without_repair() {
     use std::os::unix::fs::PermissionsExt as _;

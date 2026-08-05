@@ -402,6 +402,10 @@ fn fxlm_frame(direction: u8, opcode: u16, payload: &[u8]) -> Vec<u8> {
     frame
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn supervised_unix_binds_owner_authenticated_fxlm_before_readiness() {
     use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
@@ -475,6 +479,10 @@ fn supervised_unix_binds_owner_authenticated_fxlm_before_readiness() {
     assert!(!output.status.success());
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn supervised_unix_rejects_an_injected_wrong_peer_before_reading() {
     use std::os::unix::net::UnixStream;
@@ -495,6 +503,10 @@ fn supervised_unix_rejects_an_injected_wrong_peer_before_reading() {
     assert!(!output.status.success());
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn supervised_unix_refuses_planted_endpoint_metadata_without_repair() {
     for fixture in [EndpointFixture::SymlinkRun, EndpointFixture::StaleSocket] {
@@ -518,6 +530,11 @@ fn supervised_unix_refuses_planted_endpoint_metadata_without_repair() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-expiry-unix"
+))]
 #[test]
 fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
     let mut server = SupervisedChild::spawn(0o700);
@@ -546,6 +563,11 @@ fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
     assert!(TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_err());
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-death-wedged"
+))]
 #[test]
 fn native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged() {
     let mut server = SupervisedChild::spawn_with(0o700, true);
@@ -567,6 +589,10 @@ fn native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged() {
     assert!(TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_err());
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn any_liveness_byte_exits_without_waiting_for_eof() {
     let mut server = SupervisedChild::spawn(0o700);
@@ -642,11 +668,7 @@ fn assert_no_authority_values(bytes: &[u8], values: &[String]) {
     }
 }
 
-#[test]
-fn supervisor_helper_process() {
-    if std::env::var_os("X128_RUN_SUPERVISOR_HELPER").is_none() {
-        return;
-    }
+fn run_supervisor_helper_process() {
     let wedge = std::env::var_os("X128_HELPER_WEDGE").is_some();
     let mut server = SupervisedChild::spawn_with(0o700, wedge);
     let readiness = server.readiness();
@@ -662,20 +684,44 @@ fn supervisor_helper_process() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-death-sigkill-wedged"
+))]
 #[test]
 fn sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its_port() {
-    assert_sigkill_supervisor(true);
+    if std::env::var_os("X128_RUN_SUPERVISOR_HELPER").is_some() {
+        run_supervisor_helper_process();
+        return;
+    }
+    assert_sigkill_supervisor(
+        true,
+        "sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its_port",
+    );
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-death-sigkill"
+))]
 #[test]
 fn sigkill_of_the_real_supervisor_kills_a_responsive_exchange_and_releases_its_port() {
-    assert_sigkill_supervisor(false);
+    if std::env::var_os("X128_RUN_SUPERVISOR_HELPER").is_some() {
+        run_supervisor_helper_process();
+        return;
+    }
+    assert_sigkill_supervisor(
+        false,
+        "sigkill_of_the_real_supervisor_kills_a_responsive_exchange_and_releases_its_port",
+    );
 }
 
-fn assert_sigkill_supervisor(wedge: bool) {
+fn assert_sigkill_supervisor(wedge: bool, exact_test: &str) {
     let mut command = Command::new(std::env::current_exe().expect("integration test executable"));
     command
-        .args(["--exact", "supervisor_helper_process", "--nocapture"])
+        .args(["--exact", exact_test, "--nocapture"])
         .env("X128_RUN_SUPERVISOR_HELPER", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -735,6 +781,11 @@ fn assert_sigkill_supervisor(wedge: bool) {
     let _ = std::fs::remove_dir_all(state_root);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-death-normal"
+))]
 #[test]
 fn real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof() {
     let mut server = SupervisedChild::spawn(0o700);
@@ -871,6 +922,10 @@ fn captured_native_start_identity(pid: u32) -> VerifiedStartIdentity {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn unsafe_store_refusal_emits_no_readiness_or_sentinel() {
     let mut server = SupervisedChild::spawn(0o777);
@@ -882,6 +937,10 @@ fn unsafe_store_refusal_emits_no_readiness_or_sentinel() {
     assert_no_sentinels(&output.stderr);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn preselected_or_nonloopback_bind_refuses_before_readiness() {
     for bind in ["127.0.0.1:8080", "127.0.0.2:0", "0.0.0.0:0"] {
@@ -892,6 +951,10 @@ fn preselected_or_nonloopback_bind_refuses_before_readiness() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn non_unicode_supervised_bind_refuses_before_state_or_readiness() {
     use std::os::unix::ffi::OsStringExt;
@@ -945,6 +1008,10 @@ fn non_unicode_supervised_bind_refuses_before_state_or_readiness() {
     assert!(!root.exists(), "invalid bind opened local state");
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 #[cfg(feature = "supervisor-test-bind-refusal")]
 fn real_bind_refusal_after_store_validation_emits_no_readiness() {
@@ -960,6 +1027,11 @@ fn real_bind_refusal_after_store_validation_emits_no_readiness() {
     drop(occupied);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-abi-shape"
+))]
 #[test]
 fn exact_unix_abi_refuses_missing_and_wrong_capabilities() {
     let output = exchange_command()
@@ -1021,6 +1093,11 @@ fn exact_unix_abi_refuses_missing_and_wrong_capabilities() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-abi-alias"
+))]
 #[test]
 fn unix_abi_refuses_alias_wrong_kind_direction_and_extra_inherited_fd() {
     fn refusal(mode: &str) -> std::process::Output {
@@ -1118,6 +1195,11 @@ fn unix_abi_refuses_alias_wrong_kind_direction_and_extra_inherited_fd() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-abi-missing"
+))]
 #[test]
 fn unix_abi_refuses_each_missing_fd_and_does_not_discover_env_other_fd_or_stdout() {
     fn missing(target: RawFd) -> std::process::Output {
@@ -1202,6 +1284,10 @@ fn unix_abi_refuses_each_missing_fd_and_does_not_discover_env_other_fd_or_stdout
     assert_no_sentinels(&output.stderr);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn compatibility_is_exact_and_never_opens_a_store_or_listener() {
     let root = std::env::temp_dir().join(format!(

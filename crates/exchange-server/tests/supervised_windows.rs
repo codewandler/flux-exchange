@@ -391,6 +391,11 @@ fn assert_port_released(address: SocketAddr) {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-expiry-windows"
+))]
 #[test]
 fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
     let mut server = NativeProcess::spawn(false);
@@ -414,6 +419,10 @@ fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
     assert_port_released(address);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn real_windows_handle_list_readiness_identity_and_native_liveness() {
     let mut server = NativeProcess::spawn(false);
@@ -485,6 +494,10 @@ fn real_windows_handle_list_readiness_identity_and_native_liveness() {
     assert!(TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_err());
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn windows_tokio_wedge_still_dies_through_native_liveness() {
     let mut server = NativeProcess::spawn(true);
@@ -496,6 +509,10 @@ fn windows_tokio_wedge_still_dies_through_native_liveness() {
     assert_port_released(address);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn windows_liveness_byte_exits_without_waiting_for_eof() {
     let mut server = NativeProcess::spawn(false);
@@ -505,11 +522,7 @@ fn windows_liveness_byte_exits_without_waiting_for_eof() {
     server.wait_dead();
 }
 
-#[test]
-fn windows_supervisor_helper_process() {
-    if std::env::var_os("X128_RUN_WINDOWS_SUPERVISOR_HELPER").is_none() {
-        return;
-    }
+fn run_windows_supervisor_helper_process() {
     let wedge = std::env::var_os("X128_WINDOWS_HELPER_WEDGE").is_some();
     let mut server = NativeProcess::spawn(wedge);
     let readiness = server.readiness();
@@ -525,24 +538,44 @@ fn windows_supervisor_helper_process() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-windows-death-wedged"
+))]
 #[test]
 fn terminate_process_of_supervisor_kills_wedged_exchange_and_releases_port() {
-    assert_terminate_supervisor(true);
+    if std::env::var_os("X128_RUN_WINDOWS_SUPERVISOR_HELPER").is_some() {
+        run_windows_supervisor_helper_process();
+        return;
+    }
+    assert_terminate_supervisor(
+        true,
+        "terminate_process_of_supervisor_kills_wedged_exchange_and_releases_port",
+    );
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-windows-death-terminate"
+))]
 #[test]
 fn terminate_process_of_supervisor_kills_responsive_exchange_and_releases_port() {
-    assert_terminate_supervisor(false);
+    if std::env::var_os("X128_RUN_WINDOWS_SUPERVISOR_HELPER").is_some() {
+        run_windows_supervisor_helper_process();
+        return;
+    }
+    assert_terminate_supervisor(
+        false,
+        "terminate_process_of_supervisor_kills_responsive_exchange_and_releases_port",
+    );
 }
 
-fn assert_terminate_supervisor(wedge: bool) {
+fn assert_terminate_supervisor(wedge: bool, exact_test: &str) {
     let mut command = Command::new(std::env::current_exe().expect("integration test executable"));
     command
-        .args([
-            "--exact",
-            "windows_supervisor_helper_process",
-            "--nocapture",
-        ])
+        .args(["--exact", exact_test, "--nocapture"])
         .env("X128_RUN_WINDOWS_SUPERVISOR_HELPER", "1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -615,6 +648,11 @@ fn assert_terminate_supervisor(wedge: bool) {
     let _ = std::fs::remove_dir_all(state_root);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-windows-abi-shape"
+))]
 #[test]
 fn malformed_windows_handle_flags_refuse_without_stdout_readiness() {
     for arguments in [
@@ -700,6 +738,11 @@ fn malformed_windows_handle_flags_refuse_without_stdout_readiness() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-windows-abi-list"
+))]
 #[test]
 fn environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities() {
     let attributes = SECURITY_ATTRIBUTES {
@@ -757,6 +800,10 @@ fn environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities
     assert_no_sentinels(&output.stderr);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn ordinary_startup_over_the_same_authority_stores_captures_value_free_logs() {
     let root = std::env::temp_dir().join(format!(

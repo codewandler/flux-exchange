@@ -206,6 +206,8 @@ pub struct CompatibilityRelease {
 pub struct FixtureSet {
     pub schema: String,
     pub exchange_commit: String,
+    #[serde(default)]
+    pub native_evidence_sha256: String,
     pub files: BTreeMap<String, String>,
     pub cases: Vec<FixtureCase>,
     /// Native process cases bound to exact tests on the five release runners.
@@ -216,7 +218,11 @@ pub struct FixtureSet {
 #[serde(deny_unknown_fields)]
 pub struct NativeFixtureCase {
     pub id: String,
+    #[serde(default)]
+    pub authority: String,
     pub evidence: Vec<NativeFixtureEvidence>,
+    #[serde(default)]
+    pub release_evidence: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

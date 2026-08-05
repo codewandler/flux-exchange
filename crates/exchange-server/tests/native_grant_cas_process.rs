@@ -329,7 +329,7 @@ impl ApplyClient {
         std::fs::write(&candidate_path, candidate).expect("candidate handoff");
         let child = Command::new(std::env::current_exe().expect("current integration test"))
             .arg("--exact")
-            .arg("concurrent_apply_client_child")
+            .arg("concurrent_native_process_apply_is_one_cas_and_restart_stable")
             .arg("--nocapture")
             .env(CHILD_MARKER, "1")
             .env(CHILD_SOCKET, socket)
@@ -362,6 +362,10 @@ impl ApplyClient {
 
 #[test]
 fn concurrent_native_process_apply_is_one_cas_and_restart_stable() {
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        run_apply_client_child();
+        return;
+    }
     let fixture = Fixture::new();
     let tenant = Tenant::new("local").expect("native owner tenant");
     let unrelated = vec![
@@ -502,14 +506,9 @@ fn concurrent_native_process_apply_is_one_cas_and_restart_stable() {
     assert_eq!(github.selector.max_risk, Some(expected_risk));
 }
 
-// This process-only test is selected by the parent test executable with `--exact`. Keeping the
-// client in another process proves the native transport and server-side CAS rather than sharing a
-// GrantStore object or lock with the test coordinator.
-#[test]
-fn concurrent_apply_client_child() {
-    if std::env::var_os(CHILD_MARKER).is_none() {
-        return;
-    }
+// The same sole test re-enters as a process-only client. This proves the native transport and
+// server-side CAS while retaining a one-test/zero-filtered release verdict.
+fn run_apply_client_child() {
     let socket = PathBuf::from(std::env::var_os(CHILD_SOCKET).expect("child socket"));
     let candidate = std::fs::read(std::env::var_os(CHILD_CANDIDATE).expect("child candidate path"))
         .expect("child candidate bytes");

@@ -3,6 +3,7 @@
 mod archive;
 pub mod canonical;
 mod model;
+pub mod native_evidence;
 mod policy;
 pub mod transport;
 

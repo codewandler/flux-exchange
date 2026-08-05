@@ -65,6 +65,11 @@ impl Drop for LocalAllocation {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-windows-root-reparse"
+))]
 #[test]
 fn windows_supervised_startup_refuses_reparse_point_owner_root_ancestor_without_repair() {
     let scratch = Scratch::new("reparse");
@@ -102,6 +107,11 @@ fn windows_supervised_startup_refuses_reparse_point_owner_root_ancestor_without_
     );
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-windows-root-writable"
+))]
 #[test]
 fn windows_supervised_startup_refuses_untrusted_writable_owner_root_ancestor_without_repair() {
     let scratch = Scratch::new("untrusted-writer");

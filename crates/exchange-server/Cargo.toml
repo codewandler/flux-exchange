@@ -31,6 +31,28 @@ native-helper-deadline-test-seam = []
 # Native Windows process evidence only: let an attached probe report the mode of the real
 # pseudoconsole-backed `CONIN$` while the production helper owns its private read.
 native-console-test-seam = []
+# Release-native selection compiles one exact verdict from a historical multi-test target. Default
+# builds retain every test; `--all-features` does too through `native-evidence-all`.
+native-evidence-select = []
+native-evidence-all = []
+native-evidence-x128-expiry-unix = []
+native-evidence-x128-unix-abi-alias = []
+native-evidence-x128-unix-abi-missing = []
+native-evidence-x128-unix-abi-shape = []
+native-evidence-x128-unix-death-normal = []
+native-evidence-x128-unix-death-sigkill = []
+native-evidence-x128-unix-death-sigkill-wedged = []
+native-evidence-x128-unix-death-wedged = []
+native-evidence-x128-expiry-windows = []
+native-evidence-x128-windows-abi-list = []
+native-evidence-x128-windows-abi-shape = []
+native-evidence-x128-windows-death-terminate = []
+native-evidence-x128-windows-death-wedged = []
+native-evidence-x134-root-account = []
+native-evidence-x134-unix-root-symlink = []
+native-evidence-x134-unix-root-writable = []
+native-evidence-x134-windows-root-reparse = []
+native-evidence-x134-windows-root-writable = []
 
 [[bin]]
 name = "flux-exchange"

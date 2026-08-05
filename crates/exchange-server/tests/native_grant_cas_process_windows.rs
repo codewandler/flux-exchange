@@ -355,7 +355,7 @@ impl ApplyClient {
         std::fs::write(&candidate_path, candidate).expect("candidate handoff");
         let child = Command::new(std::env::current_exe().expect("current integration test"))
             .arg("--exact")
-            .arg("concurrent_apply_windows_client_child")
+            .arg("concurrent_native_process_apply_is_one_cas_and_restart_stable_on_windows")
             .arg("--nocapture")
             .env(CHILD_MARKER, "1")
             .env(CHILD_PIPE, pipe)
@@ -388,6 +388,10 @@ impl ApplyClient {
 
 #[test]
 fn concurrent_native_process_apply_is_one_cas_and_restart_stable_on_windows() {
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        run_apply_windows_client_child();
+        return;
+    }
     let fixture = Fixture::new();
     let tenant = Tenant::new("local").expect("native owner tenant");
     let unrelated = vec![
@@ -516,11 +520,7 @@ fn concurrent_native_process_apply_is_one_cas_and_restart_stable_on_windows() {
     assert_eq!(github.selector.max_risk, Some(expected_risk));
 }
 
-#[test]
-fn concurrent_apply_windows_client_child() {
-    if std::env::var_os(CHILD_MARKER).is_none() {
-        return;
-    }
+fn run_apply_windows_client_child() {
     let pipe = std::env::var(CHILD_PIPE).expect("child pipe name");
     let candidate = std::fs::read(std::env::var_os(CHILD_CANDIDATE).expect("candidate path"))
         .expect("candidate bytes");
