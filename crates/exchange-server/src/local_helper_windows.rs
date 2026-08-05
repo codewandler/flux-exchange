@@ -31,8 +31,8 @@ use windows_sys::Win32::Security::{
     TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFileType, GetFinalPathNameByHandleW, ReadFile, WriteFile, FILE_NAME_NORMALIZED,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_PIPE, OPEN_EXISTING, SYNCHRONIZE, VOLUME_NAME_NT,
+    CreateFileW, GetFileType, ReadFile, WriteFile, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_TYPE_PIPE, OPEN_EXISTING, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::Console::{
     GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -1050,23 +1050,12 @@ impl VendorCapabilities {
         })?;
         let request_raw = request.as_raw_handle() as HANDLE;
         let response_raw = response.as_raw_handle() as HANDLE;
-        // CompareObjectHandles catches aliases even when a launcher supplied two numeric values.
-        // File identity catches the opposite ends of one anonymous pipe: the ABI requires two
-        // distinct pipes, so Flux can never read the terminal result through its request channel.
+        // CompareObjectHandles rejects aliases without imposing access rights on either handle.
+        // Windows exposes no documented path/file-identity query for pipe handles. Opposite ends
+        // of one anonymous pipe still fail closed: retaining the response writer prevents the
+        // request reader from observing the mandatory EOF, so ceremony preparation never begins.
         if unsafe { CompareObjectHandles(request_raw, response_raw) } != 0 {
             test_helper_failure_stage(15);
-            return Err(WindowsHelperError::Capability);
-        }
-        let request_identity = pipe_identity(request_raw).map_err(|error| {
-            test_helper_failure_stage(16);
-            error
-        })?;
-        let response_identity = pipe_identity(response_raw).map_err(|error| {
-            test_helper_failure_stage(17);
-            error
-        })?;
-        if request_identity == response_identity {
-            test_helper_failure_stage(18);
             return Err(WindowsHelperError::Capability);
         }
         clear_inheritance(request_raw).map_err(|error| {
@@ -1123,23 +1112,6 @@ fn inherited_pipe(
     }
     // SAFETY: the closed helper grammar transfers each live non-pseudo handle exactly once.
     Ok(unsafe { OwnedHandle::from_raw_handle(raw.cast()) })
-}
-
-fn pipe_identity(handle: HANDLE) -> Result<Vec<u16>, WindowsHelperError> {
-    let flags = FILE_NAME_NORMALIZED | VOLUME_NAME_NT;
-    let required = unsafe { GetFinalPathNameByHandleW(handle, null_mut(), 0, flags) };
-    if required == 0 {
-        return Err(WindowsHelperError::Capability);
-    }
-    let mut identity = vec![0_u16; required as usize];
-    let written = unsafe {
-        GetFinalPathNameByHandleW(handle, identity.as_mut_ptr(), identity.len() as u32, flags)
-    };
-    if written == 0 || written as usize >= identity.len() {
-        return Err(WindowsHelperError::Capability);
-    }
-    identity.truncate(written as usize);
-    Ok(identity)
 }
 
 fn clear_inheritance(handle: HANDLE) -> Result<(), WindowsHelperError> {
