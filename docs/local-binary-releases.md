@@ -178,7 +178,7 @@ provider. It cannot authenticate loopback TCP, hosted routes, another account, S
 runtime requests or a process started with `--dev`; readiness, liveness and lifecycle control remain
 separate value-free channels.
 
-With no explicit state override, production discovers its root from the authenticated Linux
+With no explicit state override, production discovers its root from the authenticated native Linux
 account by calling `getpwuid_r(geteuid())`. Inherited `HOME`, `XDG_STATE_HOME` and equivalent
 variables do not select it. An explicit root or store path is still validated from its trusted
 account boundary through every component. Symlinks, foreign ownership, an untrusted-writable

@@ -85,6 +85,14 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- **Exchange runtime and binary releases now have one exact Linux product boundary** (X-137).
+  Release selection, packaging, download policy, workflows and interim native fixtures close over
+  `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, each as a deterministic `tar.zst`
+  containing `flux-exchange`. The server refuses non-Linux targets during its build script, and its
+  production owner endpoint, helper capabilities and supervision use only the Linux account,
+  `SO_PEERCRED`, fixed-FD, `SCM_RIGHTS` and proc-start contracts. Publication remains fail-closed
+  until X-138 recovery evidence and X-139's final native authority are done.
+
 - **The datasource vocabulary now follows cross-repository Decision 0006** (X-130). The concepts
   table's last ambiguous owner cell is resolved: vendor-data Datasource Definitions belong to the
   connector package, Flux keeps the wire vocabulary and the consuming seam, and a tenant Datasource
