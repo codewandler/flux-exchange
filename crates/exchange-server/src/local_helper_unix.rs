@@ -56,7 +56,7 @@ const MAX_SECRET_BYTES: usize = 8_192;
 pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
     match invocation {
         LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Unix) => {
-            run_vendor(&mut NativeVendorCeremony)
+            run_vendor(&mut NativeVendorCeremony::new())
         }
         LocalHelperInvocation::ServiceAccountMint {
             id,
@@ -74,16 +74,26 @@ pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
 pub(crate) fn run_with_result_budget_for_test(
     invocation: LocalHelperInvocation,
     result_budget: Duration,
-) -> HelperExit {
+) -> u8 {
     match invocation {
-        LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Unix) => run_vendor_with(
-            PinnedEndpoint::authenticated,
-            &mut NativeVendorCeremony,
-            HELPER_SETUP_DEADLINE,
-            HELPER_SETUP_DEADLINE,
-            result_budget,
-        ),
-        _ => HelperExit::CapabilityOrTransportFailure,
+        LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Unix) => {
+            let mut ceremony = NativeVendorCeremony::new();
+            let exit = run_vendor_with(
+                PinnedEndpoint::authenticated,
+                &mut ceremony,
+                HELPER_SETUP_DEADLINE,
+                HELPER_SETUP_DEADLINE,
+                result_budget,
+            );
+            if std::env::var_os("FLUX_EXCHANGE_TEST_HELPER_STAGE_EXIT").is_some()
+                && ceremony.stage != NativeVendorStage::Complete
+            {
+                ceremony.stage as u8
+            } else {
+                exit.code()
+            }
+        }
+        _ => HelperExit::CapabilityOrTransportFailure.code(),
     }
 }
 
@@ -194,7 +204,38 @@ pub(crate) trait VendorCeremony {
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
-struct NativeVendorCeremony;
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum NativeVendorStage {
+    ParseBegin = 20,
+    ConnectPlan = 21,
+    WritePlan = 22,
+    ReadPlan = 23,
+    PlanRefusal = 24,
+    ValidatePlan = 25,
+    ConnectMutation = 26,
+    WriteBegin = 27,
+    ReadNeedSecrets = 28,
+    MutationRefusal = 29,
+    ValidateNeedSecrets = 30,
+    ReadPrivateTerminal = 31,
+    WriteSecret = 32,
+    WriteCommit = 33,
+    ReadTerminal = 34,
+    Complete = 35,
+}
+
+struct NativeVendorCeremony {
+    stage: NativeVendorStage,
+}
+
+impl NativeVendorCeremony {
+    const fn new() -> Self {
+        Self {
+            stage: NativeVendorStage::ParseBegin,
+        }
+    }
+}
 
 impl VendorCeremony for NativeVendorCeremony {
     type Error = UnixHelperError;
@@ -205,6 +246,7 @@ impl VendorCeremony for NativeVendorCeremony {
         request: &VendorRequest,
         deadlines: HelperDeadlineSchedule,
     ) -> Result<Vec<u8>, Self::Error> {
+        self.stage = NativeVendorStage::ParseBegin;
         let ready_by = deadlines.setup_by();
         let operation = match request.kind() {
             VendorRequestKind::Connect => VendorOperation::Connect,
@@ -218,6 +260,7 @@ impl VendorCeremony for NativeVendorCeremony {
             operation,
         )
         .ok_or(UnixHelperError::Protocol)?;
+        self.stage = NativeVendorStage::ConnectPlan;
         let mut plan_stream = endpoint.connect_before(ready_by)?;
         let plan_query = serde_json::to_vec(&PlanQuery {
             connector: begin.connector(),
@@ -227,6 +270,7 @@ impl VendorCeremony for NativeVendorCeremony {
             },
         })
         .map_err(|_| UnixHelperError::Protocol)?;
+        self.stage = NativeVendorStage::WritePlan;
         write_before(
             &mut plan_stream,
             &encode_frame(CLIENT_DIRECTION, PLAN_QUERY, &plan_query),
@@ -235,19 +279,26 @@ impl VendorCeremony for NativeVendorCeremony {
         plan_stream
             .shutdown(Shutdown::Write)
             .map_err(|_| UnixHelperError::Transport)?;
+        self.stage = NativeVendorStage::ReadPlan;
         let plan = read_terminal_before(&mut plan_stream, ready_by)?;
         if plan.opcode == ERROR {
+            self.stage = NativeVendorStage::PlanRefusal;
             return Ok(plan.bytes);
         }
+        self.stage = NativeVendorStage::ValidatePlan;
         if plan.opcode != PLAN_RESPONSE || !begin.admits_plan(&plan.payload) {
             return Err(UnixHelperError::Protocol);
         }
 
+        self.stage = NativeVendorStage::ConnectMutation;
         let mut mutation = endpoint.connect_before(ready_by)?;
+        self.stage = NativeVendorStage::WriteBegin;
         write_before(&mut mutation, request.bytes(), ready_by)?;
         let result_by = deadlines.result_by();
+        self.stage = NativeVendorStage::ReadNeedSecrets;
         let need = read_frame_before(&mut mutation, result_by)?;
         if need.opcode == ERROR {
+            self.stage = NativeVendorStage::MutationRefusal;
             mutation
                 .shutdown(Shutdown::Write)
                 .map_err(|_| UnixHelperError::Transport)?;
@@ -256,6 +307,7 @@ impl VendorCeremony for NativeVendorCeremony {
         if need.opcode != NEED_SECRETS {
             return Err(UnixHelperError::Protocol);
         }
+        self.stage = NativeVendorStage::ValidateNeedSecrets;
         let need_payload = need.payload;
         let need: NeedSecrets =
             serde_json::from_slice(&need_payload).map_err(|_| UnixHelperError::Protocol)?;
@@ -267,8 +319,10 @@ impl VendorCeremony for NativeVendorCeremony {
             if usize::from(secret.ordinal) != index + 1 || secret.target.is_empty() {
                 return Err(UnixHelperError::Protocol);
             }
+            self.stage = NativeVendorStage::ReadPrivateTerminal;
             let mut value = read_private_tty_line(result_by)?;
             let frame = encode_secret(secret.ordinal, &value)?;
+            self.stage = NativeVendorStage::WriteSecret;
             let result = write_before(&mut mutation, &frame, result_by);
             value.fill(0);
             result?;
@@ -282,6 +336,7 @@ impl VendorCeremony for NativeVendorCeremony {
             VendorRequestKind::Connect => CONNECT_COMMIT,
             VendorRequestKind::Credential => CREDENTIAL_COMMIT,
         };
+        self.stage = NativeVendorStage::WriteCommit;
         write_before(
             &mut mutation,
             &encode_frame(CLIENT_DIRECTION, opcode, &commit),
@@ -290,7 +345,10 @@ impl VendorCeremony for NativeVendorCeremony {
         mutation
             .shutdown(Shutdown::Write)
             .map_err(|_| UnixHelperError::Transport)?;
-        Ok(read_terminal_before(&mut mutation, result_by)?.bytes)
+        self.stage = NativeVendorStage::ReadTerminal;
+        let terminal = read_terminal_before(&mut mutation, result_by)?.bytes;
+        self.stage = NativeVendorStage::Complete;
+        Ok(terminal)
     }
 }
 

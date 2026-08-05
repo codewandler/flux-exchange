@@ -339,6 +339,9 @@ impl HelperProcess {
                 milliseconds.to_string(),
             );
         }
+        if result_budget_millis.is_none() {
+            command.env("FLUX_EXCHANGE_TEST_HELPER_STAGE_EXIT", "1");
+        }
         // SAFETY: the closure establishes an otherwise descriptor-free session and uses only
         // async-signal-safe descriptor/session operations before exec.
         unsafe {
