@@ -77,6 +77,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- **Linux native helper evidence now preserves the complete admitted setup window** (X-137 repair).
+  The exact private-terminal binding models runner scheduling before observing `/dev/tty` and gives
+  the test-only outer result clock its fixed five-second pre-ceremony allowance plus the bounded
+  private-input expiry window. The production 335-second result deadline is unchanged.
+
 - **Verified vendor helpers now stay inside one absolute setup/result envelope** (X-136). Unix and
   Windows revalidate the complete value-free v2 plan before mutation, preserve old-head replay for
   the server, and share one five-second setup cap plus one non-resetting 335-second result cap across
