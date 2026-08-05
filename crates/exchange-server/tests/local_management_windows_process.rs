@@ -952,7 +952,20 @@ impl VendorHelper {
             if unsafe { WaitForSingleObject(self.process, 0) } == WAIT_OBJECT_0 {
                 let mut code = u32::MAX;
                 assert_ne!(unsafe { GetExitCodeProcess(self.process, &mut code) }, 0);
-                panic!("vendor helper exited before its private `CONIN$` read: {code}");
+                let response = read_owned_to_end(
+                    self.response
+                        .take()
+                        .expect("failed helper response capability"),
+                );
+                let endpoint_live = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(owner_pipe_name())
+                    .is_ok();
+                panic!(
+                    "vendor helper exited before its private `CONIN$` read: code={code}, endpoint_live={endpoint_live}, terminal={}",
+                    String::from_utf8_lossy(&response)
+                );
             }
             if console.mode() & ENABLE_ECHO_INPUT == 0 {
                 return;
