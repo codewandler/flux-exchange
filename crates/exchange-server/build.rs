@@ -4,6 +4,12 @@ const SOURCE_ENV: &str = "FLUX_EXCHANGE_RELEASE_SOURCE_COMMIT";
 const BUILD_ENV: &str = "FLUX_EXCHANGE_RELEASE_BUILD_ID";
 
 fn main() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS")
+        .expect("Cargo must declare the target operating system");
+    if target_os != "linux" {
+        panic!("flux-exchange server supports Linux only; target OS `{target_os}` is unsupported");
+    }
+
     println!("cargo:rerun-if-env-changed={SOURCE_ENV}");
     println!("cargo:rerun-if-env-changed={BUILD_ENV}");
     println!("cargo:rerun-if-changed=src");

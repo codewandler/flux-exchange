@@ -37,7 +37,7 @@ release_kind() {
 }
 
 byte_limit_for() {
-  local release_tag="$1" basename="$2" key_id version target _runner format _executable suffix kind
+  local release_tag="$1" basename="$2" key_id version target _runner format executable kind
   kind="$(release_kind "$release_tag")"
   case "$kind:$basename" in
     trust:flux-exchange-release-trust.json|trust-history:flux-exchange-release-trust.json|channel-history:flux-exchange-release-trust.json)
@@ -65,9 +65,9 @@ byte_limit_for() {
       valid_key_id "$key_id" || fail 'unsafe release key id before signature path construction'
       printf '4096\n'; return ;;
   esac
-  while IFS=$'\t' read -r target _runner format _executable; do
-    [ "$format" = zip ] && suffix=.zip || suffix=.tar.zst
-    if [ "$basename" = "flux-exchange-${version}-${target}${suffix}" ]; then
+  while IFS=$'\t' read -r target _runner format executable; do
+    [ "$format:$executable" = 'tar.zst:flux-exchange' ] || fail "non-Linux release row: $target"
+    if [ "$basename" = "flux-exchange-${version}-${target}.tar.zst" ]; then
       printf '268435456\n'
       return
     fi
@@ -92,14 +92,15 @@ if [ "${1:-}" = --self-test ]; then
   [ "$(byte_limit_for exchange-trust-v1-version-1 flux-exchange-release-trust.json.root-2026-01.minisig)" = 4096 ]
   [ "$(byte_limit_for exchange-stable-v1-generation-9007199254740991 flux-exchange-release-trust.json)" = 65536 ]
   [ "$(byte_limit_for exchange-stable-v1-generation-7 flux-exchange-release-channel.json)" = 262144 ]
-  [ "$(byte_limit_for v1.2.3 flux-exchange-1.2.3-x86_64-pc-windows-msvc.zip)" = 268435456 ]
+  [ "$(byte_limit_for v1.2.3 flux-exchange-1.2.3-x86_64-unknown-linux-gnu.tar.zst)" = 268435456 ]
   if (byte_limit_for exchange-stable-v1 flux-exchange-release-channel.json.bad--key.minisig >/dev/null 2>&1); then fail 'self-test accepted an unsafe key id'; fi
   if (byte_limit_for exchange-trust-v1-version-01 flux-exchange-release-trust.json >/dev/null 2>&1); then fail 'self-test accepted a noncanonical trust-history version'; fi
   if (byte_limit_for exchange-stable-v1-generation-9007199254740992 flux-exchange-release-channel.json >/dev/null 2>&1); then fail 'self-test accepted a generation above the JCS-safe bound'; fi
   if (byte_limit_for exchange-trust-v1-version-2 flux-exchange-release-channel.json >/dev/null 2>&1); then fail 'self-test accepted a channel asset in trust history'; fi
   if (byte_limit_for exchange-stable-v1-generation-2 flux-exchange-release-manifest.json >/dev/null 2>&1); then fail 'self-test accepted a manifest in stable history'; fi
   if (byte_limit_for v1.2.3 arbitrary-file >/dev/null 2>&1); then fail 'self-test accepted an arbitrary immutable asset'; fi
-  if (byte_limit_for v1.2.3 flux-exchange-1.2.4-x86_64-pc-windows-msvc.zip >/dev/null 2>&1); then fail 'self-test accepted a mismatched archive version'; fi
+  if (byte_limit_for v1.2.3 flux-exchange-1.2.4-x86_64-unknown-linux-gnu.tar.zst >/dev/null 2>&1); then fail 'self-test accepted a mismatched archive version'; fi
+  if (byte_limit_for v1.2.3 flux-exchange-1.2.3-x86_64-pc-windows-msvc.tar.zst >/dev/null 2>&1); then fail 'self-test accepted a non-Linux archive target'; fi
   printf 'PASS release download policy self-test\n'
   exit 0
 fi

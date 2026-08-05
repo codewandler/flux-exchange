@@ -8,11 +8,8 @@ import { pages, repoRoot, webRoot } from './rendered.mjs'
 const RELEASE_PAGE = 'local-releases.md'
 const RELEASE_LINK = '/flux-exchange/local-releases'
 const TARGETS = [
-  'aarch64-apple-darwin',
-  'x86_64-apple-darwin',
   'aarch64-unknown-linux-gnu',
   'x86_64-unknown-linux-gnu',
-  'x86_64-pc-windows-msvc',
 ]
 const PROTOCOLS = [
   'exchange.api.v1',
@@ -34,6 +31,9 @@ test('the public release page states the complete portable release contract', ()
 
   for (const target of TARGETS) {
     assert.ok(source.includes(target), `${RELEASE_PAGE} does not name supported target ${target}`)
+  }
+  for (const unsupported of ['apple-darwin', 'windows-msvc', 'Windows console', 'Windows named pipe']) {
+    assert.ok(!source.includes(unsupported), `${RELEASE_PAGE} retains unsupported ${unsupported}`)
   }
   for (const protocol of PROTOCOLS) {
     assert.ok(source.includes(protocol), `${RELEASE_PAGE} does not name protocol ${protocol}`)
@@ -60,13 +60,13 @@ test('the public release page states the complete portable release contract', ()
     'content-derived publication preflight',
     'The v2/eight-protocol schema shown above is the first public contract',
     'older six-protocol shape is unpublished implementation evidence',
-    'authenticated native account',
+    'authenticated native Linux account',
     'XDG_STATE_HOME',
-    'USERPROFILE',
     'does not repair',
     'not an HTTP identity provider',
     '/dev/tty',
-    'Windows console',
+    'SO_PEERCRED',
+    'SCM_RIGHTS',
     'value-free receipt or refusal',
   ]) {
     assert.ok(source.includes(required), `${RELEASE_PAGE} does not explain ${required}`)
@@ -115,13 +115,11 @@ test('the operator runbook names delegated secret inputs without claiming they e
     'implementation evidence',
     'content-derived preflight',
     'credential-handoff',
-    'authenticated native account',
+    'authenticated native Linux account',
     'XDG_STATE_HOME',
-    'USERPROFILE',
     'never narrows modes',
     'never an HTTP identity provider',
     '/dev/tty',
-    'Windows console',
     'value-free receipt or refusal',
   ]) {
     assert.ok(runbook.includes(required), `operator runbook does not state ${required}`)

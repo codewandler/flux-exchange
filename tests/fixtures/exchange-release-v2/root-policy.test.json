@@ -1,1 +1,1 @@
-{"keys":[{"key_id":"test-only-root-2026-01","minisign_public_key":"RWRk9M9svJh7zznXqaIZ8VdDTASnWYcHSH2Q0cGDKG1WwxrmzCLf1cfY"}],"schema":"exchange.release-root-policy.v1","test_only":true,"threshold":1}
+{"keys":[{"key_id":"test-only-root-2026-01","minisign_public_key":"RWSIxg0NcrTAe8Xh7Hg1OwmdrKltJh7qs0yNjUPlZg49doFsza83LviC"}],"schema":"exchange.release-root-policy.v1","test_only":true,"threshold":1}

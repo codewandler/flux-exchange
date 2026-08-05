@@ -9,16 +9,19 @@ fail() { printf 'check-local-release: %s\n' "$*" >&2; exit 1; }
 
 check() {
   local workflow_path="$1" target_path="$2" download_path="$3" expected actual expected_matrix actual_matrix history_line mutable_line history_step version_step
-  expected='aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-pc-windows-msvc x86_64-unknown-linux-gnu'
+  expected='aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu'
   actual="$(awk -F '\t' '!/^#/ && NF {print $1}' "$target_path" | LC_ALL=C sort | xargs)"
-  [ "$actual" = "$expected" ] || fail "release target set is not the exact five-platform contract: $actual"
+  [ "$actual" = "$expected" ] || fail "release target set is not the exact two-target Linux contract: $actual"
   dist_targets="$(python3 - "$root/dist-workspace.toml" <<'PY'
 import sys, tomllib
 with open(sys.argv[1], "rb") as source:
     print(" ".join(sorted(tomllib.load(source)["dist"]["targets"])))
 PY
 )"
-  [ "$dist_targets" = "$expected" ] || fail "dist-workspace target set differs from the Flux five-platform contract: $dist_targets"
+  [ "$dist_targets" = "$expected" ] || fail "dist-workspace target set differs from the two-target Linux contract: $dist_targets"
+  if grep -Eqi 'macos-[0-9]|windows-[0-9]|\.zip|flux-exchange\.exe' "$target_path" "$workflow_path" "$download_path"; then
+    fail 'release target, workflow or download policy retains a non-Linux production asset path'
+  fi
   [ "$(awk -F '\t' '!/^#/ && NF {print $1}' "$target_path" | sort | uniq -d | wc -l)" = 0 ] || fail 'release target set contains duplicates'
   expected_matrix="$(awk -F '\t' '!/^#/ && NF {print $1 ":" $2}' "$target_path" | LC_ALL=C sort)"
   actual_matrix="$(python3 - "$root/crates/exchange-release/native-evidence-v1.json" <<'PY'
@@ -45,7 +48,7 @@ PY
     || fail 'native release jobs do not select the authority-derived runner'
   while IFS=$'\t' read -r target runner format executable; do
     case "$target:$runner:$format:$executable" in
-      aarch64-apple-darwin:macos-15:tar.zst:flux-exchange|x86_64-apple-darwin:macos-15-intel:tar.zst:flux-exchange|aarch64-unknown-linux-gnu:ubuntu-24.04-arm:tar.zst:flux-exchange|x86_64-unknown-linux-gnu:ubuntu-24.04:tar.zst:flux-exchange|x86_64-pc-windows-msvc:windows-2025:zip:flux-exchange.exe) ;;
+      aarch64-unknown-linux-gnu:ubuntu-24.04-arm:tar.zst:flux-exchange|x86_64-unknown-linux-gnu:ubuntu-24.04:tar.zst:flux-exchange) ;;
       *) fail "target row violates the native platform contract: $target:$runner:$format:$executable" ;;
     esac
   done < <(awk '!/^#/ && NF' "$target_path")
@@ -137,11 +140,14 @@ if [ "${1:-}" = --self-test ]; then
   cp "$targets" "$scratch/targets.tsv"
   cp "$root/scripts/release-download.sh" "$scratch/release-download.sh"
   check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh"
-  sed -i.bak '/aarch64-apple-darwin/d' "$scratch/targets.tsv"
+  sed -i.bak '/aarch64-unknown-linux-gnu/d' "$scratch/targets.tsv"
   if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted a missing platform'; fi
   cp "$targets" "$scratch/targets.tsv"
   printf '%s\n' 'riscv64-unknown-linux-gnu ubuntu-24.04 tar.zst flux-exchange' >>"$scratch/targets.tsv"
   if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted an undeclared platform'; fi
+  cp "$targets" "$scratch/targets.tsv"
+  sed -i.bak 's/tar\.zst/zip/' "$scratch/targets.tsv"
+  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted a non-tar Linux archive row'; fi
   cp "$targets" "$scratch/targets.tsv"
   sed -i.bak 's#crates/exchange-release/native-evidence-v1.json#crates/exchange-release/missing-native-evidence.json#' "$scratch/workflow.yml"
   if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted a native matrix derived from a non-authoritative file'; fi
@@ -219,4 +225,4 @@ if [ "${1:-}" = --self-test ]; then
 fi
 
 check "$workflow" "$targets" "$root/scripts/release-download.sh"
-printf 'PASS local release workflow and five-target contract\n'
+printf 'PASS local release workflow and exact two-target Linux contract\n'

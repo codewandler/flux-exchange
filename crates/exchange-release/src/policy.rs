@@ -251,7 +251,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     sorted_unique(&manifest.signing_key_ids, 1, 4, validate_key_id)?;
     if manifest.assets.len() != SUPPORTED_TARGETS.len() {
         return Err(Error::Bounds(
-            "manifest must contain exactly the five supported targets".into(),
+            "manifest must contain exactly the two supported Linux targets".into(),
         ));
     }
     let actual: Vec<_> = manifest
@@ -267,20 +267,9 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
     let mut basenames = BTreeSet::new();
     for asset in &manifest.assets {
         let root = format!("flux-exchange-{}-{}", manifest.version, asset.target);
-        let (expected_archive, expected_format, expected_executable) =
-            if asset.target == "x86_64-pc-windows-msvc" {
-                (
-                    format!("{root}.zip"),
-                    "zip",
-                    format!("{root}/flux-exchange.exe"),
-                )
-            } else {
-                (
-                    format!("{root}.tar.zst"),
-                    "tar.zst",
-                    format!("{root}/flux-exchange"),
-                )
-            };
+        let expected_archive = format!("{root}.tar.zst");
+        let expected_format = "tar.zst";
+        let expected_executable = format!("{root}/flux-exchange");
         if asset.archive != expected_archive || asset.format != expected_format {
             return Err(Error::Schema(format!(
                 "archive name/format for {} is not exact",

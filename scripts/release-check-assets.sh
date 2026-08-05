@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Refuse a staged archive directory that is not exactly the five provider-owned basenames.
+# Refuse a staged archive directory that is not exactly the two Linux provider-owned basenames.
 set -euo pipefail
 
 fail() { printf 'release-check-assets: %s\n' "$*" >&2; exit 1; }
 root="$(git rev-parse --show-toplevel)"
 
 check() {
-  local directory="$1" version="$2" expected actual suffix target format
+  local directory="$1" version="$2" expected actual target format executable
   [ -d "$directory" ] || fail "asset directory does not exist: $directory"
-  expected="$(while IFS=$'\t' read -r target _runner format _executable; do
-    [ "$format" = zip ] && suffix=.zip || suffix=.tar.zst
-    printf 'flux-exchange-%s-%s%s\n' "$version" "$target" "$suffix"
+  expected="$(while IFS=$'\t' read -r target _runner format executable; do
+    [ "$format:$executable" = 'tar.zst:flux-exchange' ] || fail "non-Linux release row: $target"
+    printf 'flux-exchange-%s-%s.tar.zst\n' "$version" "$target"
     printf 'asset-%s.json\n' "$target"
   done < <(awk '!/^#/ && NF' "$root/release-targets.tsv") | LC_ALL=C sort)"
   actual="$(find "$directory" -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)"
   [ "$actual" = "$expected" ] || {
     diff <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") >&2 || true
-    fail 'staged archive set is not the exact five-target set'
+    fail 'staged archive set is not the exact two-target Linux set'
   }
 }
 
@@ -24,13 +24,13 @@ if [ "${1:-}" = --self-test ]; then
   scratch="$(mktemp -d "${TMPDIR:-/tmp}/flux-exchange-assets.XXXXXX")"
   trap 'find "$scratch" -type f -delete; rmdir "$scratch"' EXIT
   version=1.2.3
-  while IFS=$'\t' read -r target _runner format _executable; do
-    [ "$format" = zip ] && suffix=.zip || suffix=.tar.zst
-    : >"$scratch/flux-exchange-${version}-${target}${suffix}"
+  while IFS=$'\t' read -r target _runner format executable; do
+    [ "$format:$executable" = 'tar.zst:flux-exchange' ] || fail "non-Linux release row: $target"
+    : >"$scratch/flux-exchange-${version}-${target}.tar.zst"
     : >"$scratch/asset-${target}.json"
   done < <(awk '!/^#/ && NF' "$root/release-targets.tsv")
   check "$scratch" "$version"
-  missing="$scratch/flux-exchange-${version}-aarch64-apple-darwin.tar.zst"
+  missing="$scratch/flux-exchange-${version}-aarch64-unknown-linux-gnu.tar.zst"
   unlink "$missing"
   if (check "$scratch" "$version" >/dev/null 2>&1); then fail 'self-test accepted a deleted platform archive'; fi
   : >"$missing"
@@ -45,4 +45,4 @@ fi
 
 [ "$#" = 2 ] || fail 'usage: release-check-assets.sh <directory> <version>|--self-test'
 check "$1" "$2"
-printf 'PASS exact five-target staged archive set\n'
+printf 'PASS exact two-target Linux staged archive set\n'

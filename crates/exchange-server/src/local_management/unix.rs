@@ -625,7 +625,6 @@ fn authenticate_uid(peer: u32, startup_euid: u32) -> Result<(), String> {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn peer_uid(stream: &UnixStream) -> Result<u32, String> {
     let mut credential = std::mem::MaybeUninit::<libc::ucred>::zeroed();
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -647,21 +646,6 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, String> {
     }
     // SAFETY: getsockopt succeeded with the complete expected output size.
     Ok(unsafe { credential.assume_init() }.uid)
-}
-
-#[cfg(target_os = "macos")]
-fn peer_uid(stream: &UnixStream) -> Result<u32, String> {
-    let mut uid = 0;
-    let mut gid = 0;
-    // SAFETY: the stream descriptor is live and both output pointers reference initialized values.
-    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
-    if result != 0 {
-        return Err(format!(
-            "getpeereid refused the accepted local-management stream: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(uid)
 }
 
 fn endpoint_root() -> Result<PathBuf, String> {

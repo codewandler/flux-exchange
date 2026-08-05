@@ -66,6 +66,7 @@ pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
             Ok(writer) => run_mint(&id, expires_at, writer),
             Err(_) => HelperExit::CapabilityOrTransportFailure,
         },
+        #[cfg(test)]
         _ => HelperExit::CapabilityOrTransportFailure,
     }
 }
@@ -851,7 +852,6 @@ fn inspect_pipe(descriptor: RawFd) -> Result<PipeCapabilityFacts, UnixHelperErro
     })
 }
 
-#[cfg(target_os = "linux")]
 fn is_anonymous_pipe(descriptor: RawFd) -> bool {
     std::fs::read_link(format!("/proc/self/fd/{descriptor}"))
         .map(|target| {
@@ -861,14 +861,6 @@ fn is_anonymous_pipe(descriptor: RawFd) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(target_os = "macos")]
-fn is_anonymous_pipe(descriptor: RawFd) -> bool {
-    let mut path = [0_u8; libc::PATH_MAX as usize];
-    // An anonymous pipe has no path; F_GETPATH therefore must refuse it.
-    (unsafe { libc::fcntl(descriptor, libc::F_GETPATH, path.as_mut_ptr()) }) == -1
-}
-
-#[cfg(target_os = "linux")]
 fn all_other_descriptors_closed(request: RawFd, response: RawFd) -> Result<bool, UnixHelperError> {
     let path = CString::new("/proc/self/fd").expect("fixed proc descriptor directory");
     // SAFETY: the fixed path is NUL terminated and opendir returns one owned directory stream.
@@ -903,22 +895,6 @@ fn all_other_descriptors_closed(request: RawFd, response: RawFd) -> Result<bool,
         return Err(UnixHelperError::Capability);
     }
     Ok(closed)
-}
-
-#[cfg(target_os = "macos")]
-fn all_other_descriptors_closed(request: RawFd, response: RawFd) -> Result<bool, UnixHelperError> {
-    // SAFETY: getrlimit writes one exact output structure.
-    let mut limit = unsafe { MaybeUninit::<libc::rlimit>::zeroed().assume_init() };
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
-        return Err(UnixHelperError::Capability);
-    }
-    let maximum = limit.rlim_cur.min(i32::MAX as libc::rlim_t) as RawFd;
-    for descriptor in 3..maximum {
-        if descriptor != request && descriptor != response && !descriptor_is_closed(descriptor) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn descriptor_is_closed(descriptor: RawFd) -> bool {
@@ -1269,7 +1245,6 @@ fn authenticate_peer(stream: &UnixStream, expected_uid: u32) -> Result<(), UnixH
     }
 }
 
-#[cfg(target_os = "linux")]
 fn peer_uid(stream: &UnixStream) -> Result<u32, UnixHelperError> {
     let mut credential = MaybeUninit::<libc::ucred>::zeroed();
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -1288,18 +1263,6 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, UnixHelperError> {
     }
     // SAFETY: getsockopt succeeded with the complete output size.
     Ok(unsafe { credential.assume_init() }.uid)
-}
-
-#[cfg(target_os = "macos")]
-fn peer_uid(stream: &UnixStream) -> Result<u32, UnixHelperError> {
-    let mut uid = 0;
-    let mut gid = 0;
-    // SAFETY: both output pointers are live for getpeereid.
-    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
-        Err(UnixHelperError::PeerUnverified)
-    } else {
-        Ok(uid)
-    }
 }
 
 fn effective_uid() -> u32 {

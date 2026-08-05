@@ -63,8 +63,7 @@ pub struct NativeTarget {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativePlatform {
-    Unix,
-    Windows,
+    Linux,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -236,8 +235,7 @@ impl NativeEvidenceAuthority {
                 return schema("native runners are empty or duplicated");
             }
             let expected = match Platform::from_target(target)? {
-                Platform::Unix => NativePlatform::Unix,
-                Platform::Windows => NativePlatform::Windows,
+                Platform::Linux => NativePlatform::Linux,
             };
             if native.platform != expected {
                 return schema("native target platform disagrees with its target triple");
@@ -246,36 +244,23 @@ impl NativeEvidenceAuthority {
         for (set, targets) in &self.target_sets {
             validate_unique_refs("target", set, targets, &self.targets)?;
         }
-        let all_native = self
+        let expected_sets = ["all-native", "linux-native"]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if self
             .target_sets
-            .values()
-            .filter(|targets| target_values(targets) == supported)
-            .count();
-        let unix_native = self
-            .target_sets
-            .values()
-            .filter(|targets| {
-                targets.iter().all(|target| {
-                    self.targets
-                        .get(target)
-                        .is_some_and(|target| target.platform == NativePlatform::Unix)
-                }) && targets.len() == 4
-            })
-            .count();
-        let windows_native = self
-            .target_sets
-            .values()
-            .filter(|targets| {
-                targets.len() == 1
-                    && targets.iter().all(|target| {
-                        self.targets
-                            .get(target)
-                            .is_some_and(|target| target.platform == NativePlatform::Windows)
-                    })
-            })
-            .count();
-        if (all_native, unix_native, windows_native) != (1, 1, 1) {
-            return schema("target sets do not define one all-native, Unix and Windows set");
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            != expected_sets
+            || self
+                .target_sets
+                .values()
+                .any(|targets| target_values(targets) != supported)
+        {
+            return schema(
+                "target sets are not exactly all-native and linux-native over both Linux targets",
+            );
         }
 
         for features in self.feature_sets.values() {

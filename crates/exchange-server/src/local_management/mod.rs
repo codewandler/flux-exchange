@@ -27,23 +27,11 @@ pub use transaction::TransactionCoordinator;
 
 pub(crate) mod service_account_handoff;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod unix;
 
-#[cfg(windows)]
-mod windows;
-
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub(crate) use unix::LocalManagement;
 
-#[cfg(all(unix, feature = "native-deadline-test-seam"))]
+#[cfg(all(target_os = "linux", feature = "native-deadline-test-seam"))]
 pub(crate) use unix::run_deadline_process_fixture as run_unix_deadline_process_fixture;
-
-#[cfg(windows)]
-pub(crate) use windows::LocalManagement;
-
-#[cfg(all(windows, feature = "native-deadline-test-seam"))]
-pub(crate) use windows::run_deadline_process_fixture;
-
-#[cfg(all(windows, feature = "native-fxha-identity-test-seam"))]
-pub(crate) use windows::run_fxha_identity_process_fixture;

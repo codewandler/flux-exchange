@@ -21,7 +21,6 @@ tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
 url.workspace = true
-zip.workspace = true
 zstd.workspace = true
 
 [[bin]]

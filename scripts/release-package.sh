@@ -14,14 +14,11 @@ root="$(git rev-parse --show-toplevel)"
 printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$' || fail 'version is not stable SemVer'
 row="$(awk -F '\t' -v target="$target" '$1 == target { print; count++ } END { if (count != 1) exit 1 }' "$root/release-targets.tsv")" || fail "target is outside the closed release set: $target"
 IFS=$'\t' read -r _target _runner format member <<<"$row"
+[ "$format:$member" = "tar.zst:flux-exchange" ] || fail "release target row is not the Linux tar.zst contract: $target"
 [ -f "$executable" ] || fail "executable does not exist: $executable"
 
 archive_root="flux-exchange-${version}-${target}"
-case "$format" in
-  tar.zst) archive="$output_dir/${archive_root}.tar.zst" ;;
-  zip) archive="$output_dir/${archive_root}.zip" ;;
-  *) fail "unsupported archive format in release-targets.tsv: $format" ;;
-esac
+archive="$output_dir/${archive_root}.tar.zst"
 
 mkdir -p "$output_dir"
 cargo run --locked -p flux-exchange-release -- package \

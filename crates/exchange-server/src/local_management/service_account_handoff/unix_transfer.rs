@@ -277,10 +277,7 @@ fn receive_descriptors(
     message.msg_control = control.as_mut_ptr().cast();
     message.msg_controllen =
         message_control_length(control_bytes).ok_or(UnixHandoffError::MalformedControl)?;
-    #[cfg(target_os = "linux")]
     let receive_flags = libc::MSG_CMSG_CLOEXEC;
-    #[cfg(target_os = "macos")]
-    let receive_flags = 0;
     // SAFETY: msghdr and all referenced output buffers remain live for recvmsg.
     let received = unsafe { libc::recvmsg(stream, &mut message, receive_flags) };
     if received < 0 {
@@ -347,24 +344,11 @@ fn validate_anonymous_write_pipe(descriptor: RawFd) -> Result<(), UnixHandoffErr
     validate_anonymous_pipe(descriptor)
 }
 
-#[cfg(target_os = "linux")]
 fn validate_anonymous_pipe(descriptor: RawFd) -> Result<(), UnixHandoffError> {
     let target = std::fs::read_link(format!("/proc/self/fd/{descriptor}"))
         .map_err(|_| UnixHandoffError::WrongCapabilityKind)?;
     let bytes = target.into_os_string().into_vec();
     if bytes.starts_with(b"pipe:[") && bytes.ends_with(b"]") {
-        Ok(())
-    } else {
-        Err(UnixHandoffError::NamedPipeForbidden)
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn validate_anonymous_pipe(descriptor: RawFd) -> Result<(), UnixHandoffError> {
-    let mut path = [0_u8; libc::PATH_MAX as usize];
-    // F_GETPATH succeeds for a named FIFO and refuses an anonymous pipe, which has no pathname.
-    let result = unsafe { libc::fcntl(descriptor, libc::F_GETPATH, path.as_mut_ptr()) };
-    if result == -1 {
         Ok(())
     } else {
         Err(UnixHandoffError::NamedPipeForbidden)
@@ -403,7 +387,6 @@ fn authenticate_peer_fd(stream: RawFd, expected_uid: u32) -> Result<(), UnixHand
     }
 }
 
-#[cfg(target_os = "linux")]
 fn peer_uid(stream: RawFd) -> Result<u32, UnixHandoffError> {
     let mut credential = MaybeUninit::<libc::ucred>::zeroed();
     let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -424,18 +407,6 @@ fn peer_uid(stream: RawFd) -> Result<u32, UnixHandoffError> {
     Ok(unsafe { credential.assume_init() }.uid)
 }
 
-#[cfg(target_os = "macos")]
-fn peer_uid(stream: RawFd) -> Result<u32, UnixHandoffError> {
-    let mut uid = 0;
-    let mut gid = 0;
-    // SAFETY: the live stream and both output pointers satisfy getpeereid.
-    if unsafe { libc::getpeereid(stream, &mut uid, &mut gid) } != 0 {
-        Err(UnixHandoffError::PeerUnverified)
-    } else {
-        Ok(uid)
-    }
-}
-
 fn effective_uid() -> u32 {
     // SAFETY: geteuid has no pointer arguments or preconditions.
     unsafe { libc::geteuid() }
@@ -451,14 +422,8 @@ fn cmsg_space(bytes: usize) -> usize {
     unsafe { libc::CMSG_SPACE(bytes as _) as usize }
 }
 
-#[cfg(target_os = "linux")]
 fn message_control_length(bytes: usize) -> Option<usize> {
     Some(bytes)
-}
-
-#[cfg(target_os = "macos")]
-fn message_control_length(bytes: usize) -> Option<libc::socklen_t> {
-    bytes.try_into().ok()
 }
 
 fn cmsg_len(bytes: usize) -> usize {

@@ -58,6 +58,23 @@ def refuse(message):
     raise SystemExit(1)
 
 
+# X-137 deliberately contracts the platform and regenerates only interim fixtures. A tag must stay
+# stopped until X-138 proves the retained provider recovery and X-139 records the final candidate-
+# derived authority/fixture identity. CI exercises this check through its synthetic self-test; only
+# publication paths invoke ordinary mode while either content contract remains incomplete.
+for story_id, filename in (
+    ("X-138", "X-138-bind-provider-recovery-and-native-c515-evidence.md"),
+    ("X-139", "X-139-canonicalize-release-native-evidence.md"),
+):
+    try:
+        story = (root / "docs/stories" / filename).read_text(encoding="utf-8")
+    except OSError as error:
+        refuse(f"cannot read publication prerequisite {story_id}: {error}")
+    status = re.search(r"(?m)^status: ([a-z-]+)$", story)
+    if status is None or status.group(1) != "done":
+        refuse(f"interim Linux contraction is not publishable before {story_id} is done")
+
+
 registry = "registry+https://github.com/rust-lang/crates.io-index"
 
 try:
@@ -202,8 +219,6 @@ canonical_documents = {
     "positive/flux-exchange-release-manifest.json": "exchange.release-manifest.v2",
     "compatibility.json": "exchange.compatibility.v2",
     "readiness-linux.json": "exchange.supervisor-ready.v2",
-    "readiness-macos.json": "exchange.supervisor-ready.v2",
-    "readiness-windows.json": "exchange.supervisor-ready.v2",
 }
 for relative, schema in canonical_documents.items():
     try:
@@ -321,7 +336,7 @@ if fixture.get("native_cases") != expected_native:
 native_ids = {case["id"] for case in expected_native}
 
 required_contract_cases = {
-    "positive-linux", "positive-macos", "positive-windows", "positive-signer-overlap",
+    "positive-linux", "positive-signer-overlap",
     "integer-over-jcs-safe", "decimal-noncanonical", "id-or-basename-unsafe",
     "minisign-key-malformed", "minisign-key-reused", "channel-floor-survives-rotation",
     "higher-channel-no-compatible", "higher-channel-target-fails", "same-number-different-bytes",
@@ -352,9 +367,15 @@ source_root = Path(sys.argv[2])
 (root / "crates/exchange-release/src").mkdir(parents=True)
 (root / "crates/exchange-release/examples").mkdir(parents=True)
 (root / "crates/exchange-server/src").mkdir(parents=True)
+(root / "docs/stories").mkdir(parents=True)
 authority_bytes = (source_root / "crates/exchange-release/native-evidence-v1.json").read_bytes()
 authority = json.loads(authority_bytes)
 (root / "crates/exchange-release/native-evidence-v1.json").write_bytes(authority_bytes)
+for filename in (
+    "X-138-bind-provider-recovery-and-native-c515-evidence.md",
+    "X-139-canonicalize-release-native-evidence.md",
+):
+    (root / "docs/stories" / filename).write_text("---\nstatus: done\n---\n", encoding="utf-8")
 for relative in (
     ".github/workflows/local-release.yml", "scripts/check-local-release.sh",
     "scripts/release-stage.sh", "crates/exchange-release/src/model.rs",
@@ -412,15 +433,13 @@ documents = {
     "positive/flux-exchange-release-manifest.json": {"schema": "exchange.release-manifest.v2", "protocols": protocols},
     "compatibility.json": {"schema": "exchange.compatibility.v2", "protocols": protocols},
     "readiness-linux.json": {"schema": "exchange.supervisor-ready.v2", "protocols": protocols},
-    "readiness-macos.json": {"schema": "exchange.supervisor-ready.v2", "protocols": protocols},
-    "readiness-windows.json": {"schema": "exchange.supervisor-ready.v2", "protocols": protocols},
 }
 for relative, document in documents.items():
     path = fixtures / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(document, separators=(",", ":"), sort_keys=True), encoding="utf-8")
 
-trust_cases = '''trust-rollback trust-equivocation minisign-key-malformed minisign-key-wrong-length minisign-key-wrong-algorithm minisign-key-embedded-id-disagreement minisign-key-reused minisign-key-reused-within-role minisign-key-reused-with-root role-confusion key-id-empty key-id-overlong key-id-slash key-id-double-hyphen key-id-leading-punctuation key-id-trailing-punctuation key-id-nonascii key-id-uppercase trust-future-issued root-threshold-failure trust-signature-missing trust-signature-substituted release-threshold-failure channel-threshold-failure channel-signature-missing channel-signature-substituted manifest-signature-missing manifest-signature-key-id-disagree github-initial-trust key-id-substituted positive-linux positive-macos positive-windows positive-signer-overlap integer-over-jcs-safe decimal-noncanonical id-or-basename-unsafe channel-floor-survives-rotation higher-channel-no-compatible higher-channel-target-fails same-number-different-bytes expiry-equality-stopped readiness-bind-domain readiness-start-kind provenance-client-input'''.split()
+trust_cases = '''trust-rollback trust-equivocation minisign-key-malformed minisign-key-wrong-length minisign-key-wrong-algorithm minisign-key-embedded-id-disagreement minisign-key-reused minisign-key-reused-within-role minisign-key-reused-with-root role-confusion key-id-empty key-id-overlong key-id-slash key-id-double-hyphen key-id-leading-punctuation key-id-trailing-punctuation key-id-nonascii key-id-uppercase trust-future-issued root-threshold-failure trust-signature-missing trust-signature-substituted release-threshold-failure channel-threshold-failure channel-signature-missing channel-signature-substituted manifest-signature-missing manifest-signature-key-id-disagree github-initial-trust key-id-substituted positive-linux positive-signer-overlap integer-over-jcs-safe decimal-noncanonical id-or-basename-unsafe channel-floor-survives-rotation higher-channel-no-compatible higher-channel-target-fails same-number-different-bytes expiry-equality-stopped readiness-bind-domain readiness-start-kind provenance-client-input'''.split()
 native = []
 for case_id, obligation in authority["obligations"].items():
     evidence = []
@@ -460,6 +479,11 @@ PY
   PATH="$tripwire:$PATH" check_tree "$scratch" >/dev/null
   check_wiring "$scratch"
   [ ! -e "$marker" ] || fail "self-test: the readiness check executed a Cargo or network-capable command"
+
+  cp "$scratch/docs/stories/X-138-bind-provider-recovery-and-native-c515-evidence.md" "$scratch/x138.clean"
+  sed -i.bak 's/status: done/status: blocked/' "$scratch/docs/stories/X-138-bind-provider-recovery-and-native-c515-evidence.md"
+  if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted the interim platform contraction for publication"; fi
+  mv "$scratch/x138.clean" "$scratch/docs/stories/X-138-bind-provider-recovery-and-native-c515-evidence.md"
 
   expect_refusal() {
     local label="$1"
@@ -578,7 +602,7 @@ PY
   if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a dropped trust-v1 refusal"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
-  printf 'PASS self-test: dependency, producer, inventory, trust and five-target readiness mutations refused without Cargo or network access\n'
+  printf 'PASS self-test: dependency, interim closure, inventory, trust and two-target readiness mutations refused without Cargo or network access\n'
   exit 0
 fi
 
