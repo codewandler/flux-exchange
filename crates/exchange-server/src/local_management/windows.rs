@@ -1191,10 +1191,31 @@ mod tests {
             .open(&pipe_name)
             .expect("terminal pipe client");
         let mut terminal_connection = accepting.await.expect("terminal accept task");
-        let oversized = vec![0x5a_u8; 2 * 1024 * 1024];
-        let oversized_len = oversized.len();
+        terminal_connection
+            .pipe
+            .writable()
+            .await
+            .expect("terminal pipe initially writable");
+        let filler = [0x5a_u8; 65_536];
+        let mut filled = 0_usize;
+        loop {
+            match terminal_connection.pipe.try_write(&filler) {
+                Ok(0) => panic!("a writable Windows pipe accepted zero bytes"),
+                Ok(written) => {
+                    filled += written;
+                    assert!(
+                        filled <= 64 * 1024 * 1024,
+                        "the production Windows pipe never established backpressure"
+                    );
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill authenticated terminal pipe: {error}"),
+            }
+        }
+        assert_ne!(filled, 0, "the production pipe accepted no fixture bytes");
+        let response = crate::local_management::deadline_frame();
         let terminal = tokio::spawn(async move {
-            finalize_native_terminal(&mut terminal_connection.pipe, Some(&oversized)).await;
+            finalize_native_terminal(&mut terminal_connection.pipe, Some(&response)).await;
         });
         tokio::task::yield_now().await;
         assert!(
@@ -1208,9 +1229,10 @@ mod tests {
             .await
             .expect("backpressured Windows terminal EOF");
         terminal.await.expect("bounded Windows terminal finalizer");
+        assert_eq!(partial.len(), filled, "terminal frame crossed backpressure");
         assert!(
-            partial.len() < oversized_len,
-            "the blocked Windows frame attempt must be abandoned before EOF"
+            partial.iter().all(|byte| *byte == 0x5a),
+            "the blocked canonical frame must be abandoned before EOF"
         );
 
         let _ = std::fs::remove_dir_all(replay_root);
