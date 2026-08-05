@@ -86,7 +86,7 @@ impl WindowsEndpoint {
         };
         // Holding the first instance is part of startup admission, not deferred work in the serve
         // task. Readiness can therefore never precede ownership of the authenticated endpoint.
-        endpoint.waiting = Some(endpoint.create_first_instance()?);
+        endpoint.waiting = Some(endpoint.create_instance(true)?);
         Ok(endpoint)
     }
 
@@ -106,11 +106,16 @@ impl WindowsEndpoint {
         if self.waiting.is_some() {
             return Err(WindowsEndpointRefusal::Bind);
         }
-        self.waiting = Some(self.create_first_instance()?);
+        // `FILE_FLAG_FIRST_PIPE_INSTANCE` is a startup namespace-ownership assertion. After
+        // `DisconnectNamedPipe`, the old client can still hold its now-disconnected handle while
+        // this server rearms; repeating the flag would make that harmless handle terminate the
+        // service. The original successful bind already established ownership, and the same
+        // protected descriptor plus single-instance limit remains authoritative here.
+        self.waiting = Some(self.create_instance(false)?);
         Ok(())
     }
 
-    fn create_first_instance(&self) -> Result<NamedPipeServer, WindowsEndpointRefusal> {
+    fn create_instance(&self, first: bool) -> Result<NamedPipeServer, WindowsEndpointRefusal> {
         let descriptor = SecurityDescriptor::owner_and_system(&self.owner_sid)?;
         let mut attributes = SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
@@ -123,7 +128,7 @@ impl WindowsEndpoint {
             .pipe_mode(PipeMode::Byte)
             .access_inbound(true)
             .access_outbound(true)
-            .first_pipe_instance(true)
+            .first_pipe_instance(first)
             .reject_remote_clients(true)
             .max_instances(1)
             .in_buffer_size(MAX_FRAME_BYTES)
@@ -131,7 +136,8 @@ impl WindowsEndpoint {
 
         // SAFETY: `attributes` and its descriptor allocation remain live until CreateNamedPipeW
         // returns. Tokio always adds FILE_FLAG_OVERLAPPED; the options additionally select byte
-        // mode, FILE_FLAG_FIRST_PIPE_INSTANCE and PIPE_REJECT_REMOTE_CLIENTS.
+        // mode and PIPE_REJECT_REMOTE_CLIENTS. Startup additionally selects
+        // FILE_FLAG_FIRST_PIPE_INSTANCE; rearm cannot repeat that startup-only namespace claim.
         unsafe {
             options.create_with_security_attributes_raw(
                 std::ffi::OsStr::new(&self.pipe_name),
