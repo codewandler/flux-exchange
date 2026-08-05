@@ -338,8 +338,11 @@ impl HelperProcess {
                 "FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS",
                 milliseconds.to_string(),
             );
-        }
-        if result_budget_millis.is_none() {
+        } else {
+            // Enter the feature-only diagnostic seam without changing the production 335-second
+            // result envelope. The stage exit is value-free and is removed after the Darwin-only
+            // failure is identified.
+            command.env("FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS", "335000");
             command.env("FLUX_EXCHANGE_TEST_HELPER_STAGE_EXIT", "1");
         }
         // SAFETY: the closure establishes an otherwise descriptor-free session and uses only
