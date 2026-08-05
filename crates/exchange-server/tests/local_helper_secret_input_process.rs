@@ -349,6 +349,13 @@ impl HelperProcess {
                 if libc::ioctl(terminal_source, libc::TIOCSCTTY as _, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
+                // Darwin does not promise that acquiring a controlling terminal also installs the
+                // new session leader's process group as its foreground group. Make that harness
+                // fact explicit before the helper later opens `/dev/tty`; no terminal descriptor
+                // survives exec, so FD 6/7 remain its only inherited Flux capabilities.
+                if libc::tcsetpgrp(terminal_source, libc::getpgrp()) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 if libc::dup2(request_source, 6) < 0 || libc::dup2(response_source, 7) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
