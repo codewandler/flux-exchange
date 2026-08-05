@@ -1,7 +1,7 @@
 ---
 id: X-136
 title: "Bound helper plan validation and the absolute result envelope"
-status: in-progress
+status: done
 epic: connections
 areas: [exchange-server, protocol, tests, windows]
 depends_on: [X-135]
@@ -36,7 +36,7 @@ result cap, including private input, terminal writes and closure.
 - [x] Windows `blocked_console_read_is_cancelled_at_the_unchanged_outer_deadline` and the Unix real
       `/dev/tty` process counterpart hold private input beyond the same `result_by`. Console/TTY
       mode, echo and handles/descriptors are restored or closed on every exit without using stdio.
-- [ ] The production helper grammar remains exactly the X-134 Unix fixed-descriptor and Windows
+- [x] The production helper grammar remains exactly the X-134 Unix fixed-descriptor and Windows
       handle-list ABI. Linux process tests and native `windows-2025` MSVC tests execute by exact
       name with one passed, zero ignored and zero filtered; MinGW is compile-only evidence.
 
@@ -57,6 +57,11 @@ result cap, including private input, terminal writes and closure.
 - MinGW compiles the complete binary plus `local_helper_windows_envelope`; the dedicated native
   test lists only `supervised_windows_helper_outer_deadline_is_exact`, and `windows-2025` is wired
   to require its one-passed/zero-ignored/zero-filtered MSVC report before the story can become done.
+- `windows-2025` diagnostic run `30993306744` compiled the complete MSVC composition from dispatched
+  source `cb1e99315b14febfc50c95b851b60422d5353ff4`, then selected
+  `x134-windows-helper-envelope` and passed
+  `supervised_windows_helper_outer_deadline_is_exact` with one passed, zero ignored and zero
+  filtered. The matching Linux authority selection and MinGW compile-only path are green locally.
 
 ## Notes
 

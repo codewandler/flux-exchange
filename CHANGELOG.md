@@ -75,6 +75,14 @@ All notable changes to this project are documented in this file. The format is b
   invoke path remains the execution contract; disconnected connections now have their own bounded
   refusal instead of collapsing into a missing-credential projection failure.
 
+### Fixed
+
+- **Verified vendor helpers now stay inside one absolute setup/result envelope** (X-136). Unix and
+  Windows revalidate the complete value-free v2 plan before mutation, preserve old-head replay for
+  the server, and share one five-second setup cap plus one non-resetting 335-second result cap across
+  private input, terminal framing and capability closure. Exact Linux and native Windows process
+  evidence pins the fixed-descriptor/handle-list ABI; MinGW remains compile-only evidence.
+
 ### Changed
 
 - **The datasource vocabulary now follows cross-repository Decision 0006** (X-130). The concepts
