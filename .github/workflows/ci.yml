@@ -20,6 +20,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      native_target:
+        description: Optional one-target native evidence projection; empty runs the complete authority.
+        required: false
+        type: string
 
 # Least privilege. Every job here only reads the checkout: nothing comments on a pull request,
 # uploads an artifact, or touches a package. `crates-io.yml` declares the same `contents: read` and
@@ -170,7 +175,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          matrix="$(jq -ce '[.targets | to_entries[] | {target: .key, runner: .value.runner}]' crates/exchange-release/native-evidence-v1.json)"
+          requested='${{ inputs.native_target }}'
+          matrix="$(jq -ce --arg requested "$requested" '[.targets | to_entries[] | select($requested == "" or .key == $requested) | {target: .key, runner: .value.runner}]' crates/exchange-release/native-evidence-v1.json)"
+          if [[ "$matrix" == '[]' ]]; then
+            echo "requested native target is absent from the canonical authority" >&2
+            exit 1
+          fi
           echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
 
   native-local-state:
