@@ -223,6 +223,9 @@ enum NativeVendorStage {
     WriteCommit = 33,
     ReadTerminal = 34,
     Complete = 35,
+    ReadPlanDeadline = 36,
+    ReadPlanProtocol = 37,
+    ReadPlanTransport = 38,
 }
 
 struct NativeVendorCeremony {
@@ -280,7 +283,17 @@ impl VendorCeremony for NativeVendorCeremony {
             .shutdown(Shutdown::Write)
             .map_err(|_| UnixHelperError::Transport)?;
         self.stage = NativeVendorStage::ReadPlan;
-        let plan = read_terminal_before(&mut plan_stream, ready_by)?;
+        let plan = match read_terminal_before(&mut plan_stream, ready_by) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.stage = match error {
+                    UnixHelperError::Deadline => NativeVendorStage::ReadPlanDeadline,
+                    UnixHelperError::Protocol => NativeVendorStage::ReadPlanProtocol,
+                    _ => NativeVendorStage::ReadPlanTransport,
+                };
+                return Err(error);
+            }
+        };
         if plan.opcode == ERROR {
             self.stage = NativeVendorStage::PlanRefusal;
             return Ok(plan.bytes);
