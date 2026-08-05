@@ -149,7 +149,7 @@ mod platform {
         AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetLengthSid, GetTokenInformation,
         IsValidAcl, IsValidSecurityDescriptor, IsValidSid, TokenUser, ACCESS_ALLOWED_ACE,
         ACE_HEADER, ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PRESENT, TOKEN_QUERY, TOKEN_USER,
+        PSECURITY_DESCRIPTOR, PSID, SE_DACL_PRESENT, TOKEN_IMPERSONATE, TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
@@ -189,8 +189,9 @@ mod platform {
         if let Some(paths) = controlled_test_account_paths()? {
             return Ok(paths);
         }
-        let profile = known_folder(&FOLDERID_Profile, "FOLDERID_Profile")?;
-        let local_app_data = known_folder(&FOLDERID_LocalAppData, "FOLDERID_LocalAppData")?;
+        let token = authenticated_process_token()?;
+        let profile = known_folder(&FOLDERID_Profile, "FOLDERID_Profile", &token)?;
+        let local_app_data = known_folder(&FOLDERID_LocalAppData, "FOLDERID_LocalAppData", &token)?;
         let root = local_app_data.join("Flux/Exchange");
         Ok((profile, local_app_data, root))
     }
@@ -218,19 +219,48 @@ mod platform {
         }
     }
 
-    fn known_folder(folder: &windows_sys::core::GUID, name: &str) -> Result<PathBuf, String> {
+    fn authenticated_process_token() -> Result<OwnedHandle, String> {
+        let mut raw = null_mut();
+        // SAFETY: the current process pseudo-handle is always live and `raw` points to writable
+        // handle storage. Supplying this explicit token makes the shell resolve the authenticated
+        // user's folder rather than expanding the caller-controlled process environment.
+        let opened = unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_QUERY | TOKEN_IMPERSONATE,
+                &mut raw,
+            )
+        };
+        if opened == 0 || raw.is_null() {
+            return Err(format!(
+                "OpenProcessToken refused authenticated known-folder discovery with error {}",
+                unsafe { GetLastError() }
+            ));
+        }
+        // SAFETY: successful OpenProcessToken transfers one live owned handle.
+        Ok(unsafe { OwnedHandle::from_raw_handle(raw.cast()) })
+    }
+
+    fn known_folder(
+        folder: &windows_sys::core::GUID,
+        name: &str,
+        token: &OwnedHandle,
+    ) -> Result<PathBuf, String> {
         let mut raw = std::ptr::null_mut();
-        // SAFETY: the API allocates a NUL-terminated path for the current process token when passed
-        // a null token. `raw` is released with the documented COM allocator on every success path.
+        // SAFETY: the explicit current-process token has the documented query/impersonate rights.
+        // The shell allocation is released with the documented COM allocator on every return.
         let result = unsafe {
             SHGetKnownFolderPath(
                 folder,
                 KF_FLAG_DONT_VERIFY as u32,
-                std::ptr::null_mut(),
+                token.as_raw_handle() as HANDLE,
                 &mut raw,
             )
         };
         if result != 0 {
+            if !raw.is_null() {
+                unsafe { CoTaskMemFree(raw.cast()) };
+            }
             return Err(format!(
                 "SHGetKnownFolderPath({name}) refused the authenticated account with HRESULT {result:#x}"
             ));
