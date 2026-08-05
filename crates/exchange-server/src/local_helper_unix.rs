@@ -492,7 +492,12 @@ fn encode_secret(ordinal: u16, secret: &[u8]) -> Result<Vec<u8>, UnixHelperError
 fn read_private_tty_line(deadline: Instant) -> Result<Vec<u8>, UnixHelperError> {
     let tty = CString::new("/dev/tty").expect("fixed terminal path");
     // SAFETY: the fixed NUL-terminated path is valid and open returns one owned descriptor.
-    let descriptor = unsafe { libc::open(tty.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    let descriptor = unsafe {
+        libc::open(
+            tty.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
     if descriptor < 0 {
         return Err(UnixHelperError::Terminal);
     }
@@ -527,10 +532,14 @@ fn read_private_tty_line(deadline: Instant) -> Result<Vec<u8>, UnixHelperError> 
         // SAFETY: the descriptor is a validated terminal and the one-byte output is live.
         let received =
             unsafe { libc::read(descriptor.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) };
-        if received < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
-            continue;
+        if received < 0 {
+            let kind = io::Error::last_os_error().kind();
+            if matches!(kind, io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) {
+                continue;
+            }
+            return Err(UnixHelperError::Terminal);
         }
-        if received <= 0 {
+        if received == 0 {
             return Err(UnixHelperError::Terminal);
         }
         if byte == b'\n' {
