@@ -22,8 +22,9 @@ use serde::{Deserialize, Serialize};
 use crate::local_helper::{
     validate_unix_vendor_capabilities, ExpiresAt, HelperDeadlineSchedule, HelperExit,
     LocalHelperInvocation, MintWriterCapability, PipeCapabilityFacts, PipeDirection,
-    ServiceAccountId, UnixVendorCapabilityFacts, VendorSecretCapabilities, HELPER_SETUP_DEADLINE,
-    MAX_HELPER_FRAME_BYTES, UNIX_MINT_WRITER_FD, UNIX_VENDOR_REQUEST_FD, UNIX_VENDOR_RESPONSE_FD,
+    ServiceAccountId, UnixVendorCapabilityFacts, VendorSecretCapabilities, HELPER_RESULT_DEADLINE,
+    HELPER_SETUP_DEADLINE, MAX_HELPER_FRAME_BYTES, UNIX_MINT_WRITER_FD, UNIX_VENDOR_REQUEST_FD,
+    UNIX_VENDOR_RESPONSE_FD,
 };
 use crate::local_helper_plan::{VendorBegin, VendorOperation};
 use crate::local_management::service_account_handoff::unix_transfer::{
@@ -65,6 +66,23 @@ pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
             Ok(writer) => run_mint(&id, expires_at, writer),
             Err(_) => HelperExit::CapabilityOrTransportFailure,
         },
+        _ => HelperExit::CapabilityOrTransportFailure,
+    }
+}
+
+#[cfg(feature = "native-helper-deadline-test-seam")]
+pub(crate) fn run_with_result_budget_for_test(
+    invocation: LocalHelperInvocation,
+    result_budget: Duration,
+) -> HelperExit {
+    match invocation {
+        LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Unix) => run_vendor_with(
+            PinnedEndpoint::authenticated,
+            &mut NativeVendorCeremony,
+            HELPER_SETUP_DEADLINE,
+            HELPER_SETUP_DEADLINE,
+            result_budget,
+        ),
         _ => HelperExit::CapabilityOrTransportFailure,
     }
 }
@@ -491,6 +509,14 @@ fn read_private_tty_line(deadline: Instant) -> Result<Vec<u8>, UnixHelperError> 
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)] // Called by the native integration harness through this source module.
+pub(crate) fn read_private_tty_line_before_for_test(
+    deadline: Instant,
+) -> Result<Vec<u8>, UnixHelperError> {
+    read_private_tty_line(deadline)
+}
+
 fn wait_fd_readable(descriptor: RawFd, deadline: Instant) -> Result<bool, UnixHelperError> {
     let mut poll = libc::pollfd {
         fd: descriptor,
@@ -508,7 +534,13 @@ fn wait_fd_readable(descriptor: RawFd, deadline: Instant) -> Result<bool, UnixHe
             return Ok(true);
         }
         if result == 0 {
-            return Ok(false);
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            // `poll` accepts whole milliseconds and may wake before the absolute instant after a
+            // rounded timeout. Preserve the one outer deadline instead of turning that early wake
+            // into time to write a terminal frame after a private-input timeout.
+            continue;
         }
         if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
             return Err(UnixHelperError::Terminal);
@@ -547,6 +579,7 @@ pub(crate) fn run_vendor<C: VendorCeremony>(ceremony: &mut C) -> HelperExit {
         ceremony,
         HELPER_SETUP_DEADLINE,
         HELPER_SETUP_DEADLINE,
+        HELPER_RESULT_DEADLINE,
     )
 }
 
@@ -578,6 +611,7 @@ pub(crate) fn run_vendor_at_for_test<C: VendorCeremony>(
         ceremony,
         request_deadline,
         setup_deadline,
+        HELPER_RESULT_DEADLINE,
     )
 }
 
@@ -604,6 +638,7 @@ fn run_vendor_with<C, E>(
     ceremony: &mut C,
     request_budget: Duration,
     setup_budget: Duration,
+    result_budget: Duration,
 ) -> HelperExit
 where
     C: VendorCeremony,
@@ -619,11 +654,11 @@ where
         .unwrap_or_else(Instant::now);
     let parsed_request = read_request(&request, request_by);
     drop(request);
-    let deadlines = if setup_budget == HELPER_SETUP_DEADLINE {
-        HelperDeadlineSchedule::from_request_eof(Instant::now())
-    } else {
-        HelperDeadlineSchedule::from_request_eof_with_setup(Instant::now(), setup_budget)
-    };
+    let deadlines = HelperDeadlineSchedule::from_request_eof_with_budgets(
+        Instant::now(),
+        setup_budget,
+        result_budget,
+    );
     let Some(deadlines) = deadlines else {
         return HelperExit::CapabilityOrTransportFailure;
     };

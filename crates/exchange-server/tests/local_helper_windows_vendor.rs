@@ -19,8 +19,8 @@ use local_helper::{
     VendorSecretCapabilities,
 };
 use local_helper_windows::{
-    blocking_read_before_for_test, read_console_secret_with, ConsolePort, VendorCeremony,
-    VendorPreparation, VendorRequest, WindowsHelperError,
+    blocking_read_before_for_test, finish_response_before_for_test, read_console_secret_with,
+    ConsolePort, VendorCeremony, VendorPreparation, VendorRequest, WindowsHelperError,
 };
 use windows_sys::Win32::Foundation::{GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT};
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -36,7 +36,7 @@ fn inheritable_pipe() -> (OwnedHandle, OwnedHandle) {
     let mut read = null_mut();
     let mut write = null_mut();
     assert_ne!(
-        unsafe { CreatePipe(&mut read, &mut write, &attributes, 0) },
+        unsafe { CreatePipe(&mut read, &mut write, &attributes, 4_096) },
         0
     );
     // SAFETY: CreatePipe returned two newly owned handles.
@@ -274,9 +274,48 @@ fn private_input_restores_echo_after_console_read_failure() {
 fn blocked_console_read_is_cancelled_at_the_unchanged_outer_deadline() {
     let (read, _held_write) = inheritable_pipe();
     let started = Instant::now();
+    let schedule = HelperDeadlineSchedule::from_request_eof_with_budgets(
+        started,
+        std::time::Duration::from_millis(25),
+        std::time::Duration::from_millis(25),
+    )
+    .expect("test helper deadlines");
     assert!(matches!(
-        blocking_read_before_for_test(read, started + std::time::Duration::from_millis(25)),
+        blocking_read_before_for_test(read, schedule.result_by()),
         Err(WindowsHelperError::Deadline)
     ));
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn blocked_terminal_write_and_close_share_the_absolute_result_deadline() {
+    for terminal in [
+        frame(2, 0x0006, &vec![b'x'; 65_536]),
+        frame(
+            2,
+            0x7fff,
+            br#"{"code":"local_management_unavailable","commit":"none","retry":"operator","schema":"exchange.local-management-error.v1","status":503}"#,
+        ),
+    ] {
+        let (read, write) = inheritable_pipe();
+        write_all(&write, &[0x5a; 4_096]);
+        let started = Instant::now();
+        let schedule = HelperDeadlineSchedule::from_request_eof_with_budgets(
+            started,
+            std::time::Duration::from_millis(25),
+            std::time::Duration::from_millis(25),
+        )
+        .expect("test helper deadlines");
+        assert!(
+            finish_response_before_for_test(write, terminal, schedule.result_by())
+                == HelperExit::CapabilityOrTransportFailure,
+            "a blocked terminal cannot claim frame plus EOF"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let mut drained = Vec::new();
+        std::fs::File::from(read)
+            .read_to_end(&mut drained)
+            .expect("cancelled writer closes for EOF");
+        assert_eq!(drained, vec![0x5a; 4_096]);
+    }
 }

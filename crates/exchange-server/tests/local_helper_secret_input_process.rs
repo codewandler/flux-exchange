@@ -1,6 +1,7 @@
 #![cfg(all(
     any(target_os = "linux", target_os = "macos"),
-    feature = "native-root-test-seam"
+    feature = "native-root-test-seam",
+    feature = "native-helper-deadline-test-seam"
 ))]
 
 use std::ffi::OsStr;
@@ -27,52 +28,118 @@ const SENTINEL: &[u8] = b"x134-real-tty-secret-bc5d9138";
 /// the release binary, not a source-included worker: FD 6/7 are its only Flux capabilities while
 /// an otherwise-unreferenced controlling PTY makes `/dev/tty` the only possible secret input.
 #[test]
-fn unix_helper_reads_the_secret_from_dev_tty_with_null_stdio_and_keeps_it_private() {
-    let fixture = Fixture::new();
-    let mut server = SupervisedServer::spawn(&fixture.state);
-    let plan = server.plan("github", None);
-    let begin = connect_begin(&plan, "tty-owned");
-    let request = frame(
-        CLIENT,
-        CONNECT_BEGIN,
-        &serde_json::to_vec(&begin).expect("canonical BEGIN"),
-    );
+fn supervised_unix_helper_private_input_and_outer_deadline_are_exact() {
+    {
+        let fixture = Fixture::new();
+        let mut server = SupervisedServer::spawn(&fixture.state);
+        let plan = server.plan("github", None);
+        let begin = connect_begin(&plan, "tty-owned");
+        let request = frame(
+            CLIENT,
+            CONNECT_BEGIN,
+            &serde_json::to_vec(&begin).expect("canonical BEGIN"),
+        );
 
-    let mut helper = HelperProcess::spawn(&fixture.state);
-    helper.assert_process_inputs_exclude(SENTINEL);
-    helper
-        .request
-        .as_mut()
-        .expect("live helper request")
-        .write_all(&request)
-        .expect("BEGIN request");
-    drop(helper.request.take());
-    helper.wait_for_private_terminal_read();
+        let mut helper = HelperProcess::spawn(&fixture.state, None);
+        helper.assert_process_inputs_exclude(SENTINEL);
+        helper
+            .request
+            .as_mut()
+            .expect("live helper request")
+            .write_all(&request)
+            .expect("BEGIN request");
+        drop(helper.request.take());
+        if let Some(status) = helper.wait_for_private_terminal_read() {
+            let response = read_to_eof_before(&helper.response, Duration::from_secs(1));
+            panic!(
+                "helper exited before private input: {:?}, terminal={}",
+                status.code(),
+                String::from_utf8_lossy(&response)
+            );
+        }
 
-    // Canonical-mode terminal input is one line. The synchronization above observes that
-    // production disabled terminal echo before this byte exists; writing optimistically would let
-    // the kernel echo a secret before even a correct reader had opened `/dev/tty`.
-    helper.terminal.write_all(SENTINEL).expect("TTY secret");
-    helper.terminal.write_all(b"\n").expect("TTY line ending");
+        // Canonical-mode terminal input is one line. The synchronization above observes that
+        // production disabled terminal echo before this byte exists; writing optimistically would
+        // let the kernel echo a secret before even a correct reader had opened `/dev/tty`.
+        helper.terminal.write_all(SENTINEL).expect("TTY secret");
+        helper.terminal.write_all(b"\n").expect("TTY line ending");
 
-    let response = read_to_eof_before(&helper.response, Duration::from_secs(10));
-    let status = wait_before(&mut helper.child, Duration::from_secs(5));
-    assert_eq!(status.code(), Some(0), "helper transport did not complete");
-    let receipt = decode_server_control(&response, CONNECT_RECEIPT);
-    assert_eq!(receipt["schema"], "exchange.connect-receipt.v1");
-    assert_eq!(receipt["connector"], "github");
-    assert_eq!(receipt["label"], "tty-owned");
-    assert_eq!(receipt["operation"], "connect");
+        let response = read_to_eof_before(&helper.response, Duration::from_secs(10));
+        let status = wait_before(&mut helper.child, Duration::from_secs(5));
+        assert_eq!(status.code(), Some(0), "helper transport did not complete");
+        let receipt = decode_server_control(&response, CONNECT_RECEIPT);
+        assert_eq!(receipt["schema"], "exchange.connect-receipt.v1");
+        assert_eq!(receipt["connector"], "github");
+        assert_eq!(receipt["label"], "tty-owned");
+        assert_eq!(receipt["operation"], "connect");
+        helper.assert_terminal_echo_restored();
 
-    let transcript = drain_terminal(&helper.terminal);
-    assert_excludes(&transcript, SENTINEL, "controlling-terminal echo/output");
-    server.finish(SENTINEL);
+        let transcript = drain_terminal(&helper.terminal);
+        assert_excludes(&transcript, SENTINEL, "controlling-terminal echo/output");
+        server.finish(SENTINEL);
 
-    assert!(
-        tree_contains(&fixture.state.join("credentials"), SENTINEL),
-        "the secret read from /dev/tty never reached the retained credential provider"
-    );
-    assert_tree_excludes_except_credentials(&fixture.state, SENTINEL);
+        let credentials =
+            exchange_host::CredentialStore::bind(fixture.state.join("credentials/store.txt"))
+                .expect("reopen retained credential provider after server exit");
+        let reference =
+            exchange_host::CredentialRef::new("local", "com.github.api", "default", "token")
+                .expect("GitHub credential address");
+        let secret = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("credential read runtime")
+            .block_on(credentials.secrets().get(&reference))
+            .expect("credential committed through the retained provider");
+        assert_eq!(secret.expose_secret().as_bytes(), SENTINEL);
+        assert_tree_excludes_except_credentials(&fixture.state, SENTINEL);
+    }
+
+    // The production binary receives the same unchanged result deadline through its feature-only
+    // native test seam. Holding the real controlling TTY past that boundary must cancel the read,
+    // restore echo, close the response capability and produce only the fixed transport exit.
+    {
+        let fixture = Fixture::new();
+        let mut server = SupervisedServer::spawn(&fixture.state);
+        let plan = server.plan("github", None);
+        let begin = connect_begin(&plan, "tty-deadline");
+        let request = frame(
+            CLIENT,
+            CONNECT_BEGIN,
+            &serde_json::to_vec(&begin).expect("canonical deadline BEGIN"),
+        );
+        let mut helper = HelperProcess::spawn(&fixture.state, Some(300));
+        helper
+            .request
+            .as_mut()
+            .expect("live deadline request")
+            .write_all(&request)
+            .expect("deadline BEGIN request");
+        drop(helper.request.take());
+        if let Some(status) = helper.wait_for_private_terminal_read() {
+            let response = read_to_eof_before(&helper.response, Duration::from_secs(1));
+            panic!(
+                "deadline helper exited before private input: {:?}, terminal={}",
+                status.code(),
+                String::from_utf8_lossy(&response)
+            );
+        }
+
+        let response = read_to_eof_before(&helper.response, Duration::from_secs(2));
+        let status = wait_before(&mut helper.child, Duration::from_secs(2));
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "deadline is a helper transport exit"
+        );
+        assert!(
+            response.is_empty(),
+            "expired result pipe must close value-free"
+        );
+        helper.assert_terminal_echo_restored();
+        assert!(drain_terminal(&helper.terminal).is_empty());
+        server.finish(SENTINEL);
+        assert_tree_excludes_except_credentials(&fixture.state, SENTINEL);
+    }
 }
 
 struct Fixture {
@@ -194,7 +261,11 @@ impl SupervisedServer {
     fn finish(&mut self, sentinel: &[u8]) {
         drop(self.liveness.take());
         let status = wait_before(&mut self.child, Duration::from_secs(5));
-        assert!(status.success(), "supervised server exit");
+        assert_eq!(
+            status.code(),
+            Some(1),
+            "the retained X-128 liveness EOF contract exits exactly 1"
+        );
         let mut stdout = Vec::new();
         self.child
             .stdout
@@ -232,7 +303,7 @@ struct HelperProcess {
 }
 
 impl HelperProcess {
-    fn spawn(state_root: &Path) -> Self {
+    fn spawn(state_root: &Path, result_budget_millis: Option<u64>) -> Self {
         let request = Pipe::new();
         let response = Pipe::new();
         let request_source = duplicate_high(request.read.as_raw_fd());
@@ -253,6 +324,12 @@ impl HelperProcess {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(milliseconds) = result_budget_millis {
+            command.env(
+                "FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS",
+                milliseconds.to_string(),
+            );
+        }
         // SAFETY: the closure establishes an otherwise descriptor-free session and uses only
         // async-signal-safe descriptor/session operations before exec.
         unsafe {
@@ -290,9 +367,12 @@ impl HelperProcess {
         }
     }
 
-    fn wait_for_private_terminal_read(&self) {
+    fn wait_for_private_terminal_read(&mut self) -> Option<std::process::ExitStatus> {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
+            if let Some(status) = self.child.try_wait().expect("helper state") {
+                return Some(status);
+            }
             // SAFETY: tcgetattr only writes the live termios output for this PTY slave.
             let mut attributes = unsafe { std::mem::zeroed::<libc::termios>() };
             assert_eq!(
@@ -301,7 +381,7 @@ impl HelperProcess {
                 "PTY terminal attributes"
             );
             if attributes.c_lflag & libc::ECHO == 0 {
-                return;
+                return None;
             }
             assert!(
                 Instant::now() < deadline,
@@ -309,6 +389,20 @@ impl HelperProcess {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    fn assert_terminal_echo_restored(&self) {
+        let mut attributes = unsafe { std::mem::zeroed::<libc::termios>() };
+        assert_eq!(
+            unsafe { libc::tcgetattr(self.terminal_control.as_raw_fd(), &mut attributes) },
+            0,
+            "PTY terminal attributes after helper exit"
+        );
+        assert_ne!(
+            attributes.c_lflag & libc::ECHO,
+            0,
+            "helper did not restore private-terminal echo"
+        );
     }
 
     fn assert_process_inputs_exclude(&self, sentinel: &[u8]) {
@@ -349,8 +443,12 @@ fn connect_begin(plan: &Value, label: &str) -> Value {
             continue;
         }
         let target = &field["target"];
-        if !targets.iter().any(|held| held == target) {
-            targets.push(target.clone());
+        let begin_target = json!({
+            "revision": target["revision"],
+            "target": target["id"],
+        });
+        if !targets.iter().any(|held| held == &begin_target) {
+            targets.push(begin_target);
         }
         let target_id = target["id"].as_str().expect("target id");
         assert!(
@@ -361,7 +459,7 @@ fn connect_begin(plan: &Value, label: &str) -> Value {
     assert_eq!(
         targets
             .iter()
-            .filter(|target| target["id"] != "connection.name")
+            .filter(|target| target["target"] != "connection.name")
             .count(),
         1,
         "process fixture requires exactly one TTY secret"
@@ -528,31 +626,6 @@ fn drain_terminal(file: &std::fs::File) -> Vec<u8> {
         }
         panic!("terminal transcript read: {error}");
     }
-}
-
-fn tree_contains(root: &Path, needle: &[u8]) -> bool {
-    if !root.exists() {
-        return false;
-    }
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        let metadata = std::fs::symlink_metadata(&path).expect("persisted metadata");
-        if metadata.is_dir() {
-            pending.extend(
-                std::fs::read_dir(path)
-                    .expect("persisted directory")
-                    .map(|entry| entry.expect("persisted entry").path()),
-            );
-        } else if metadata.is_file()
-            && std::fs::read(path)
-                .expect("persisted file")
-                .windows(needle.len())
-                .any(|candidate| candidate == needle)
-        {
-            return true;
-        }
-    }
-    false
 }
 
 fn assert_tree_excludes_except_credentials(root: &Path, needle: &[u8]) {

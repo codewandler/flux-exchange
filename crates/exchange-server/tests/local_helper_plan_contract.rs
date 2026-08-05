@@ -9,17 +9,18 @@ const PLAN_REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const NAME_REVISION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const ORIGIN_REVISION: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 const TOKEN_REVISION: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+const REFRESH_REVISION: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 fn credential_begin() -> Vec<u8> {
     format!(
-        "{{\"action\":\"rotate\",\"connector\":\"gitlab\",\"credential_revision\":\"{OLD_HEAD}\",\"label\":\"work\",\"plan_revision\":\"{PLAN_REVISION}\",\"targets\":[{{\"revision\":\"{TOKEN_REVISION}\",\"target\":\"credential.token\"}}]}}"
+        "{{\"action\":\"rotate\",\"connector\":\"gitlab\",\"credential_revision\":\"{OLD_HEAD}\",\"label\":\"work\",\"plan_revision\":\"{PLAN_REVISION}\",\"targets\":[{{\"revision\":\"{TOKEN_REVISION}\",\"target\":\"credential.token\"}},{{\"revision\":\"{REFRESH_REVISION}\",\"target\":\"credential.refresh\"}}]}}"
     )
     .into_bytes()
 }
 
 fn connect_begin() -> Vec<u8> {
     format!(
-        "{{\"authorities\":[{{\"revision\":null,\"target\":\"authority.origin\"}}],\"connector\":\"gitlab\",\"label\":\"new-work\",\"plan_revision\":\"{PLAN_REVISION}\",\"settings\":[{{\"target\":\"authority.origin\",\"value\":\"https://gitlab.example\"}}],\"targets\":[{{\"revision\":\"{NAME_REVISION}\",\"target\":\"connection.name\"}},{{\"revision\":\"{ORIGIN_REVISION}\",\"target\":\"authority.origin\"}},{{\"revision\":\"{TOKEN_REVISION}\",\"target\":\"credential.token\"}}]}}"
+        "{{\"authorities\":[{{\"revision\":null,\"target\":\"authority.origin\"}}],\"connector\":\"gitlab\",\"label\":\"new-work\",\"plan_revision\":\"{PLAN_REVISION}\",\"settings\":[{{\"target\":\"authority.origin\",\"value\":\"https://gitlab.example\"}}],\"targets\":[{{\"revision\":\"{NAME_REVISION}\",\"target\":\"connection.name\"}},{{\"revision\":\"{ORIGIN_REVISION}\",\"target\":\"authority.origin\"}},{{\"revision\":\"{TOKEN_REVISION}\",\"target\":\"credential.token\"}},{{\"revision\":\"{REFRESH_REVISION}\",\"target\":\"credential.refresh\"}}]}}"
     )
     .into_bytes()
 }
@@ -30,8 +31,9 @@ fn plan() -> serde_json::Value {
         "credential_revision": CURRENT_HEAD,
         "fields": [
             field("connection.name", false, true, Some(("connection.name", NAME_REVISION)), None),
-            field("origin", false, true, Some(("authority.origin", ORIGIN_REVISION)), Some(serde_json::json!({"actions":["approve"],"revision":"1","state":"approved"}))),
-            field("token", true, true, Some(("credential.token", TOKEN_REVISION)), None)
+            field("origin", false, true, Some(("authority.origin", ORIGIN_REVISION)), Some(serde_json::json!({"actions":["revoke"],"revision":"1","state":"approved"}))),
+            field("token", true, true, Some(("credential.token", TOKEN_REVISION)), None),
+            field("refresh", true, true, Some(("credential.refresh", REFRESH_REVISION)), None)
         ],
         "labels": ["work"],
         "plan_revision": PLAN_REVISION,
@@ -50,7 +52,7 @@ fn unselected_plan() -> serde_json::Value {
     plan["fields"][0]["set"] = serde_json::json!(false);
     plan["fields"][1]["set"] = serde_json::json!(false);
     plan["fields"][1]["authority"] =
-        serde_json::json!({"actions":["approve"],"revision":null,"state":"unset"});
+        serde_json::json!({"actions":[],"revision":null,"state":"unset"});
     plan
 }
 
@@ -84,7 +86,7 @@ fn field(
 }
 
 #[test]
-fn old_credential_head_replay_reaches_server_before_current_head_validation() {
+fn helper_admits_a_noncurrent_old_head_for_server_side_replay_lookup() {
     let begin = VendorBegin::parse(&credential_begin(), VendorOperation::Credential)
         .expect("closed credential BEGIN");
     assert!(begin.admits_plan(&serde_json::to_vec(&plan()).expect("plan")));
@@ -107,11 +109,22 @@ fn every_plan_projection_fact_is_revalidated_before_connection_two() {
     assert!(begin.admits_plan(&serde_json::to_vec(&original).expect("plan")));
 
     let mutations = [
+        "/connector",
+        "/credential_revision",
+        "/labels/0",
+        "/plan_revision",
+        "/selection",
         "/fields/0/target/revision",
+        "/fields/1/authority/actions/0",
         "/fields/1/authority/revision",
+        "/fields/1/authority/state",
+        "/fields/1/target/revision",
+        "/fields/2/secret",
         "/fields/2/set",
         "/fields/2/target/revision",
+        "/fields/3/target/revision",
         "/state",
+        "/version",
     ];
     for pointer in mutations {
         let mut changed = original.clone();
@@ -121,4 +134,14 @@ fn every_plan_projection_fact_is_revalidated_before_connection_two() {
             "helper admitted mutated plan fact {pointer}"
         );
     }
+
+    let mut reordered = original;
+    reordered["fields"]
+        .as_array_mut()
+        .expect("plan fields")
+        .swap(2, 3);
+    assert!(
+        !begin.admits_plan(&serde_json::to_vec(&reordered).expect("reordered plan")),
+        "helper admitted a reordered credential target projection"
+    );
 }

@@ -335,7 +335,7 @@ fn settings_only_connect_prepares_empty_batch_and_waits_for_commit() {
 }
 
 #[test]
-fn acquire_rotate_head_cas_stale_refusal_and_restart_replay_are_live() {
+fn old_credential_head_replay_reaches_server_before_current_head_validation() {
     let fixture = Fixture::new();
     fixture.seed_empty_label("github", "work", "11111111-1111-4111-8111-111111111111");
     let server = fixture.spawn();

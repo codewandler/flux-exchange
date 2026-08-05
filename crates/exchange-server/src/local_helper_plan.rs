@@ -379,11 +379,28 @@ fn validate_fields(fields: &[PlanField], state: PlanState) -> Option<Vec<TargetF
 
 fn valid_authority(authority: &PlanAuthority) -> bool {
     match authority.state {
-        AuthorityState::Unset => authority.revision.is_none(),
-        AuthorityState::Proposed | AuthorityState::Approved | AuthorityState::Revoked => authority
-            .revision
-            .as_deref()
-            .is_some_and(canonical_positive_u64),
+        AuthorityState::Unset => authority.revision.is_none() && authority.actions.is_empty(),
+        AuthorityState::Proposed => {
+            authority
+                .revision
+                .as_deref()
+                .is_some_and(canonical_positive_u64)
+                && authority.actions == ["approve", "revoke"]
+        }
+        AuthorityState::Approved => {
+            authority
+                .revision
+                .as_deref()
+                .is_some_and(canonical_positive_u64)
+                && authority.actions == ["revoke"]
+        }
+        AuthorityState::Revoked => {
+            authority
+                .revision
+                .as_deref()
+                .is_some_and(canonical_positive_u64)
+                && authority.actions.is_empty()
+        }
     }
 }
 

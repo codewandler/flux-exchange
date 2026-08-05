@@ -25,6 +25,9 @@ native-root-test-seam = []
 # Native CI only: run the production Windows endpoint with a paused monotonic clock from one
 # dedicated integration-test executable. Released binaries do not recognize this command.
 native-deadline-test-seam = ["tokio/test-util"]
+# Native helper process evidence only: shorten the otherwise fixed 335-second outer result cap.
+# Released binaries do not consult the test environment variable guarded by this feature.
+native-helper-deadline-test-seam = []
 
 [[bin]]
 name = "flux-exchange"

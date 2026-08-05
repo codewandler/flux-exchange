@@ -277,7 +277,27 @@ fn main() -> ExitCode {
                 local_helper::HelperPlatform::Unix,
                 &arguments,
             ) {
-                Ok(invocation) => ExitCode::from(local_helper_unix::run(invocation).code()),
+                Ok(invocation) => {
+                    #[cfg(feature = "native-helper-deadline-test-seam")]
+                    if let Some(value) = std::env::var_os("FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS")
+                    {
+                        let Some(milliseconds) = value
+                            .to_str()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|milliseconds| *milliseconds != 0)
+                        else {
+                            return ExitCode::FAILURE;
+                        };
+                        return ExitCode::from(
+                            local_helper_unix::run_with_result_budget_for_test(
+                                invocation,
+                                std::time::Duration::from_millis(milliseconds),
+                            )
+                            .code(),
+                        );
+                    }
+                    ExitCode::from(local_helper_unix::run(invocation).code())
+                }
                 Err(_) => ExitCode::FAILURE,
             };
         }

@@ -22,7 +22,7 @@ use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use local_helper::{
     parse_local_helper, HelperDeadlineSchedule, HelperExit, HelperPlatform, LocalHelperInvocation,
@@ -192,41 +192,98 @@ fn oversized_declared_request_refuses_without_reading_its_body() {
 
 #[test]
 fn terminal_response_write_and_eof_share_the_absolute_result_deadline() {
-    let (read, write) = pipe();
-    let flags = unsafe { libc::fcntl(write.as_raw_fd(), libc::F_GETFL) };
-    assert_ne!(flags, -1);
-    assert_ne!(
-        unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
-        -1
-    );
-    let fill = [0x5a_u8; 4096];
-    loop {
-        let written = unsafe { libc::write(write.as_raw_fd(), fill.as_ptr().cast(), fill.len()) };
-        if written > 0 {
-            continue;
-        }
-        assert_eq!(
-            std::io::Error::last_os_error().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
-        break;
-    }
-    let started = std::time::Instant::now();
-    let exit = local_helper_unix::finish_response_before_for_test(
-        write,
+    for terminal in [
+        server_frame(0x0006, &vec![b'x'; 65_536]),
         server_frame(0x7fff, br#"{"code":"deadline_exceeded"}"#),
-        started + Duration::from_millis(25),
+    ] {
+        let (read, write) = pipe();
+        let flags = unsafe { libc::fcntl(write.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(flags, -1);
+        assert_ne!(
+            unsafe { libc::fcntl(write.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+            -1
+        );
+        let fill = [0x5a_u8; 4096];
+        loop {
+            let written =
+                unsafe { libc::write(write.as_raw_fd(), fill.as_ptr().cast(), fill.len()) };
+            if written > 0 {
+                continue;
+            }
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+            break;
+        }
+        let started = std::time::Instant::now();
+        let exit = local_helper_unix::finish_response_before_for_test(
+            write,
+            terminal,
+            started + Duration::from_millis(25),
+        );
+        assert!(
+            exit == HelperExit::CapabilityOrTransportFailure,
+            "a blocked response cannot be reported as frame+EOF"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let mut drained = Vec::new();
+        File::from(read)
+            .read_to_end(&mut drained)
+            .expect("writer closure produces EOF after queued bytes");
+        assert!(!drained.is_empty());
+    }
+}
+
+#[test]
+fn blocked_private_tty_read_is_cancelled_at_the_unchanged_outer_deadline() {
+    let (terminal, terminal_slave) = pseudo_terminal();
+    let terminal_source = duplicate_high(terminal_slave.as_raw_fd());
+    let mut command = Command::new(std::env::current_exe().expect("test executable"));
+    command
+        .arg("--quiet")
+        .arg("--exact")
+        .arg("unix_helper_worker")
+        .env(WORKER_ENV, "1")
+        .env(MODE_ENV, "tty-deadline")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 || libc::ioctl(terminal_source, libc::TIOCSCTTY as _, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for descriptor in 3..256 {
+                libc::close(descriptor);
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().expect("private-TTY deadline worker");
+    close_raw(terminal_source);
+
+    let echo_disabled_by = Instant::now() + Duration::from_millis(200);
+    loop {
+        let attributes = terminal_attributes(terminal_slave.as_raw_fd());
+        if attributes.c_lflag & libc::ECHO == 0 {
+            break;
+        }
+        assert!(
+            Instant::now() < echo_disabled_by,
+            "deadline worker never disabled /dev/tty echo"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    let status = wait_child_before(&mut child, Duration::from_secs(2));
+    assert!(status.success(), "private-TTY deadline worker failed");
+    assert_ne!(
+        terminal_attributes(terminal_slave.as_raw_fd()).c_lflag & libc::ECHO,
+        0,
+        "deadline cancellation did not restore terminal echo"
     );
-    assert!(
-        exit == HelperExit::CapabilityOrTransportFailure,
-        "a blocked response cannot be reported as frame+EOF"
-    );
-    assert!(started.elapsed() < Duration::from_secs(1));
-    let mut drained = Vec::new();
-    File::from(read)
-        .read_to_end(&mut drained)
-        .expect("writer closure produces EOF after queued bytes");
-    assert!(!drained.is_empty());
+    drop(terminal);
 }
 
 #[test]
@@ -258,6 +315,20 @@ fn service_account_mode_builds_exact_mint_frame_for_the_fd5_transfer_seam() {
         panic!("expected Unix mint invocation");
     };
     let expected = client_frame(0x0020, br#"{"expires_at":"2147483647","id":"worker_1"}"#);
+    let listener = fixture.listener.try_clone().expect("fixture listener");
+    listener
+        .set_nonblocking(false)
+        .expect("blocking fixture listener");
+    let server_expected = expected.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("mint helper connection");
+        let mut observed = vec![0_u8; server_expected.len()];
+        stream.read_exact(&mut observed).expect("exact MINT frame");
+        assert_eq!(observed, server_expected);
+        stream
+            .write_all(&server_frame(0x7fff, br#"{"code":"fixture"}"#))
+            .expect("terminal fixture response");
+    });
     let mut observed = Vec::new();
     let exit = local_helper_unix::run_mint_at_for_test(
         &fixture.root,
@@ -266,7 +337,7 @@ fn service_account_mode_builds_exact_mint_frame_for_the_fd5_transfer_seam() {
         CaptureMint(&mut observed),
         Duration::from_secs(1),
     );
-    fixture.accept_one();
+    server.join().expect("mint fixture server");
     assert_eq!(exit.code(), 0);
     assert_eq!(observed, expected);
 }
@@ -276,6 +347,19 @@ fn unix_helper_worker() {
     let Some(mode) = std::env::var_os(WORKER_ENV) else {
         return;
     };
+    if std::env::var_os(MODE_ENV).as_deref() == Some("tty-deadline".as_ref()) {
+        let schedule = HelperDeadlineSchedule::from_request_eof_with_budgets(
+            Instant::now(),
+            Duration::from_millis(250),
+            Duration::from_millis(250),
+        )
+        .expect("test helper deadlines");
+        assert_eq!(
+            local_helper_unix::read_private_tty_line_before_for_test(schedule.result_by()),
+            Err(local_helper_unix::UnixHelperError::Deadline)
+        );
+        return;
+    }
     let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("worker root"));
     let timeout = if std::env::var_os(MODE_ENV).as_deref() == Some("deadline".as_ref()) {
         Duration::from_millis(40)
@@ -322,7 +406,11 @@ impl MintTransfer for CaptureMint<'_> {
         mint_frame: &[u8],
     ) -> Result<(), Self::Error> {
         self.0.extend_from_slice(mint_frame);
-        drop(stream.try_clone().map_err(|_| ())?);
+        stream
+            .try_clone()
+            .map_err(|_| ())?
+            .write_all(mint_frame)
+            .map_err(|_| ())?;
         Ok(())
     }
 }
@@ -494,6 +582,54 @@ fn pipe() -> (OwnedFd, OwnedFd) {
             OwnedFd::from_raw_fd(descriptors[0]),
             OwnedFd::from_raw_fd(descriptors[1]),
         )
+    }
+}
+
+fn pseudo_terminal() -> (OwnedFd, OwnedFd) {
+    let mut master = -1;
+    let mut slave = -1;
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
+}
+
+fn close_raw(descriptor: RawFd) {
+    unsafe {
+        libc::close(descriptor);
+    }
+}
+
+fn terminal_attributes(descriptor: RawFd) -> libc::termios {
+    let mut attributes = unsafe { std::mem::zeroed::<libc::termios>() };
+    assert_eq!(
+        unsafe { libc::tcgetattr(descriptor, &mut attributes) },
+        0,
+        "PTY terminal attributes"
+    );
+    attributes
+}
+
+fn wait_child_before(
+    child: &mut std::process::Child,
+    budget: Duration,
+) -> std::process::ExitStatus {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Some(status) = child.try_wait().expect("worker state") {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "worker exit deadline");
+        std::thread::sleep(Duration::from_millis(2));
     }
 }
 

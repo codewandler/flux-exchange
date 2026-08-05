@@ -29,6 +29,7 @@ pub(crate) struct HelperDeadlineSchedule {
 }
 
 impl HelperDeadlineSchedule {
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn from_request_eof(now: std::time::Instant) -> Option<Self> {
         Self::from_request_eof_with_setup(now, HELPER_SETUP_DEADLINE)
     }
@@ -37,8 +38,16 @@ impl HelperDeadlineSchedule {
         now: std::time::Instant,
         setup: Duration,
     ) -> Option<Self> {
+        Self::from_request_eof_with_budgets(now, setup, HELPER_RESULT_DEADLINE)
+    }
+
+    pub(crate) fn from_request_eof_with_budgets(
+        now: std::time::Instant,
+        setup: Duration,
+        result: Duration,
+    ) -> Option<Self> {
         Some(Self {
-            result_by: now.checked_add(HELPER_RESULT_DEADLINE)?,
+            result_by: now.checked_add(result)?,
             setup_by: now.checked_add(setup)?,
         })
     }

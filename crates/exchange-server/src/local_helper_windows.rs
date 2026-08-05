@@ -1173,6 +1173,16 @@ fn finish_response(response: OwnedHandle, bytes: Vec<u8>, deadline: Instant) -> 
     }
 }
 
+#[cfg(test)]
+#[allow(dead_code)] // Called by the native Windows integration harness through this source module.
+pub(crate) fn finish_response_before_for_test(
+    response: OwnedHandle,
+    bytes: Vec<u8>,
+    deadline: Instant,
+) -> HelperExit {
+    finish_response(response, bytes, deadline)
+}
+
 fn write_response_and_close(response: OwnedHandle, bytes: &[u8]) -> bool {
     let raw = response.into_raw_handle() as HANDLE;
     let mut written = 0_usize;
