@@ -174,7 +174,8 @@ implements its manager in C-510.
       checksummed `codewandler-connector-secrets` 0.20.0, contains none of the obsolete v1
       channel/manifest/compatibility/readiness producers or `exchange-release-v1` candidate tree,
       and contains the complete digest-checked v2 fixture inventory with trust v1, the exact eight
-      protocols, the nine X-128 native cases, fourteen exact native test bindings and the inherited
+      protocols, the inherited nine X-128 native cases/fourteen exact bindings plus four X-134
+      ratchet cases/five exact bindings — thirteen cases and nineteen bindings combined — and the inherited
       trust-v1 refusal cases. Its synthetic self-test independently proves each stale dependency,
       identity, missing/extra protocol, residual v1 tree, fixture corruption and lost native/trust
       case refuses.
@@ -272,11 +273,18 @@ implements its manager in C-510.
   and live-child expiry behavior now precede implementation.
 - 2026-08-04: The implementation wave now has a bounded same-handle verifier, deterministic closed
   archives, signing-time delegated-key validity, identical Rust/Python transport admission, 161
-  explicitly ratcheted provider cases over 547 inventoried files, and nine native cases mapped to 14
+  explicitly ratcheted provider cases over 547 inventoried files, and nine X-128 native cases mapped to 14
   exact process tests across the five release runners. The local Linux runner executed all eight
   applicable liveness, supervisor-death, inherited-FD and live-expiry tests; the release workflow
   runs the corresponding exact set natively on macOS, Linux arm64 and Windows before admitting an
   artifact.
+- 2026-08-04: X-134 extended the inherited native refusal inventory with four separately classified
+  X-134 ratchet cases carrying five bindings, including the two-test Windows production-root
+  poisoning case. The combined inventory is therefore thirteen cases and nineteen exact bindings:
+  nine/fourteen inherited from X-128 plus four/five owned by X-134. This is fixture coverage, not
+  release completion: the crates.io manual-resume path
+  still lacks immutable tag binding and remains an explicit blocker beside the first signed public
+  tag, five-target artifacts and public verifier ceremony.
 - 2026-08-04: Public evidence is now append-only. An immutable version release and
   `exchange-stable-v1-generation-<generation>` snapshot are bounded-re-downloaded and verified before
   the mutable stable head advances; future offline-root rotation must similarly retain
