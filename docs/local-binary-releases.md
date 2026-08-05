@@ -6,23 +6,20 @@ This is the operator contract for publishing and consuming the separately releas
 that contract without turning the workflow, crates.io, or a local checkout into another trust root.
 
 The contract and its fixtures do not by themselves make a production channel live. The first usable
-release requires one real immutable `vX.Y.Z` tag, all five public assets, production trust metadata,
+release requires one real immutable `vX.Y.Z` tag, both public assets, production trust metadata,
 and a successful post-publication verification of the downloaded release. Draft assets or a green
 staging run are not release evidence.
 
 ## What is released
 
-A tag release contains exactly one server archive for each supported Flux target:
+A tag release contains exactly one server archive for each supported Exchange target:
 
-- `aarch64-apple-darwin`
-- `x86_64-apple-darwin`
 - `aarch64-unknown-linux-gnu`
 - `x86_64-unknown-linux-gnu`
-- `x86_64-pc-windows-msvc`
 
 Each target reaches the signed manifest only after its native persistence and supervised-readiness
-proof passes. Cross-compilation alone is not support. Unix targets use deterministic `tar.zst`
-archives and Windows uses a deterministic zip. An archive contains the server executable plus only
+proof passes. Cross-compilation alone is not support. Both targets use deterministic `tar.zst`
+archives. An archive contains the `flux-exchange` executable plus only
 declared documentation or licence members.
 
 These binaries are a separate Exchange product artifact. They are **not**:
@@ -103,13 +100,18 @@ objects and does not turn an unprotected merge into release authorization. The e
 be a separately reviewed, non-test policy matching the final integrated verifier schema; the
 repository does not choose production root ids, packets, threshold or custodians in advance.
 
-The next unused version is `v0.18.0`. Pushing that tag starts both this five-target binary workflow
+The next unused version is `v0.18.0`. Pushing that tag starts both this two-target Linux binary workflow
 and the crates.io workflow, whose publications are irreversible. Creating or pushing the tag is
 therefore one explicit release-operator authorization boundary for both products, after owner and
 security approval confirms every production hard stop above has been resolved. Workflow dispatch is
 only a byte-idempotent resume at an already authorized immutable tag; it is not permission to create
 the tag. X-126 remains active after the implementation merge until that production release passes
-the public five-target verifier.
+the public two-target verifier.
+
+X-137's platform contraction is not publication authorization. Ordinary publication readiness
+remains stopped until X-138 supplies the required provider recovery/lease evidence and X-139 commits
+the final native-evidence authority, reports and candidate identity. No tag, secret or workflow
+input bypasses that content-derived stop.
 
 Decision 0007 adds another independent stop. A permanent content-derived preflight closes both tag
 workflows before credentials or publication unless the tree consumes the checksummed registry
@@ -168,27 +170,25 @@ protocol/client contract or change the pinned offline-root/trust policy.
 
 ## Owner-bound local onboarding
 
-The native onboarding endpoint belongs only to the supervised single-user composition. It is an
-owner-only Unix socket below the native state root or a Windows named pipe with a protected
-current-user/System DACL, and it
+The native onboarding endpoint belongs only to the supervised single-user Linux composition. It is
+an owner-only Unix socket below the native state root, and it
 authenticates the peer as the same operating-system account before mapping that peer to local
 operator authority inside the management dispatcher. That mapping is never an HTTP identity
 provider. It cannot authenticate loopback TCP, hosted routes, another account, Service Account
 runtime requests or a process started with `--dev`; readiness, liveness and lifecycle control remain
 separate value-free channels.
 
-With no explicit state override, production discovers its root from the authenticated native
-account: the effective uid's account-database home on Linux and macOS, and the current account's
-Local AppData known folder on Windows. Inherited `HOME`, `XDG_STATE_HOME`, `USERPROFILE`,
-`LOCALAPPDATA` and equivalent variables do not select it. An explicit root or store path is still
-validated from its trusted account boundary through every component. Symlinks or reparse points,
-foreign ownership, an untrusted-writable ancestor and widened root/descendant permissions refuse.
-Exchange never narrows modes, changes ownership, rewrites an ACL, repairs an unsafe ancestor or
+With no explicit state override, production discovers its root from the authenticated Linux
+account by calling `getpwuid_r(geteuid())`. Inherited `HOME`, `XDG_STATE_HOME` and equivalent
+variables do not select it. An explicit root or store path is still validated from its trusted
+account boundary through every component. Symlinks, foreign ownership, an untrusted-writable
+ancestor and widened root/descendant permissions refuse. Exchange never narrows modes, changes
+ownership, repairs an unsafe ancestor or
 falls back to memory.
 
 The native `flux-exchange` helper owns secret-bearing input; Flux owns only bounded, non-secret
-request and result capabilities. When a vendor value is requested, the helper opens `/dev/tty` or
-the Windows console directly, sends the raw value only over the authenticated management connection,
+request and result capabilities. When a vendor value is requested, the helper opens `/dev/tty`
+directly, sends the raw value only over the authenticated management connection,
 and returns a value-free receipt or refusal to Flux. It does not open a terminal for a ceremony that
 needs no secret. Service Account mint uses a separate write-only handoff capability, so the one-time
 credential travels from Exchange to its receiver without entering ordinary JSON, argv, environment,
@@ -286,7 +286,7 @@ a different trust root.
 
 Publication is CI-only from an immutable `vX.Y.Z` tag whose version matches the workspace and whose
 exact commit passes the full repository gate. Publication is incomplete until the post-publication
-verifier downloads the public release by immutable tag, requires the closed five-target asset set,
+verifier downloads the public release by immutable tag, requires the closed two-target Linux asset set,
 verifies signatures and every digest/member, runs the host-platform compatibility command, verifies
 the separate bounded provenance evidence, and proves that the signed channel selects the release
 without an exact-version input.

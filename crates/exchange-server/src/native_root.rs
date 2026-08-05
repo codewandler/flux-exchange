@@ -19,7 +19,7 @@ pub(crate) fn ensure_authenticated_account_state_root(
     platform::ensure_authenticated_account_state_root(root)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod platform {
     use std::ffi::{CStr, OsString};
     use std::os::unix::ffi::OsStringExt as _;
@@ -90,10 +90,7 @@ mod platform {
     }
 
     fn account_state_root(home: PathBuf) -> PathBuf {
-        #[cfg(target_os = "macos")]
-        return home.join("Library/Application Support/Flux/Exchange");
-        #[cfg(not(target_os = "macos"))]
-        return home.join(".local/state/flux-exchange");
+        home.join(".local/state/flux-exchange")
     }
 
     #[cfg(feature = "native-root-test-seam")]

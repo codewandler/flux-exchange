@@ -29,10 +29,6 @@ fn main() -> anyhow::Result<()> {
         b"test-only unix fixture executable\n",
     )?;
     write(
-        &scratch.join("flux-exchange.exe"),
-        b"test-only windows fixture executable\n",
-    )?;
-    write(
         &scratch.join("LICENSE-APACHE"),
         b"test-only Apache fixture license\n",
     )?;
@@ -118,15 +114,10 @@ fn main() -> anyhow::Result<()> {
     let licenses = [scratch.join("LICENSE-APACHE"), scratch.join("LICENSE-MIT")];
     let mut assets = Vec::new();
     for target in SUPPORTED_TARGETS {
-        let executable = if target.contains("windows") {
-            scratch.join("flux-exchange.exe")
-        } else {
-            scratch.join("flux-exchange")
-        };
         assets.push(package_archive(
             version,
             target,
-            &executable,
+            &scratch.join("flux-exchange"),
             &licenses,
             None,
             &positive,
@@ -567,23 +558,12 @@ fn main() -> anyhow::Result<()> {
             protocols: entry.protocols.clone(),
         })?,
     )?;
-    for (name, identity) in [
-        (
-            "readiness-linux.json",
-            serde_json::json!({"boot_id":"00000000-0000-0000-0000-000000000001","kind":"linux-proc-start","ticks":"1"}),
-        ),
-        (
-            "readiness-macos.json",
-            serde_json::json!({"kind":"macos-proc-start","microseconds":0,"seconds":"1"}),
-        ),
-        (
-            "readiness-windows.json",
-            serde_json::json!({"filetime":"1","kind":"windows-process-creation"}),
-        ),
-    ] {
-        let readiness = serde_json::json!({"bind":{"host":"127.0.0.1","port":1,"scheme":"http"},"process":{"pid":1,"start_identity":identity},"protocols":entry.protocols,"release":{"build_id":entry.build_id,"executable_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":entry.source_commit,"tag":entry.tag,"version":entry.version},"schema":"exchange.supervisor-ready.v2"});
-        write(&root.join(name), &canonical::encode(&readiness)?)?;
-    }
+    let identity = serde_json::json!({"boot_id":"00000000-0000-0000-0000-000000000001","kind":"linux-proc-start","ticks":"1"});
+    let readiness = serde_json::json!({"bind":{"host":"127.0.0.1","port":1,"scheme":"http"},"process":{"pid":1,"start_identity":identity},"protocols":entry.protocols,"release":{"build_id":entry.build_id,"executable_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":entry.source_commit,"tag":entry.tag,"version":entry.version},"schema":"exchange.supervisor-ready.v2"});
+    write(
+        &root.join("readiness-linux.json"),
+        &canonical::encode(&readiness)?,
+    )?;
     let mut bad_bind: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("readiness-linux.json"))?)?;
     bad_bind["bind"]["host"] = serde_json::json!("localhost");
@@ -1126,7 +1106,6 @@ fn fixture_cases(
         "archive-total-expanded-overflow",
         "archive-trailing-zstd-frame",
         "archive-trailing-tar-data",
-        "archive-trailing-zip-data",
         "archive-member-decompression-bound",
         "archive-link-member",
         "archive-device-member",
@@ -1138,22 +1117,6 @@ fn fixture_cases(
             "positive",
             "accepted",
             "x86_64-unknown-linux-gnu",
-            accepted.clone(),
-        ),
-        case(
-            "positive-macos",
-            "verify-directory",
-            "positive",
-            "accepted",
-            "x86_64-apple-darwin",
-            accepted.clone(),
-        ),
-        case(
-            "positive-windows",
-            "verify-directory",
-            "positive",
-            "accepted",
-            "x86_64-pc-windows-msvc",
             accepted.clone(),
         ),
         FixtureCase {
@@ -1666,22 +1629,6 @@ fn fixture_cases(
             empty.clone(),
         ),
         case(
-            "readiness-macos-start",
-            "readiness",
-            "readiness-macos.json",
-            "accepted",
-            "x86_64-apple-darwin",
-            empty.clone(),
-        ),
-        case(
-            "readiness-windows-start",
-            "readiness",
-            "readiness-windows.json",
-            "accepted",
-            "x86_64-pc-windows-msvc",
-            empty.clone(),
-        ),
-        case(
             "github-redirect-positive",
             "transport",
             "redirect-positive.json",
@@ -2072,7 +2019,7 @@ fn fixture_cases(
         "verify-directory",
         "forbidden-executable",
         "refused",
-        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
         RollbackState {
             trust: accepted.trust.clone(),
             channel: Some(Floor {
@@ -2336,7 +2283,6 @@ fn expected_error(id: &str, operation: &str, result: &str) -> Option<&'static st
         | "archive-path-case-fold"
         | "archive-trailing-zstd-frame"
         | "archive-trailing-tar-data"
-        | "archive-trailing-zip-data"
         | "archive-link-member"
         | "archive-device-member" => "archive refused",
         "channel-release-count-129"

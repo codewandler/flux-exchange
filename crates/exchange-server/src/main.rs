@@ -24,12 +24,11 @@ mod dev_identity;
 pub use flux_exchange::entropy;
 mod execution;
 mod hosted_origin;
+#[cfg_attr(test, allow(dead_code))]
 mod local_helper;
 mod local_helper_plan;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod local_helper_unix;
-#[cfg(windows)]
-mod local_helper_windows;
 mod local_identity;
 pub mod local_management;
 mod local_state;
@@ -232,19 +231,6 @@ where
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    #[cfg(all(windows, feature = "native-console-test-seam"))]
-    if arguments.len() == 2 && arguments[0] == "native-console-mode-test-seam" {
-        let Some(writer) = arguments[1]
-            .to_str()
-            .filter(|value| !value.is_empty() && !value.starts_with('0'))
-            .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
-            .and_then(|value| value.parse::<u64>().ok())
-            .and_then(|value| usize::try_from(value).ok())
-        else {
-            return ExitCode::FAILURE;
-        };
-        return ExitCode::from(local_helper_windows::report_console_mode_for_test(writer).code());
-    }
     #[cfg(feature = "native-deadline-test-seam")]
     if arguments == [OsStr::new("hosted-deadline-test-seam")] {
         return match routes::run_hosted_deadline_process_fixture() {
@@ -255,29 +241,9 @@ fn main() -> ExitCode {
             }
         };
     }
-    #[cfg(all(unix, feature = "native-deadline-test-seam"))]
+    #[cfg(all(target_os = "linux", feature = "native-deadline-test-seam"))]
     if arguments == [OsStr::new("unix-deadline-test-seam")] {
         return match local_management::run_unix_deadline_process_fixture() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(refusal) => {
-                eprintln!("{refusal}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    #[cfg(all(windows, feature = "native-deadline-test-seam"))]
-    if arguments == [OsStr::new("native-deadline-test-seam")] {
-        return match local_management::run_deadline_process_fixture() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(refusal) => {
-                eprintln!("{refusal}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-    #[cfg(all(windows, feature = "native-fxha-identity-test-seam"))]
-    if arguments == [OsStr::new("native-fxha-identity-test-seam")] {
-        return match local_management::run_fxha_identity_process_fixture() {
             Ok(()) => ExitCode::SUCCESS,
             Err(refusal) => {
                 eprintln!("{refusal}");
@@ -314,7 +280,7 @@ fn main() -> ExitCode {
         };
     }
     if arguments.first().map(std::ffi::OsString::as_os_str) == Some(OsStr::new("local")) {
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         {
             return match local_helper::parse_local_helper(
                 local_helper::HelperPlatform::Unix,
@@ -340,36 +306,6 @@ fn main() -> ExitCode {
                         );
                     }
                     ExitCode::from(local_helper_unix::run(invocation).code())
-                }
-                Err(_) => ExitCode::FAILURE,
-            };
-        }
-        #[cfg(windows)]
-        {
-            return match local_helper::parse_local_helper(
-                local_helper::HelperPlatform::Windows,
-                &arguments,
-            ) {
-                Ok(invocation) => {
-                    #[cfg(feature = "native-helper-deadline-test-seam")]
-                    if let Some(value) = std::env::var_os("FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS")
-                    {
-                        let Some(milliseconds) = value
-                            .to_str()
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .filter(|milliseconds| *milliseconds != 0)
-                        else {
-                            return ExitCode::FAILURE;
-                        };
-                        return ExitCode::from(
-                            local_helper_windows::run_with_result_budget_for_test(
-                                invocation,
-                                std::time::Duration::from_millis(milliseconds),
-                            )
-                            .code(),
-                        );
-                    }
-                    ExitCode::from(local_helper_windows::run(invocation).code())
                 }
                 Err(_) => ExitCode::FAILURE,
             };
@@ -915,7 +851,7 @@ async fn compose(
 }
 
 /// Bind installed App declarations and the per-App durable Flux event logs, or bind neither.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn app_store(
     invoker: Option<Arc<exchange_host::Invoker>>,
     local_default: Option<&std::path::Path>,
@@ -952,14 +888,6 @@ fn app_store(
     info!(path = %configured, "installed Apps: owner-only atomic bindings");
     info!(path = %event_root.display(), "installed App activity: tenant-isolated Flux event logs");
     Ok(Some(Arc::new(supervisor)))
-}
-
-#[cfg(not(unix))]
-fn app_store(
-    _invoker: Option<Arc<exchange_host::Invoker>>,
-    _local_default: Option<&std::path::Path>,
-) -> Result<Option<Arc<ManagedAppSupervisor>>, StartupRefusal> {
-    Ok(None)
 }
 
 /// Bind the durable application audit journal, or bind none for a loopback composition.

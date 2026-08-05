@@ -1,8 +1,7 @@
 //! Closed command and capability contract for verified local helper processes.
 //!
-//! This module deliberately stops at the native-port boundary. In particular, Windows writer
-//! handles are capabilities transferred by the endpoint implementation, never bytes added to an
-//! FXLM or FXSA payload.
+//! This module deliberately stops at the native-port boundary. Linux descriptors are capabilities
+//! transferred by the endpoint implementation, never bytes added to an FXLM or FXSA payload.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -29,7 +28,7 @@ pub(crate) struct HelperDeadlineSchedule {
 }
 
 impl HelperDeadlineSchedule {
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn from_request_eof(now: std::time::Instant) -> Option<Self> {
         Self::from_request_eof_with_setup(now, HELPER_SETUP_DEADLINE)
     }
@@ -70,8 +69,8 @@ impl HelperDeadlineSchedule {
 pub enum HelperPlatform {
     /// Unix fixed-descriptor ABI.
     Unix,
-    /// Windows explicit-handle ABI.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// Legacy test-only grammar retained to prove old profiles cannot enter a release binary.
+    #[cfg(test)]
     Windows,
 }
 
@@ -94,8 +93,8 @@ pub enum LocalHelperInvocation {
 pub enum VendorSecretCapabilities {
     /// Unix uses only fixed descriptors 6 and 7; descriptor 5 must be closed.
     Unix,
-    /// Windows receives exactly two explicit, distinct handles.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// Legacy test-only handle profile.
+    #[cfg(test)]
     Windows {
         /// Readable anonymous request pipe.
         request: WindowsHandle,
@@ -108,26 +107,21 @@ pub enum VendorSecretCapabilities {
 pub enum MintWriterCapability {
     /// The closed Unix ABI always names descriptor 5.
     UnixFd5,
-    /// Windows carries one explicit nonzero handle.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    /// Legacy test-only handle profile.
+    #[cfg(test)]
     Windows(WindowsHandle),
 }
 
 /// Canonical nonzero Windows pointer-width handle spelling.
+#[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct WindowsHandle(usize);
 
+#[cfg(test)]
 impl WindowsHandle {
     /// Native value to pass to platform capability validation, never protocol serialization.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub const fn native_value(self) -> usize {
         self.0
-    }
-
-    /// Construct one test-process capability after the feature-only grammar validated it.
-    #[cfg(all(windows, feature = "native-console-test-seam"))]
-    pub(crate) const fn from_test_process(value: usize) -> Self {
-        Self(value)
     }
 }
 
@@ -163,8 +157,10 @@ pub enum HelperGrammarRefusal {
     /// The expiry is not canonical positive decimal in the admitted range.
     ExpiresAt,
     /// A Windows handle is zero, noncanonical, or outside pointer width.
+    #[cfg(test)]
     Handle,
     /// Request and response name the same Windows handle.
+    #[cfg(test)]
     DuplicateHandle,
 }
 
@@ -174,7 +170,9 @@ impl fmt::Display for HelperGrammarRefusal {
             Self::Grammar => "local helper arguments do not match the closed grammar",
             Self::ServiceAccountId => "service account id is invalid",
             Self::ExpiresAt => "service account expiry is invalid",
+            #[cfg(test)]
             Self::Handle => "local helper handle is invalid",
+            #[cfg(test)]
             Self::DuplicateHandle => "local helper handles must be distinct",
         })
     }
@@ -194,6 +192,7 @@ pub fn parse_local_helper(
 
     match platform {
         HelperPlatform::Unix => parse_unix(&strings),
+        #[cfg(test)]
         HelperPlatform::Windows => parse_windows(&strings),
     }
 }
@@ -221,6 +220,7 @@ fn parse_unix(arguments: &[&OsStr]) -> Result<LocalHelperInvocation, HelperGramm
     mint_invocation(id, expiry, MintWriterCapability::UnixFd5)
 }
 
+#[cfg(test)]
 fn parse_windows(arguments: &[&OsStr]) -> Result<LocalHelperInvocation, HelperGrammarRefusal> {
     if let [local, mode, request_flag, request, response_flag, response] = arguments {
         if *local == "local"
@@ -284,6 +284,7 @@ fn mint_invocation(
     })
 }
 
+#[cfg(test)]
 fn parse_handle(value: &OsStr) -> Result<WindowsHandle, HelperGrammarRefusal> {
     value
         .to_str()
@@ -358,7 +359,7 @@ pub struct UnixVendorCapabilityFacts {
 }
 
 /// Complete Windows inheritance-list facts measured on helper entry.
-#[allow(dead_code)] // Exercised by the platform-neutral integration contract on non-Windows hosts.
+#[cfg(test)]
 pub struct WindowsVendorCapabilityFacts {
     /// Capability named by `--request-handle`.
     pub request: PipeCapabilityFacts,
@@ -402,7 +403,7 @@ pub fn validate_unix_vendor_capabilities(
 }
 
 /// Validate the portable portion of the Windows handle contract before clearing inheritance.
-#[allow(dead_code)] // Exercised by the platform-neutral integration contract on non-Windows hosts.
+#[cfg(test)]
 pub fn validate_windows_vendor_capabilities(
     facts: &WindowsVendorCapabilityFacts,
 ) -> Result<(), CapabilityRefusal> {

@@ -1,7 +1,7 @@
 ---
 id: X-137
 title: "Constrain Exchange runtime and release to Linux"
-status: ready
+status: in-progress
 epic: connections
 areas: [exchange-server, exchange-release, protocol, tests, workflows]
 depends_on: [X-136]
@@ -72,6 +72,11 @@ release inventory and target selector close over exactly the two supported Linux
 - 2026-08-05: Flux-roadmap Decision 0012 at `dc907fa` superseded the non-Linux platform clauses of
   Decisions 0004, 0007 and 0011. This story restarts from canonical Exchange `main` rather than the
   preserved Windows branch.
+- 2026-08-05: Failing-first contracts rejected the previous five-target `Platform` and the absence
+  of a non-Linux server build refusal. The implementation now closes release/package selection over
+  the two Linux GNU targets and makes the Linux FD/socket/helper graph the only production entry.
+  The mechanically contracted native authority and fixture projection are explicitly interim;
+  ordinary publication readiness refuses until X-138 and X-139 are both `done`.
 
 ## Notes
 

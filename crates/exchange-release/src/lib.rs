@@ -21,13 +21,7 @@ pub const JCS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub const MAX_ARCHIVE_BYTES: u64 = 268_435_456;
 pub const MAX_MEMBER_BYTES: u64 = 268_435_456;
 pub const MAX_EXPANDED_BYTES: u64 = 536_870_912;
-pub const SUPPORTED_TARGETS: &[&str] = &[
-    "aarch64-apple-darwin",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-    "x86_64-unknown-linux-gnu",
-];
+pub const SUPPORTED_TARGETS: &[&str] = &["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -101,18 +95,13 @@ pub fn read_bounded_file(path: &Path, limit: u64) -> Result<Vec<u8>> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Platform {
-    Unix,
-    Windows,
+    Linux,
 }
 
 impl Platform {
     pub fn from_target(target: &str) -> Result<Self> {
         match target {
-            "aarch64-apple-darwin"
-            | "x86_64-apple-darwin"
-            | "aarch64-unknown-linux-gnu"
-            | "x86_64-unknown-linux-gnu" => Ok(Self::Unix),
-            "x86_64-pc-windows-msvc" => Ok(Self::Windows),
+            "aarch64-unknown-linux-gnu" | "x86_64-unknown-linux-gnu" => Ok(Self::Linux),
             _ => Err(Error::Schema(format!("unsupported target {target:?}"))),
         }
     }
@@ -502,7 +491,7 @@ pub fn verify_readiness(
         .get("start_identity")
         .ok_or_else(|| Error::Schema("start_identity absent".into()))?;
     match Platform::from_target(target)? {
-        Platform::Unix if target.ends_with("linux-gnu") => {
+        Platform::Linux => {
             let identity = exact_object(identity, &["boot_id", "kind", "ticks"])?;
             if identity["kind"] != "linux-proc-start"
                 || !identity["boot_id"].as_str().is_some_and(lower_uuid)
@@ -510,22 +499,6 @@ pub fn verify_readiness(
                 return Err(Error::Schema("Linux start identity is invalid".into()));
             }
             decimal(identity["ticks"].as_str(), u64::MAX)?;
-        }
-        Platform::Unix => {
-            let identity = exact_object(identity, &["kind", "microseconds", "seconds"])?;
-            if identity["kind"] != "macos-proc-start"
-                || !matches!(identity["microseconds"].as_u64(), Some(0..=999_999))
-            {
-                return Err(Error::Schema("macOS start identity is invalid".into()));
-            }
-            decimal(identity["seconds"].as_str(), i64::MAX as u64)?;
-        }
-        Platform::Windows => {
-            let identity = exact_object(identity, &["filetime", "kind"])?;
-            if identity["kind"] != "windows-process-creation" {
-                return Err(Error::Schema("Windows start identity is invalid".into()));
-            }
-            decimal(identity["filetime"].as_str(), u64::MAX)?;
         }
     }
     Ok(())

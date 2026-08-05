@@ -2,18 +2,6 @@
 # Execute the canonical native authority one exact Cargo binding at a time.
 set -euo pipefail
 
-# macOS exposes its temporary directory through a `/var` symlink. Explicit production state must
-# refuse that ancestor, while process fixtures need a safe owner root so they test their named
-# obligation. Resolve only the runner's temporary base to its physical spelling before any fixture
-# creates a child; adversarial root tests still plant and exercise their own unsafe metadata.
-if [ "$(uname -s)" = Darwin ]; then
-  # The per-user Darwin TMPDIR is long enough that the X-128 owner endpoint can exceed
-  # sockaddr_un.sun_path after its run-directory and socket suffixes are appended. `/tmp` has the
-  # same symlink issue, but its physical `/private/tmp` spelling is both short and explicit.
-  physical_temp="$(cd -- /tmp && pwd -P)"
-  export TMPDIR="$physical_temp"
-fi
-
 root="$(git rev-parse --show-toplevel)"
 fail() { printf 'release-native-fixtures: %s\n' "$*" >&2; exit 1; }
 release_cli() {

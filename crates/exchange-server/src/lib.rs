@@ -7,6 +7,3 @@ pub mod entropy;
 pub mod protocol_identity;
 pub mod service_account;
 pub mod supervisor;
-
-#[cfg(windows)]
-pub mod windows_handle;

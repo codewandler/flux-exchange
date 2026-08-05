@@ -364,7 +364,7 @@ fn locked_packager_is_reproducible_and_archive_is_exact() {
     verify_archive(
         &first.join(&left.archive),
         "tar.zst",
-        Platform::Unix,
+        Platform::Linux,
         &expected,
     )
     .expect("exact archive");
@@ -374,7 +374,7 @@ fn locked_packager_is_reproducible_and_archive_is_exact() {
     assert!(verify_archive(
         &first.join("trailing.tar.zst"),
         "tar.zst",
-        Platform::Unix,
+        Platform::Linux,
         &expected
     )
     .is_err());
@@ -383,9 +383,9 @@ fn locked_packager_is_reproducible_and_archive_is_exact() {
 #[test]
 fn archive_paths_refuse_traversal_before_extraction() {
     let result = verify_archive(
-        std::path::Path::new("missing.zip"),
-        "zip",
-        Platform::Windows,
+        std::path::Path::new("missing.tar.zst"),
+        "tar.zst",
+        Platform::Linux,
         &[],
     );
     assert!(result.is_err());
@@ -421,56 +421,7 @@ fn archive_member_modes_are_the_exact_packager_modes() {
         payload.len() as u64,
         flux_exchange_release::digest_hex(payload),
     )];
-    assert!(verify_archive(&path, "tar.zst", Platform::Unix, &expected).is_err());
-}
-
-#[test]
-fn raw_zip_member_names_must_be_utf8() {
-    let temporary = tempfile::tempdir().expect("tempdir");
-    let executable = temporary.path().join("flux-exchange.exe");
-    let apache = temporary.path().join("LICENSE-APACHE");
-    let mit = temporary.path().join("LICENSE-MIT");
-    fs::write(&executable, b"binary").expect("executable");
-    fs::write(&apache, b"apache").expect("license");
-    fs::write(&mit, b"mit").expect("license");
-    let asset = package_archive(
-        "1.2.3",
-        "x86_64-pc-windows-msvc",
-        &executable,
-        &[apache, mit],
-        None,
-        temporary.path(),
-    )
-    .expect("package");
-    let archive = temporary.path().join(&asset.archive);
-    let mut bytes = fs::read(&archive).expect("zip");
-    let needle = b"LICENSE-APACHE";
-    let mut mutations = 0;
-    for index in 0..=bytes.len() - needle.len() {
-        if bytes[index..].starts_with(needle) {
-            bytes[index] = 0xff;
-            mutations += 1;
-        }
-    }
-    assert_eq!(mutations, 2, "local and central ZIP names");
-    fs::write(&archive, bytes).expect("mutated ZIP");
-    let expected = std::iter::once((
-        asset.executable.path,
-        asset.executable.bytes,
-        asset.executable.sha256,
-    ))
-    .chain(
-        asset
-            .other_members
-            .into_iter()
-            .map(|member| (member.path, member.bytes, member.sha256)),
-    )
-    .collect::<Vec<_>>();
-    let error = verify_archive(&archive, "zip", Platform::Windows, &expected)
-        .expect_err("invalid raw ZIP name");
-    assert!(error
-        .to_string()
-        .contains("raw ZIP member path is not UTF-8"));
+    assert!(verify_archive(&path, "tar.zst", Platform::Linux, &expected).is_err());
 }
 
 #[test]

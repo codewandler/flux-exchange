@@ -194,11 +194,7 @@ fn verify_set(
             .ok_or_else(|| anyhow!("host target has no asset"))?;
         let bytes = release::verified_executable_bytes(directory, asset)?;
         let temporary = tempfile::tempdir().context("create private compatibility directory")?;
-        let executable = temporary.path().join(if host_target.contains("windows") {
-            "flux-exchange.exe"
-        } else {
-            "flux-exchange"
-        });
+        let executable = temporary.path().join("flux-exchange");
         std::fs::write(&executable, bytes)?;
         #[cfg(unix)]
         {
@@ -641,8 +637,6 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
 
 const REQUIRED_PROVIDER_CASES: &[&str] = &[
     "positive-linux",
-    "positive-macos",
-    "positive-windows",
     "positive-signer-overlap",
     "compatibility-positive",
     "integer-over-jcs-safe",
@@ -698,8 +692,6 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
     "readiness-pid-overflow",
     "readiness-start-kind",
     "readiness-linux-start",
-    "readiness-macos-start",
-    "readiness-windows-start",
     "github-redirect-positive",
     "github-redirect-uppercase-host",
     "github-redirect-status",
@@ -792,14 +784,10 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
     "archive-total-expanded-overflow",
     "archive-trailing-zstd-frame",
     "archive-trailing-tar-data",
-    "archive-trailing-zip-data",
     "archive-member-decompression-bound",
     "archive-link-member",
     "archive-device-member",
     "higher-channel-target-fails",
-    "higher-channel-target-fails-aarch64-unknown-linux-gnu",
-    "higher-channel-target-fails-x86_64-apple-darwin",
-    "higher-channel-target-fails-x86_64-pc-windows-msvc",
     "higher-channel-target-fails-x86_64-unknown-linux-gnu",
 ];
 
@@ -1105,17 +1093,6 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
                 Ok(())
             });
         }
-        "archive-trailing-zip-data" => {
-            let index = manifest
-                .assets
-                .iter()
-                .position(|asset| asset.format == "zip")
-                .ok_or_else(|| anyhow!("fixture manifest has no zip asset"))?;
-            return mutate_archive_and_stage(&positive, &manifest, index, |bytes| {
-                bytes.extend_from_slice(b"trailing zip bytes");
-                Ok(())
-            });
-        }
         "archive-member-decompression-bound" => {
             manifest.assets[0].executable.bytes -= 1;
         }
@@ -1189,7 +1166,7 @@ fn execute_special_tar_member(id: &str) -> anyhow::Result<()> {
     release::verify_archive(
         &path,
         "tar.zst",
-        release::Platform::Unix,
+        release::Platform::Linux,
         &[("root/special".into(), 0, release::digest_hex(&[]))],
     )?;
     Ok(())

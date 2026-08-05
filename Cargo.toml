@@ -143,5 +143,4 @@ tokio-tungstenite = "0.30"
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 url = "2"
 windows-sys = "0.61.2"
-zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
 zstd = "0.13"
