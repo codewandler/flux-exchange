@@ -321,10 +321,13 @@ fn main() -> ExitCode {
                         else {
                             return ExitCode::FAILURE;
                         };
-                        return ExitCode::from(local_helper_unix::run_with_result_budget_for_test(
-                            invocation,
-                            std::time::Duration::from_millis(milliseconds),
-                        ));
+                        return ExitCode::from(
+                            local_helper_unix::run_with_result_budget_for_test(
+                                invocation,
+                                std::time::Duration::from_millis(milliseconds),
+                            )
+                            .code(),
+                        );
                     }
                     ExitCode::from(local_helper_unix::run(invocation).code())
                 }

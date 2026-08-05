@@ -56,7 +56,7 @@ const MAX_SECRET_BYTES: usize = 8_192;
 pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
     match invocation {
         LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Unix) => {
-            run_vendor(&mut NativeVendorCeremony::new())
+            run_vendor(&mut NativeVendorCeremony)
         }
         LocalHelperInvocation::ServiceAccountMint {
             id,
@@ -74,26 +74,16 @@ pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
 pub(crate) fn run_with_result_budget_for_test(
     invocation: LocalHelperInvocation,
     result_budget: Duration,
-) -> u8 {
+) -> HelperExit {
     match invocation {
-        LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Unix) => {
-            let mut ceremony = NativeVendorCeremony::new();
-            let exit = run_vendor_with(
-                PinnedEndpoint::authenticated,
-                &mut ceremony,
-                HELPER_SETUP_DEADLINE,
-                HELPER_SETUP_DEADLINE,
-                result_budget,
-            );
-            if std::env::var_os("FLUX_EXCHANGE_TEST_HELPER_STAGE_EXIT").is_some()
-                && ceremony.stage != NativeVendorStage::Complete
-            {
-                ceremony.stage as u8
-            } else {
-                exit.code()
-            }
-        }
-        _ => HelperExit::CapabilityOrTransportFailure.code(),
+        LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Unix) => run_vendor_with(
+            PinnedEndpoint::authenticated,
+            &mut NativeVendorCeremony,
+            HELPER_SETUP_DEADLINE,
+            HELPER_SETUP_DEADLINE,
+            result_budget,
+        ),
+        _ => HelperExit::CapabilityOrTransportFailure,
     }
 }
 
@@ -204,41 +194,7 @@ pub(crate) trait VendorCeremony {
     ) -> Result<Vec<u8>, Self::Error>;
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum NativeVendorStage {
-    ParseBegin = 20,
-    ConnectPlan = 21,
-    WritePlan = 22,
-    ReadPlan = 23,
-    PlanRefusal = 24,
-    ValidatePlan = 25,
-    ConnectMutation = 26,
-    WriteBegin = 27,
-    ReadNeedSecrets = 28,
-    MutationRefusal = 29,
-    ValidateNeedSecrets = 30,
-    ReadPrivateTerminal = 31,
-    WriteSecret = 32,
-    WriteCommit = 33,
-    ReadTerminal = 34,
-    Complete = 35,
-    ReadPlanDeadline = 36,
-    ReadPlanProtocol = 37,
-    ReadPlanTransport = 38,
-}
-
-struct NativeVendorCeremony {
-    stage: NativeVendorStage,
-}
-
-impl NativeVendorCeremony {
-    const fn new() -> Self {
-        Self {
-            stage: NativeVendorStage::ParseBegin,
-        }
-    }
-}
+struct NativeVendorCeremony;
 
 impl VendorCeremony for NativeVendorCeremony {
     type Error = UnixHelperError;
@@ -249,7 +205,6 @@ impl VendorCeremony for NativeVendorCeremony {
         request: &VendorRequest,
         deadlines: HelperDeadlineSchedule,
     ) -> Result<Vec<u8>, Self::Error> {
-        self.stage = NativeVendorStage::ParseBegin;
         let ready_by = deadlines.setup_by();
         let operation = match request.kind() {
             VendorRequestKind::Connect => VendorOperation::Connect,
@@ -263,7 +218,6 @@ impl VendorCeremony for NativeVendorCeremony {
             operation,
         )
         .ok_or(UnixHelperError::Protocol)?;
-        self.stage = NativeVendorStage::ConnectPlan;
         let mut plan_stream = endpoint.connect_before(ready_by)?;
         let plan_query = serde_json::to_vec(&PlanQuery {
             connector: begin.connector(),
@@ -273,7 +227,6 @@ impl VendorCeremony for NativeVendorCeremony {
             },
         })
         .map_err(|_| UnixHelperError::Protocol)?;
-        self.stage = NativeVendorStage::WritePlan;
         write_before(
             &mut plan_stream,
             &encode_frame(CLIENT_DIRECTION, PLAN_QUERY, &plan_query),
@@ -282,36 +235,19 @@ impl VendorCeremony for NativeVendorCeremony {
         plan_stream
             .shutdown(Shutdown::Write)
             .map_err(|_| UnixHelperError::Transport)?;
-        self.stage = NativeVendorStage::ReadPlan;
-        let plan = match read_terminal_before(&mut plan_stream, ready_by) {
-            Ok(plan) => plan,
-            Err(error) => {
-                self.stage = match error {
-                    UnixHelperError::Deadline => NativeVendorStage::ReadPlanDeadline,
-                    UnixHelperError::Protocol => NativeVendorStage::ReadPlanProtocol,
-                    _ => NativeVendorStage::ReadPlanTransport,
-                };
-                return Err(error);
-            }
-        };
+        let plan = read_terminal_before(&mut plan_stream, ready_by)?;
         if plan.opcode == ERROR {
-            self.stage = NativeVendorStage::PlanRefusal;
             return Ok(plan.bytes);
         }
-        self.stage = NativeVendorStage::ValidatePlan;
         if plan.opcode != PLAN_RESPONSE || !begin.admits_plan(&plan.payload) {
             return Err(UnixHelperError::Protocol);
         }
 
-        self.stage = NativeVendorStage::ConnectMutation;
         let mut mutation = endpoint.connect_before(ready_by)?;
-        self.stage = NativeVendorStage::WriteBegin;
         write_before(&mut mutation, request.bytes(), ready_by)?;
         let result_by = deadlines.result_by();
-        self.stage = NativeVendorStage::ReadNeedSecrets;
         let need = read_frame_before(&mut mutation, result_by)?;
         if need.opcode == ERROR {
-            self.stage = NativeVendorStage::MutationRefusal;
             mutation
                 .shutdown(Shutdown::Write)
                 .map_err(|_| UnixHelperError::Transport)?;
@@ -320,7 +256,6 @@ impl VendorCeremony for NativeVendorCeremony {
         if need.opcode != NEED_SECRETS {
             return Err(UnixHelperError::Protocol);
         }
-        self.stage = NativeVendorStage::ValidateNeedSecrets;
         let need_payload = need.payload;
         let need: NeedSecrets =
             serde_json::from_slice(&need_payload).map_err(|_| UnixHelperError::Protocol)?;
@@ -332,10 +267,8 @@ impl VendorCeremony for NativeVendorCeremony {
             if usize::from(secret.ordinal) != index + 1 || secret.target.is_empty() {
                 return Err(UnixHelperError::Protocol);
             }
-            self.stage = NativeVendorStage::ReadPrivateTerminal;
             let mut value = read_private_tty_line(result_by)?;
             let frame = encode_secret(secret.ordinal, &value)?;
-            self.stage = NativeVendorStage::WriteSecret;
             let result = write_before(&mut mutation, &frame, result_by);
             value.fill(0);
             result?;
@@ -349,7 +282,6 @@ impl VendorCeremony for NativeVendorCeremony {
             VendorRequestKind::Connect => CONNECT_COMMIT,
             VendorRequestKind::Credential => CREDENTIAL_COMMIT,
         };
-        self.stage = NativeVendorStage::WriteCommit;
         write_before(
             &mut mutation,
             &encode_frame(CLIENT_DIRECTION, opcode, &commit),
@@ -358,10 +290,7 @@ impl VendorCeremony for NativeVendorCeremony {
         mutation
             .shutdown(Shutdown::Write)
             .map_err(|_| UnixHelperError::Transport)?;
-        self.stage = NativeVendorStage::ReadTerminal;
-        let terminal = read_terminal_before(&mut mutation, result_by)?.bytes;
-        self.stage = NativeVendorStage::Complete;
-        Ok(terminal)
+        Ok(read_terminal_before(&mut mutation, result_by)?.bytes)
     }
 }
 
@@ -444,13 +373,8 @@ fn read_frame_before(
     stream: &mut UnixStream,
     deadline: Instant,
 ) -> Result<NativeFrame, UnixHelperError> {
-    stream
-        .set_read_timeout(Some(remaining(deadline)?))
-        .map_err(|_| UnixHelperError::Transport)?;
     let mut header = [0_u8; HEADER_BYTES];
-    stream
-        .read_exact(&mut header)
-        .map_err(|error| timeout_or_transport(&error))?;
+    read_exact_before(stream, &mut header, deadline)?;
     if &header[..4] != b"FXLM" || header[4] != 1 || header[5] != SERVER_DIRECTION {
         return Err(UnixHelperError::Protocol);
     }
@@ -460,9 +384,7 @@ fn read_frame_before(
         return Err(UnixHelperError::Protocol);
     }
     let mut payload = vec![0_u8; payload_length];
-    stream
-        .read_exact(&mut payload)
-        .map_err(|error| timeout_or_transport(&error))?;
+    read_exact_before(stream, &mut payload, deadline)?;
     let mut bytes = header.to_vec();
     bytes.extend_from_slice(&payload);
     Ok(NativeFrame {
@@ -477,14 +399,65 @@ fn read_terminal_before(
     deadline: Instant,
 ) -> Result<NativeFrame, UnixHelperError> {
     let frame = read_frame_before(stream, deadline)?;
-    stream
-        .set_read_timeout(Some(remaining(deadline)?))
-        .map_err(|_| UnixHelperError::Transport)?;
     let mut extra = [0_u8; 1];
-    match stream.read(&mut extra) {
-        Ok(0) => Ok(frame),
-        Ok(_) => Err(UnixHelperError::Protocol),
-        Err(error) => Err(timeout_or_transport(&error)),
+    loop {
+        wait_stream_readable(stream.as_raw_fd(), deadline)?;
+        match stream.read(&mut extra) {
+            Ok(0) => return Ok(frame),
+            Ok(_) => return Err(UnixHelperError::Protocol),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => return Err(UnixHelperError::Transport),
+        }
+    }
+}
+
+fn read_exact_before(
+    stream: &mut UnixStream,
+    mut bytes: &mut [u8],
+    deadline: Instant,
+) -> Result<(), UnixHelperError> {
+    while !bytes.is_empty() {
+        wait_stream_readable(stream.as_raw_fd(), deadline)?;
+        match stream.read(bytes) {
+            Ok(0) => return Err(UnixHelperError::Transport),
+            Ok(received) => bytes = &mut bytes[received..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(_) => return Err(UnixHelperError::Transport),
+        }
+    }
+    Ok(())
+}
+
+fn wait_stream_readable(descriptor: RawFd, deadline: Instant) -> Result<(), UnixHelperError> {
+    let mut poll = libc::pollfd {
+        fd: descriptor,
+        events: libc::POLLIN | libc::POLLHUP,
+        revents: 0,
+    };
+    loop {
+        let milliseconds = remaining(deadline)?
+            .as_millis()
+            .max(1)
+            .min(i32::MAX as u128) as i32;
+        // SAFETY: poll receives one live descriptor record for the remaining absolute budget.
+        let result = unsafe { libc::poll(&mut poll, 1, milliseconds) };
+        if result > 0 {
+            if poll.revents & libc::POLLNVAL != 0 {
+                return Err(UnixHelperError::Transport);
+            }
+            return Ok(());
+        }
+        if result == 0 {
+            if Instant::now() >= deadline {
+                return Err(UnixHelperError::Deadline);
+            }
+            continue;
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return Err(UnixHelperError::Transport);
+        }
     }
 }
 
