@@ -2,6 +2,16 @@
 # Execute the canonical native authority one exact Cargo binding at a time.
 set -euo pipefail
 
+# macOS exposes its temporary directory through a `/var` symlink. Explicit production state must
+# refuse that ancestor, while process fixtures need a safe owner root so they test their named
+# obligation. Resolve only the runner's temporary base to its physical spelling before any fixture
+# creates a child; adversarial root tests still plant and exercise their own unsafe metadata.
+if [ "$(uname -s)" = Darwin ]; then
+  configured_temp="${TMPDIR:-/tmp}"
+  physical_temp="$(cd -- "$configured_temp" && pwd -P)"
+  export TMPDIR="$physical_temp"
+fi
+
 root="$(git rev-parse --show-toplevel)"
 fail() { printf 'release-native-fixtures: %s\n' "$*" >&2; exit 1; }
 release_cli() {

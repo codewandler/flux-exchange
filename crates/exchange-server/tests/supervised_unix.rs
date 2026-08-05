@@ -184,7 +184,13 @@ impl SupervisedChild {
     ) -> Self {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = std::env::temp_dir().join(format!(
+        // macOS commonly spells its temporary root below `/var`, which is a symlink to
+        // `/private/var`. Production must refuse that configured ancestor; this liveness harness
+        // names the physical directory so it tests supervision rather than root poisoning.
+        let physical_temp = std::env::temp_dir()
+            .canonicalize()
+            .expect("physical temporary root");
+        let root = physical_temp.join(format!(
             "flux-exchange-x128-{}-{}",
             std::process::id(),
             unique_counter()
@@ -541,8 +547,16 @@ fn supervised_unix_refuses_planted_endpoint_metadata_without_repair() {
 fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
     let mut server = SupervisedChild::spawn(0o700);
     let pid = server.child.id();
-    let ready: serde_json::Value =
-        serde_json::from_slice(&server.readiness()).expect("readiness object");
+    let readiness = server.readiness();
+    if readiness.is_empty() {
+        let output = server.finish();
+        panic!(
+            "supervised server exited before readiness: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let ready: serde_json::Value = serde_json::from_slice(&readiness).expect("readiness object");
     let address: SocketAddr = format!(
         "{}:{}",
         ready["bind"]["host"].as_str().expect("host"),
