@@ -558,14 +558,24 @@ async fn dispatch_one(
                     } else if !decoder.buffered_bytes().is_empty() {
                         Some(AttachmentRefusal::InvalidFrame)
                     } else {
-                        // The attachment is consumed by exactly this immediate MINT.
-                        // Later reads cannot inherit the writer because `take` clears it.
-                        None
+                        match connection.pipe.try_read(&mut bytes) {
+                            Ok(0) => None,
+                            Ok(received) if bytes[..received].starts_with(b"FXHA") => {
+                                Some(AttachmentRefusal::UnexpectedFrame)
+                            }
+                            Ok(_) => Some(AttachmentRefusal::InvalidFrame),
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
+                            Err(error) => return Err(error),
+                        }
                     };
                     if let Some(refusal) = refusal {
                         refuse_attachment(&mut connection.pipe, refusal, deadline).await?;
                         return Ok(());
                     }
+                    // The attachment is consumed by exactly this immediate MINT. Later reads
+                    // cannot inherit the writer because `take` clears it. `try_read` above is
+                    // limited to this one-shot boundary: an extra byte already queued by the
+                    // client must refuse before the writer can block on or publish an FXSA frame.
                 }
                 match dispatcher
                     .begin_frame_with_writer(
