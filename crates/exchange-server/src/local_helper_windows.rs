@@ -385,16 +385,16 @@ impl VendorCeremony for NativeVendorCeremony {
 
 struct PinnedEndpoint {
     pipe_name: String,
-    owner: ProcessIdentity,
-    process: Option<OwnedHandle>,
+    owner: OwnerIdentity,
+    process: Option<PinnedProcess>,
 }
 
 impl PinnedEndpoint {
     fn authenticated() -> Result<Self, WindowsHelperError> {
-        let owner = process_token_identity(unsafe { GetCurrentProcess() })?;
+        let helper = process_token_identity(unsafe { GetCurrentProcess() })?;
         Ok(Self {
-            pipe_name: pipe_name_for_sid(&owner.sid),
-            owner,
+            pipe_name: pipe_name_for_sid(&helper.sid),
+            owner: helper.owner(),
             process: None,
         })
     }
@@ -445,8 +445,9 @@ impl PinnedEndpoint {
         }
         // SAFETY: successful OpenProcess returned one owned non-pseudo process handle.
         let candidate = unsafe { OwnedHandle::from_raw_handle(raw.cast()) };
+        let candidate_identity = process_token_identity(candidate.as_raw_handle() as HANDLE)?;
         let mut confirmed_process_id = 0_u32;
-        if process_token_identity(candidate.as_raw_handle() as HANDLE)? != self.owner
+        if candidate_identity.owner() != self.owner
             || unsafe { WaitForSingleObject(candidate.as_raw_handle() as HANDLE, 0) }
                 != WAIT_TIMEOUT
             || unsafe {
@@ -461,22 +462,37 @@ impl PinnedEndpoint {
         }
         match &self.process {
             Some(process)
-                if unsafe {
-                    CompareObjectHandles(
-                        process.as_raw_handle() as HANDLE,
-                        candidate.as_raw_handle() as HANDLE,
-                    )
-                } == 0 =>
+                if process.creation != candidate_identity.creation
+                    || unsafe {
+                        CompareObjectHandles(
+                            process.handle.as_raw_handle() as HANDLE,
+                            candidate.as_raw_handle() as HANDLE,
+                        )
+                    } == 0 =>
             {
                 Err(WindowsHelperError::EndpointChanged)
             }
             Some(_) => Ok(()),
             None => {
-                self.process = Some(candidate);
+                self.process = Some(PinnedProcess {
+                    handle: candidate,
+                    creation: candidate_identity.creation,
+                });
                 Ok(())
             }
         }
     }
+}
+
+struct PinnedProcess {
+    handle: OwnedHandle,
+    creation: u64,
+}
+
+#[derive(PartialEq, Eq)]
+struct OwnerIdentity {
+    sid: Vec<u8>,
+    session: u32,
 }
 
 #[derive(PartialEq, Eq)]
@@ -484,6 +500,15 @@ struct ProcessIdentity {
     sid: Vec<u8>,
     session: u32,
     creation: u64,
+}
+
+impl ProcessIdentity {
+    fn owner(&self) -> OwnerIdentity {
+        OwnerIdentity {
+            sid: self.sid.clone(),
+            session: self.session,
+        }
+    }
 }
 
 fn process_token_identity(process: HANDLE) -> Result<ProcessIdentity, WindowsHelperError> {
