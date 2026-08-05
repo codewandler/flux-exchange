@@ -7,8 +7,10 @@ set -euo pipefail
 # obligation. Resolve only the runner's temporary base to its physical spelling before any fixture
 # creates a child; adversarial root tests still plant and exercise their own unsafe metadata.
 if [ "$(uname -s)" = Darwin ]; then
-  configured_temp="${TMPDIR:-/tmp}"
-  physical_temp="$(cd -- "$configured_temp" && pwd -P)"
+  # The per-user Darwin TMPDIR is long enough that the X-128 owner endpoint can exceed
+  # sockaddr_un.sun_path after its run-directory and socket suffixes are appended. `/tmp` has the
+  # same symlink issue, but its physical `/private/tmp` spelling is both short and explicit.
+  physical_temp="$(cd -- /tmp && pwd -P)"
   export TMPDIR="$physical_temp"
 fi
 

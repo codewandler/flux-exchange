@@ -632,6 +632,11 @@ mod tests {
             "the verifier-backed human form target. It creates the browser session through the same sign-in capability fact and is never a call an agent makes.",
         ),
         (
+            "/api/onboarding/frames",
+            "the authenticated human operator's hosted local-management transport. It mutates the \
+             connections and grants capabilities but grants an agent no new authority.",
+        ),
+        (
             "/api/service-accounts/{id}",
             "revocation is the item half of the create-service-account capability and an operator \
              action, not a separate capability an Agent receives.",

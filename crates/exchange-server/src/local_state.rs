@@ -574,7 +574,9 @@ mod tests {
         let refusal = ensure_owner_only_root(&root).expect_err("0755 must refuse");
         let message = refusal.to_string();
         assert!(message.contains(&root.display().to_string()), "{message}");
-        assert!(message.contains("private child directory"), "{message}");
+        assert!(message.contains("mode 0755"), "{message}");
+        assert!(message.contains("mode 0700"), "{message}");
+        assert!(message.contains("did not chmod or chown"), "{message}");
         assert!(!message.contains("chmod 700 /tmp"), "{message}");
         assert_eq!(
             std::fs::metadata(&root)

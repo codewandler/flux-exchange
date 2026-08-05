@@ -33,7 +33,7 @@ const LEASE_SCHEMA: &str = "exchange.local-management-lease.v1";
 const LOCAL_OWNER_TENANT: &str = "local";
 const LOCAL_OWNER_PRINCIPAL: &str = "local-owner";
 #[cfg(test)]
-const UNAVAILABLE: &[u8] = br#"{"code":"local_management_unavailable","commit":"none","retry":"operator","schema":"exchange.local-management-error.v1","status":503}"#;
+const UNAVAILABLE: &[u8] = br#"{"code":"store_unavailable","commit":"none","retry":"operator","schema":"exchange.local-management-error.v1","status":503}"#;
 
 /// An owner-authenticated native management listener.
 ///
