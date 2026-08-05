@@ -8,6 +8,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Hosted and owner-native local management now share one non-resetting decision deadline**
+  (X-135). Admission owns the 300-second pre-decision budget, durable decision starts one fixed
+  30-second receipt-bearing roll-forward budget, and cancellation can abort only before that
+  boundary. Hosted WebSocket, Unix socket and Windows named-pipe transports reserve their mandatory
+  close or EOF inside a separate bounded terminal operation, including backpressure and replay.
+
 - **Verified local Exchange release machinery now covers the complete pre-production contract**
   (X-126, implementation slice). CI builds the exact five native targets, runs compatibility and
   named supervisor/ABI process evidence on each applicable runner, packages bounded deterministic

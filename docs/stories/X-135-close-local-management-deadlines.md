@@ -1,7 +1,7 @@
 ---
 id: X-135
 title: "Close hosted and native local-management deadlines"
-status: in-progress
+status: done
 priority: 0
 epic: connections
 areas: [exchange-server, protocol, tests, windows]
@@ -34,18 +34,18 @@ blocked stores and terminal framing. No timeout may turn an uncertain durable wr
       grant store, Service Account store/audit and one-shot writer before and after decision. Owned
       worker tasks are raced by the controller; pre-decision cancellation is closed, post-decision
       work detaches and becomes query/replay-visible.
-- [ ] The exact hosted test
+- [x] The exact hosted test
       `hosted_slot_idle_and_ping_traffic_expire_on_the_admission_clock`, Unix test
       `authenticated_native_idle_and_partial_traffic_expire_on_one_absolute_clock`, and Windows
       test `supervised_windows_local_management_deadlines_are_phase_exact` each cover 299/300,
       29/30, traffic without reset, idle between frames, disconnect and recovery. WebSocket closes
       are exactly 1008 before decision or 1000 after it, with empty reasons; native streams end in
       clean EOF.
-- [ ] Failing first, `backpressured_terminal_frame_reserves_the_required_close_or_eof` proves one
+- [x] Failing first, `backpressured_terminal_frame_reserves_the_required_close_or_eof` proves one
       separately bounded finalization operation on all transports. If the canonical FXLM error
       cannot be written safely, the mandatory close/EOF remains prioritized; no branch reuses an
       already-expired operation deadline or waits unbounded after terminal selection.
-- [ ] Linux targeted tests, MinGW compilation and native `windows-2025` MSVC execution are selected
+- [x] Linux targeted tests, MinGW compilation and native `windows-2025` MSVC execution are selected
       by exact test name with one passed, zero ignored and zero filtered. This story narrows no
       opcode, refusal, receipt or no-secret invariant in X-134.
 
@@ -70,9 +70,15 @@ blocked stores and terminal framing. No timeout may turn an uncertain durable wr
   and report one passed, zero ignored and zero filtered; the hosted fixture checks sink readiness
   before both atomic reservations and the Unix fixture retains the half-closed handle only through
   the fixed terminal budget even while an authenticated peer floods unread bytes.
-- Status remains `in-progress` until `windows-2025` executes that dedicated production named-pipe
-  target and returns the required exact native report; cross-compilation is not recorded as runtime
-  evidence.
+- `windows-2025` CI run `30975743177` executed
+  `supervised_windows_local_management_deadlines_are_phase_exact` at checkpoint `19820c5` with one
+  passed, zero failed, ignored, measured or filtered. The production named-pipe backpressure leg
+  queues the canonical frame only for its bounded attempt, then uses the same
+  `DisconnectNamedPipe` boundary as the server so unread bytes cannot outrun the mandatory EOF.
+- The final targeted gate re-listed and executed both dedicated Linux integration tests with one
+  passed and zero filtered, compiled the Windows target under MinGW, denied warnings across all
+  Linux targets and passed formatting/diff checks. Native execution, not cross-compilation, is the
+  closure evidence for the Windows row.
 
 ## Notes
 
