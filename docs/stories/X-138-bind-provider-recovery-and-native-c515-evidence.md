@@ -1,7 +1,8 @@
 ---
 id: X-138
 title: "Bind provider recovery, replay and Linux-native C-515 evidence"
-status: blocked
+status: ready
+priority: 0
 epic: connections
 areas: [exchange-host, exchange-server, connections, protocol, tests]
 depends_on: [X-135, X-137]
