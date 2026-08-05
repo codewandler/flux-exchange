@@ -41,10 +41,12 @@ lockfile and compile-time tests.
 
 ## Next (ready — take the top one unless the user named a story)
 
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-138 — Bind provider recovery, replay and Linux-native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — retain the exact portable connector-secrets 0.20 identity and prove Exchange-owned recovery on both Linux release targets
+
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
-- [X-138 — Bind provider recovery, replay and Linux-native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — retain the exact portable connector-secrets 0.20 identity and prove Exchange-owned recovery on both Linux release targets
 - [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
 
 ## Backlog
