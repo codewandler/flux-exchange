@@ -44,3 +44,6 @@ pub(crate) use windows::LocalManagement;
 
 #[cfg(all(windows, feature = "native-deadline-test-seam"))]
 pub(crate) use windows::run_deadline_process_fixture;
+
+#[cfg(all(windows, feature = "native-fxha-identity-test-seam"))]
+pub(crate) use windows::run_fxha_identity_process_fixture;

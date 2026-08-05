@@ -691,6 +691,51 @@ fn pinned_client_matches(
         && live
 }
 
+#[cfg(any(test, feature = "native-fxha-identity-test-seam"))]
+fn prove_pinned_client_substitutions_refuse() -> Result<(), String> {
+    let expected = TokenIdentity {
+        sid: b"owner-sid".to_vec(),
+        session: 7,
+    };
+    if !pinned_client_matches(41, 41, 99, 99, &expected, &expected, true) {
+        return Err("the exact pinned Windows client identity was refused".to_owned());
+    }
+    let substitutions = [
+        (42, 99, expected.clone(), true),
+        (41, 100, expected.clone(), true),
+        (
+            41,
+            99,
+            TokenIdentity {
+                sid: b"other-sid".to_vec(),
+                session: 7,
+            },
+            true,
+        ),
+        (
+            41,
+            99,
+            TokenIdentity {
+                sid: b"owner-sid".to_vec(),
+                session: 8,
+            },
+            true,
+        ),
+        (41, 99, expected.clone(), false),
+    ];
+    for (process, creation, token, live) in substitutions {
+        if pinned_client_matches(41, 41.max(process), 99, creation, &expected, &token, live) {
+            return Err("a substituted Windows client identity was accepted".to_owned());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "native-fxha-identity-test-seam")]
+pub(crate) fn run_fxha_identity_process_fixture() -> Result<(), String> {
+    prove_pinned_client_substitutions_refuse()
+}
+
 fn process_token_identity(process: HANDLE) -> Result<TokenIdentity, WindowsEndpointRefusal> {
     let mut raw: HANDLE = null_mut();
     if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw) } == 0 {
@@ -1306,47 +1351,7 @@ mod tests {
 
     #[test]
     fn pinned_fxha_client_refuses_each_pid_creation_sid_session_and_liveness_substitution() {
-        let expected = TokenIdentity {
-            sid: b"owner-sid".to_vec(),
-            session: 7,
-        };
-        assert!(pinned_client_matches(
-            41, 41, 99, 99, &expected, &expected, true
-        ));
-        let substitutions = [
-            (42, 99, expected.clone(), true),
-            (41, 100, expected.clone(), true),
-            (
-                41,
-                99,
-                TokenIdentity {
-                    sid: b"other-sid".to_vec(),
-                    session: 7,
-                },
-                true,
-            ),
-            (
-                41,
-                99,
-                TokenIdentity {
-                    sid: b"owner-sid".to_vec(),
-                    session: 8,
-                },
-                true,
-            ),
-            (41, 99, expected.clone(), false),
-        ];
-        for (process, creation, token, live) in substitutions {
-            assert!(!pinned_client_matches(
-                41,
-                41.max(process),
-                99,
-                creation,
-                &expected,
-                &token,
-                live
-            ));
-        }
+        prove_pinned_client_substitutions_refuse().expect("all pinned-client substitutions refuse");
     }
 
     #[test]

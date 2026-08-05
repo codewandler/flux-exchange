@@ -275,6 +275,16 @@ fn main() -> ExitCode {
             }
         };
     }
+    #[cfg(all(windows, feature = "native-fxha-identity-test-seam"))]
+    if arguments == [OsStr::new("native-fxha-identity-test-seam")] {
+        return match local_management::run_fxha_identity_process_fixture() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     #[cfg(feature = "native-root-test-seam")]
     if arguments == [OsStr::new("native-root-test-seam")] {
         return match native_root::authenticated_account_state_root() {
