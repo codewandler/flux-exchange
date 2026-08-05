@@ -234,7 +234,9 @@ fn send_one_descriptor(
     message.msg_iov = &mut iovec;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_bytes;
+    message.msg_controllen = control_bytes
+        .try_into()
+        .map_err(|_| UnixHandoffError::MalformedControl)?;
     // SAFETY: the initialized control buffer is large and aligned for one cmsghdr plus one fd.
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&message);
@@ -274,7 +276,9 @@ fn receive_descriptors(
     message.msg_iov = &mut iovec;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_bytes;
+    message.msg_controllen = control_bytes
+        .try_into()
+        .map_err(|_| UnixHandoffError::MalformedControl)?;
     #[cfg(target_os = "linux")]
     let receive_flags = libc::MSG_CMSG_CLOEXEC;
     #[cfg(target_os = "macos")]
@@ -687,7 +691,9 @@ mod tests {
         message.msg_iov = &mut iovec;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = control_bytes;
+        message.msg_controllen = control_bytes
+            .try_into()
+            .expect("bounded control length fits the platform msghdr");
         unsafe {
             let header = libc::CMSG_FIRSTHDR(&message);
             assert!(!header.is_null());
