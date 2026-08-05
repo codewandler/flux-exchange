@@ -322,11 +322,75 @@ fn request(
         .expect("HTTP request headers");
     stream.write_all(body).expect("HTTP request body");
     stream.flush().expect("flush HTTP request");
+    read_http_message(&mut stream).expect("complete HTTP response")
+}
+
+fn read_http_message(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .expect("complete HTTP response");
-    response
+    let mut buffer = [0_u8; 4096];
+    loop {
+        if let Some(expected) = declared_http_message_bytes(&response)? {
+            if response.len() >= expected {
+                response.truncate(expected);
+                return Ok(response);
+            }
+        }
+        let received = stream.read(&mut buffer)?;
+        if received == 0 {
+            return declared_http_message_bytes(&response)?
+                .filter(|expected| *expected == response.len())
+                .map(|_| response)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "HTTP response closed before its declared message boundary",
+                    )
+                });
+        }
+        response.extend_from_slice(&buffer[..received]);
+    }
+}
+
+fn declared_http_message_bytes(response: &[u8]) -> std::io::Result<Option<usize>> {
+    let Some(boundary) = response.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+        return Ok(None);
+    };
+    let headers = std::str::from_utf8(&response[..boundary]).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "HTTP response headers are not ASCII",
+        )
+    })?;
+    let length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim())
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP response omitted its content-length boundary",
+            )
+        })?
+        .parse::<usize>()
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP response content-length is not canonical",
+            )
+        })?;
+    boundary
+        .checked_add(4)
+        .and_then(|header_bytes| header_bytes.checked_add(length))
+        .map(Some)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP response message boundary overflowed",
+            )
+        })
 }
 
 fn connect(address: SocketAddr) -> TcpStream {
