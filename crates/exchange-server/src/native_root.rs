@@ -191,13 +191,6 @@ mod platform {
         }
         let profile = known_folder(&FOLDERID_Profile, "FOLDERID_Profile")?;
         let local_app_data = known_folder(&FOLDERID_LocalAppData, "FOLDERID_LocalAppData")?;
-        if !local_app_data.starts_with(&profile) {
-            return Err(format!(
-                "the authenticated account LocalAppData `{}` is outside its profile boundary `{}`",
-                local_app_data.display(),
-                profile.display()
-            ));
-        }
         let root = local_app_data.join("Flux/Exchange");
         Ok((profile, local_app_data, root))
     }
@@ -265,10 +258,14 @@ mod platform {
     ) -> Result<PathBuf, String> {
         validate_shape(profile, local_app_data, root)?;
         let sid = current_process_sid()?;
+        // Known-folder APIs may spell one path with an authenticated account's legal 8.3 alias and
+        // the other with its long name. Object identity accepts only that exact directory while
+        // the OPEN_REPARSE_POINT inspection below still refuses every substituted ancestor.
+        let profile_identity = inspect_directory(profile)?.identity;
         let mut reached_profile = false;
         for prefix in existing_prefixes(local_app_data)? {
-            inspect_directory(&prefix)?;
-            if prefix == profile {
+            let inspected = inspect_directory(&prefix)?;
+            if inspected.identity == profile_identity {
                 reached_profile = true;
             }
             inspect_ancestor_security(&prefix, &sid, reached_profile)?;
@@ -310,11 +307,6 @@ mod platform {
                 ));
             }
         }
-        if !local_app_data.starts_with(profile) {
-            return Err(
-                "LocalAppData is outside the authenticated account profile boundary".into(),
-            );
-        }
         if root != local_app_data.join("Flux/Exchange") {
             return Err(
                 "the production root is not the exact LocalAppData/Flux/Exchange path".into(),
@@ -343,7 +335,18 @@ mod platform {
         Ok(prefixes)
     }
 
-    fn inspect_directory(path: &Path) -> Result<OwnedHandle, String> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct DirectoryIdentity {
+        volume: u32,
+        file: u64,
+    }
+
+    struct InspectedDirectory {
+        handle: OwnedHandle,
+        identity: DirectoryIdentity,
+    }
+
+    fn inspect_directory(path: &Path) -> Result<InspectedDirectory, String> {
         let wide = wide(path)?;
         // SAFETY: the path buffer remains live; OPEN_REPARSE_POINT opens the named component itself,
         // and this read-only handle is closed by OwnedHandle.
@@ -380,7 +383,14 @@ mod platform {
         if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
             return Err(format!("`{}` is not a directory", path.display()));
         }
-        Ok(handle)
+        Ok(InspectedDirectory {
+            handle,
+            identity: DirectoryIdentity {
+                volume: information.dwVolumeSerialNumber,
+                file: (u64::from(information.nFileIndexHigh) << 32)
+                    | u64::from(information.nFileIndexLow),
+            },
+        })
     }
 
     fn inspect_ancestor_security(
@@ -388,7 +398,8 @@ mod platform {
         sid: &ProcessSid,
         require_account_owner: bool,
     ) -> Result<(), String> {
-        let handle = inspect_directory(path)?;
+        let inspected = inspect_directory(path)?;
+        let handle = inspected.handle;
         let mut owner: PSID = null_mut();
         let mut dacl = null_mut();
         let mut descriptor: PSECURITY_DESCRIPTOR = null_mut();
