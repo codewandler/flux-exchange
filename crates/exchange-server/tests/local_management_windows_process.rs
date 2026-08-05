@@ -1429,6 +1429,7 @@ fn assert_tree_excludes_except_credentials(root: &Path, forms: &[Vec<u8>]) {
     walk(root, root, forms);
 }
 
+#[track_caller]
 fn open_owner_pipe() -> std::fs::File {
     let path = owner_pipe_name();
     let deadline = Instant::now() + Duration::from_secs(2);
