@@ -5,6 +5,11 @@ status: accepted
 
 # One declaration-driven labelled connection plan
 
+> Historical v1 design. X-134 supersedes the released wire identity and fixture with the closed
+> `exchange.connection-plan.v2` contract in [local-release-v1.md](local-release-v1.md). No v1
+> producer or positive fixture remains in the shipped tree; the discussion below records X-125's
+> original design rather than a currently accepted consumer contract.
+
 The connection surface already has three correct but separate write models: X-14 owns labels and
 host-minted instance UUIDs, X-47 owns non-secret settings, and X-10 owns credentials. A first-time
 client cannot safely infer how those models compose. This design adds one projection and one

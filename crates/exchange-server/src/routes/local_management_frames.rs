@@ -494,13 +494,7 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir(&root).expect("private test root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
-                .expect("owner-only test root");
-        }
+        exchange_host::ensure_private_state_directory(&root).expect("private test root");
         root
     }
 
@@ -697,13 +691,8 @@ mod tests {
         server.abort();
 
         let post_root = root.join("post-decision");
-        std::fs::create_dir(&post_root).expect("post-decision root");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&post_root, std::fs::Permissions::from_mode(0o700))
-                .expect("owner-only post-decision root");
-        }
+        exchange_host::ensure_private_state_directory(&post_root)
+            .expect("owner-only post-decision root");
         let post_credentials =
             exchange_host::CredentialStore::bind(post_root.join("credentials/store"))
                 .expect("post-decision credential store");

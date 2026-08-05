@@ -455,14 +455,24 @@ fn supervised_unix_binds_owner_authenticated_fxlm_before_readiness() {
     stream
         .read_to_end(&mut response)
         .expect("closed FXLM response");
+    assert!(response.len() >= 12, "complete FXLM PLAN frame");
+    assert_eq!(&response[..4], b"FXLM");
+    assert_eq!(response[4], 1, "FXLM version");
+    assert_eq!(response[5], 2, "server-to-client direction");
+    assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0x0008);
+    let payload_length =
+        u32::from_be_bytes([response[8], response[9], response[10], response[11]]) as usize;
+    assert_eq!(response.len(), 12 + payload_length, "one exact PLAN frame");
+    let payload = &response[12..];
+    let plan = flux_exchange_release::canonical::parse_value(payload, 65_536)
+        .expect("canonical value-free PLAN");
     assert_eq!(
-        response,
-        fxlm_frame(
-            2,
-            0x7fff,
-            br#"{"code":"local_management_unavailable","commit":"none","retry":"operator","schema":"exchange.local-management-error.v1","status":503}"#,
-        )
+        flux_exchange_release::canonical::encode(&plan).expect("canonical PLAN bytes"),
+        payload
     );
+    assert_eq!(plan["version"], "exchange.connection-plan.v2");
+    assert_eq!(plan["connector"], "gitlab");
+    assert_eq!(plan["selection"], serde_json::Value::Null);
 
     let address = format!(
         "{}:{}",
@@ -1323,7 +1333,7 @@ fn compatibility_is_exact_and_never_opens_a_store_or_listener() {
     assert!(!root.exists(), "compatibility opened the configured store");
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("exact compatibility object");
-    assert_eq!(value["schema"], "exchange.compatibility.v1");
+    assert_eq!(value["schema"], "exchange.compatibility.v2");
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = Command::new("git")
         .args(["rev-parse", "HEAD"])
