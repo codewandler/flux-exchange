@@ -40,9 +40,7 @@ lockfile and compile-time tests.
 - [X-134 — Publish owner-bound local onboarding without secret JSON](X-134-publish-owner-bound-local-onboarding.md) · Milestone 1 — Linux OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public Linux release
 
 ## Next (ready — take the top one unless the user named a story)
-
-### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-138 — Bind provider recovery, replay and Linux-native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — retain the exact portable connector-secrets 0.20 identity and prove Exchange-owned recovery on both Linux release targets
+_None._
 
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
@@ -185,6 +183,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-135 — Close hosted and native local-management deadlines](X-135-close-local-management-deadlines.md) · X-134 child — one admission clock, one durable-decision transition and bounded terminal behavior on every transport
 - [X-136 — Bound helper plan validation and the absolute result envelope](X-136-bound-helper-plan-and-result-envelope.md) · X-134 child — revalidate the complete v2 plan and keep every helper operation inside one 5s setup / 335s result envelope
 - [X-137 — Constrain Exchange runtime and release to Linux](X-137-constrain-exchange-runtime-and-release-to-linux.md) · X-134 child — Decision 0012 replaces the stopped Windows proof with the exact two-target Linux product boundary
+- [X-138 — Bind provider recovery, replay and Linux-native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — retain the exact portable connector-secrets 0.20 identity and prove Exchange-owned recovery on both Linux release targets
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

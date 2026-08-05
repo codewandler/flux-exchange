@@ -21,6 +21,7 @@ use exchange_host::{
 
 const HELPER_MODE: &str = "FLUX_EXCHANGE_C515_LEASE_HELPER";
 const HELPER_STORE: &str = "FLUX_EXCHANGE_C515_LEASE_STORE";
+const RECOVERY_PAUSE_ENV: &str = "FLUX_EXCHANGE_TEST_PROVIDER_RECOVERY_PAUSE";
 const REFUSE: &str = "refuse";
 const REOPEN: &str = "reopen";
 const STORE_OVERRIDES: [&str; 8] = [
@@ -138,6 +139,20 @@ fn real_server_retains_the_c515_lease_through_recovery_and_readiness() {
     let store_path = root.join("credentials/store.txt");
     seed_committed_provider_state(&store_path);
 
+    #[cfg(unix)]
+    let mut server = {
+        use std::os::unix::fs::PermissionsExt as _;
+        let pause = root.join("provider-recovery-pause");
+        std::fs::create_dir(&pause).expect("recovery pause directory");
+        std::fs::set_permissions(&pause, std::fs::Permissions::from_mode(0o700))
+            .expect("owner-only recovery pause directory");
+        let server = NativeServer::spawn_paused(&root, &pause);
+        server.wait_until_recovery_paused(&pause);
+        run_opener(&store_path, REFUSE);
+        server.resume_recovery(&pause);
+        server
+    };
+    #[cfg(windows)]
     let mut server = NativeServer::spawn(&root);
     let readiness = server.readiness();
     let ready: serde_json::Value =
@@ -213,7 +228,11 @@ mod platform {
     }
 
     impl NativeServer {
-        pub(super) fn spawn(root: &Path) -> Self {
+        pub(super) fn spawn_paused(root: &Path, pause: &Path) -> Self {
+            Self::spawn_with_pause(root, Some(pause))
+        }
+
+        fn spawn_with_pause(root: &Path, pause: Option<&Path>) -> Self {
             let readiness = PipeEnds::new();
             let liveness = PipeEnds::new();
             let readiness_source = duplicate_high(readiness.write);
@@ -226,6 +245,11 @@ mod platform {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped());
+            if let Some(pause) = pause {
+                command.env(super::RECOVERY_PAUSE_ENV, pause);
+            } else {
+                command.env_remove(super::RECOVERY_PAUSE_ENV);
+            }
             for setting in super::STORE_OVERRIDES {
                 command.env_remove(setting);
             }
@@ -252,6 +276,23 @@ mod platform {
                 liveness: liveness.write,
                 dead: false,
             }
+        }
+
+        pub(super) fn wait_until_recovery_paused(&self, pause: &Path) {
+            let active = pause.join("active");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !active.is_file() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "server did not expose the deterministic recovery-active boundary"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+
+        pub(super) fn resume_recovery(&self, pause: &Path) {
+            std::fs::write(pause.join("resume"), b"resume")
+                .expect("release deterministic provider recovery pause");
         }
 
         pub(super) fn readiness(&mut self) -> Vec<u8> {
