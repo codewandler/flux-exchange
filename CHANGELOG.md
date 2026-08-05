@@ -17,6 +17,13 @@ All notable changes to this project are documented in this file. The format is b
   the retained-lease assertion join does not select. The upstream 0.20.0 checksum, released commit
   and portable provider evidence are unchanged, and `native-evidence-v1.json` itself stays X-139's
   to finalize.
+- **Provider recovery and its retained lifetime lease now have exact Linux process evidence**
+  (X-138). The real supervised server is crashed after provider prepare, after the durable decision,
+  after provider commit and after every value-free publication step; restart proves the exact
+  abort/state/repeated-commit paths, one receipt under QUERY and byte-identical replay, and no
+  second transaction or semantic revision. A deterministic test-only recovery pause proves the one
+  registry 0.20 `FileStore` excludes another process before readiness as well as after it, then
+  releases on abrupt exit without changing the provider identity or five-method port.
 
 - **Hosted and owner-native local management now share one non-resetting decision deadline**
   (X-135). Admission owns the 300-second pre-decision budget, durable decision starts one fixed

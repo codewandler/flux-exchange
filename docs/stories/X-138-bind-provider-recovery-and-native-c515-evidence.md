@@ -76,6 +76,26 @@ second store, point-write emulation or secret-shaped Exchange state.
   codewandler-connector-address`, and the networked attempt failed DNS resolution for
   `index.crates.io`. The exact `--exact` executions on `ubuntu-24.04` and `ubuntu-24.04-arm`, the
   release contract suite and the repository gate therefore remain the integrator's Linux runs.
+- 2026-08-05: Failing-first process evidence showed the server returned a receipt instead of
+  stopping at provider prepare, and reached readiness without exposing a recovery-active lease
+  boundary. The exact tests now crash after provider prepare, after the durable decision and after
+  provider commit, then observe only `prepare,abort`, `prepare,decision,state,commit` and
+  `prepare,decision,commit,state` respectively.
+- 2026-08-05: Every provider and publication crash restarts the real supervised server. QUERY and
+  byte-identical replay retain one receipt and one transaction row; changed proposals conflict;
+  raw, JSON-escaped, percent-encoded and base64 sentinels remain absent after every crash, query and
+  replay outside the provider-owned credential store.
+- 2026-08-05: The retained-store test pauses inside coordinator recovery after the one concrete
+  `FileStore` is open, proves a second process receives the provider lease conflict, resumes through
+  readiness, proves contention again, then proves abrupt release and committed-state reopen.
+- 2026-08-05: Both exact parent tests pass locally with one passed, zero ignored and zero filtered.
+  The unchanged authority that X-139 exclusively owns selects each test once on
+  `ubuntu-24.04-arm` and `ubuntu-24.04`; it retains the released C-515 five-target evidence, while
+  X-139 remains the sole owner of terminal reports and the final derived authority.
+- 2026-08-05: The complete Rust, console and public-site repository gate passed. The manifest and
+  lock remain on registry `codewandler-connector-secrets` 0.20.0 checksum
+  `edf98bece86f6364aba3e7dd48c3b7e161146942e9e8450d5dc286143b627717`; no dependency, authority,
+  fixture, digest, release script or CI workflow identity changed.
 
 ## Notes
 
