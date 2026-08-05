@@ -86,7 +86,7 @@ impl WindowsEndpoint {
         };
         // Holding the first instance is part of startup admission, not deferred work in the serve
         // task. Readiness can therefore never precede ownership of the authenticated endpoint.
-        endpoint.waiting = Some(endpoint.create_instance(true)?);
+        endpoint.waiting = Some(endpoint.create_first_instance()?);
         Ok(endpoint)
     }
 
@@ -102,20 +102,18 @@ impl WindowsEndpoint {
         Ok(AuthenticatedPipe { pipe, client })
     }
 
-    fn rearm(&mut self) -> Result<(), WindowsEndpointRefusal> {
+    fn rearm(&mut self, pipe: NamedPipeServer) -> Result<(), WindowsEndpointRefusal> {
         if self.waiting.is_some() {
             return Err(WindowsEndpointRefusal::Bind);
         }
-        // `FILE_FLAG_FIRST_PIPE_INSTANCE` is a startup namespace-ownership assertion. After
-        // `DisconnectNamedPipe`, the old client can still hold its now-disconnected handle while
-        // this server rearms; repeating the flag would make that harmless handle terminate the
-        // service. The original successful bind already established ownership, and the same
-        // protected descriptor plus single-instance limit remains authoritative here.
-        self.waiting = Some(self.create_instance(false)?);
+        // `DisconnectNamedPipe` makes this secured first-instance handle available to accept the
+        // next client. Retaining it preserves the startup namespace-ownership assertion and avoids
+        // a close/create interval in which the owner endpoint is absent or can be preempted.
+        self.waiting = Some(pipe);
         Ok(())
     }
 
-    fn create_instance(&self, first: bool) -> Result<NamedPipeServer, WindowsEndpointRefusal> {
+    fn create_first_instance(&self) -> Result<NamedPipeServer, WindowsEndpointRefusal> {
         let descriptor = SecurityDescriptor::owner_and_system(&self.owner_sid)?;
         let mut attributes = SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
@@ -128,7 +126,7 @@ impl WindowsEndpoint {
             .pipe_mode(PipeMode::Byte)
             .access_inbound(true)
             .access_outbound(true)
-            .first_pipe_instance(first)
+            .first_pipe_instance(true)
             .reject_remote_clients(true)
             .max_instances(1)
             .in_buffer_size(MAX_FRAME_BYTES)
@@ -136,8 +134,8 @@ impl WindowsEndpoint {
 
         // SAFETY: `attributes` and its descriptor allocation remain live until CreateNamedPipeW
         // returns. Tokio always adds FILE_FLAG_OVERLAPPED; the options additionally select byte
-        // mode and PIPE_REJECT_REMOTE_CLIENTS. Startup additionally selects
-        // FILE_FLAG_FIRST_PIPE_INSTANCE; rearm cannot repeat that startup-only namespace claim.
+        // mode, FILE_FLAG_FIRST_PIPE_INSTANCE and PIPE_REJECT_REMOTE_CLIENTS. Rearm retains this
+        // exact server handle instead of making a second namespace claim.
         unsafe {
             options.create_with_security_attributes_raw(
                 std::ffi::OsStr::new(&self.pipe_name),
@@ -398,10 +396,11 @@ impl LocalManagement {
             // it rejects raced client writes without a read loop and makes the completed server
             // shutdown observable before this authenticated connection is dropped.
             let _ = connection.pipe.disconnect();
-            // The endpoint is rearmed only after both the pipe and its pinned client process have
-            // been dropped, so no attachment can be associated with the next connection.
-            drop(connection);
-            if self.endpoint.rearm().is_err() {
+            // Drop the pinned process before returning this disconnected server handle to the
+            // endpoint. No attachment or client identity can cross into the next ceremony.
+            let AuthenticatedPipe { pipe, client } = connection;
+            drop(client);
+            if self.endpoint.rearm(pipe).is_err() {
                 return;
             }
         }
@@ -1440,7 +1439,7 @@ mod tests {
         let owner_text = sid_string(endpoint.owner_sid.as_ptr()).expect("owner SID text");
         let pipe = endpoint.waiting.as_ref().expect("owner pipe");
         assert_eq!(
-            endpoint.create_instance(true).err(),
+            endpoint.create_first_instance().err(),
             Some(WindowsEndpointRefusal::Bind),
             "the exact first-instance name cannot be preempted"
         );
