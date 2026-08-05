@@ -143,6 +143,8 @@ impl NativeProcess {
             std::process::id(),
             unique_counter()
         ));
+        exchange_host::ensure_private_state_directory(&state_root)
+            .expect("private supervised state root");
         let dynamic_authority_values = seed_production_authority_stores(&state_root);
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -811,6 +813,7 @@ fn ordinary_startup_over_the_same_authority_stores_captures_value_free_logs() {
         std::process::id(),
         unique_counter()
     ));
+    exchange_host::ensure_private_state_directory(&root).expect("private log-capture state root");
     let dynamic_authority_values = seed_production_authority_stores(&root);
     let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupied log fixture");
     let occupied_address = occupied.local_addr().expect("occupied log address");

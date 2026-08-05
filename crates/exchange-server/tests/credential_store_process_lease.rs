@@ -169,6 +169,8 @@ fn private_root() -> PathBuf {
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
             .expect("owner-only fixture root");
     }
+    #[cfg(windows)]
+    exchange_host::ensure_private_state_directory(&root).expect("private fixture root");
     root
 }
 

@@ -51,9 +51,9 @@ impl Fixture {
             std::process::id(),
             unique_counter()
         ));
-        std::fs::create_dir(&owner).expect("private fixture owner");
+        exchange_host::ensure_private_state_directory(&owner).expect("private fixture owner");
         let state = owner.join("state");
-        std::fs::create_dir(&state).expect("private fixture state");
+        exchange_host::ensure_private_state_directory(&state).expect("private fixture state");
         Self {
             owner,
             state,

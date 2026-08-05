@@ -69,7 +69,8 @@ impl SupervisedServer {
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&state_root).expect("private test state root");
+        exchange_host::ensure_private_state_directory(&state_root)
+            .expect("private test state root");
 
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
