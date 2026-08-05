@@ -107,7 +107,10 @@ fn supervised_unix_helper_private_input_and_outer_deadline_are_exact() {
             CONNECT_BEGIN,
             &serde_json::to_vec(&begin).expect("canonical deadline BEGIN"),
         );
-        let mut helper = HelperProcess::spawn(&fixture.state, Some(300));
+        // The outer result clock starts at request EOF and includes the fixed five-second
+        // pre-ceremony allowance. Keep a short 300 ms private-input expiry window after that
+        // allowance so runner scheduling cannot consume the proof before `/dev/tty` is reached.
+        let mut helper = HelperProcess::spawn(&fixture.state, Some(5_300));
         helper
             .request
             .as_mut()
@@ -115,6 +118,8 @@ fn supervised_unix_helper_private_input_and_outer_deadline_are_exact() {
             .write_all(&request)
             .expect("deadline BEGIN request");
         drop(helper.request.take());
+        // Model the runner scheduling delay that exposed the too-short diagnostic budget on main.
+        std::thread::sleep(Duration::from_millis(500));
         if let Some(status) = helper.wait_for_private_terminal_read() {
             let response = read_to_eof_before(&helper.response, Duration::from_secs(1));
             panic!(
@@ -124,7 +129,7 @@ fn supervised_unix_helper_private_input_and_outer_deadline_are_exact() {
             );
         }
 
-        let response = read_to_eof_before(&helper.response, Duration::from_secs(2));
+        let response = read_to_eof_before(&helper.response, Duration::from_secs(7));
         let status = wait_before(&mut helper.child, Duration::from_secs(2));
         assert_eq!(
             status.code(),
