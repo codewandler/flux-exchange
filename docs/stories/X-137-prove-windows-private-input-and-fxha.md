@@ -37,11 +37,13 @@ writer HANDLE to the immediately following MINT without a new protocol or secret
       production `CONIN$` input with null standard streams and covers cancellation at X-136's
       unchanged outer deadline. No token, numeric HANDLE or canary appears raw, JSON-escaped,
       percent-encoded or base64 in logs, receipts, persistence or diagnostics.
-- [ ] Implementation uses only supported Windows APIs named by Decision 0007: same-pipe
+- [ ] Implementation uses the security-sensitive Windows APIs named by Decision 0007: same-pipe
       `GetNamedPipeClientProcessId`, pinned process creation identity and token/session validation,
       server-side `DuplicateHandle`, noninheritability/distinct writable `FILE_TYPE_PIPE`
-      validation. Remote argv/PEB, undocumented process-information and handle-table enumeration
-      remain structurally absent.
+      validation. Documented `PeekNamedPipe` may inspect only queued byte availability and its
+      prefix, without consuming data, on that same authenticated pipe solely to classify immediate
+      surplus before MINT. Remote argv/PEB, undocumented process-information and handle-table
+      enumeration remain structurally absent.
 - [ ] MinGW proves the production path is referenced; the exact test above executes only on
       `windows-2025` MSVC with one passed, zero ignored and zero filtered.
 

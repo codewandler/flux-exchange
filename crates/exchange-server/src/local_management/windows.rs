@@ -25,7 +25,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FlushFileBuffers, GetFileType, WriteFile, FILE_TYPE_PIPE, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::Pipes::{
-    GetNamedPipeClientProcessId, GetNamedPipeInfo, ImpersonateNamedPipeClient, PIPE_SERVER_END,
+    GetNamedPipeClientProcessId, GetNamedPipeInfo, ImpersonateNamedPipeClient, PeekNamedPipe,
+    PIPE_SERVER_END,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentThread, GetProcessTimes, OpenProcess, OpenProcessToken,
@@ -303,6 +304,36 @@ fn parse_attachment(bytes: &[u8; ATTACHMENT_BYTES]) -> Result<u64, AttachmentRef
         .ok_or(AttachmentRefusal::WriterInvalid)
 }
 
+fn queued_attachment_refusal(pipe: HANDLE) -> std::io::Result<Option<AttachmentRefusal>> {
+    let mut prefix = [0_u8; 4];
+    let mut copied = 0_u32;
+    let mut available = 0_u32;
+    // Tokio's readiness cache may be clear while a synchronous client write has already queued
+    // bytes. Query the same authenticated byte pipe directly and without consuming data so a
+    // prewritten suffix is refused before the one-shot writer can publish or block.
+    if unsafe {
+        PeekNamedPipe(
+            pipe,
+            prefix.as_mut_ptr().cast(),
+            prefix.len() as u32,
+            &mut copied,
+            &mut available,
+            null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    if available == 0 {
+        return Ok(None);
+    }
+    if copied == prefix.len() as u32 && &prefix == b"FXHA" {
+        Ok(Some(AttachmentRefusal::UnexpectedFrame))
+    } else {
+        Ok(Some(AttachmentRefusal::InvalidFrame))
+    }
+}
+
 struct WindowsWriter(OwnedHandle);
 
 impl OneShotWriter for WindowsWriter {
@@ -558,24 +589,16 @@ async fn dispatch_one(
                     } else if !decoder.buffered_bytes().is_empty() {
                         Some(AttachmentRefusal::InvalidFrame)
                     } else {
-                        match connection.pipe.try_read(&mut bytes) {
-                            Ok(0) => None,
-                            Ok(received) if bytes[..received].starts_with(b"FXHA") => {
-                                Some(AttachmentRefusal::UnexpectedFrame)
-                            }
-                            Ok(_) => Some(AttachmentRefusal::InvalidFrame),
-                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
-                            Err(error) => return Err(error),
-                        }
+                        queued_attachment_refusal(connection.pipe.as_raw_handle() as HANDLE)?
                     };
                     if let Some(refusal) = refusal {
                         refuse_attachment(&mut connection.pipe, refusal, deadline).await?;
                         return Ok(());
                     }
                     // The attachment is consumed by exactly this immediate MINT. Later reads
-                    // cannot inherit the writer because `take` clears it. `try_read` above is
-                    // limited to this one-shot boundary: an extra byte already queued by the
-                    // client must refuse before the writer can block on or publish an FXSA frame.
+                    // cannot inherit the writer because `take` clears it. The same-pipe check
+                    // above is limited to this one-shot boundary: an extra byte already queued by
+                    // the client must refuse before the writer can block on or publish an FXSA.
                 }
                 match dispatcher
                     .begin_frame_with_writer(
