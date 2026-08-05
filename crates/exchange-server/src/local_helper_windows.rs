@@ -23,8 +23,8 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use windows_sys::Win32::Foundation::{
     CloseHandle, CompareObjectHandles, DuplicateHandle, GetHandleInformation, GetLastError,
     SetHandleInformation, DUPLICATE_SAME_ACCESS, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER,
-    FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
-    WAIT_TIMEOUT,
+    ERROR_PIPE_NOT_CONNECTED, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, HANDLE_FLAG_INHERIT,
+    INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, TokenSessionId, TokenUser, TOKEN_QUERY,
@@ -703,17 +703,24 @@ async fn read_terminal_before_async(
                 .await
                 {
                     Err(_) => return Err(WindowsHelperError::Deadline),
-                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                    Ok(Err(error)) if named_pipe_eof(&error) => {
                         return Ok(frame);
                     }
                     Ok(Err(_)) => return Err(WindowsHelperError::Transport),
                     Ok(Ok(())) => {}
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(frame),
+            Err(error) if named_pipe_eof(&error) => return Ok(frame),
             Err(_) => return Err(WindowsHelperError::Transport),
         }
     }
+}
+
+fn named_pipe_eof(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::BrokenPipe
+        || error.raw_os_error().is_some_and(|code| {
+            code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32
+        })
 }
 
 async fn read_exact_before_async(

@@ -946,7 +946,8 @@ mod tests {
     };
     use tokio::net::windows::named_pipe::ClientOptions;
     use windows_sys::Win32::Foundation::{
-        GetLastError, LocalFree, ERROR_NO_TOKEN, ERROR_SUCCESS, HANDLE,
+        GetLastError, LocalFree, ERROR_BROKEN_PIPE, ERROR_NO_TOKEN, ERROR_PIPE_NOT_CONNECTED,
+        ERROR_SUCCESS, HANDLE,
     };
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
     use windows_sys::Win32::Security::{
@@ -1045,6 +1046,27 @@ mod tests {
         )
     }
 
+    async fn read_named_pipe_to_end<R: tokio::io::AsyncRead + Unpin>(
+        reader: &mut R,
+        bytes: &mut Vec<u8>,
+    ) -> std::io::Result<()> {
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match tokio::io::AsyncReadExt::read(reader, &mut chunk).await {
+                Ok(0) => return Ok(()),
+                Ok(received) => bytes.extend_from_slice(&chunk[..received]),
+                Err(error)
+                    if error.raw_os_error().is_some_and(|code| {
+                        code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32
+                    }) =>
+                {
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     async fn deadline_process_fixture() {
         let _endpoint_guard = ENDPOINT_TEST_LOCK.lock().expect("endpoint test lock");
 
@@ -1059,7 +1081,7 @@ mod tests {
             .expect("partial header");
         let response = tokio::spawn(async move {
             let mut bytes = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut bytes)
+            read_named_pipe_to_end(&mut reader, &mut bytes)
                 .await
                 .expect("pre-decision response EOF");
             bytes
@@ -1095,7 +1117,7 @@ mod tests {
             .expect("durable decision");
         let response = tokio::spawn(async move {
             let mut bytes = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut bytes)
+            read_named_pipe_to_end(&mut reader, &mut bytes)
                 .await
                 .expect("post-decision response EOF");
             bytes
@@ -1145,7 +1167,7 @@ mod tests {
             .await
             .expect("grant QUERY EOF");
         let mut replayed = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut client, &mut replayed)
+        read_named_pipe_to_end(&mut client, &mut replayed)
             .await
             .expect("grant replay EOF");
         let replayed = String::from_utf8_lossy(&replayed);
@@ -1182,7 +1204,7 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_millis(250)).await;
         tokio::task::yield_now().await;
         let mut partial = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut terminal_reader, &mut partial)
+        read_named_pipe_to_end(&mut terminal_reader, &mut partial)
             .await
             .expect("backpressured Windows terminal EOF");
         terminal.await.expect("bounded Windows terminal finalizer");
