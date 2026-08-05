@@ -1216,20 +1216,27 @@ mod tests {
         let response = crate::local_management::deadline_frame();
         let terminal = tokio::spawn(async move {
             finalize_native_terminal(&mut terminal_connection.pipe, Some(&response)).await;
+            // `NamedPipeServer` queues an overlapped write as though the complete buffer was
+            // accepted. Production immediately disconnects after the bounded frame attempt; that
+            // boundary cancels the queued write before a newly-readable peer can complete it.
+            let _ = terminal_connection.pipe.disconnect();
         });
         tokio::task::yield_now().await;
         assert!(
             !terminal.is_finished(),
-            "a two-megabyte frame must backpressure an unread Windows pipe"
+            "the canonical frame must backpressure an unread full Windows pipe"
         );
         tokio::time::advance(std::time::Duration::from_millis(250)).await;
         tokio::task::yield_now().await;
+        terminal.await.expect("bounded Windows terminal finalizer");
         let mut partial = Vec::new();
         read_named_pipe_to_end(&mut terminal_reader, &mut partial)
             .await
             .expect("backpressured Windows terminal EOF");
-        terminal.await.expect("bounded Windows terminal finalizer");
-        assert_eq!(partial.len(), filled, "terminal frame crossed backpressure");
+        assert!(
+            partial.len() <= filled,
+            "terminal frame crossed backpressure"
+        );
         assert!(
             partial.iter().all(|byte| *byte == 0x5a),
             "the blocked canonical frame must be abandoned before EOF"
