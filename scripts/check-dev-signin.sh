@@ -118,6 +118,21 @@ test -x "$server_binary" || {
 # not the explicit development roster or a federated composition. The CI gate forces Cargo colour
 # globally; this log is a machine-readable process boundary, and ANSI between a structured field
 # name and `=` makes a healthy ephemeral listener undiscoverable.
+#
+# Since X-134 the conventional root is derived from the authenticated OS account, deliberately not
+# from HOME/XDG/USERPROFILE/LOCALAPPDATA, so redirecting those no longer moves it — an unqualified
+# `--dev` here would write into the developer's own account state and take its writer lease. This
+# smoke therefore names an explicit scratch root through the one supported override,
+# FLUX_EXCHANGE_STATE, and both processes below name the same one so the restart is a genuine
+# second open of the first root. Derivation itself is not this script's subject: it is held by
+# `production_root_discovery_does_not_consult_inherited_home_variables` and
+# `native_process_derives_production_root_from_the_authenticated_os_account` in
+# `crates/exchange-server/tests/local_state_regressions.rs`, where a refusal is observable.
+#
+# The XDG_STATE_HOME/LOCALAPPDATA/USERPROFILE scratch values stay, now as sentinels for the override
+# rather than for derivation: nothing may appear below them, and the assertion after the ceremony
+# says so. That keeps a regression that reads an inherited variable *ahead* of the explicit root
+# visible here instead of silently landing state somewhere this run cannot see.
 env \
   -u FLUX_EXCHANGE_DEV_IDENTITY \
   -u FLUX_EXCHANGE_LOCAL_USERS \
@@ -131,7 +146,6 @@ env \
   -u FLUX_EXCHANGE_OIDC_REDIRECT_URI \
   -u FLUX_EXCHANGE_OIDC_TENANT \
   -u FLUX_EXCHANGE_OIDC_HOSTED_DOMAIN \
-  -u FLUX_EXCHANGE_STATE \
   -u FLUX_EXCHANGE_CREDENTIALS \
   -u FLUX_EXCHANGE_SETTINGS \
   -u FLUX_EXCHANGE_GRANTS \
@@ -143,6 +157,7 @@ env \
   -u FLUX_EXCHANGE_APPS \
   NO_COLOR=1 \
   CARGO_TERM_COLOR=never \
+  FLUX_EXCHANGE_STATE="$run_dir/state" \
   XDG_STATE_HOME="$run_dir/state-home" \
   LOCALAPPDATA="$run_dir/state-home" \
   USERPROFILE="$run_dir/home" \
@@ -197,10 +212,9 @@ if grep -Fq 'store is bound' "$server_log"; then
   exit 1
 fi
 
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*) state_root="$run_dir/state-home/Flux/Exchange" ;;
-  *) state_root="$run_dir/state-home/flux-exchange" ;;
-esac
+# One named root on every platform: the override is a path, not a platform convention, so there is
+# no per-platform suffix to mirror here.
+state_root="$run_dir/state"
 for path in \
   credentials/store.txt \
   audit/events.sqlite3; do
@@ -214,6 +228,14 @@ for path in settings grants connections channels workflows service-accounts; do
     echo "development composition did not bind $path" >&2
     exit 1
   }
+done
+# The inherited-variable sentinels must stay untouched. An empty directory is the passing shape;
+# anything below one means a root was derived from the environment ahead of the explicit override.
+for sentinel in "$run_dir/state-home" "$run_dir/home"; do
+  if [[ -d "$sentinel" ]] && [[ -n "$(ls -A "$sentinel")" ]]; then
+    echo "development composition wrote below the inherited-variable sentinel $sentinel" >&2
+    exit 1
+  fi
 done
 
 # BEGIN X-134 RELEASE-V2 EVIDENCE
@@ -302,7 +324,6 @@ env \
   -u FLUX_EXCHANGE_DEV_IDENTITY \
   -u FLUX_EXCHANGE_LOCAL_USERS \
   -u FLUX_EXCHANGE_TENANT \
-  -u FLUX_EXCHANGE_STATE \
   -u FLUX_EXCHANGE_CREDENTIALS \
   -u FLUX_EXCHANGE_SETTINGS \
   -u FLUX_EXCHANGE_GRANTS \
@@ -314,6 +335,7 @@ env \
   -u FLUX_EXCHANGE_APPS \
   NO_COLOR=1 \
   CARGO_TERM_COLOR=never \
+  FLUX_EXCHANGE_STATE="$run_dir/state" \
   XDG_STATE_HOME="$run_dir/state-home" \
   LOCALAPPDATA="$run_dir/state-home" \
   USERPROFILE="$run_dir/home" \
