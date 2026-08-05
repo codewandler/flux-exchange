@@ -14,8 +14,8 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, HANDLE,
-    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
+    CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER,
+    ERROR_PIPE_NOT_CONNECTED, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY,
@@ -288,10 +288,7 @@ fn supervised_windows_service_account_helper_delivers_exact_fxsa_and_closes_fxha
     for chunk in query.chunks(5) {
         owner_pipe.write_all(chunk).expect("split PLAN write");
     }
-    let mut response = Vec::new();
-    owner_pipe
-        .read_to_end(&mut response)
-        .expect("one PLAN response plus EOF");
+    let response = read_named_pipe_to_end(&mut owner_pipe);
     drop(owner_pipe);
     let (opcode, payload) = decode_server_frame(&response);
     assert_eq!(opcode, PLAN_RESPONSE, "owner pipe must serve PLAN_RESPONSE");
@@ -685,9 +682,30 @@ fn request_one(opcode: u16, payload: &[u8]) -> (u16, Vec<u8>) {
     pipe.write_all(&frame(CLIENT, opcode, payload))
         .expect("native request");
     let response = read_frame(&mut pipe);
-    let mut eof = [0_u8; 1];
-    assert_eq!(pipe.read(&mut eof).expect("native terminal EOF"), 0);
+    assert!(
+        read_named_pipe_to_end(&mut pipe).is_empty(),
+        "native terminal has surplus bytes"
+    );
     response
+}
+
+fn read_named_pipe_to_end(pipe: &mut std::fs::File) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => return bytes,
+            Ok(received) => bytes.extend_from_slice(&buffer[..received]),
+            Err(error)
+                if error.raw_os_error().is_some_and(|code| {
+                    code == ERROR_BROKEN_PIPE as i32 || code == ERROR_PIPE_NOT_CONNECTED as i32
+                }) =>
+            {
+                return bytes;
+            }
+            Err(error) => panic!("named-pipe response and EOF: {error}"),
+        }
+    }
 }
 
 fn read_frame(pipe: &mut std::fs::File) -> (u16, Vec<u8>) {
