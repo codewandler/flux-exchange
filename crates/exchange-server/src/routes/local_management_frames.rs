@@ -366,7 +366,12 @@ fn refusal(status: StatusCode, code: &'static str) -> Response {
     response
 }
 
-#[cfg(test)]
+#[cfg(feature = "native-deadline-test-seam")]
+pub(crate) fn run_deadline_process_fixture() -> Result<(), String> {
+    tests::run_deadline_process_fixture()
+}
+
+#[cfg(any(test, feature = "native-deadline-test-seam"))]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -499,8 +504,7 @@ mod tests {
         root
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn hosted_slot_idle_and_ping_traffic_expire_on_the_admission_clock() {
+    async fn hosted_deadline_fixture() {
         let root = private_root();
         let credentials = exchange_host::CredentialStore::bind(root.join("credentials/store"))
             .expect("retained credential store");
@@ -516,6 +520,7 @@ mod tests {
             Arc::new(DevIdentity::from_roster("user:owner@local").expect("development identity"));
         let origin = "http://owner.local";
         let state = AppState::with_development_identity(identity)
+            .with_operator_policy(crate::operator::OperatorPolicy::one("owner"))
             .with_transaction_coordinator(coordinator)
             .with_audit(audit)
             .with_hosted_origin(origin);
@@ -524,7 +529,7 @@ mod tests {
             .expect("loopback listener");
         let address = listener.local_addr().expect("listener address");
         let server = tokio::spawn(async move {
-            axum::serve(listener, crate::routes::app(state))
+            axum::serve(listener, crate::routes::app_with_console(state, None))
                 .await
                 .expect("test server");
         });
@@ -734,8 +739,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn hosted_backpressured_terminal_frame_reserves_the_required_close() {
+    async fn hosted_backpressure_fixture() {
         for (path, code, expected) in [
             ("/pre", close_code::POLICY, CloseCode::Policy),
             ("/post", close_code::NORMAL, CloseCode::Normal),
@@ -772,5 +776,31 @@ mod tests {
             server.abort();
             tokio::time::pause();
         }
+    }
+
+    #[cfg(test)]
+    #[tokio::test(start_paused = true)]
+    async fn hosted_slot_idle_and_ping_traffic_expire_on_the_admission_clock() {
+        hosted_deadline_fixture().await;
+    }
+
+    #[cfg(test)]
+    #[tokio::test(start_paused = true)]
+    async fn hosted_backpressured_terminal_frame_reserves_the_required_close() {
+        hosted_backpressure_fixture().await;
+    }
+
+    #[cfg(feature = "native-deadline-test-seam")]
+    pub(super) fn run_deadline_process_fixture() -> Result<(), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(async {
+            hosted_deadline_fixture().await;
+            hosted_backpressure_fixture().await;
+        });
+        Ok(())
     }
 }

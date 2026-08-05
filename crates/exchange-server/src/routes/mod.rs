@@ -26,6 +26,8 @@ mod health;
 mod identity;
 mod invoke;
 mod local_management_frames;
+#[cfg(feature = "native-deadline-test-seam")]
+pub(crate) use local_management_frames::run_deadline_process_fixture as run_hosted_deadline_process_fixture;
 mod metrics;
 mod onboarding;
 mod service_accounts;

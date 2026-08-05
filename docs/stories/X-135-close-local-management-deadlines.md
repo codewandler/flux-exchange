@@ -65,6 +65,11 @@ blocked stores and terminal framing. No timeout may turn an uncertain durable wr
   the retained-handle correction. MinGW compiles the complete Windows binary and dedicated
   `local_management_windows_deadline` integration target. `ci.yml` lists its sole exact test once
   and rejects any native MSVC report other than one passed, zero ignored and zero filtered.
+- The descendant X-135 selector checkpoint gives hosted and Unix their own one-test integration
+  targets over feature-gated production binary fixtures. Both list the contract name exactly once
+  and report one passed, zero ignored and zero filtered; the hosted fixture checks sink readiness
+  before both atomic reservations and the Unix fixture retains the half-closed handle only through
+  the fixed terminal budget even while an authenticated peer floods unread bytes.
 - Status remains `in-progress` until `windows-2025` executes that dedicated production named-pipe
   target and returns the required exact native report; cross-compilation is not recorded as runtime
   evidence.

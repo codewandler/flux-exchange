@@ -22,9 +22,9 @@ supervisor-test-bind-refusal = []
 # Process-only acceptance seam. It reports the production account-derived root without creating
 # it, so native runners can poison inherited home variables and inspect the real binary decision.
 native-root-test-seam = []
-# Native CI only: run the production Windows endpoint with a paused monotonic clock from one
-# dedicated integration-test executable. Released binaries do not recognize this command.
-native-deadline-test-seam = ["tokio/test-util"]
+# Native CI only: run each production deadline transport with a paused monotonic clock from one
+# dedicated integration-test executable. Released binaries do not recognize these commands.
+native-deadline-test-seam = ["tokio/test-util", "dep:tokio-tungstenite"]
 # Native helper process evidence only: shorten the otherwise fixed 335-second outer result cap.
 # Released binaries do not consult the test environment variable guarded by this feature.
 native-helper-deadline-test-seam = []
@@ -35,6 +35,16 @@ native-console-test-seam = []
 [[bin]]
 name = "flux-exchange"
 path = "src/main.rs"
+
+[[test]]
+name = "local_management_hosted_deadline"
+path = "tests/local_management_hosted_deadline.rs"
+required-features = ["native-deadline-test-seam"]
+
+[[test]]
+name = "local_management_unix_deadline"
+path = "tests/local_management_unix_deadline.rs"
+required-features = ["native-deadline-test-seam"]
 
 [dependencies]
 exchange-host.workspace = true
@@ -71,6 +81,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 tokio-util.workspace = true
 thiserror.workspace = true
 tower.workspace = true

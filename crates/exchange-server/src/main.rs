@@ -245,6 +245,26 @@ fn main() -> ExitCode {
         };
         return ExitCode::from(local_helper_windows::report_console_mode_for_test(writer).code());
     }
+    #[cfg(feature = "native-deadline-test-seam")]
+    if arguments == [OsStr::new("hosted-deadline-test-seam")] {
+        return match routes::run_hosted_deadline_process_fixture() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(all(unix, feature = "native-deadline-test-seam"))]
+    if arguments == [OsStr::new("unix-deadline-test-seam")] {
+        return match local_management::run_unix_deadline_process_fixture() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     #[cfg(all(windows, feature = "native-deadline-test-seam"))]
     if arguments == [OsStr::new("native-deadline-test-seam")] {
         return match local_management::run_deadline_process_fixture() {

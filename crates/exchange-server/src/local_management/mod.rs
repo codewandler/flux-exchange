@@ -14,9 +14,9 @@ mod service_account;
 pub mod transaction;
 
 pub(crate) use deadline::DeadlineController;
-#[cfg(any(test, all(windows, feature = "native-deadline-test-seam")))]
+#[cfg(any(test, feature = "native-deadline-test-seam"))]
 pub(crate) use deadline::{Expired, ReceiptIdentity, Unresolved};
-#[cfg(any(test, all(windows, feature = "native-deadline-test-seam")))]
+#[cfg(any(test, feature = "native-deadline-test-seam"))]
 pub(crate) use dispatcher::deadline_frame;
 pub(crate) use dispatcher::expired_reply;
 pub(crate) use dispatcher::ActiveSession;
@@ -35,6 +35,9 @@ mod windows;
 
 #[cfg(unix)]
 pub(crate) use unix::LocalManagement;
+
+#[cfg(all(unix, feature = "native-deadline-test-seam"))]
+pub(crate) use unix::run_deadline_process_fixture as run_unix_deadline_process_fixture;
 
 #[cfg(windows)]
 pub(crate) use windows::LocalManagement;

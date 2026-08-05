@@ -14,7 +14,7 @@ const TERMINAL_FINALIZATION_BUDGET: Duration = Duration::from_secs(1);
 const TERMINAL_FRAME_ATTEMPT: Duration = Duration::from_millis(250);
 
 /// Best-effort native terminal frame plus mandatory EOF under one separate fixed budget.
-#[cfg(any(test, all(windows, feature = "native-deadline-test-seam")))]
+#[cfg(any(test, feature = "native-deadline-test-seam"))]
 pub(crate) async fn finalize_native_terminal<W>(writer: &mut W, response: Option<&[u8]>)
 where
     W: AsyncWrite + Unpin,

@@ -23,7 +23,7 @@ use super::{
 };
 use crate::state::AppState;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "native-deadline-test-seam"))]
 use super::deadline::finalize_native_terminal;
 
 const RUN_DIRECTORY: &str = "run";
@@ -48,7 +48,7 @@ pub(crate) struct LocalManagement {
     _lease: EndpointLease,
     expected_peer_uid: u32,
     dispatcher: Dispatcher,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "native-deadline-test-seam"))]
     deadline_override: Option<DeadlineController>,
 }
 
@@ -172,7 +172,7 @@ impl LocalManagement {
                 _lease: lease,
                 expected_peer_uid: startup_euid,
                 dispatcher,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "native-deadline-test-seam"))]
                 deadline_override: None,
             })
         })();
@@ -186,7 +186,7 @@ impl LocalManagement {
 
     /// Accept owner streams until shutdown. Peer authentication precedes the first byte read.
     pub(crate) async fn serve(self) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "native-deadline-test-seam"))]
         let deadline_override = self.deadline_override.clone();
         loop {
             let Ok((stream, _)) = self.listener.accept().await else {
@@ -194,7 +194,7 @@ impl LocalManagement {
             };
             let expected_peer_uid = self.expected_peer_uid;
             let dispatcher = self.dispatcher.clone();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "native-deadline-test-seam"))]
             let deadline_override = deadline_override.clone();
             tokio::spawn(async move {
                 if authenticate_peer(&stream, expected_peer_uid).is_ok() {
@@ -202,9 +202,9 @@ impl LocalManagement {
                     let _closed_projection =
                         (owner.tenant, owner.principal, owner.user, owner.operator);
                     let mut stream = stream;
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "native-deadline-test-seam"))]
                     let deadline = deadline_override.unwrap_or_else(DeadlineController::start);
-                    #[cfg(not(test))]
+                    #[cfg(not(any(test, feature = "native-deadline-test-seam")))]
                     let deadline = DeadlineController::start();
                     let mut initial = [0_u8; 65_548];
                     let received = deadline
@@ -244,7 +244,7 @@ impl LocalManagement {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "native-deadline-test-seam"))]
     fn path(&self) -> &Path {
         &self.socket
     }
@@ -741,10 +741,19 @@ fn object_kind(metadata: &std::fs::Metadata) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "native-deadline-test-seam")]
+pub(crate) fn run_deadline_process_fixture() -> Result<(), String> {
+    tests::run_deadline_process_fixture()
+}
+
+#[cfg(any(test, feature = "native-deadline-test-seam"))]
 mod tests {
+    #[cfg(test)]
     use std::io::{Read as _, Write as _};
-    use std::os::unix::fs::{symlink, MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::fs::PermissionsExt as _;
+    #[cfg(test)]
+    use std::os::unix::fs::{symlink, MetadataExt as _};
+    #[cfg(test)]
     use std::os::unix::net::UnixStream as StdUnixStream;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -896,8 +905,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn authenticated_native_idle_and_partial_traffic_expire_on_one_absolute_clock() {
+    async fn unix_deadline_fixture() {
         let root = private_root("absolute-deadline");
         let endpoint = LocalManagement::bind_at(&root, effective_uid(), test_dispatcher(&root))
             .expect("owner endpoint");
@@ -1089,6 +1097,23 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(replay_root);
         let _ = std::fs::remove_dir_all(post_root);
+    }
+
+    #[cfg(test)]
+    #[tokio::test(start_paused = true)]
+    async fn authenticated_native_idle_and_partial_traffic_expire_on_one_absolute_clock() {
+        unix_deadline_fixture().await;
+    }
+
+    #[cfg(feature = "native-deadline-test-seam")]
+    pub(super) fn run_deadline_process_fixture() -> Result<(), String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .map_err(|error| error.to_string())?;
+        runtime.block_on(unix_deadline_fixture());
+        Ok(())
     }
 
     #[test]
