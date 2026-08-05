@@ -471,6 +471,21 @@ async fn dispatch_one(
             refuse_attachment(&mut connection.pipe, refusal, deadline).await?;
             return Ok(());
         }
+    } else if &prefix != b"FXLM" {
+        // A one-field mutation of the attachment magic is distinguishable from an ordinary
+        // malformed FXLM header only after the fixed attachment fields arrive. Preserve the
+        // ordinary invalid-frame row unless the complete sixteen-byte candidate carries the exact
+        // version/direction/kind/reserved boundary.
+        let mut candidate = [0_u8; ATTACHMENT_BYTES];
+        candidate[..4].copy_from_slice(&prefix);
+        let received = read_prefix(&mut connection.pipe, &mut candidate[4..]).await?;
+        let refusal = if received == ATTACHMENT_BYTES - 4 && candidate[4..8] == [1, 1, 1, 0] {
+            AttachmentRefusal::WriterInvalid
+        } else {
+            AttachmentRefusal::InvalidFrame
+        };
+        refuse_attachment(&mut connection.pipe, refusal, deadline).await?;
+        return Ok(());
     }
 
     let mut decoder = StreamDecoder::new(Direction::ClientToServer);
