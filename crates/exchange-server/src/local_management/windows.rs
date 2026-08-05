@@ -198,13 +198,24 @@ impl PinnedClient {
             return Err(AttachmentRefusal::WriterInvalid);
         }
         let mut confirmed = 0_u32;
+        let expected = process_token_identity(unsafe { GetCurrentProcess() })
+            .map_err(|_| AttachmentRefusal::WriterInvalid)?;
+        let actual = process_token_identity(self.process.as_raw_handle() as HANDLE)
+            .map_err(|_| AttachmentRefusal::WriterInvalid)?;
+        let creation = process_creation(self.process.as_raw_handle() as HANDLE)
+            .map_err(|_| AttachmentRefusal::WriterInvalid)?;
+        let live = unsafe { WaitForSingleObject(self.process.as_raw_handle() as HANDLE, 0) }
+            == WAIT_TIMEOUT;
         if unsafe { GetNamedPipeClientProcessId(pipe, &mut confirmed) } == 0
-            || confirmed != self.process_id
-            || process_creation(self.process.as_raw_handle() as HANDLE)
-                .map_err(|_| AttachmentRefusal::WriterInvalid)?
-                != self.creation
-            || unsafe { WaitForSingleObject(self.process.as_raw_handle() as HANDLE, 0) }
-                != WAIT_TIMEOUT
+            || !pinned_client_matches(
+                self.process_id,
+                confirmed,
+                self.creation,
+                creation,
+                &expected,
+                &actual,
+                live,
+            )
         {
             return Err(AttachmentRefusal::WriterInvalid);
         }
@@ -650,9 +661,25 @@ fn process_token_sid() -> Result<OwnedSid, WindowsEndpointRefusal> {
     )
 }
 
+#[derive(Clone, PartialEq, Eq)]
 struct TokenIdentity {
     sid: Vec<u8>,
     session: u32,
+}
+
+fn pinned_client_matches(
+    expected_process: u32,
+    confirmed_process: u32,
+    expected_creation: u64,
+    confirmed_creation: u64,
+    expected_token: &TokenIdentity,
+    confirmed_token: &TokenIdentity,
+    live: bool,
+) -> bool {
+    expected_process == confirmed_process
+        && expected_creation == confirmed_creation
+        && expected_token == confirmed_token
+        && live
 }
 
 fn process_token_identity(process: HANDLE) -> Result<TokenIdentity, WindowsEndpointRefusal> {
@@ -1215,6 +1242,51 @@ mod tests {
             parse_attachment(&attachment),
             Err(AttachmentRefusal::WriterInvalid)
         );
+    }
+
+    #[test]
+    fn pinned_fxha_client_refuses_each_pid_creation_sid_session_and_liveness_substitution() {
+        let expected = TokenIdentity {
+            sid: b"owner-sid".to_vec(),
+            session: 7,
+        };
+        assert!(pinned_client_matches(
+            41, 41, 99, 99, &expected, &expected, true
+        ));
+        let substitutions = [
+            (42, 99, expected.clone(), true),
+            (41, 100, expected.clone(), true),
+            (
+                41,
+                99,
+                TokenIdentity {
+                    sid: b"other-sid".to_vec(),
+                    session: 7,
+                },
+                true,
+            ),
+            (
+                41,
+                99,
+                TokenIdentity {
+                    sid: b"owner-sid".to_vec(),
+                    session: 8,
+                },
+                true,
+            ),
+            (41, 99, expected.clone(), false),
+        ];
+        for (process, creation, token, live) in substitutions {
+            assert!(!pinned_client_matches(
+                41,
+                41.max(process),
+                99,
+                creation,
+                &expected,
+                &token,
+                live
+            ));
+        }
     }
 
     #[test]

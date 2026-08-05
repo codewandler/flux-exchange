@@ -1,7 +1,7 @@
 ---
 id: X-137
 title: "Prove Windows private input and FXHA in production"
-status: blocked
+status: in-progress
 epic: connections
 areas: [exchange-server, protocol, tests, windows]
 depends_on: [X-136]
@@ -49,6 +49,19 @@ writer HANDLE to the immediately following MINT without a new protocol or secret
 
 - X-134 already contains typed helper/endpoint/duplication primitives and passing MinGW checks.
   Those are supplemental and do not satisfy the native process rows in this story.
+- The production process test now contains exactly one test named
+  `supervised_windows_service_account_helper_delivers_exact_fxsa_and_closes_fxha_adversaries`.
+  It launches the real supervised server and suspended released helper, proves the helper handle
+  list excludes a live inheritable canary before resume, reads exact FXSA plus EOF, requires helper
+  exit zero, queries the durable receipt, and keeps ordinary PLAN plus multi-frame CONNECT on the
+  shared endpoint state machine.
+- Its table mutates every fixed FXHA field and covers zero/planted, aliased, wrong-object and
+  wrong-direction handles, extra bytes, second FXHA, non-MINT, truncated-client rearm and durable
+  state stability. Production now revalidates client PID, creation identity, SID, session and
+  liveness immediately before `DuplicateHandle`; the pure production predicate has mutation tests
+  for every component.
+- MinGW links the complete process test. Native `windows-2025` execution and the real `CONIN$`
+  null-stdio/mode-restoration process leg remain required before any Acceptance row is checked.
 
 ## Notes
 

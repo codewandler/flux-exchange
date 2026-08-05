@@ -8,26 +8,27 @@ use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_INSUFFICIENT_BUFFER, HANDLE, HANDLE_FLAG_INHERIT,
-    WAIT_OBJECT_0,
+    CloseHandle, GetLastError, ERROR_BROKEN_PIPE, ERROR_INSUFFICIENT_BUFFER, HANDLE,
+    HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY,
     TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::ReadFile;
-use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
-    InitializeProcThreadAttributeList, OpenProcessToken, TerminateProcess,
-    UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    STARTUPINFOEXW, STARTUPINFOW,
+    CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
+    GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    STARTUPINFOW,
 };
 
 const PIPE_PREFIX: &str = r"\\.\pipe\flux-exchange-local-management-v1-";
@@ -35,6 +36,14 @@ const CLIENT: u8 = 1;
 const SERVER: u8 = 2;
 const PLAN_QUERY: u16 = 0x0007;
 const PLAN_RESPONSE: u16 = 0x0008;
+const CONNECT_BEGIN: u16 = 0x0001;
+const NEED_SECRETS: u16 = 0x0002;
+const SECRET: u16 = 0x0003;
+const CONNECT_COMMIT: u16 = 0x0004;
+const CONNECT_RECEIPT: u16 = 0x0006;
+const SERVICE_ACCOUNT_QUERY: u16 = 0x0021;
+const SERVICE_ACCOUNT_RECEIPT: u16 = 0x0022;
+const CONNECT_SENTINEL: &[u8] = b"x137-windows-connect-secret";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -214,7 +223,7 @@ impl Drop for SupervisedServer {
 }
 
 #[test]
-fn supervised_owner_pipe_serves_exact_plan_while_loopback_tcp_cannot_bootstrap() {
+fn supervised_windows_service_account_helper_delivers_exact_fxsa_and_closes_fxha_adversaries() {
     let mut server = SupervisedServer::spawn();
     let readiness = server.readiness();
     assert_eq!(readiness["schema"], "exchange.supervisor-ready.v2");
@@ -305,6 +314,155 @@ fn supervised_owner_pipe_serves_exact_plan_while_loopback_tcp_cannot_bootstrap()
         );
     }
 
+    let github_plan = plan_query("github", None);
+    let begin = connect_begin(&github_plan, "windows-active-session");
+    let proposal = serde_json::to_vec(&begin).expect("canonical CONNECT proposal");
+    let proposal_digest =
+        proposal_digest("exchange.local-management.v1.connect-proposal", &proposal);
+    let mut ceremony = open_owner_pipe();
+    ceremony
+        .write_all(&frame(CLIENT, CONNECT_BEGIN, &proposal))
+        .expect("CONNECT BEGIN");
+    let needed = read_frame(&mut ceremony);
+    assert_eq!(needed.0, NEED_SECRETS, "CONNECT must enter ActiveSession");
+    let needed_json: Value = serde_json::from_slice(&needed.1).expect("NEED_SECRETS JSON");
+    assert_eq!(needed_json["proposal_digest"], proposal_digest);
+    let needs = needed_json["secrets"].as_array().expect("secret needs");
+    assert_eq!(needs.len(), 1, "GitHub fixture has one secret prompt");
+    let ordinal = u16::try_from(needs[0]["ordinal"].as_u64().expect("secret ordinal"))
+        .expect("bounded ordinal");
+    let mut secret = Vec::with_capacity(2 + CONNECT_SENTINEL.len());
+    secret.extend_from_slice(&ordinal.to_be_bytes());
+    secret.extend_from_slice(CONNECT_SENTINEL);
+    ceremony
+        .write_all(&frame(CLIENT, SECRET, &secret))
+        .expect("CONNECT secret frame");
+    let commit = serde_json::to_vec(&serde_json::json!({
+        "proposal_digest": proposal_digest,
+        "transaction_id": needed_json["transaction_id"],
+    }))
+    .expect("canonical CONNECT COMMIT");
+    ceremony
+        .write_all(&frame(CLIENT, CONNECT_COMMIT, &commit))
+        .expect("CONNECT COMMIT");
+    let receipt = read_frame(&mut ceremony);
+    assert_eq!(receipt.0, CONNECT_RECEIPT, "multi-frame CONNECT receipt");
+    let receipt: Value = serde_json::from_slice(&receipt.1).expect("CONNECT receipt JSON");
+    assert_eq!(receipt["label"], "windows-active-session");
+    assert_eq!(receipt["replayed"], false);
+    let mut eof = [0_u8; 1];
+    assert_eq!(ceremony.read(&mut eof).expect("CONNECT terminal EOF"), 0);
+
+    let expires_at = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("fixture clock")
+        .as_secs()
+        .checked_add(300)
+        .expect("bounded expiry");
+    let helper = MintHelper::spawn(&server.state_root, expires_at);
+    let token = helper.finish();
+    let stored_path = server.state_root.join("service-accounts/store.json");
+    let stored = std::fs::read(&stored_path).expect("durable Service Account authority");
+    let receipt_id = committed_mint_receipt(&stored, expires_at);
+    assert_forms_absent(&stored, &transformed_forms(&token), "Service Account store");
+    let queried = request_one(
+        SERVICE_ACCOUNT_QUERY,
+        &serde_json::to_vec(&serde_json::json!({"receipt_id": receipt_id}))
+            .expect("canonical receipt query"),
+    );
+    assert_eq!(queried.0, SERVICE_ACCOUNT_RECEIPT);
+    let queried: Value = serde_json::from_slice(&queried.1).expect("queried receipt JSON");
+    assert_eq!(queried["receipt_id"], receipt_id);
+    assert_eq!(queried["replayed"], true);
+
+    let before_adversaries = std::fs::read(&stored_path).expect("pre-adversary durable image");
+    let valid = NativePipe::new();
+    let valid_source = valid.write.as_raw_handle() as usize as u64;
+    let mint = frame(
+        CLIENT,
+        0x0020,
+        format!(r#"{{"expires_at":"{expires_at}","id":"adversary"}}"#).as_bytes(),
+    );
+    let mut attachment = fxha(valid_source);
+    for index in 0..8 {
+        let original = attachment[index];
+        attachment[index] ^= 0xff;
+        assert_attachment_refusal(attachment_exchange(&attachment, &mint), "writer_invalid");
+        attachment[index] = original;
+    }
+    assert_attachment_refusal(attachment_exchange(&fxha(0), &mint), "writer_invalid");
+    assert_attachment_refusal(
+        attachment_exchange(&fxha(u64::MAX), &mint),
+        "writer_invalid",
+    );
+
+    let wrong_direction = NativePipe::new();
+    let wrong_direction_value = wrong_direction.read.as_raw_handle() as usize as u64;
+    assert_attachment_refusal(
+        attachment_exchange(&fxha(wrong_direction_value), &mint),
+        "writer_invalid",
+    );
+    let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+    assert!(!event.is_null());
+    let event = unsafe { OwnedHandle::from_raw_handle(event.cast()) };
+    assert_attachment_refusal(
+        attachment_exchange(&fxha(event.as_raw_handle() as usize as u64), &mint),
+        "writer_invalid",
+    );
+
+    let mut alias_pipe = open_owner_pipe();
+    let alias = alias_pipe.as_raw_handle() as usize as u64;
+    let mut alias_request = fxha(alias).to_vec();
+    alias_request.extend_from_slice(&mint);
+    alias_pipe
+        .write_all(&alias_request)
+        .expect("aliased FXHA request");
+    assert_attachment_refusal(read_frame(&mut alias_pipe), "writer_invalid");
+
+    let mut surplus = mint.clone();
+    surplus.push(0);
+    assert_attachment_refusal(
+        attachment_exchange(&fxha(valid_source), &surplus),
+        "invalid_frame",
+    );
+    assert_attachment_refusal(
+        attachment_exchange(&fxha(valid_source), b"FXHA"),
+        "unexpected_frame",
+    );
+    assert_attachment_refusal(
+        attachment_exchange(
+            &fxha(valid_source),
+            &frame(
+                CLIENT,
+                PLAN_QUERY,
+                br#"{"connector":"github","selection":null}"#,
+            ),
+        ),
+        "unexpected_frame",
+    );
+
+    let mut truncated = open_owner_pipe();
+    truncated
+        .write_all(&fxha(valid_source)[..9])
+        .expect("truncated FXHA");
+    drop(truncated);
+    assert_eq!(
+        plan_query("github", None)["version"],
+        "exchange.connection-plan.v2",
+        "a truncated attachment must drop fully before endpoint rearm"
+    );
+    let after_adversaries = std::fs::read(&stored_path).expect("post-adversary durable image");
+    assert_eq!(after_adversaries, before_adversaries);
+    for source in [valid_source, wrong_direction_value, alias] {
+        let spelling = source.to_string();
+        assert!(
+            !after_adversaries
+                .windows(spelling.len())
+                .any(|candidate| candidate == spelling.as_bytes()),
+            "numeric FXHA source HANDLE entered persistence"
+        );
+    }
+
     let mut raw_tcp = TcpStream::connect_timeout(&address, Duration::from_secs(2))
         .expect("loopback TCP listener");
     raw_tcp
@@ -344,6 +502,412 @@ fn supervised_owner_pipe_serves_exact_plan_while_loopback_tcp_cannot_bootstrap()
     );
 
     server.stop();
+}
+
+fn plan_query(connector: &str, selection: Option<&str>) -> Value {
+    let response = request_one(
+        PLAN_QUERY,
+        &serde_json::to_vec(&serde_json::json!({
+            "connector": connector,
+            "selection": selection,
+        }))
+        .expect("canonical PLAN query"),
+    );
+    assert_eq!(response.0, PLAN_RESPONSE);
+    serde_json::from_slice(&response.1).expect("PLAN response JSON")
+}
+
+fn request_one(opcode: u16, payload: &[u8]) -> (u16, Vec<u8>) {
+    let mut pipe = open_owner_pipe();
+    pipe.write_all(&frame(CLIENT, opcode, payload))
+        .expect("native request");
+    let response = read_frame(&mut pipe);
+    let mut eof = [0_u8; 1];
+    assert_eq!(pipe.read(&mut eof).expect("native terminal EOF"), 0);
+    response
+}
+
+fn read_frame(pipe: &mut std::fs::File) -> (u16, Vec<u8>) {
+    let mut header = [0_u8; 12];
+    pipe.read_exact(&mut header).expect("complete FXLM header");
+    assert_eq!(&header[..4], b"FXLM");
+    assert_eq!(header[4], 1);
+    assert_eq!(header[5], SERVER);
+    let length = u32::from_be_bytes(header[8..12].try_into().expect("frame length")) as usize;
+    assert!(length <= 65_536);
+    let mut payload = vec![0_u8; length];
+    pipe.read_exact(&mut payload)
+        .expect("complete FXLM payload");
+    (u16::from_be_bytes([header[6], header[7]]), payload)
+}
+
+fn connect_begin(plan: &Value, label: &str) -> Value {
+    let mut targets = Vec::new();
+    let mut settings = Vec::new();
+    let mut authorities = Vec::new();
+    for field in plan["fields"].as_array().expect("plan fields") {
+        if !field["required"].as_bool().expect("required")
+            || !field["routable"].as_bool().expect("routable")
+        {
+            continue;
+        }
+        let target = &field["target"];
+        let projected = serde_json::json!({
+            "revision": target["revision"],
+            "target": target["id"],
+        });
+        if !targets.iter().any(|held| held == &projected) {
+            targets.push(projected);
+        }
+        if field["secret"] == false && target["id"] != "connection.name" {
+            settings.push(serde_json::json!({
+                "target": target["id"],
+                "value": "fixture-value",
+            }));
+            if field["authority"].is_object() {
+                authorities.push(serde_json::json!({
+                    "revision": null,
+                    "target": target["id"],
+                }));
+            }
+        }
+    }
+    serde_json::json!({
+        "authorities": authorities,
+        "connector": plan["connector"],
+        "label": label,
+        "plan_revision": plan["plan_revision"],
+        "settings": settings,
+        "targets": targets,
+    })
+}
+
+fn proposal_digest(domain: &str, proposal: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(domain.as_bytes());
+    digest.update([0]);
+    digest.update(proposal);
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn fxha(source: u64) -> [u8; 16] {
+    let mut attachment = *b"FXHA\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    attachment[8..].copy_from_slice(&source.to_be_bytes());
+    attachment
+}
+
+fn attachment_exchange(attachment: &[u8], following: &[u8]) -> (u16, Vec<u8>) {
+    let mut pipe = open_owner_pipe();
+    pipe.write_all(attachment).expect("FXHA attachment");
+    pipe.write_all(following).expect("FXHA following bytes");
+    read_frame(&mut pipe)
+}
+
+fn assert_attachment_refusal(response: (u16, Vec<u8>), code: &str) {
+    assert_eq!(response.0, 0x7fff);
+    let body: Value = serde_json::from_slice(&response.1).expect("attachment refusal JSON");
+    assert_eq!(body["code"], code);
+    assert_eq!(body["commit"], "none");
+    assert_eq!(body["retry"], "never");
+}
+
+struct MintHelper {
+    process: HANDLE,
+    fxsa: OwnedHandle,
+}
+
+impl MintHelper {
+    fn spawn(state_root: &Path, expires_at: u64) -> Self {
+        let fxsa = NativePipe::new();
+        let canary = NativePipe::new();
+        let writer = fxsa.write.as_raw_handle() as HANDLE;
+        let inherited = [writer];
+        let mut attribute_bytes = 0_usize;
+        unsafe {
+            InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attribute_bytes);
+        }
+        let mut attribute_storage =
+            vec![0_usize; attribute_bytes.div_ceil(std::mem::size_of::<usize>())];
+        let attribute_list = attribute_storage.as_mut_ptr().cast();
+        assert_ne!(
+            unsafe {
+                InitializeProcThreadAttributeList(attribute_list, 1, 0, &mut attribute_bytes)
+            },
+            0
+        );
+        assert_ne!(
+            unsafe {
+                UpdateProcThreadAttribute(
+                    attribute_list,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                    inherited.as_ptr().cast(),
+                    std::mem::size_of_val(&inherited),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+
+        let executable = PathBuf::from(env!("CARGO_BIN_EXE_flux-exchange"));
+        let application = wide(executable.as_os_str());
+        let mut command_line = wide(OsStr::new(&format!(
+            "\"{}\" local service-account-mint --id native-worker --expires-at {} --writer-handle {}",
+            executable.display(),
+            expires_at,
+            writer as usize
+        )));
+        let mut environment = child_environment(state_root);
+        let mut startup = STARTUPINFOEXW::default();
+        startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = std::ptr::null_mut();
+        startup.StartupInfo.hStdOutput = std::ptr::null_mut();
+        startup.StartupInfo.hStdError = std::ptr::null_mut();
+        startup.lpAttributeList = attribute_list;
+        let mut child = PROCESS_INFORMATION::default();
+        let created = unsafe {
+            CreateProcessW(
+                application.as_ptr(),
+                command_line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+                EXTENDED_STARTUPINFO_PRESENT
+                    | CREATE_NO_WINDOW
+                    | CREATE_SUSPENDED
+                    | CREATE_UNICODE_ENVIRONMENT,
+                environment.as_mut_ptr().cast(),
+                std::ptr::null(),
+                (&startup as *const STARTUPINFOEXW).cast::<STARTUPINFOW>(),
+                &mut child,
+            )
+        };
+        unsafe { DeleteProcThreadAttributeList(attribute_list) };
+        assert_ne!(
+            created,
+            0,
+            "create released Windows Service Account helper: {}",
+            std::io::Error::last_os_error()
+        );
+
+        drop(fxsa.write);
+        drop(canary.write);
+        assert_pipe_closed_without_bytes(&canary.read);
+        assert_ne!(unsafe { ResumeThread(child.hThread) }, u32::MAX);
+        close(child.hThread);
+        Self {
+            process: child.hProcess,
+            fxsa: fxsa.read,
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        let token = read_one_fxsa(&self.fxsa);
+        assert_eq!(
+            unsafe { WaitForSingleObject(self.process, 10_000) },
+            WAIT_OBJECT_0,
+            "released Windows helper exit deadline"
+        );
+        let mut code = u32::MAX;
+        assert_ne!(unsafe { GetExitCodeProcess(self.process, &mut code) }, 0);
+        assert_eq!(code, 0, "one FXSA plus receipt is helper exit zero");
+        close(std::mem::replace(&mut self.process, std::ptr::null_mut()));
+        token
+    }
+}
+
+impl Drop for MintHelper {
+    fn drop(&mut self) {
+        if !self.process.is_null() {
+            unsafe {
+                TerminateProcess(self.process, 1);
+                WaitForSingleObject(self.process, 5_000);
+            }
+            close(std::mem::replace(&mut self.process, std::ptr::null_mut()));
+        }
+    }
+}
+
+struct NativePipe {
+    read: OwnedHandle,
+    write: OwnedHandle,
+}
+
+impl NativePipe {
+    fn new() -> Self {
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let mut read = std::ptr::null_mut();
+        let mut write = std::ptr::null_mut();
+        assert_ne!(
+            unsafe { CreatePipe(&mut read, &mut write, &attributes, 4_096) },
+            0
+        );
+        clear_inherit(read);
+        unsafe {
+            Self {
+                read: OwnedHandle::from_raw_handle(read.cast()),
+                write: OwnedHandle::from_raw_handle(write.cast()),
+            }
+        }
+    }
+}
+
+fn assert_pipe_closed_without_bytes(read: &OwnedHandle) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let mut available = 0_u32;
+        let result = unsafe {
+            PeekNamedPipe(
+                read.as_raw_handle() as HANDLE,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if result == 0 && unsafe { GetLastError() } == ERROR_BROKEN_PIPE {
+            return;
+        }
+        assert_eq!(available, 0, "unrelated canary received bytes");
+        assert!(
+            Instant::now() < deadline,
+            "suspended helper inherited an unlisted canary capability"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn read_one_fxsa(read: &OwnedHandle) -> Vec<u8> {
+    let mut header = [0_u8; 12];
+    read_exact_handle(read, &mut header);
+    assert_eq!(&header[..4], b"FXSA");
+    assert_eq!(&header[4..8], &[1, 1, 0, 0]);
+    let length = u32::from_be_bytes(header[8..12].try_into().expect("FXSA length")) as usize;
+    assert!((1..=512).contains(&length));
+    let mut token = vec![0_u8; length];
+    read_exact_handle(read, &mut token);
+    let mut surplus = [0_u8; 1];
+    assert_eq!(
+        read_handle(read, &mut surplus),
+        0,
+        "FXSA writer closes at EOF"
+    );
+    token
+}
+
+fn read_exact_handle(read: &OwnedHandle, mut output: &mut [u8]) {
+    while !output.is_empty() {
+        let received = read_handle(read, output);
+        assert!(received != 0, "native pipe closed before complete frame");
+        output = &mut output[received..];
+    }
+}
+
+fn read_handle(read: &OwnedHandle, output: &mut [u8]) -> usize {
+    let mut received = 0_u32;
+    let result = unsafe {
+        ReadFile(
+            read.as_raw_handle() as HANDLE,
+            output.as_mut_ptr(),
+            output.len() as u32,
+            &mut received,
+            std::ptr::null_mut(),
+        )
+    };
+    if result == 0 {
+        assert_eq!(unsafe { GetLastError() }, ERROR_BROKEN_PIPE);
+        0
+    } else {
+        received as usize
+    }
+}
+
+fn committed_mint_receipt(stored: &[u8], expires_at: u64) -> String {
+    let stored: Value = serde_json::from_slice(stored).expect("Service Account JSON");
+    let receipts = stored["mint_receipts"]
+        .as_object()
+        .expect("durable receipt map");
+    assert_eq!(receipts.len(), 1);
+    let (receipt_id, receipt) = receipts.iter().next().expect("one mint receipt");
+    assert_nonzero_lowerhex(receipt_id);
+    assert_eq!(receipt["tenant"], "local");
+    assert_eq!(receipt["id"], "native-worker");
+    assert_eq!(receipt["expires_at"], expires_at);
+    assert_eq!(receipt["state"], "committed");
+    receipt_id.clone()
+}
+
+fn transformed_forms(raw: &[u8]) -> Vec<Vec<u8>> {
+    let text = std::str::from_utf8(raw).expect("token UTF-8");
+    let json = serde_json::to_string(text).expect("JSON token encoding");
+    vec![
+        raw.to_vec(),
+        json.as_bytes()[1..json.len() - 1].to_vec(),
+        percent_encode(raw),
+        base64(raw),
+    ]
+}
+
+fn percent_encode(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = Vec::with_capacity(bytes.len() * 3);
+    for byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(*byte);
+        } else {
+            encoded.extend_from_slice(&[
+                b'%',
+                HEX[usize::from(byte >> 4)],
+                HEX[usize::from(byte & 0x0f)],
+            ]);
+        }
+    }
+    encoded
+}
+
+fn base64(bytes: &[u8]) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = Vec::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        encoded.push(ALPHABET[usize::from(first >> 2)]);
+        encoded.push(ALPHABET[usize::from(((first & 3) << 4) | (second >> 4))]);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[usize::from(((second & 15) << 2) | (third >> 6))]
+        } else {
+            b'='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[usize::from(third & 63)]
+        } else {
+            b'='
+        });
+    }
+    encoded
+}
+
+fn assert_forms_absent(bytes: &[u8], forms: &[Vec<u8>], surface: &str) {
+    for (index, form) in forms.iter().enumerate() {
+        assert!(
+            !bytes
+                .windows(form.len())
+                .any(|candidate| candidate == form.as_slice()),
+            "secret representation {index} entered {surface}"
+        );
+    }
 }
 
 fn open_owner_pipe() -> std::fs::File {
