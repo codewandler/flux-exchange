@@ -409,8 +409,11 @@ impl HelperProcess {
 
     fn assert_terminal_echo_restored(&self) {
         let mut attributes = unsafe { std::mem::zeroed::<libc::termios>() };
+        // Darwin revokes the controlling-terminal association when the helper session leader
+        // exits, so the retained slave can report EIO even though its descriptor is still open.
+        // The PTY master remains the stable post-exit observer of the same terminal attributes.
         assert_eq!(
-            unsafe { libc::tcgetattr(self.terminal_control.as_raw_fd(), &mut attributes) },
+            unsafe { libc::tcgetattr(self.terminal.as_raw_fd(), &mut attributes) },
             0,
             "PTY terminal attributes after helper exit"
         );
