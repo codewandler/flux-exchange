@@ -48,6 +48,10 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # The gate proves the frozen fixture against its earlier candidate commit without a
+          # network fetch, so retain the history that contains that immutable object.
+          fetch-depth: 0
 
       - name: Refuse an unpublished or incomplete tagged tree before tokens or tools
         run: |
