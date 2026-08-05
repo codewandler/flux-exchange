@@ -234,9 +234,8 @@ fn send_one_descriptor(
     message.msg_iov = &mut iovec;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_bytes
-        .try_into()
-        .map_err(|_| UnixHandoffError::MalformedControl)?;
+    message.msg_controllen =
+        message_control_length(control_bytes).ok_or(UnixHandoffError::MalformedControl)?;
     // SAFETY: the initialized control buffer is large and aligned for one cmsghdr plus one fd.
     unsafe {
         let header = libc::CMSG_FIRSTHDR(&message);
@@ -276,9 +275,8 @@ fn receive_descriptors(
     message.msg_iov = &mut iovec;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = control_bytes
-        .try_into()
-        .map_err(|_| UnixHandoffError::MalformedControl)?;
+    message.msg_controllen =
+        message_control_length(control_bytes).ok_or(UnixHandoffError::MalformedControl)?;
     #[cfg(target_os = "linux")]
     let receive_flags = libc::MSG_CMSG_CLOEXEC;
     #[cfg(target_os = "macos")]
@@ -451,6 +449,16 @@ fn aligned_control(bytes: usize) -> Vec<MaybeUninit<libc::cmsghdr>> {
 fn cmsg_space(bytes: usize) -> usize {
     // SAFETY: CMSG_SPACE performs bounded integer alignment for this tiny descriptor count.
     unsafe { libc::CMSG_SPACE(bytes as _) as usize }
+}
+
+#[cfg(target_os = "linux")]
+fn message_control_length(bytes: usize) -> Option<usize> {
+    Some(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn message_control_length(bytes: usize) -> Option<libc::socklen_t> {
+    bytes.try_into().ok()
 }
 
 fn cmsg_len(bytes: usize) -> usize {
@@ -691,8 +699,7 @@ mod tests {
         message.msg_iov = &mut iovec;
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = control_bytes
-            .try_into()
+        message.msg_controllen = message_control_length(control_bytes)
             .expect("bounded control length fits the platform msghdr");
         unsafe {
             let header = libc::CMSG_FIRSTHDR(&message);
