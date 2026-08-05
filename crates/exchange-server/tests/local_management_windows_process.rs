@@ -395,8 +395,10 @@ fn supervised_windows_service_account_helper_delivers_exact_fxsa_and_closes_fxha
     let receipt: Value = serde_json::from_slice(&receipt.1).expect("CONNECT receipt JSON");
     assert_eq!(receipt["label"], "windows-active-session");
     assert_eq!(receipt["replayed"], false);
-    let mut eof = [0_u8; 1];
-    assert_eq!(ceremony.read(&mut eof).expect("CONNECT terminal EOF"), 0);
+    assert!(
+        read_named_pipe_to_end(&mut ceremony).is_empty(),
+        "CONNECT terminal has surplus bytes"
+    );
 
     let expires_at = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
