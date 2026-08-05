@@ -1,21 +1,21 @@
 ---
 id: X-126
-title: "Publish verified local Exchange binaries for every Flux platform"
+title: "Publish verified local Exchange binaries for Linux"
 status: in-progress
 priority: 0
 epic: remote-deployment
 areas: [ci, release, supply-chain, exchange-server]
-depends_on: [X-125, X-127, X-128, X-129, X-134]
+depends_on: [X-125, X-127, X-128, X-129, X-134, X-139]
 design: docs/designs/local-release-v1.md
-note: "Milestone 1 — Flux can manage a separately released, attested Exchange executable on a clean machine without bundling plugins or trusting PATH"
+note: "Milestone 1 — supported Linux Flux can manage a separately released, attested Exchange executable without bundling plugins or trusting PATH"
 ---
 
-# Publish verified local Exchange binaries for every Flux platform
+# Publish verified local Exchange binaries for Linux
 
 ## Goal
 
-Give `flux exchange local start` a separately released Exchange executable it can discover from a
-signed stable update channel, identify, verify and run on a clean machine. Exchange owns the channel
+Give supported Linux `flux exchange local start` a separately released Exchange executable it can
+discover from a signed stable update channel, identify, verify and run on a clean machine. Exchange owns the channel
 and binary release; Flux owns compatible-version selection, download and lifecycle. No official
 connector executable or plugin becomes part of either core distribution, and shipping a compatible
 Exchange or connector update does not require shipping Flux again.
@@ -36,18 +36,35 @@ implements its manager in C-510.
 
 ## Acceptance
 
-- [ ] After X-125, X-127, X-128, X-129 and X-134 are complete, a tag release builds one Exchange server
-      archive for each platform Flux supports:
-      `aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`,
-      `x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`. The target list is a checked closed
-      set matching Flux's `dist-workspace.toml`; changing either list requires one coordinated
-      contract update rather than silently omitting a platform. A target enters the manifest only
+### Decision 0012 platform amendment
+
+Flux-roadmap Decision 0012 at `dc907fa` is the platform authority for every Acceptance row below.
+It replaces every lower five-platform, Unix/macOS/Windows, Darwin, MSVC, zip, HANDLE and FXHA
+publication clause with this exact closed set:
+
+- `aarch64-unknown-linux-gnu` on `ubuntu-24.04-arm`; and
+- `x86_64-unknown-linux-gnu` on `ubuntu-24.04`.
+
+There are exactly two deterministic `tar.zst` assets, two terminal native reports and two manifest
+asset entries. The production native ABI is Linux `getpwuid_r`/`SO_PEERCRED`, fixed inherited FDs,
+`SCM_RIGHTS` and the Linux proc start marker. Non-Linux target input refuses before build, staging,
+signing or publication. Lower rows remain authoritative for their platform-independent trust,
+canonical bytes, compatibility, signature, provenance, source/tag, history, public-verifier,
+failure-atomicity and bounds requirements only; their non-Linux examples and numeric five-target
+counts are superseded and are not acceptance. The published portable five-target C-515 release identity remains
+accepted upstream, while Exchange consumes its applicable Linux evidence. No v3 schema is created
+solely by contracting the unpublished platform set.
+
+- [ ] After X-125, X-127, X-128, X-129 and X-134 are complete, a tag release builds one Exchange
+      server archive for each target in the exact closed set `aarch64-unknown-linux-gnu` and
+      `x86_64-unknown-linux-gnu`. This set is independent of Flux's five-target distribution; any
+      addition requires a coordinated contract update rather than inference from Flux or Cargo. A target enters the manifest only
       after X-127's native owner-only restart proof and X-128's native supervised-readiness proof
       plus C-515's prepared-store child-crash/reopen and lifetime-lease contention/release suites
       pass natively for that exact target; cross-compilation, a merged provider commit or an
       unpublished dependency is insufficient.
-- [ ] Unix assets are deterministic archives and Windows is a deterministic zip, each named with
-      the exact Exchange version and target triple. Each contains the server executable and only
+- [ ] Both assets are deterministic `tar.zst` archives named with the exact Exchange version and
+      target triple. Each contains the `flux-exchange` server executable and only
       explicitly allowed runtime documentation/licence material: no connector/plugin executable,
       dynamic download helper, credential, deployment config or sibling checkout content.
 - [ ] The release carries one UTF-8 canonical-JSON manifest with schema identity
@@ -100,7 +117,7 @@ implements its manager in C-510.
       paths; absolute paths, `..`, alternate separators, links, devices and duplicate normalized
       member names refuse.
 - [ ] The version-two bounds are part of the signed schema and the verifier: manifest at most
-      256 KiB; exactly five asset entries; each archive at most 256 MiB; at most 16 members and
+      256 KiB; exactly two asset entries; each archive at most 256 MiB; at most 16 members and
       512 MiB total expanded bytes per archive; each member at most 256 MiB; each member path at most
       240 UTF-8 bytes. Staged and live verification apply the bounds before allocation/extraction and
       refuse integer overflow, size disagreement, trailing data or decompression past a declared
@@ -166,17 +183,17 @@ implements its manager in C-510.
       actual routes/types; X-134 binds the plan and owner-bound protocols. The same values occur in
       channel, manifest, compatibility and X-128 readiness fixtures.
 - [ ] Compatibility identities are versioned protocols, not the workspace package version used as
-      a guess. A release check executes every platform artifact it can run directly or under the
-      declared cross-platform harness and proves its JSON agrees with the manifest; a missing,
+      a guess. A release check executes both Linux artifacts on their declared native runners and
+      proves their JSON agrees with the manifest; a missing,
       malformed or contradictory compatibility field refuses publication.
 - [ ] A permanent content-derived X-126 readiness guard, with no flag, environment bypass, network
       lookup or mutable marker, fails closed until the tagged tree registry-resolves exactly one
       checksummed `codewandler-connector-secrets` 0.20.0, contains none of the obsolete v1
       channel/manifest/compatibility/readiness producers or `exchange-release-v1` candidate tree,
-      and contains the complete digest-checked v2 fixture inventory with trust v1, the exact eight
-      protocols, the inherited nine X-128 native cases/fourteen exact bindings plus four X-134
-      ratchet cases/five exact bindings — thirteen cases and nineteen bindings combined — and the inherited
-      trust-v1 refusal cases. Its synthetic self-test independently proves each stale dependency,
+      and contains X-139's complete digest-checked v2 fixture inventory with trust v1, the exact
+      eight protocols, every retained Linux X-128/X-134/C-515 obligation and binding derived from one
+      canonical native-evidence authority, plus the inherited trust-v1 refusal cases. No numeric
+      family/binding count is a release ratchet. Its synthetic self-test independently proves each stale dependency,
       identity, missing/extra protocol, residual v1 tree, fixture corruption and lost native/trust
       case refuses.
 - [ ] That readiness guard is the first post-checkout action in local-release preflight, before
@@ -220,8 +237,8 @@ implements its manager in C-510.
 - [ ] X-126 materializes the provider conformance set named by the design under
       `tests/fixtures/exchange-release-v2/`: canonical positive trust, channel, manifest,
       compatibility and readiness bytes with test-only threshold signatures and bounded
-      archives, plus the machine-readable adversarial mutation inventory. It includes all three
-      process-start tags, Unix FD/Windows HANDLE ABI fixtures, supervisor-death liveness fixtures,
+      archives, plus the machine-readable adversarial mutation inventory. It includes the exact
+      `linux-proc-start`, fixed FD 3/4 supervised ABI and supervisor-death liveness fixtures,
       integer/decimal/grammar/key-material limits, global rollback transactions, expiry while
       stopped/live and every provenance-free offline input. A checked
       fixture-set manifest records every relative filename and SHA-256. Exchange's staged verifier
@@ -237,7 +254,7 @@ implements its manager in C-510.
       asset or staged/live shape difference leaves the release visibly failed.
 - [ ] X-126 is not marked `done` when workflow code, fixtures or uploaded draft assets are green. Its
       first real immutable `vX.Y.Z` production tag must complete the post-publication verifier over
-      the public five-target release with the exact production trust/delegation policy, the one
+      the public two-target Linux release with the exact production trust/delegation policy, the one
       admitted GitHub asset redirect and the staged/live byte-identical manifest. The tag, release
       URL, verifier run and source SHA are recorded in Progress before the story closes; a failed
       live verification leaves the release unusable by Flux and this story open.
@@ -252,6 +269,11 @@ implements its manager in C-510.
       update.
 
 ## Progress
+
+- 2026-08-05: Flux-roadmap Decision 0012 at `dc907fab219d67f80bf08311ebdfdeb766f1e8d7`
+  contracted the unpublished Exchange product to the two Linux GNU targets. All five-target facts
+  below are historical implementation/audit evidence only; X-137 removes non-Linux product paths
+  and X-139 regenerates the final derived two-target authority before publication.
 
 - 2026-08-04: Filed from cross-repository Decision 0004 after the Milestone 1 seam audit found that
   `flux exchange local start` had no executable available from a clean Flux installation.
@@ -314,15 +336,17 @@ implements its manager in C-510.
 
 - Cross-repository authority:
   `../flux-roadmap/decisions/0004-flux-manages-a-verified-local-exchange.md` at frozen roadmap
-  authority `daf80d5`.
+  authority `daf80d5`, as superseded on platform scope by Decision 0012 at
+  `dc907fab219d67f80bf08311ebdfdeb766f1e8d7`.
 - Flux C-510 consumes this channel and owns rollback state, compatible selection, verified
   cache/install/start/status/stop and audit of the installed exact identity. X-126 does not add a
   downloader or lifecycle manager to Exchange.
 - `docs/designs/local-release-v1.md` is the provider source of truth. X-126 materializes its positive
   and adversarial fixtures; Flux may vendor those exact bytes with the Exchange commit and fixture
   digest, but may not restate a different schema, bound or transport under a competing identity.
-- X-127 owns native five-target persistence and owner-only Windows DACLs. X-128 owns Exchange's
-  supervised launch/readiness record. Neither is satisfied by adding an archive to this workflow.
+- X-127's portable persistence and X-128's portable supervised-readiness work remain historical
+  evidence. X-126 consumes their Linux rows only; neither is satisfied by adding an archive to this
+  workflow.
 - X-134 supersedes X-125's secret-bearing submission with the exact v2 connection-plan protocol that
   compatibility identifies. X-113 delivered the effective catalogue/invoke routes; X-129 gives
   those actual wire types the exact four ids required here. Version reporting binds those contracts;

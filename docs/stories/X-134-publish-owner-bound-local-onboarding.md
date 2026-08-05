@@ -4,10 +4,10 @@ title: "Publish owner-bound local onboarding without secret JSON"
 status: in-progress
 priority: 0
 epic: connections
-areas: [exchange-server, identity, connections, grants, protocol, tests, windows]
+areas: [exchange-server, identity, connections, grants, protocol, tests]
 depends_on: [X-125, X-127, X-128, X-129]
 design: docs/designs/local-release-v1.md
-note: "Milestone 1 — OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public local release"
+note: "Milestone 1 — Linux OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public Linux release"
 ---
 
 # Publish owner-bound local onboarding without secret JSON
@@ -40,8 +40,8 @@ item is explicitly retired with evidence satisfying the same X-134 Acceptance ro
    behavior.
 2. [X-136](X-136-bound-helper-plan-and-result-envelope.md) — helper plan validation and the one
    absolute setup/result envelope.
-3. [X-137](X-137-prove-windows-private-input-and-fxha.md) — native Windows private input and FXHA
-   production-process evidence.
+3. [X-137](X-137-constrain-exchange-runtime-and-release-to-linux.md) — remove non-Linux runtime/publication
+   paths and establish the exact two-target Linux boundary.
 4. [X-138](X-138-bind-provider-recovery-and-native-c515-evidence.md) — provider crash/replay and
    exact native C-515 bindings.
 5. [X-139](X-139-canonicalize-release-native-evidence.md) — the sole canonical native-evidence
@@ -52,30 +52,46 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
 
 ## Acceptance
 
+### Decision 0012 platform amendment
+
+Flux-roadmap Decision 0012 at `dc907fa` is the platform authority for every Acceptance row below.
+It replaces every lower Unix/macOS/Windows split with Linux only. Production derives the owner root
+with `getpwuid_r(geteuid())`, serves an owner-only Unix socket authenticated with Linux
+`SO_PEERCRED`, uses readiness/liveness FD 3/4, FXSA writer FD 5, ceremony request/result FD 6/7,
+opens `/dev/tty` for direct private input, transfers the writer once with `SCM_RIGHTS` and binds
+process identity to the Linux proc start marker.
+
+There is no macOS support root or `getpeereid` path and no Windows profile/DACL, named pipe,
+impersonation, private `CONIN$`, HANDLE-list or FXHA path. Native FXLM begins directly with its
+12-byte frame; Service Account MINT receives the separately transferred writer capability and no
+descriptor appears in JSON. The hosted WebSocket contract and all platform-independent framing,
+deadline, plan, grant, recovery, receipt, secret-exclusion and C-515 obligations remain unchanged.
+Every lower mixed-platform row is authoritative only for that retained behavior executed on
+`aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`; its non-Linux clauses and five-runner
+counts are superseded and are not acceptance. The unpublished v2 protocol/schema identities remain
+v2.
+
+Authenticated Service Account catalogue/invocation HTTP and hosted FXLM WebSocket behavior remain
+available on a Linux Exchange. This contract adds no remote lifecycle, native FXLM/FXSA,
+connect/grant/mint or remote owner-management protocol for a non-Linux Flux client.
+
 - [ ] This contract change amends X-126's frontmatter to depend on X-134 and replaces/supersedes
       every authoritative v1/six-protocol Acceptance clause with the final v2/eight-protocol
       contract below. X-126 stays `in-progress`; its merged v1 machinery remains unpublished
-      implementation evidence only. X-134 stays `blocked` and no code wave starts until connectors
-      C-515 publishes the prepared secret-transaction port to crates.io and the cross-repository
-      schedule records `connectors/C-515 -> exchange/X-134 -> exchange/X-126`. A path, git
+      implementation evidence only. X-134 closure requires the registry-resolved C-515 0.20.0 exact
+      checksum/source and preserves the recorded order
+      `connectors/C-515 -> exchange/X-134 -> exchange/X-126`. A path, git
       dependency, copied batch representation or Exchange-owned credential schema refuses.
-- [ ] Production derives native roots without `HOME`, `XDG_*`, `USERPROFILE`, `LOCALAPPDATA` or an
-      equivalent inherited variable. Linux uses
-      `getpwuid_r(geteuid()).pw_dir/.local/state/flux-exchange`, macOS uses
-      `getpwuid_r(geteuid()).pw_dir/Library/Application Support/Flux/Exchange`, and Windows uses
-      `SHGetKnownFolderPath(FOLDERID_LocalAppData)/Flux/Exchange`. Traversal refuses symlinks/reparse
-      points; the account home/profile boundary belongs to the expected account; shared ancestors
+- [ ] Production derives the native root without `HOME`, `XDG_*`, `USERPROFILE`, `LOCALAPPDATA` or
+      an equivalent inherited variable. Linux uses
+      `getpwuid_r(geteuid()).pw_dir/.local/state/flux-exchange`. Traversal refuses symlinks; the
+      account home boundary belongs to the expected account; shared ancestors
       are not writable by untrusted accounts; the Exchange root and descendants are owner-only.
       Unsafe existing metadata refuses without chmod, chown, ACL repair or advice to narrow `/tmp`
       or another shared ancestor.
-- [ ] Unix creates `<native-root>/run/local-management-v1.sock` below an owner `0700` directory with
-      an owner `0600` socket and authenticates the startup effective UID using `SO_PEERCRED` on Linux
-      or `getpeereid` on macOS. Windows creates
-      `\\.\pipe\flux-exchange-local-management-v1-<first-32-lowerhex-of-SHA256(TokenUser-SID-bytes)>`
-      in the named-pipe namespace using byte mode, overlapped IO, `PIPE_REJECT_REMOTE_CLIENTS`,
-      `FILE_FLAG_FIRST_PIPE_INSTANCE`, current-user ownership and a protected current-user/System
-      DACL. It authenticates through named-pipe impersonation, `TokenUser` comparison and an
-      unconditional `RevertToSelf`.
+- [ ] Linux creates `<native-root>/run/local-management-v1.sock` below an owner `0700` directory
+      with an owner `0600` socket and authenticates the startup effective UID using `SO_PEERCRED`.
+      The production endpoint implementation has no alternate macOS or Windows transport.
 - [ ] The authenticated peer maps only inside the local-management dispatcher to tenant `local`,
       `PrincipalKind::User`, principal id `local-owner` and operator `true`. It is never installed as
       an HTTP identity provider and cannot authenticate loopback TCP, hosted mode, another account,
@@ -92,9 +108,9 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
       `exchange.service-account-handoff.v1`; and `supervisor` is v2. Deny-unknown serializers,
       parsers, signed fixtures and release checks reject the old six-field object, added fields or a
       changed contract under any existing v1 identity.
-- [ ] `exchange.supervisor-ready.v2` changes only the schema identity and protocol inventory. Unix
-      supervised readiness FD 3/liveness FD 4 and the existing two Windows HANDLE arguments retain
-      their exact X-128 directions and value-free meanings. Local management has no lifecycle opcode
+- [ ] `exchange.supervisor-ready.v2` changes only the schema identity and protocol inventory. Linux
+      supervised readiness FD 3/liveness FD 4 retain their exact X-128 directions and value-free
+      meanings. Local management has no lifecycle opcode
       and never shares readiness, liveness or C-510 lifecycle control.
 - [ ] `exchange.local-management.v1` uses one operation per native connection or hosted WebSocket
       and a 12-byte header: ASCII `FXLM`, version byte `1`, direction byte (`1` client-to-server or
@@ -103,11 +119,9 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
       bytes; `NEED_SECRETS.secrets` has 0..=64 entries, at most 64 secret frames and 1 MiB cumulative
       payload are accepted. The header has no
       flag field. Native byte-stream reads may split or coalesce bytes arbitrarily; the 12-byte header
-      and declared payload length delimit each successive FXLM frame. The sole native prefix is the
-      Windows-only 16-byte `FXHA` Service Account writer attachment defined below. It is admitted
-      exactly once, immediately before MINT on that already owner-authenticated named-pipe
-      connection; it is not an FXLM frame, JSON member, opcode or ninth release protocol. Every
-      other native operation begins with `FXLM`. Only hosted transport binds
+      and declared payload length delimit each successive FXLM frame. Every native operation begins
+      with `FXLM`; the Service Account writer is transferred separately with `SCM_RIGHTS` alongside
+      MINT and is never a frame, JSON member, opcode or ninth release protocol. Only hosted transport binds
       message boundaries to frames: each reassembled WebSocket binary message contains exactly one
       complete FXLM frame and is at most 65,548 bytes. WebSocket fragmentation is transport-only;
       splitting one FXLM frame across messages is a truncated frame and coalescing frames in one
@@ -325,14 +339,10 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
       software/dataflow invariant, not OS isolation against a malicious same-user debugger.
       With `secrets:[]` the helper opens no TTY/browser, emits no SECRET and sends COMMIT directly;
       Flux's request/result view remains identical and value-free.
-- [ ] The exact helper grammar and capability ABI are provider-fixtured and closed. Unix vendor input
+- [ ] The exact helper grammar and capability ABI are provider-fixtured and closed. Linux vendor input
       is `flux-exchange local vendor-secret` with no arguments: request-read FD 6 and terminal-
       response-write FD 7 are distinct anonymous pipes, FD 5 is closed/reserved for FXSA, every other
-      FD at or above 3 is closed, and the helper sets `FD_CLOEXEC` on 6/7. Windows vendor input is
-      exactly `flux-exchange local vendor-secret --request-handle <canonical-decimal>
-      --response-handle <canonical-decimal>` in that order; the two nonzero, distinct, correctly
-      directed anonymous-pipe HANDLEs are the complete `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, and the
-      helper clears inheritance after validation. Each pipe is capped at one 65,548-byte FXLM frame
+      FD at or above 3 is closed, and the helper sets `FD_CLOEXEC` on 6/7. Each pipe is capped at one 65,548-byte FXLM frame
       plus EOF. Request completion is bounded at 5 seconds from spawn. Endpoint discovery/pinning,
       both native connect/auth handshakes, complete connection-1 plan query/response/close and
       revalidation, and readiness to write BEGIN on connection 2 are bounded together at 5 seconds
@@ -341,14 +351,11 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
       pre-decision and, after its durable decision, 30-second post-decision budgets. Flux result
       completion is therefore exactly bounded at `5 + 300 + 30 = 335` seconds from request EOF;
       traffic resets no budget.
-      Service Account mint remains
+      Service Account mint is exactly
       `flux-exchange local service-account-mint --id <id> --expires-at <canonical-decimal>
-      --writer-fd 5` on Unix or the same command with `--writer-handle <canonical-decimal>` on
-      Windows. On Windows the helper validates that local argv HANDLE and clears inheritance, then
-      writes the exact `FXHA` attachment followed immediately by canonical MINT on one authenticated
-      connection. No endpoint, tenant, credential address, program, cwd or arbitrary argument is
+      --writer-fd 5`. No endpoint, tenant, credential address, program, cwd or arbitrary argument is
       caller-selectable; the helper rederives the owner-private root/endpoint. Standard streams are
-      null and the helper opens `/dev/tty` or the Windows console directly. Stdout/stderr are empty;
+      null and the helper opens `/dev/tty` directly. Stdout/stderr are empty;
       exit 0 means one terminal receipt/error was written and closed, while exit 1 is the sole
       value-free capability/transport failure. No other status exists.
 - [ ] Supervised local connect uses one Exchange-server transaction coordinator, not the current plan
@@ -420,27 +427,12 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
       audit delivery succeeds. An unavailable audit sink after the decision or a lost response
       returns `query_receipt`; retry drains/deduplicates and returns the same receipt. No committed
       connection can become visible or replayable without one queryable canonical audit event.
-- [ ] For Service Account mint, Unix helper mode receives only write FD 5 and transfers exactly that
+- [ ] For Service Account mint, the Linux helper receives only write FD 5 and transfers exactly that
       write-only pipe to the authenticated running server through one `SCM_RIGHTS` message. Exchange
       rejects `MSG_CTRUNC`, multiple descriptors and the wrong pipe kind/direction and sets
-      `FD_CLOEXEC`. Windows launches the helper with a closed
-      `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` containing only the declared writer. The helper validates
-      and clears inheritance on that local argv HANDLE, then sends exactly one 16-byte attachment:
-      ASCII `FXHA`, version `1`, direction `1`, kind `1` (Service Account writer), one zero reserved
-      byte and the source-process HANDLE as a big-endian nonzero `u64`, immediately followed by MINT
-      on the same owner-authenticated named-pipe connection. The server obtains and pins that
-      connection's client PID and process-creation identity, revalidates owner SID and session, and
-      calls `DuplicateHandle` from that exact client process into itself. The duplicate is made
-      non-inheritable and must be a distinct writable `FILE_TYPE_PIPE` before MINT is dispatched.
-      Truncated attachment is `truncated_frame`; a second attachment or attachment before any opcode
-      other than MINT is `unexpected_frame`; an extra byte between attachment and MINT is
-      `invalid_frame`; wrong magic/version/direction/kind/reserved byte, zero or unrepresentable
-      HANDLE, PID/creation-identity change, another-process source, duplication failure, non-pipe or
-      unusable direction is `writer_invalid`. Every refusal closes every duplicate before mutation.
-      The source number never enters FXLM JSON, receipts, persistence, audit or logs. Neither side
-      reads remote argv, a PEB or undocumented process information, and no receiver enumerates the
-      process handle table. Native substitution, planted-handle and unrelated-inheritable-handle
-      canaries bind these rows.
+      `FD_CLOEXEC`. Missing, multiple, truncated-control, wrong-kind/direction and unrelated planted
+      descriptors refuse and close every received capability before mutation. No descriptor number
+      enters FXLM JSON, receipts, persistence, audit or logs.
 - [ ] `exchange.service-account-handoff.v1` is exactly one frame followed by EOF: ASCII `FXSA`,
       version byte `1`, direction byte `1` (Exchange to writer), two zero flag bytes, a big-endian
       `u32` length of `1..=512`, then opaque token bytes. Truncation, surplus bytes, a second frame,
@@ -486,8 +478,8 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
       conflict, exact digest preimages, zero-generation/nonzero-nonce transaction ids, handoff
       framing/capability closure, split receipts, grant CAS/preservation, the complete plan-v2
       positive/adversarial corpus, every opcode/transport cell and the unchanged X-128 capability
-      ABI. Vendor-helper fixtures prove Unix 6/7 with planted 3/4/5/8 FDs and Windows' exact two-HANDLE
-      list with an unrelated inheritable canary; one initiating/result frame plus EOF; swapped,
+      ABI. Vendor-helper fixtures prove Linux 6/7 with planted 3/4/5/8 FDs and an unrelated
+      inheritable descriptor canary; one initiating/result frame plus EOF; swapped,
       truncated, surplus, second-frame and wrong-opcode cases; 4/5 and 334/335-second boundaries;
       empty stdout/stderr and exact 0/1 exits; and that transaction ids/ordinals never cross to Flux.
       Plan-validation fixtures cover new create and held-label same-proposal replay with null
@@ -541,11 +533,9 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
       persisted file. Only connector-secrets' committed credential store and C-515 staging sink, the
       dedicated frame/test sink and later Authorization transport are allowlisted; Exchange journals
       remain value-free.
-- [ ] Native CI executes the complete evidence on `macos-15` (`aarch64-apple-darwin`),
-      `macos-15-intel` (`x86_64-apple-darwin`), `ubuntu-24.04-arm`
-      (`aarch64-unknown-linux-gnu`), `ubuntu-24.04` (`x86_64-unknown-linux-gnu`) and `windows-2025`
-      (`x86_64-pc-windows-msvc`). Every row runs root poisoning, owner endpoint/TCP adversary, real
-      TTY/console input, handoff closure plus an extra-capability canary, crash injection before and
+- [ ] Native CI executes the complete evidence on `ubuntu-24.04-arm`
+      (`aarch64-unknown-linux-gnu`) and `ubuntu-24.04` (`x86_64-unknown-linux-gnu`). Every row runs
+      root poisoning, owner endpoint/TCP adversary, real `/dev/tty` input, handoff closure plus an extra-capability canary, crash injection before and
       after connect commit, restart receipt replay, concurrent grant CAS, four-form sentinel scans
       and existing native X-128 tests. The registry-resolved 0.20.0 FileStore holds C-515's exclusive
       lifetime writer/recovery lease throughout each native process test; a second opener refuses,
@@ -560,10 +550,18 @@ partial X-134 contract. Their frontmatter records the serialized dependency orde
       it exactly. The full repository gate and public-site build pass. Any
       corresponding Flux PR runs Flux's `scripts/build-embedded-docs.sh` before its gate so embedded
       documentation cannot be stale. X-126 stays active until X-134 is merged, final v2 fixtures are
-      regenerated from the candidate commit, all five native jobs pass and the separately authorized
+      regenerated from the candidate commit, both native Linux jobs pass and the separately authorized
       public release verifier succeeds.
 
 ## Progress
+
+- 2026-08-05: Flux-roadmap Decision 0012 at `dc907fab219d67f80bf08311ebdfdeb766f1e8d7`
+  contracted the unpublished local Exchange runtime to the two Linux GNU targets. X-137 now owns
+  removal of the non-Linux runtime/release paths; all platform-independent FXLM/FXSA, hosted,
+  recovery, grant and secret-exclusion obligations remain open until the amended child sequence
+  closes.
+- 2026-08-04: X-134 remained blocked until C-515 0.20.0 published; that prerequisite is now
+  satisfied and retained as the exact registry identity used by the in-progress child sequence.
 
 - 2026-08-04T18:11:23+02:00 — The coordinator admitted X-134 for implementation after the accepted
   contract head `9dc414c76f231bd179358fd526019a16872a7be1` merged as

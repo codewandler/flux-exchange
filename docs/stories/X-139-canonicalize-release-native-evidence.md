@@ -1,22 +1,22 @@
 ---
 id: X-139
-title: "Canonicalize the release-native fixture inventory"
+title: "Canonicalize the two-target Linux native-evidence inventory"
 status: blocked
 epic: connections
-areas: [exchange-release, tests, workflows, docs, windows]
+areas: [exchange-release, tests, workflows, docs]
 depends_on: [X-135, X-136, X-137, X-138]
 design: docs/designs/local-release-v1.md
-note: "X-134 child — replace the historical 13-case projection with one canonical JSON authority and final five-target reports"
+note: "X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets"
 ---
 
-# Canonicalize the release-native fixture inventory
+# Canonicalize the two-target Linux native-evidence inventory
 
 ## Goal
 
-Turn the historical 13-case release-native inventory into one canonical, derived and
-publication-blocking authority for the final X-134 tree. The authority names every inherited and
-X-134 obligation, exact test and native runner once; no copied list, literal count or stale fixture
-may certify publication.
+Replace every historical copied or five-target release-native inventory with one canonical, derived
+and publication-blocking authority for the final Linux-only X-134 tree. It names every retained
+inherited obligation, X-134 obligation, exact test and supported Linux runner once; no copied list,
+literal count, stale fixture or non-Linux report may certify publication.
 
 ## Acceptance
 
@@ -24,39 +24,46 @@ may certify publication.
       removes or substitutes each authority class, family, target, runner, feature and exact Cargo
       binding independently and makes publication fail. The sole source is
       `crates/exchange-release/native-evidence-v1.json`; no TSV, Python/digest oracle,
-      `native_fixture_cases()`, Rust expected list, copied YAML target matrix, numeric 13/19 ratchet
-      or `EXPECTED_MATRIX_SHA256` remains.
-- [ ] The JSON models literal X-134, inherited X-128 and inherited C-515 authority classes; native
-      target/runner sets; obligations; exact Cargo tests/features; named adversarial cases;
-      inherited release evidence; and the cross-cutting connector-secrets 0.20 lease assertion. The
-      historical 13-case assessment is input only—the final family/binding totals are derived from
-      the complete contract and are never hard-coded as acceptance.
-- [ ] Derived projections alone drive the Rust generator, frozen fixture tree, publication checker,
-      GitHub runner/target matrix and exact native runner. Every selected test is listed exactly
-      once, executed with `--exact`, proves one passed/zero ignored/zero filtered, and emits a
-      target/runner/inventory-identity report. Publication requires terminal reports from all five
-      native targets and permits no `gap` row.
-- [ ] Exact families cover unsafe production-root ancestry; Unix/Windows owner PLAN and peer/TCP
-      adversaries; private input; SCM_RIGHTS and FXHA positive/refusal/canary/surface exclusion;
-      pre/post-decision crash; restart QUERY/replay; concurrent grant CAS; four-form sentinel scans;
-      X-134 Acceptance 507–513 hosted-origin, clock-boundary, native-stream and hosted-message-state
-      obligations; all nine inherited X-128 cases; and all inherited C-515 tests from X-138.
+      `native_fixture_cases()`, copied YAML target matrix, frozen family/binding count or
+      `EXPECTED_MATRIX_SHA256` remains.
+- [ ] The JSON models literal X-134, inherited X-128 and inherited C-515 authority classes;
+      obligations; exact Cargo tests/features; named adversarial cases; inherited release evidence;
+      and the cross-cutting connector-secrets 0.20 lease assertion. Its supported target/runner set
+      is exactly `aarch64-unknown-linux-gnu`/`ubuntu-24.04-arm` and
+      `x86_64-unknown-linux-gnu`/`ubuntu-24.04`. It contains no Darwin/MSVC target, Windows family or
+      skipped/gap row. `all-native` and `linux-native` both mean exactly those two targets;
+      `unix-native` and `windows-native` are absent.
+- [ ] Derived projections alone drive the Rust generator, complete frozen fixture tree and digest,
+      publication/readiness checkers, GitHub target matrix and exact native runner. Every selected
+      test is listed exactly once, executes with `--exact`, proves one passed/zero ignored/zero
+      filtered and emits a target/runner/inventory-identity report. Publication requires terminal
+      reports from both targets and permits no `gap` row.
+- [ ] The retained X-128 obligations are exactly `x128-expiry-live`,
+      `x128-supervisor-sigkill-responsive`, `x128-supervisor-sigkill-wedged`,
+      `x128-supervisor-unix-normal`, `x128-supervisor-unix-wedged` and
+      `x128-unix-inherited-abi`, projected onto Linux only. The retained X-134 families are exactly
+      `x134-c515-retained-lease`, `x134-connect-crash-replay`, `x134-four-form-sentinel`,
+      `x134-grant-cas`, `x134-helper-deadlines`, `x134-hosted-origin-and-message-state`,
+      `x134-local-management-deadlines`, `x134-native-owner-endpoint`,
+      `x134-native-private-input`, `x134-native-service-account-handoff`,
+      `x134-native-stream-framing` and `x134-production-root-safety`. X-138's
+      exact portable C-515 release identity and Linux Exchange bindings are included. Counts remain
+      derived; non-Linux families are absent, not copied into a negative or optional inventory.
 - [ ] Failing first, `fixture_and_release_guards_are_derived_from_the_candidate_commit` proves the
       fixture inventory, hashes and selection are regenerated from the final candidate-bearing
       commit, followed by the required non-self-referential signed fixture commit. Both readiness
-      and native-fixture checkers pass self-test and real mode without stale v1 consumers.
-- [ ] X-126 remains in progress: its nine X-128/fourteen-binding claim is kept distinct from X-134
-      additions, and public signing/tag/manual-resume verification remains an explicit X-126
-      blocker. This story may not claim a release, publish a crate or weaken X-126's public verifier.
+      and native-fixture checkers pass self-test and real mode without stale v1/five-target
+      consumers. The release workflow runs publication readiness as the first post-checkout action;
+      deriving a matrix or taking another candidate action before readiness is rejected.
+- [ ] X-126 remains in progress: trust, signing, tag/manual-resume and public verification remain
+      its blockers. This story may not claim a release, publish a crate or weaken the public
+      verifier.
 
 ## Progress
 
 - Immutable audit baseline `3dc7b28` contained a committed fixture selecting 12 cases while its
-  release self-test required 13. That exact contradiction is failing-first provenance for replacing
-  copied inventories; 13 is not the final authority or a numeric acceptance ratchet.
-- The committed fixture predating this story is incomplete, and rejected commits `7c1b238` and
-  `5e2b3f4` must never be integrated. Useful list/`--exact` mechanics may be reimplemented only from
-  the final product-test names delivered by X-135 through X-138.
+  release self-test required 13. That contradiction remains failing-first provenance for derived
+  inventories; neither number is the new acceptance ratchet.
 
 ## Notes
 
