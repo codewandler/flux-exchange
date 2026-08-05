@@ -1440,7 +1440,7 @@ mod tests {
         let owner_text = sid_string(endpoint.owner_sid.as_ptr()).expect("owner SID text");
         let pipe = endpoint.waiting.as_ref().expect("owner pipe");
         assert_eq!(
-            endpoint.create_first_instance().err(),
+            endpoint.create_instance(true).err(),
             Some(WindowsEndpointRefusal::Bind),
             "the exact first-instance name cannot be preempted"
         );
