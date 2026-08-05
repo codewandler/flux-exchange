@@ -21,6 +21,7 @@ const CONNECT_BEGIN: u16 = 0x0001;
 const NEED_SECRETS: u16 = 0x0002;
 const SECRET: u16 = 0x0003;
 const CONNECT_COMMIT: u16 = 0x0004;
+const CONNECT_QUERY: u16 = 0x0005;
 const CONNECT_RECEIPT: u16 = 0x0006;
 const PLAN_QUERY: u16 = 0x0007;
 const PLAN_RESPONSE: u16 = 0x0008;
@@ -302,6 +303,16 @@ impl Server {
         self.assert_diagnostics_value_free();
     }
 
+    fn terminate_before_decision(mut self) {
+        self.child
+            .kill()
+            .expect("abrupt pre-decision server termination");
+        let status = self.child.wait().expect("reap pre-decision server");
+        assert!(!status.success(), "pre-decision termination was graceful");
+        self.close_liveness();
+        self.assert_diagnostics_value_free();
+    }
+
     fn finish(mut self) {
         self.close_liveness();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -414,6 +425,66 @@ impl WireFrame {
 }
 
 #[test]
+fn unix_connect_crashes_recover_before_readiness_and_replay_one_receipt() {
+    predecision_crash_aborts_without_a_visible_label();
+    every_postdecision_projection_crash_recovers_one_indivisible_publication();
+    connection_readers_and_mutations_are_both_guarded_by_pending_publication_state();
+    a_live_unresolved_publication_gates_plan_and_mutation_until_same_proposal_replay();
+}
+
+fn predecision_crash_aborts_without_a_visible_label() {
+    let case = CrashCase {
+        connector: "github",
+        durable_image: "coordinator/transactions.sqlite3",
+        label: "predecision-crash",
+        phase: "predecision",
+    };
+    let fixture = Fixture::new(case);
+    let server = fixture.spawn(None);
+    let plan = server.plan(case.connector, None);
+    let begin = connect_begin(&plan, case.label);
+    let mut active = server.session();
+    active.send_control(CONNECT_BEGIN, &begin);
+    let needed = active.read();
+    assert_eq!(needed.opcode, NEED_SECRETS, "pre-decision allocation");
+    assert!(
+        !needed.json()["secrets"]
+            .as_array()
+            .expect("secret needs")
+            .is_empty(),
+        "the abrupt process boundary must follow a real provider allocation"
+    );
+    server.terminate_before_decision();
+    drop(active);
+
+    let restarted = fixture.spawn(None);
+    let mut selected = restarted.session();
+    selected.send_control(
+        PLAN_QUERY,
+        &json!({"connector": case.connector, "selection": case.label}),
+    );
+    let missing = selected.read();
+    assert_eq!(missing.opcode, ERROR, "aborted label became visible");
+    assert_eq!(missing.json()["code"], "unknown_label");
+
+    let mut retry = restarted.session();
+    retry.send_control(CONNECT_BEGIN, &begin);
+    let retried = retry.read();
+    assert_eq!(
+        retried.opcode,
+        NEED_SECRETS,
+        "same proposal did not allocate after pre-decision recovery: {}",
+        retried.text()
+    );
+    restarted.terminate_before_decision();
+    drop(retry);
+
+    let stable = fixture.spawn(None);
+    stable.finish();
+    assert_eq!(transaction_row_count(&fixture), 0);
+    fixture.assert_value_free();
+}
+
 fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
     for case in CASES {
         eprintln!("publication crash case {}", case.phase);
@@ -451,6 +522,16 @@ fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
         let selected = recovered.plan(case.connector, Some(case.label));
         assert_complete_selected_plan(&selected, case.label);
         let first_receipt = replay_receipt(&recovered, &begin);
+        assert_eq!(
+            query_receipt(
+                &recovered,
+                first_receipt["receipt_id"].as_str().expect("receipt id")
+            ),
+            first_receipt,
+            "QUERY and same-proposal replay diverged after {}",
+            case.phase
+        );
+        assert_changed_proposal_conflicts(&recovered, &begin);
         let recovered_image = fixture.image(case.durable_image);
         if case.durable_image == "settings/store.json" {
             assert_settings_replay_only_completes_missing_projection(
@@ -467,6 +548,12 @@ fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
         }
         let selected_bytes = serde_json::to_vec(&selected).expect("canonical selected plan");
         recovered.finish();
+        assert_eq!(
+            transaction_row_count(&fixture),
+            1,
+            "recovery after {} created another transaction row",
+            case.phase
+        );
 
         let stable = fixture.spawn(None);
         assert_eq!(
@@ -483,11 +570,16 @@ fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
             case.phase
         );
         stable.finish();
+        assert_eq!(
+            transaction_row_count(&fixture),
+            1,
+            "stable replay after {} allocated another transaction",
+            case.phase
+        );
         fixture.assert_value_free();
     }
 }
 
-#[test]
 fn connection_readers_and_mutations_are_both_guarded_by_pending_publication_state() {
     let connection = include_str!("../src/local_management/connection.rs");
     let transaction = include_str!("../src/local_management/transaction.rs");
@@ -507,7 +599,6 @@ fn connection_readers_and_mutations_are_both_guarded_by_pending_publication_stat
     );
 }
 
-#[test]
 fn a_live_unresolved_publication_gates_plan_and_mutation_until_same_proposal_replay() {
     let case = CrashCase {
         connector: "github",
@@ -601,6 +692,40 @@ fn replay_receipt(server: &Server, begin: &Value) -> Value {
         json!({"audit": "committed", "resource": "committed"})
     );
     receipt
+}
+
+fn query_receipt(server: &Server, receipt_id: &str) -> Value {
+    let mut query = server.session();
+    query.send_control(CONNECT_QUERY, &json!({"receipt_id": receipt_id}));
+    let receipt = query.read();
+    assert_eq!(
+        receipt.opcode,
+        CONNECT_RECEIPT,
+        "QUERY refused: {}",
+        receipt.text()
+    );
+    let receipt = receipt.json();
+    assert_eq!(receipt["replayed"], true);
+    receipt
+}
+
+fn assert_changed_proposal_conflicts(server: &Server, begin: &Value) {
+    let mut changed = begin.clone();
+    changed["plan_revision"] = json!("1".repeat(64));
+    let mut request = server.session();
+    request.send_control(CONNECT_BEGIN, &changed);
+    let refusal = request.read();
+    assert_eq!(refusal.opcode, ERROR, "changed proposal was admitted");
+    assert_eq!(refusal.json()["code"], "proposal_conflict");
+}
+
+fn transaction_row_count(fixture: &Fixture) -> i64 {
+    let connection =
+        rusqlite::Connection::open(fixture.state.join("coordinator/transactions.sqlite3"))
+            .expect("open value-free transaction journal");
+    connection
+        .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
+        .expect("count value-free transaction rows")
 }
 
 fn assert_complete_selected_plan(plan: &Value, label: &str) {

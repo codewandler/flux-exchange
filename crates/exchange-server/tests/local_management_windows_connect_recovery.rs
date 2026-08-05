@@ -418,6 +418,9 @@ fn predecision_crash_aborts_without_a_visible_label() {
         retried.text()
     );
     restarted.terminate_before_decision();
+    let stable = fixture.spawn(None);
+    stable.stop();
+    assert_eq!(transaction_row_count(&fixture), 0);
     fixture.assert_value_free();
 }
 
@@ -460,7 +463,9 @@ fn postdecision_crash_rolls_forward_once_and_replays_one_receipt() {
         .to_owned();
     let queried = query_receipt(&fixture.pipe, &receipt_id);
     assert_eq!(queried, replayed, "QUERY and same-proposal replay diverged");
+    assert_changed_proposal_conflicts(&fixture.pipe, &begin);
     recovered.stop();
+    assert_eq!(transaction_row_count(&fixture), 1);
 
     let stable = fixture.spawn(None);
     assert_eq!(
@@ -478,6 +483,7 @@ fn postdecision_crash_rolls_forward_once_and_replays_one_receipt() {
         "second restart created another semantic head revision"
     );
     stable.stop();
+    assert_eq!(transaction_row_count(&fixture), 1);
     fixture.assert_value_free();
 }
 
@@ -552,6 +558,23 @@ fn query_receipt(pipe: &str, receipt_id: &str) -> Value {
     let receipt = receipt.json();
     assert_receipt(&receipt, true);
     receipt
+}
+
+fn assert_changed_proposal_conflicts(pipe: &str, begin: &Value) {
+    let mut changed = begin.clone();
+    changed["plan_revision"] = json!("1".repeat(64));
+    let refusal = Session::connect(pipe).request_control(CONNECT_BEGIN, &changed);
+    assert_eq!(refusal.opcode, ERROR, "changed proposal was admitted");
+    assert_eq!(refusal.json()["code"], "proposal_conflict");
+}
+
+fn transaction_row_count(fixture: &Fixture) -> i64 {
+    let connection =
+        rusqlite::Connection::open(fixture.state.join("coordinator/transactions.sqlite3"))
+            .expect("open value-free transaction journal");
+    connection
+        .query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get(0))
+        .expect("count value-free transaction rows")
 }
 
 fn connect_begin(plan: &Value, label: &str) -> Value {

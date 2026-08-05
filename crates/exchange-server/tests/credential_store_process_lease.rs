@@ -86,11 +86,7 @@ fn assert_provider_lease_conflict(error: CredentialStoreError) {
     );
 }
 
-#[test]
-fn c515_lease_opener_process() {
-    let Some(mode) = std::env::var_os(HELPER_MODE) else {
-        return;
-    };
+fn run_lease_opener_process(mode: &std::ffi::OsStr) {
     let path = PathBuf::from(std::env::var_os(HELPER_STORE).expect("helper store path"));
     match mode.to_str().expect("ASCII helper mode") {
         REFUSE => {
@@ -115,7 +111,7 @@ fn c515_lease_opener_process() {
 fn run_opener(path: &Path, mode: &str) {
     let output = Command::new(std::env::current_exe().expect("integration test executable"))
         .arg("--exact")
-        .arg("c515_lease_opener_process")
+        .arg("real_server_retains_the_c515_lease_through_recovery_and_readiness")
         .arg("--nocapture")
         .env(HELPER_MODE, mode)
         .env(HELPER_STORE, path)
@@ -134,6 +130,10 @@ fn run_opener(path: &Path, mode: &str) {
 
 #[test]
 fn real_server_retains_the_c515_lease_through_recovery_and_readiness() {
+    if let Some(mode) = std::env::var_os(HELPER_MODE) {
+        run_lease_opener_process(&mode);
+        return;
+    }
     let root = private_root();
     let store_path = root.join("credentials/store.txt");
     seed_committed_provider_state(&store_path);

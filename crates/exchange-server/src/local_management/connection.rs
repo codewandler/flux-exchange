@@ -150,21 +150,10 @@ impl Ceremony {
             }
         }
 
-        let snapshot =
-            match crate::routes::native_plan_snapshot(&self.state, tenant, begin.connector(), None)
-            {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    return BeginOutcome::Terminal(refusal(error.code, error.status, error.retry));
-                }
-            };
-        if begin.plan_revision() != snapshot.plan_revision {
-            return BeginOutcome::Terminal(refusal("stale_plan", 409, "refresh"));
-        }
-        if let Err(error) = begin.validate_target_closure(&target_facts(&snapshot)) {
-            return BeginOutcome::Terminal(proposal_refusal(&begin, &snapshot, error));
-        }
-
+        // An exact committed replay returned above. Any other proposal for a label that already
+        // exists is a value-free conflict regardless of whether its embedded plan revision has
+        // since become stale; validating current plan bytes first would make the same durable
+        // conflict depend on unrelated later catalogue state.
         let label = match ConnectionLabel::new(begin.label()) {
             Ok(label) => label,
             Err(_) => return BeginOutcome::Terminal(refusal("invalid_label", 422, "never")),
@@ -185,6 +174,22 @@ impl Ceremony {
                 return BeginOutcome::Terminal(refusal("store_unavailable", 503, "operator"));
             }
         }
+
+        let snapshot =
+            match crate::routes::native_plan_snapshot(&self.state, tenant, begin.connector(), None)
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    return BeginOutcome::Terminal(refusal(error.code, error.status, error.retry));
+                }
+            };
+        if begin.plan_revision() != snapshot.plan_revision {
+            return BeginOutcome::Terminal(refusal("stale_plan", 409, "refresh"));
+        }
+        if let Err(error) = begin.validate_target_closure(&target_facts(&snapshot)) {
+            return BeginOutcome::Terminal(proposal_refusal(&begin, &snapshot, error));
+        }
+
         let Some(claim) = self.state.claim_connection(tenant, begin.connector()) else {
             return BeginOutcome::Terminal(refusal("connect_busy", 409, "refresh"));
         };
