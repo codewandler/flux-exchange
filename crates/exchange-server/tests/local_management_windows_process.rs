@@ -849,7 +849,14 @@ impl PseudoConsole {
             env!("CARGO_BIN_EXE_flux-exchange"),
             writer as usize
         );
-        let child = spawn_attached(self.handle, &[writer], &command, &self.state_root, None);
+        let child = spawn_attached(
+            self.handle,
+            &[writer],
+            &command,
+            &self.state_root,
+            None,
+            false,
+        );
         drop(report.write);
         assert_ne!(unsafe { ResumeThread(child.hThread) }, u32::MAX);
         close(child.hThread);
@@ -931,6 +938,7 @@ impl VendorHelper {
             &command,
             state_root,
             result_budget_millis,
+            true,
         );
         drop(request_pipe.read);
         drop(response_pipe.write);
@@ -1013,6 +1021,7 @@ fn spawn_attached(
     command: &str,
     state_root: &Path,
     result_budget_millis: Option<u64>,
+    diagnostic: bool,
 ) -> PROCESS_INFORMATION {
     let mut attribute_bytes = 0_usize;
     unsafe {
@@ -1057,7 +1066,8 @@ fn spawn_attached(
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_flux-exchange"));
     let application = wide(executable.as_os_str());
     let mut command_line = wide(OsStr::new(command));
-    let mut environment = child_environment_with_budget(state_root, result_budget_millis);
+    let mut environment =
+        child_environment_with_budget(state_root, result_budget_millis, diagnostic);
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -1559,10 +1569,14 @@ fn assert_nonzero_lowerhex(value: &str) {
 }
 
 fn child_environment(state_root: &Path) -> Vec<u16> {
-    child_environment_with_budget(state_root, None)
+    child_environment_with_budget(state_root, None, false)
 }
 
-fn child_environment_with_budget(state_root: &Path, result_budget_millis: Option<u64>) -> Vec<u16> {
+fn child_environment_with_budget(
+    state_root: &Path,
+    result_budget_millis: Option<u64>,
+    diagnostic: bool,
+) -> Vec<u16> {
     let mut values = std::env::vars_os().collect::<BTreeMap<OsString, OsString>>();
     values.retain(|name, _| {
         !name
@@ -1579,6 +1593,9 @@ fn child_environment_with_budget(state_root: &Path, result_budget_millis: Option
             "FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS".into(),
             milliseconds.to_string().into(),
         );
+    }
+    if diagnostic {
+        values.insert("FLUX_EXCHANGE_TEST_HELPER_DIAGNOSTIC".into(), "1".into());
     }
     let mut block = Vec::new();
     for (name, value) in values {

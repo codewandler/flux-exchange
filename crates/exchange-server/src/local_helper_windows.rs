@@ -85,11 +85,15 @@ pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
             response,
         }) => {
             if detach_standard_handles().is_err() {
+                test_helper_failure_stage(11);
                 return HelperExit::CapabilityOrTransportFailure;
             }
             match NativeVendorCeremony::new() {
                 Ok(mut ceremony) => run_vendor(request, response, &mut ceremony),
-                Err(_) => HelperExit::CapabilityOrTransportFailure,
+                Err(_) => {
+                    test_helper_failure_stage(12);
+                    HelperExit::CapabilityOrTransportFailure
+                }
             }
         }
         LocalHelperInvocation::ServiceAccountMint {
@@ -1036,22 +1040,53 @@ struct VendorCapabilities {
 
 impl VendorCapabilities {
     fn take(request: WindowsHandle, response: WindowsHandle) -> Result<Self, WindowsHelperError> {
-        let request = inherited_pipe(request, PipeEnd::Read)?;
-        let response = inherited_pipe(response, PipeEnd::Write)?;
+        let request = inherited_pipe(request, PipeEnd::Read).map_err(|error| {
+            test_helper_failure_stage(13);
+            error
+        })?;
+        let response = inherited_pipe(response, PipeEnd::Write).map_err(|error| {
+            test_helper_failure_stage(14);
+            error
+        })?;
         let request_raw = request.as_raw_handle() as HANDLE;
         let response_raw = response.as_raw_handle() as HANDLE;
         // CompareObjectHandles catches aliases even when a launcher supplied two numeric values.
         // File identity catches the opposite ends of one anonymous pipe: the ABI requires two
         // distinct pipes, so Flux can never read the terminal result through its request channel.
-        if unsafe { CompareObjectHandles(request_raw, response_raw) } != 0
-            || pipe_identity(request_raw)? == pipe_identity(response_raw)?
-        {
+        if unsafe { CompareObjectHandles(request_raw, response_raw) } != 0 {
+            test_helper_failure_stage(15);
             return Err(WindowsHelperError::Capability);
         }
-        clear_inheritance(request_raw)?;
-        clear_inheritance(response_raw)?;
+        let request_identity = pipe_identity(request_raw).map_err(|error| {
+            test_helper_failure_stage(16);
+            error
+        })?;
+        let response_identity = pipe_identity(response_raw).map_err(|error| {
+            test_helper_failure_stage(17);
+            error
+        })?;
+        if request_identity == response_identity {
+            test_helper_failure_stage(18);
+            return Err(WindowsHelperError::Capability);
+        }
+        clear_inheritance(request_raw).map_err(|error| {
+            test_helper_failure_stage(19);
+            error
+        })?;
+        clear_inheritance(response_raw).map_err(|error| {
+            test_helper_failure_stage(20);
+            error
+        })?;
         Ok(Self { request, response })
     }
+}
+
+fn test_helper_failure_stage(stage: u8) {
+    #[cfg(feature = "native-console-test-seam")]
+    if std::env::var_os("FLUX_EXCHANGE_TEST_HELPER_DIAGNOSTIC").is_some() {
+        std::process::exit(i32::from(stage));
+    }
+    let _ = stage;
 }
 
 #[derive(Clone, Copy)]
