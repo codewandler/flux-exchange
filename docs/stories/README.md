@@ -38,7 +38,6 @@ lockfile and compile-time tests.
 - [X-111 — Host every connector runtime through Exchange (epic)](X-111-rich-connector-runtimes-epic.md) · EPIC — Exchange is the sole official-integration executor: ship the effective catalogue and existing HTTP invoke first, then rich runtimes and lifecycle
 - [X-126 — Publish verified local Exchange binaries for every Flux platform](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — Flux can manage a separately released, attested Exchange executable on a clean machine without bundling plugins or trusting PATH
 - [X-134 — Publish owner-bound local onboarding without secret JSON](X-134-publish-owner-bound-local-onboarding.md) · Milestone 1 — OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public local release
-- [X-136 — Bound helper plan validation and the absolute result envelope](X-136-bound-helper-plan-and-result-envelope.md) · X-134 child — revalidate the complete v2 plan and keep every helper operation inside one 5s setup / 335s result envelope
 - [X-137 — Prove Windows private input and FXHA in production](X-137-prove-windows-private-input-and-fxha.md) · X-134 child — native MSVC process evidence for CONIN$, owner pipes and the Decision 0007 FXHA writer attachment
 
 ## Next (ready — take the top one unless the user named a story)
@@ -184,6 +183,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-129 — Bind local-release protocol identities to the delivered HTTP wire](X-129-bind-release-protocol-ids-to-the-http-wire.md) · Milestone 1 — compatibility advertises exact tested HTTP wire identities, never placeholders or a package-version guess
 - [X-130 — Adopt the Decision 0006 datasource vocabulary](X-130-adopt-the-decision-0006-datasource-vocabulary.md) · Milestone 0 — resolve the concepts table's last ambiguous owner cell and point the audit's upstream gap at chartered connector work
 - [X-135 — Close hosted and native local-management deadlines](X-135-close-local-management-deadlines.md) · X-134 child — one admission clock, one durable-decision transition and bounded terminal behavior on every transport
+- [X-136 — Bound helper plan validation and the absolute result envelope](X-136-bound-helper-plan-and-result-envelope.md) · X-134 child — revalidate the complete v2 plan and keep every helper operation inside one 5s setup / 335s result envelope
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
