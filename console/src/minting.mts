@@ -1,5 +1,5 @@
-// The mint screen's model: where it lives, who may use it, what a token from here can do today, and
-// what a "copy" button owes an operator when the copy silently did not happen.
+// The Service Account screen's value-free model: where it lives, who may manage identities, and
+// what the resulting principal can do today.
 //
 // **Why this is a module and not a few consts in the screen.** Two of the four are claims about the
 // platform rather than about the layout, and this repository's rule for those is X-41's: a claim is
@@ -31,14 +31,14 @@
 //
 // This module imports `onboarding.mts` and, for a type only, `service.mts`. It reads nothing over
 // the network — the screen does that — and it holds no state at all, which is the property that
-// matters most here: nothing in this file could be where a minted token ends up living.
+// matters most here: nothing in this file can receive or retain the one-shot handoff.
 
 import type { Principal } from './service.mts'
 import { STEPS, authenticationStep, available, withheld, type Step } from './onboarding.mts'
 import { SURFACES, type Surface } from './surfaces.mts'
 
 /**
- * Where the mint screen lives, as a catalogue-style path the fragment router resolves.
+ * Where the Service Account management screen lives, as a catalogue-style path the fragment router resolves.
  *
  * `/service-accounts` and not `/connect`: the first is the canonical non-human identity resource;
  * the second is the operator-facing guide for connecting an App or Agent. That page's argument for taking
@@ -194,62 +194,4 @@ export function authorisation(
     'mint successors and revoking it ends the whole of the access it gave; and an agent’s token ' +
     'grants access to an operation, never to a credential.'
   )
-}
-
-/**
- * When a token minted now should stop resolving, as seconds since the Unix epoch.
- *
- * The console converts a lifetime an operator can reason about into the instant the service wants,
- * and shows them the instant before they send it. It does **not** supply the lifetime: the box
- * starts empty, because `routes::service_accounts` refuses a body with no expiry rather than picking one, and
- * a console with a helpful default in it would quietly become the thing that picks.
- *
- * Read against this browser's clock, which is not the host's. A few seconds of skew is immaterial
- * for a lifetime measured in days, and a clock wrong by more than that produces a refusal naming
- * the expiry rather than a token with a lifetime nobody intended.
- */
-export function expiryFromNow(days: number, now: number = Date.now()): number {
-  return Math.floor(now / 1000) + Math.round(days * 86_400)
-}
-
-/** What became of a copy: it happened, or it did not and here is what to tell the operator. */
-export type Copied = { ok: true } | { ok: false; reason: string }
-
-/**
- * Put text on the clipboard, and report what actually happened.
- *
- * **The whole point of this function is the failure path.** `navigator.clipboard` exists only on a
- * secure origin, so on `http://` to anything but localhost — a bench deployment, a host behind a
- * plain reverse proxy, the first thing anybody stands up — it is simply `undefined`, and the usual
- * shape of this button (`navigator.clipboard.writeText(value)`, unawaited, uncaught) does nothing
- * at all and says nothing about it. An operator who believes they copied a token they did not is
- * strictly worse off than one who selected it by hand: they navigate away, and the token this host
- * cannot show again is gone.
- *
- * A rejected write is the same event by a different route — a permissions policy, a document that
- * is not focused — so it is reported the same way, in the browser's own words rather than in a
- * sentence this console made up about what it thinks went wrong.
- *
- * `clipboard` is a parameter so the two failures can be driven in a test. It is read at call time
- * rather than at module load, because a page can be loaded before its origin is known to be secure.
- */
-export async function writeClipboard(
-  text: string,
-  clipboard: Clipboard | undefined = globalThis.navigator?.clipboard
-): Promise<Copied> {
-  if (!clipboard || typeof clipboard.writeText !== 'function') {
-    return {
-      ok: false,
-      reason:
-        'This page has no clipboard to write to. The browser exposes one only on a secure origin — ' +
-        'https, or localhost — so on a plain http deployment there is nothing here to copy with.',
-    }
-  }
-
-  try {
-    await clipboard.writeText(text)
-    return { ok: true }
-  } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
-  }
 }

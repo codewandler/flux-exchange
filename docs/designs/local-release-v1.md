@@ -110,6 +110,13 @@ array order. There is no ordinal zero and no sparse or caller-chosen ordinal.
 For `secrets=[]`, `secrets.len()` is zero and there are no ordinals or `SECRET` frames; the raw
 secret payload grammar remains nonempty and cannot encode a synthetic empty secret.
 
+The sole prefix outside FXLM framing is Windows Service Account writer attachment `FXHA`. It is
+exactly 16 bytes: ASCII `FXHA`, version byte `1`, direction byte `1` (helper to server), kind byte
+`1` (Service Account writer), one zero reserved byte, then the helper-process source HANDLE as a
+big-endian nonzero `u64`. It is admitted only once, immediately before one MINT frame on the same
+already owner-authenticated named-pipe connection. It is not an FXLM frame, payload member, opcode
+or ninth release protocol; every other native operation begins with the 12-byte `FXLM` header.
+
 One outbound grant selector is the exact object
 `{"effects_within":null|Effects,"idempotency":null|Idempotency,"max_risk":null|Risk}`.
 `Risk` is one of `low`, `medium`, `high`, `destructive`; `Idempotency` is one of `idempotent`,
@@ -566,7 +573,7 @@ The state table is exhaustive. `S` is the initial state and `T` is terminal:
 | grant preview | `S --client 0x0010--> P --server 0x0011|0x7fff--> T` |
 | grant apply | `S --client 0x0012--> D --server 0x0014|0x7fff--> T` |
 | grant query | `S --client 0x0013--> Q --server 0x0014|0x7fff--> T` |
-| Service Account mint | `S --client 0x0020 plus one writer--> D --server 0x0022|0x7fff--> T` |
+| Service Account mint | Windows only: `S --client FXHA--> A --client 0x0020--> D`; Unix transfers one writer with the MINT read; `D --server 0x0022|0x7fff--> T` |
 | Service Account query | `S --client 0x0021--> Q --server 0x0022|0x7fff--> T` |
 | credential/replay | `S --client 0x0030--> B`; `B --server 0x0032--> T` for same-proposal replay, `B --server 0x0002 secrets=[]--> N0`, `B --server 0x0002 secrets=[1..N]--> N` for `N>0`, or `B --server 0x7fff--> T`; `N0 --client 0x0031--> D`; `N --client 0x0003 ordinals 1..N in order--> C --client 0x0031--> D`; `D --server 0x0032|0x7fff--> T` |
 | credential query | `S --client 0x0033--> Q --server 0x0032|0x7fff--> T` |
@@ -890,6 +897,45 @@ TTY/browser open, direct COMMIT and ordinary metadata/audit receipt. Adversarial
 `SECRET` for `N=0`, COMMIT before all ordinals for `N>0`, skip an ordinal, send an empty raw secret
 and attempt a direct server receipt/decision for a new non-replay BEGIN before COMMIT; each takes
 its exact state/error row.
+
+### Windows Service Account capability attachment
+
+Flux launches `flux-exchange local service-account-mint --id <ID> --expires-at <DECIMAL>
+--writer-handle <DECIMAL>` with a closed `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` containing only the
+declared writer. The helper validates the local argv HANDLE as a nonzero writable pipe endpoint,
+clears `HANDLE_FLAG_INHERIT`, opens the owner-SID named pipe, authenticates and pins its server
+process, then writes exactly one `FXHA` attachment immediately followed by canonical MINT. The
+attachment's source HANDLE is a non-secret transport capability reference and never enters MINT
+JSON.
+
+After named-pipe impersonation and unconditional `RevertToSelf`, the server calls
+`GetNamedPipeClientProcessId` on that same connection, opens and pins that client process together
+with its creation identity from `GetProcessTimes`, and revalidates its TokenUser SID and
+TokenSessionId. It then calls `DuplicateHandle` from that exact pinned client process into itself
+using the source value in `FXHA`. The target duplicate is made non-inheritable and must be distinct
+from every endpoint/control handle and a writable `FILE_TYPE_PIPE`; only then may the dispatcher
+associate it with the immediately following MINT. Neither side reads remote argv or a PEB, uses an
+undocumented process-information API, enumerates the process handle table, or trusts process-image
+path text as capability identity.
+
+Attachment state is closed. A truncated 16-byte attachment is
+`truncated_frame/400/never/none`; a second attachment or an attachment followed by any opcode other
+than MINT is `unexpected_frame/409/never/none`; any byte between the exact attachment and the
+`FXLM` MINT header is `invalid_frame/400/never/none`. Wrong magic, version, direction, kind or
+reserved byte; zero or unrepresentable source HANDLE; client PID/creation-identity change; a source
+from another process; duplication failure; a non-pipe duplicate; or an unusable direction is
+`writer_invalid/400/never/none`. Every refusal closes every acquired process/duplicate handle and
+mutates no verifier. After MINT begins, the existing writer-closed and durable mint result rows
+apply unchanged. The attachment source value is excluded from diagnostics, audit, journals,
+persistence, receipts and release inventory.
+
+Native adversarial fixtures split `FXHA` at every byte, mutate every field independently, add one
+byte, repeat the attachment, substitute another-process and planted pipe HANDLEs, race process exit
+and PID reuse against creation-time pinning, and plant an unrelated inheritable capability. The
+positive proves the closed launch list admits only the intended writer, server-side duplication
+delivers one complete FXSA frame, MINT returns one canonical receipt, and all handles close across
+success and refusal. This Windows transport prefix remains part of
+`exchange.local-management.v1`; it adds no ninth protocol identity.
 
 ### Prepared credential transaction ownership
 

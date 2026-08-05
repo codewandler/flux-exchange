@@ -3,11 +3,91 @@
 
 set -euo pipefail
 
+fail() {
+  printf 'check-dev-signin: %s\n' "$*" >&2
+  exit 1
+}
+
+check_release_v2_evidence() {
+  local script="$1" evidence legacy_plan
+  evidence="$(sed -n '/^# BEGIN X-134 RELEASE-V2 EVIDENCE$/,$p' "$script")"
+  test -n "$evidence" || fail 'release-v2 evidence boundary is missing'
+  legacy_plan="exchange.connection-plan.""v1"
+  if grep -Fq "$legacy_plan" <<<"$evidence"; then
+    fail 'development smoke still admits a v1 connection-plan ratchet'
+  fi
+  grep -Fq 'exchange.connection-plan.v2' <<<"$evidence" \
+    || fail 'development smoke does not query the authoritative v2 connection plan'
+  grep -Fq 'secret_json_forbidden' <<<"$evidence" \
+    || fail 'development smoke does not prove the secret JSON refusal'
+  grep -Fq 'application/vnd.flux-exchange.service-account-handoff-v1' <<<"$evidence" \
+    || fail 'development smoke does not bind the FXSA response media type'
+  grep -Fq 'FXSA\x01\x01\x00\x00' <<<"$evidence" \
+    || fail 'development smoke does not decode the closed FXSA header'
+}
+
+if [[ "${1:-}" = --self-test ]]; then
+  scratch="$(mktemp "${TMPDIR:-/tmp}/flux-exchange-dev-signin.XXXXXX")"
+  trap 'rm -f -- "$scratch"' EXIT
+  cp "${BASH_SOURCE[0]}" "$scratch"
+  check_release_v2_evidence "$scratch"
+
+  python3 - "$scratch" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+current = (
+    "$origin/api/connections/intercom/plan?version="
+    + "exchange.connection-plan.v2"
+)
+source = source.replace(
+    current,
+    current.removesuffix("v2") + "v1",
+    1,
+)
+path.write_text(source)
+PY
+  if (check_release_v2_evidence "$scratch" >/dev/null 2>&1); then
+    fail 'self-test accepted the legacy connection-plan identity'
+  fi
+
+  cp "${BASH_SOURCE[0]}" "$scratch"
+  python3 - "$scratch" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+media_type = (
+    "content-type: application/vnd.flux-exchange.service-account-handoff-" + "v1"
+)
+source = source.replace(
+    media_type,
+    "content-type: application/octet-stream",
+    1,
+)
+path.write_text(source)
+PY
+  if (check_release_v2_evidence "$scratch" >/dev/null 2>&1); then
+    fail 'self-test accepted removal of the FXSA response media type'
+  fi
+
+  printf 'PASS check-dev-signin release-v2 self-test\n'
+  exit 0
+fi
+
+check_release_v2_evidence "${BASH_SOURCE[0]}"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 run_dir="$(mktemp -d)"
 server_log="$run_dir/server.log"
 first_server_log="$run_dir/server-first.log"
 cookie_jar="$run_dir/cookies"
+secret_refusal="$run_dir/secret-json-refusal.json"
+handoff_headers="$run_dir/service-account-handoff.headers"
+handoff_frame="$run_dir/service-account-handoff.fxsa"
 server_pid=""
 
 cleanup() {
@@ -25,7 +105,7 @@ cd "$repo_root"
 # itself on Unix, but on Windows Cargo remains the parent waiting for the `.exe`; killing `$!` there
 # would stop Cargo without proving the Exchange child released its listener and store handles.
 cargo build --locked --bin flux-exchange
-server_binary="$repo_root/target/debug/flux-exchange"
+server_binary="${CARGO_TARGET_DIR:-$repo_root/target}/debug/flux-exchange"
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*) server_binary="$server_binary.exe" ;;
 esac
@@ -38,6 +118,21 @@ test -x "$server_binary" || {
 # not the explicit development roster or a federated composition. The CI gate forces Cargo colour
 # globally; this log is a machine-readable process boundary, and ANSI between a structured field
 # name and `=` makes a healthy ephemeral listener undiscoverable.
+#
+# Since X-134 the conventional root is derived from the authenticated OS account, deliberately not
+# from HOME/XDG/USERPROFILE/LOCALAPPDATA, so redirecting those no longer moves it — an unqualified
+# `--dev` here would write into the developer's own account state and take its writer lease. This
+# smoke therefore names an explicit scratch root through the one supported override,
+# FLUX_EXCHANGE_STATE, and both processes below name the same one so the restart is a genuine
+# second open of the first root. Derivation itself is not this script's subject: it is held by
+# `production_root_discovery_does_not_consult_inherited_home_variables` and
+# `native_process_derives_production_root_from_the_authenticated_os_account` in
+# `crates/exchange-server/tests/local_state_regressions.rs`, where a refusal is observable.
+#
+# The XDG_STATE_HOME/LOCALAPPDATA/USERPROFILE scratch values stay, now as sentinels for the override
+# rather than for derivation: nothing may appear below them, and the assertion after the ceremony
+# says so. That keeps a regression that reads an inherited variable *ahead* of the explicit root
+# visible here instead of silently landing state somewhere this run cannot see.
 env \
   -u FLUX_EXCHANGE_DEV_IDENTITY \
   -u FLUX_EXCHANGE_LOCAL_USERS \
@@ -51,7 +146,6 @@ env \
   -u FLUX_EXCHANGE_OIDC_REDIRECT_URI \
   -u FLUX_EXCHANGE_OIDC_TENANT \
   -u FLUX_EXCHANGE_OIDC_HOSTED_DOMAIN \
-  -u FLUX_EXCHANGE_STATE \
   -u FLUX_EXCHANGE_CREDENTIALS \
   -u FLUX_EXCHANGE_SETTINGS \
   -u FLUX_EXCHANGE_GRANTS \
@@ -63,6 +157,7 @@ env \
   -u FLUX_EXCHANGE_APPS \
   NO_COLOR=1 \
   CARGO_TERM_COLOR=never \
+  FLUX_EXCHANGE_STATE="$run_dir/state" \
   XDG_STATE_HOME="$run_dir/state-home" \
   LOCALAPPDATA="$run_dir/state-home" \
   USERPROFILE="$run_dir/home" \
@@ -117,10 +212,9 @@ if grep -Fq 'store is bound' "$server_log"; then
   exit 1
 fi
 
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*) state_root="$run_dir/state-home/Flux/Exchange" ;;
-  *) state_root="$run_dir/state-home/flux-exchange" ;;
-esac
+# One named root on every platform: the override is a path, not a platform convention, so there is
+# no per-platform suffix to mirror here.
+state_root="$run_dir/state"
 for path in \
   credentials/store.txt \
   audit/events.sqlite3; do
@@ -135,57 +229,85 @@ for path in settings grants connections channels workflows service-accounts; do
     exit 1
   }
 done
-
-# Exercise a released connector through the real connection, setting, grant and invocation
-# surfaces. Intercom's contact read needs both its credential and its declared region setting, and
-# documents non-2xx responses as operation data. This deliberately fake credential therefore makes
-# `intercom-contact-get` a harmless network fixture: the released Flux executes a read, but no
-# vendor state can change and no real authority is needed.
-credential_sentinel="X127-SENTINEL-NOT-A-REAL-SECRET"
-connection_response="$(curl --fail --silent --show-error \
-  --cookie "$cookie_jar" \
-  --header 'content-type: application/json' \
-  --data "{\"version\":\"exchange.connection-plan.v1\",\"name\":\"restart-proof\",\"values\":{\"credential.intercom.access_token\":\"$credential_sentinel\",\"setting.default.endpoint.host\":\"api.intercom.io\"}}" \
-  "$origin/api/connections/intercom/plan")"
-grep -Fq '"outcome":"complete"' <<<"$connection_response"
-grep -Fq '"selection":"restart-proof"' <<<"$connection_response"
-grep -Fq '"state":"complete"' <<<"$connection_response"
-
-grant_response="$(curl --fail --silent --show-error \
-  --request PUT \
-  --cookie "$cookie_jar" \
-  --header 'content-type: application/json' \
-  --data '{"grants":[{"connector":"intercom","selector":{"max_risk":"low"}}]}' \
-  "$origin/api/grants")"
-grep -Fq '"id":"intercom-contact-get"' <<<"$grant_response"
-
-invoke_response="$(curl --fail --silent --show-error \
-  --cookie "$cookie_jar" \
-  --header 'content-type: application/json' \
-  --data '{"contact_id":"X127-HARMLESS-NOT-REAL"}' \
-  "$origin/api/operations/intercom-contact-get/invoke?connection=restart-proof")"
-grep -Fq '"operation":"intercom-contact-get"' <<<"$invoke_response"
-grep -Fq '"is_error":false' <<<"$invoke_response"
-
-for response in "$connection_response" "$grant_response" "$invoke_response"; do
-  if grep -Fq "$credential_sentinel" <<<"$response"; then
-    echo "a connection credential entered an Exchange response" >&2
+# The inherited-variable sentinels must stay untouched. An empty directory is the passing shape;
+# anything below one means a root was derived from the environment ahead of the explicit override.
+for sentinel in "$run_dir/state-home" "$run_dir/home"; do
+  if [[ -d "$sentinel" ]] && [[ -n "$(ls -A "$sentinel")" ]]; then
+    echo "development composition wrote below the inherited-variable sentinel $sentinel" >&2
     exit 1
   fi
 done
 
-# Mint one durable bearer identity, restart the real process over the same root, and prove the
-# second process accepts it. The response is kept only in this private scratch directory and never
-# printed; the store itself contains only the verifier.
-expires_at="$(( $(date +%s) + 3600 ))"
-minted="$(curl --fail --silent --show-error \
+# BEGIN X-134 RELEASE-V2 EVIDENCE
+# The ordinary HTTP connection surface is now projection-only. It returns the complete v2 plan,
+# while the former JSON mutation path refuses before decoding or writing a credential. Native FXLM
+# owns the secret-bearing ceremony; this browser-shaped smoke must never reintroduce it.
+credential_sentinel="X127-SENTINEL-NOT-A-REAL-SECRET"
+connection_plan="$(curl --fail --silent --show-error \
+  --cookie "$cookie_jar" \
+  "$origin/api/connections/intercom/plan?version=exchange.connection-plan.v2")"
+grep -Fq '"version":"exchange.connection-plan.v2"' <<<"$connection_plan"
+grep -Fq '"selection":null' <<<"$connection_plan"
+grep -Fq '"credential_revision":null' <<<"$connection_plan"
+
+secret_status="$(curl --silent --show-error \
   --cookie "$cookie_jar" \
   --header 'content-type: application/json' \
+  --output "$secret_refusal" \
+  --write-out '%{http_code}' \
+  --data "{\"version\":\"exchange.connection-plan.v2\",\"name\":\"restart-proof\",\"values\":{\"credential.intercom.access_token\":\"$credential_sentinel\",\"setting.default.endpoint.host\":\"api.intercom.io\"}}" \
+  "$origin/api/connections/intercom/plan")"
+test "$secret_status" = 415 || {
+  echo "legacy connection secret JSON returned HTTP $secret_status instead of 415" >&2
+  exit 1
+}
+test "$(tr -d '\r\n' <"$secret_refusal")" = '{"code":"secret_json_forbidden"}' || {
+  echo "legacy connection secret JSON did not return the closed refusal" >&2
+  exit 1
+}
+if grep -Fq "$credential_sentinel" <<<"$connection_plan" || \
+   grep -R -Fq -- "$credential_sentinel" "$state_root"; then
+  echo "a refused connection credential entered an Exchange response or durable state" >&2
+  exit 1
+fi
+
+# Mint one durable bearer identity into the exact one-frame FXSA response, restart the real process
+# over the same root, and prove the second process accepts it. The frame remains in this private
+# scratch directory and is never printed; the store itself contains only the verifier.
+expires_at="$(( $(date +%s) + 3600 ))"
+mint_status="$(curl --silent --show-error \
+  --cookie "$cookie_jar" \
+  --header 'content-type: application/json' \
+  --dump-header "$handoff_headers" \
+  --output "$handoff_frame" \
+  --write-out '%{http_code}' \
   --data "{\"id\":\"restart-proof\",\"expires_at\":$expires_at}" \
   "$origin/api/service-accounts")"
-service_account_token="$(sed -nE 's/.*"token":"([^"]+)".*/\1/p' <<<"$minted")"
+test "$mint_status" = 201 || {
+  echo "Service Account handoff returned HTTP $mint_status instead of 201" >&2
+  exit 1
+}
+grep -Fqi 'content-type: application/vnd.flux-exchange.service-account-handoff-v1' "$handoff_headers"
+grep -Fqi 'cache-control: no-store' "$handoff_headers"
+service_account_token="$(python3 - "$handoff_frame" <<'PY'
+import pathlib
+import sys
+
+frame = pathlib.Path(sys.argv[1]).read_bytes()
+if len(frame) < 13 or frame[:8] != b"FXSA\x01\x01\x00\x00":
+    raise SystemExit("Service Account response is not a v1 Exchange-to-writer FXSA frame")
+declared = int.from_bytes(frame[8:12], "big")
+if not 1 <= declared <= 512 or len(frame) != 12 + declared:
+    raise SystemExit("Service Account response is not exactly one bounded FXSA frame")
+token = frame[12:]
+try:
+    sys.stdout.write(token.decode("ascii"))
+except UnicodeDecodeError as error:
+    raise SystemExit("current bearer token is not ASCII") from error
+PY
+)"
 test -n "$service_account_token" || {
-  echo "development composition did not mint a Service Account" >&2
+  echo "development composition returned an empty FXSA token" >&2
   exit 1
 }
 
@@ -202,7 +324,6 @@ env \
   -u FLUX_EXCHANGE_DEV_IDENTITY \
   -u FLUX_EXCHANGE_LOCAL_USERS \
   -u FLUX_EXCHANGE_TENANT \
-  -u FLUX_EXCHANGE_STATE \
   -u FLUX_EXCHANGE_CREDENTIALS \
   -u FLUX_EXCHANGE_SETTINGS \
   -u FLUX_EXCHANGE_GRANTS \
@@ -214,6 +335,7 @@ env \
   -u FLUX_EXCHANGE_APPS \
   NO_COLOR=1 \
   CARGO_TERM_COLOR=never \
+  FLUX_EXCHANGE_STATE="$run_dir/state" \
   XDG_STATE_HOME="$run_dir/state-home" \
   LOCALAPPDATA="$run_dir/state-home" \
   USERPROFILE="$run_dir/home" \
@@ -245,15 +367,15 @@ curl --fail --silent --show-error \
   --header "Authorization: Bearer $service_account_token" \
   "http://127.0.0.1:$port/api/catalogue/effective" >/dev/null
 
-restarted_invoke_response="$(curl --fail --silent --show-error \
+restarted_session="$(curl --fail --silent --show-error \
   --header "Authorization: Bearer $service_account_token" \
-  --header 'content-type: application/json' \
-  --data '{"contact_id":"X127-HARMLESS-NOT-REAL"}' \
-  "http://127.0.0.1:$port/api/operations/intercom-contact-get/invoke?connection=restart-proof")"
-grep -Fq '"operation":"intercom-contact-get"' <<<"$restarted_invoke_response"
-grep -Fq '"is_error":false' <<<"$restarted_invoke_response"
-if grep -Fq "$credential_sentinel" <<<"$restarted_invoke_response" || \
-   grep -Fq "$credential_sentinel" "$first_server_log" "$server_log"; then
-  echo "a connection credential entered server output or the post-restart response" >&2
+  "http://127.0.0.1:$port/api/session")"
+grep -Fq '"id":"restart-proof"' <<<"$restarted_session"
+grep -Fq '"kind":"service_account"' <<<"$restarted_session"
+grep -Fq '"tenant":"dev"' <<<"$restarted_session"
+if grep -Fq "$credential_sentinel" <<<"$restarted_session" || \
+   grep -Fq "$credential_sentinel" "$first_server_log" "$server_log" || \
+   grep -R -Fq -- "$credential_sentinel" "$state_root"; then
+  echo "a refused connection credential entered server output, durable state or a response" >&2
   exit 1
 fi

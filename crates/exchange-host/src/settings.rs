@@ -917,6 +917,23 @@ pub trait ConnectionSettings: ConfigStore {
         self.commit_authority_proposal_for_instance(prepared)
     }
 
+    /// Ensure one exact initial custom-origin proposal exists, without allocating a second
+    /// semantic revision when a durable, value-free publication is replayed after a crash.
+    ///
+    /// The default remains create-only for ports that cannot prove exact equality. Durable stores
+    /// that implement replay must override this method and compare both the normalized setting
+    /// value and normalized origin before acknowledging an existing proposal.
+    fn ensure_authority_proposal_for_instance(
+        &self,
+        tenant: &Tenant,
+        connector: &str,
+        instance: Option<&InstanceId>,
+        declared: &DeclaredSetting,
+        value: &str,
+    ) -> Result<AuthorityStatus, SettingsRefusal> {
+        self.propose_authority_for_instance(tenant, connector, instance, declared, value, None)
+    }
+
     /// Validate one proposal and reserve no state while exposing its candidate revision to audit.
     fn prepare_authority_proposal_for_instance(
         &self,
@@ -2586,6 +2603,67 @@ mod file {
             Ok(())
         }
 
+        fn ensure_authority_proposal_for_instance(
+            &self,
+            tenant: &Tenant,
+            connector: &str,
+            instance: Option<&InstanceId>,
+            declared: &DeclaredSetting,
+            value: &str,
+        ) -> Result<AuthorityStatus, SettingsRefusal> {
+            let normalized = self.admit(connector, declared, value)?.ok_or_else(|| {
+                SettingsRefusal::AuthorityUnsupported {
+                    connector: connector.to_owned(),
+                    setting: declared.binds(),
+                }
+            })?;
+            let document = self
+                .document
+                .read()
+                .map_err(|_| SettingsRefusal::Unwritable {
+                    path: self.path.display().to_string(),
+                    reason: "the store lock is poisoned".to_owned(),
+                })?;
+            let [t, c, s, b] = SettingsStore::at(
+                tenant.as_str(),
+                connector,
+                instance,
+                &declared.service,
+                &declared.binds(),
+            );
+            match document
+                .values
+                .get(&t)
+                .and_then(|connectors| connectors.get(&c))
+                .and_then(|services| services.get(&s))
+                .and_then(|settings| settings.get(&b))
+            {
+                Some(StoredValue::Origin(current))
+                    if current.value == normalized.setting_value
+                        && current.origin == normalized.origin
+                        && matches!(current.state, StoredAuthorityState::Proposed) =>
+                {
+                    return Ok(authority_status(current));
+                }
+                Some(StoredValue::Origin(current)) => {
+                    return Err(SettingsRefusal::AuthorityRevisionRequired {
+                        connector: connector.to_owned(),
+                        setting: declared.binds(),
+                        current: current.revision,
+                    });
+                }
+                Some(StoredValue::Ordinary(_)) => {
+                    return Err(SettingsRefusal::AuthorityUnsupported {
+                        connector: connector.to_owned(),
+                        setting: declared.binds(),
+                    });
+                }
+                None => {}
+            }
+            drop(document);
+            self.propose_authority_for_instance(tenant, connector, instance, declared, value, None)
+        }
+
         fn prepare_authority_proposal_for_instance(
             &self,
             tenant: &Tenant,
@@ -3015,6 +3093,9 @@ mod file {
                 return Ok(());
             };
             let qualified = format!("{connector}@{}", instance.as_str());
+            if connectors.contains_key(&qualified) && !connectors.contains_key(connector) {
+                return Ok(());
+            }
             if connectors.contains_key(&qualified) {
                 return Err(SettingsRefusal::InstanceTransition {
                     connector: connector.to_owned(),
@@ -3441,6 +3522,58 @@ mod file {
                 .expect("authority status")
                 .revision
                 .expect("proposal revision")
+        }
+
+        #[test]
+        fn publication_replay_preserves_one_authority_revision_and_qualified_namespace() {
+            let scratch = Scratch::new("publication-replay");
+            let path = scratch.0.join("settings");
+            let tenant = Tenant::new("acme").expect("tenant");
+            let declared = setting();
+            let instance = instance();
+            let store = bind(&path);
+
+            let first = store
+                .ensure_authority_proposal_for_instance(
+                    &tenant,
+                    connector(),
+                    None,
+                    &declared,
+                    "https://REPLAY.example",
+                )
+                .expect("first publication");
+            let replay = store
+                .ensure_authority_proposal_for_instance(
+                    &tenant,
+                    connector(),
+                    None,
+                    &declared,
+                    "https://replay.example",
+                )
+                .expect("same normalized publication replay");
+            assert_eq!(replay.revision, first.revision);
+            assert!(matches!(
+                store.ensure_authority_proposal_for_instance(
+                    &tenant,
+                    connector(),
+                    None,
+                    &declared,
+                    "https://changed.example",
+                ),
+                Err(SettingsRefusal::AuthorityRevisionRequired { current, .. })
+                    if Some(current) == first.revision
+            ));
+
+            store
+                .qualify_instance(&tenant, connector(), &instance)
+                .expect("first namespace qualification");
+            store
+                .qualify_instance(&tenant, connector(), &instance)
+                .expect("qualification replay");
+            assert_eq!(
+                proposal_revision(&store, &tenant, &declared, &instance),
+                first.revision.expect("first revision")
+            );
         }
 
         #[test]

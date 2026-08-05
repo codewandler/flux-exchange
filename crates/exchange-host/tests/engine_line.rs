@@ -23,6 +23,11 @@
 use std::sync::Arc;
 
 use connector_pack::{Configuration, Credentials, Egress, Layout, MemoryConfig, TenantLayout};
+use connector_secrets::{
+    CredentialRef, CredentialScope, MemoryStore, PreparedSecretError, PreparedSecretStore, Secret,
+    SecretBatch, SecretProposalDigest, SecretTransactionGeneration, SecretTransactionId,
+    SecretTransactionState,
+};
 use exchange_host::{address_path, ConnectorDeclaration, DeclaredCredential, SecretStore, Tenant};
 use flux_runtime::ToolRegistry;
 use flux_web::{http::HttpRequestTool, WebOptions};
@@ -233,6 +238,152 @@ fn the_lock_carries_one_engine_line() {
          second, separate copy of flux in one build: two `flux_runtime::Tool` traits with identical \
          names, and a host that can link only one of them",
     );
+}
+
+/// X-134 consumes the released C-515 provider line from crates.io, with one copy of each connector
+/// package and the exact audited archive checksums. A path/git source or stale lock is a contract
+/// failure even when the public Rust signatures happen to compile.
+#[test]
+fn the_lock_carries_the_exact_registry_connector_020_line() {
+    const EXPECTED: [(&str, &str); 4] = [
+        (
+            "codewandler-connector-address",
+            "bdee7fb0d488de4ed97dbd3b8414e04138c122ee36b6f9c97a174bb317913d8c",
+        ),
+        (
+            "codewandler-connector-catalog",
+            "9a7737659b74876b09ff6e09b253402c5bdfcafcbde89373cb76f689bd8ffed2",
+        ),
+        (
+            "codewandler-connector-secrets",
+            "edf98bece86f6364aba3e7dd48c3b7e161146942e9e8450d5dc286143b627717",
+        ),
+        (
+            "codewandler-connector-pack",
+            "8e858a844dab8324d42bb83c98c4ffb6823681eb1157ddb96a79d5d7a42cff48",
+        ),
+    ];
+
+    for (name, checksum) in EXPECTED {
+        let matches: Vec<&str> = WORKSPACE_LOCK
+            .split("[[package]]")
+            .filter(|block| {
+                value_of(
+                    block
+                        .lines()
+                        .find(|line| line.starts_with("name = "))
+                        .unwrap_or(""),
+                    "name",
+                ) == Some(name)
+            })
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "Cargo.lock must contain exactly one `{name}` package"
+        );
+        let block = matches[0];
+        assert_eq!(
+            block.lines().find_map(|line| value_of(line, "version")),
+            Some("0.20.0"),
+            "`{name}` is not locked to the released 0.20.0 provider line",
+        );
+        assert_eq!(
+            block.lines().find_map(|line| value_of(line, "source")),
+            Some("registry+https://github.com/rust-lang/crates.io-index"),
+            "`{name}` did not resolve from crates.io",
+        );
+        assert_eq!(
+            block.lines().find_map(|line| value_of(line, "checksum")),
+            Some(checksum),
+            "`{name}` archive checksum differs from the independently published artifact",
+        );
+    }
+}
+
+/// The C-515 prepared transaction port is object-safe and shares one concrete store with ordinary
+/// reads. This is the provider API Exchange must retain for the process lifetime; reopening a
+/// second file store for coordinator recovery would violate that ownership boundary.
+#[tokio::test]
+async fn connector_020_prepared_port_is_ready_for_exchange_composition() {
+    let concrete = Arc::new(MemoryStore::new());
+    let ordinary: Arc<dyn SecretStore> = concrete.clone();
+    let prepared: Arc<dyn PreparedSecretStore> = concrete;
+    let generation = SecretTransactionGeneration::from_protocol_bytes(1_u64.to_be_bytes())
+        .expect("generation one is non-zero");
+    let next = generation
+        .checked_next()
+        .expect("generation one has a successor");
+    let first = SecretTransactionId::new(generation, [0x13; 24]);
+    let aborted = SecretTransactionId::new(next, [0x27; 24]);
+    let digest = SecretProposalDigest::from_protocol_bytes([0x52; 32]);
+    let reference = CredentialRef::new("acme", "com.example.api", "primary", "token")
+        .expect("static credential reference");
+    let batch = SecretBatch::new(
+        CredentialScope::new(reference.tenant(), reference.authority())
+            .expect("static credential scope"),
+    );
+
+    ordinary
+        .put(&reference, &Secret::new("x134-registry-readiness-sentinel"))
+        .await
+        .expect("ordinary write through the shared backing store");
+    assert!(
+        prepared.get(&reference).await.is_ok(),
+        "the prepared port does not share the ordinary backing store"
+    );
+    assert_eq!(
+        prepared.state(first).await.map_err(prepared_error_kind),
+        Ok(SecretTransactionState::Absent)
+    );
+    assert_eq!(
+        prepared
+            .prepare(first, digest, &batch)
+            .await
+            .map_err(prepared_error_kind),
+        Ok(SecretTransactionState::Prepared)
+    );
+    assert_eq!(
+        prepared.commit(first).await.map_err(prepared_error_kind),
+        Ok(SecretTransactionState::Committed)
+    );
+    assert_eq!(
+        prepared.abort(aborted).await.map_err(prepared_error_kind),
+        Ok(SecretTransactionState::Absent)
+    );
+    assert_eq!(
+        prepared
+            .prepare(aborted, digest, &batch)
+            .await
+            .map_err(prepared_error_kind),
+        Err("transaction_id_reused")
+    );
+    prepared
+        .reclaim(generation)
+        .await
+        .map_err(prepared_error_kind)
+        .expect("generation one can be reclaimed");
+    assert_eq!(
+        prepared.state(first).await.map_err(prepared_error_kind),
+        Err("retired")
+    );
+}
+
+/// Exhaustive mapping is intentional: a new provider refusal must make this consumer update its
+/// handling instead of being silently folded into an assumed closed set.
+fn prepared_error_kind(error: PreparedSecretError) -> &'static str {
+    match error {
+        PreparedSecretError::Unsupported => "unsupported",
+        PreparedSecretError::Busy => "busy",
+        PreparedSecretError::DigestMismatch => "digest_mismatch",
+        PreparedSecretError::TransactionIdReused => "transaction_id_reused",
+        PreparedSecretError::NotPrepared => "not_prepared",
+        PreparedSecretError::AlreadyCommitted => "already_committed",
+        PreparedSecretError::Retired => "retired",
+        PreparedSecretError::Capacity => "capacity",
+        PreparedSecretError::InvalidBatch => "invalid_batch",
+        PreparedSecretError::Backend => "backend",
+    }
 }
 
 /// Every `codewandler-flux-*` entry in the lock, as `(name, version)`, this workspace's own excluded.

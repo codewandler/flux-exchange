@@ -30,14 +30,14 @@
     {
       "id": "create-service-account",
       "title": "Create a Service Account",
-      "summary": "A Service Account is a non-human principal of exactly one tenant. A signed-in human creates it and hands its one-time token to an App, Agent or automation.",
+      "summary": "A Service Account is a non-human principal of exactly one tenant. A signed-in human creates it through the authenticated owner-local helper, which transfers its one-time credential directly to the waiting App, Agent or automation.",
       "live": true,
       "call": {
         "method": "POST",
         "endpoint": "/api/service-accounts",
-        "caller": "A signed-in human, from this console. Not the App or Agent that will use it — creating non-human identities is an operator action.",
+        "caller": "The verified owner-local helper, acting for the authenticated OS owner. Not this browser and not an arbitrary remote App or Agent.",
         "note": "Send id, what to call the Service Account within the tenant, and expires_at, seconds since the Unix epoch. The expiry is never defaulted: a body without one is refused rather than given a lifetime this host picked. There is no tenant field, and there is nowhere one could be put — the tenant is read from the caller this host resolved, and a tenant in the body is ignored rather than honoured.",
-        "warn": "The response carries the token, and it is shown once. This host keeps a verifier rather than the token, so nothing here can show it to you again. Lose it and mint another."
+        "warn": "The response is the one-shot binary FXSA handoff, written through a closed native capability. It is never token JSON and never enters the browser, argv, environment, standard streams or diagnostics."
       },
       "withheld": ""
     },

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use exchange_host::Principal;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension as _};
@@ -376,6 +376,12 @@ impl AuditJournal {
             path: path.to_path_buf(),
             source,
         })?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|source| AuditError::Database {
+                path: path.to_path_buf(),
+                source,
+            })?;
         initialise(&connection, path)?;
         let now = fixed_now.unwrap_or_else(now_unix);
         connection
@@ -402,16 +408,6 @@ impl AuditJournal {
         &self.path
     }
 
-    #[cfg(test)]
-    pub(crate) fn refuse_writes_for_test(&self) {
-        self.inner
-            .lock()
-            .expect("audit journal lock")
-            .connection
-            .execute_batch("PRAGMA query_only = ON")
-            .expect("arm audit write refusal");
-    }
-
     /// Append one final event that does not surround a state-changing action.
     pub fn record(
         &self,
@@ -425,6 +421,94 @@ impl AuditJournal {
         self.insert(&record)?;
         self.evaluate_alerts(&record)?;
         Ok(record)
+    }
+
+    /// Durably append one terminal event under a server-owned stable identifier.
+    ///
+    /// Receipt recovery reaches this method through a later request, so request identity and time
+    /// belong to the first canonical record rather than the replay key. The authority tuple does
+    /// remain closed: reusing an event identifier for another actor, action, outcome or target is
+    /// an invariant refusal and never edits the retained evidence.
+    pub fn record_terminal_once(
+        &self,
+        event_id: &str,
+        request_id: &RequestId,
+        action: Action,
+        outcome: Outcome,
+        actor: Option<&Principal>,
+        target: Target,
+    ) -> Result<Record, AuditError> {
+        if outcome == Outcome::Attempted {
+            return Err(AuditError::StableEventNotTerminal);
+        }
+        let candidate = Record {
+            schema_version: SCHEMA_VERSION,
+            event_id: event_id.to_owned(),
+            request_id: request_id.as_str().to_owned(),
+            timestamp: timestamp(self.now())?,
+            action,
+            outcome,
+            actor: actor.map(Actor::from),
+            target,
+            count: None,
+            window_seconds: None,
+        };
+        let rendered = serde_json::to_string(&candidate).map_err(AuditError::Json)?;
+        let (target_kind, target_value) = candidate.target.query_parts();
+        let mut state = self.inner.lock().map_err(|_| AuditError::Poisoned)?;
+        self.retain_if_due(&mut state)?;
+        let inserted = state
+            .connection
+            .execute(
+                "INSERT OR IGNORE INTO audit_records (event_id, request_id, timestamp, timestamp_unix, action, outcome, actor_tenant, actor_kind, actor_id, target_kind, target_value, record_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    candidate.event_id,
+                    candidate.request_id,
+                    candidate.timestamp,
+                    parse_timestamp(&candidate.timestamp)?,
+                    candidate.action.spelling(),
+                    candidate.outcome.spelling(),
+                    candidate.actor.as_ref().map(|actor| actor.tenant.as_str()),
+                    candidate.actor.as_ref().map(|actor| actor.kind.as_str()),
+                    candidate.actor.as_ref().map(|actor| actor.id.as_str()),
+                    target_kind,
+                    target_value,
+                    rendered,
+                ],
+            )
+            .map_err(|source| self.database_error(source))?
+            == 1;
+        let canonical = if inserted {
+            candidate.clone()
+        } else {
+            let json = state
+                .connection
+                .query_row(
+                    "SELECT record_json FROM audit_records WHERE event_id = ?1",
+                    params![event_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|source| self.database_error(source))?;
+            serde_json::from_str(&json).map_err(AuditError::Json)?
+        };
+        drop(state);
+
+        if canonical.schema_version != candidate.schema_version
+            || canonical.event_id != candidate.event_id
+            || canonical.action != candidate.action
+            || canonical.outcome != candidate.outcome
+            || canonical.actor != candidate.actor
+            || canonical.target != candidate.target
+            || canonical.count != candidate.count
+            || canonical.window_seconds != candidate.window_seconds
+        {
+            return Err(AuditError::StableEventConflict(event_id.to_owned()));
+        }
+        if inserted {
+            emit(&canonical);
+            self.evaluate_alerts(&canonical)?;
+        }
+        Ok(canonical)
     }
 
     /// Insert `attempted` before a state-changing store or runtime is touched.
@@ -980,6 +1064,10 @@ pub enum AuditError {
     MissingAttempt(String),
     #[error("audit event `{0}` was already final")]
     AlreadyFinal(String),
+    #[error("audit event `{0}` was already retained for a different terminal authority tuple")]
+    StableEventConflict(String),
+    #[error("a stable audit event must have a terminal outcome")]
+    StableEventNotTerminal,
     #[error("the audit journal lock is poisoned")]
     Poisoned,
 }
@@ -1046,6 +1134,148 @@ mod tests {
             .expect("rows")
             .map(|row| serde_json::from_str(&row.expect("row")).expect("record JSON"))
             .collect()
+    }
+
+    #[test]
+    fn stable_terminal_event_replay_survives_restart_without_a_second_row() {
+        let root = scratch("stable-terminal-restart");
+        let path = root.join("audit").join("events.sqlite3");
+        let target = Target::ConnectionInstance {
+            connector: "github".to_owned(),
+            label: "primary".to_owned(),
+        };
+        let first = {
+            let journal = AuditJournal::bind_for_test(&path, 2_000_000_000).expect("a journal");
+            journal
+                .record_terminal_once(
+                    "transaction-audit-event-1",
+                    &RequestId::for_test("request-before-response-loss"),
+                    Action::ConnectionCreated,
+                    Outcome::Succeeded,
+                    Some(&alice()),
+                    target.clone(),
+                )
+                .expect("first durable append")
+        };
+
+        let reopened = AuditJournal::bind_for_test(&path, 2_000_000_001).expect("reopened");
+        let replay = reopened
+            .record_terminal_once(
+                "transaction-audit-event-1",
+                &RequestId::for_test("request-after-restart"),
+                Action::ConnectionCreated,
+                Outcome::Succeeded,
+                Some(&alice()),
+                target,
+            )
+            .expect("same terminal tuple replays");
+
+        assert_eq!(replay, first);
+        assert_eq!(replay.request_id, "request-before-response-loss");
+        assert_eq!(
+            reopened
+                .by_event_id("transaction-audit-event-1")
+                .expect("event query"),
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn stable_terminal_event_refuses_conflicting_reuse_and_attempted_outcome() {
+        let root = scratch("stable-terminal-conflict");
+        let path = root.join("audit").join("events.sqlite3");
+        let journal = AuditJournal::bind_for_test(&path, 2_000_000_000).expect("a journal");
+        let target = Target::Connection {
+            connector: "github".to_owned(),
+        };
+        let original = journal
+            .record_terminal_once(
+                "transaction-audit-event-2",
+                &RequestId::for_test("request-1"),
+                Action::ConnectionCreated,
+                Outcome::Succeeded,
+                Some(&alice()),
+                target.clone(),
+            )
+            .expect("first durable append");
+
+        let conflict = journal
+            .record_terminal_once(
+                "transaction-audit-event-2",
+                &RequestId::for_test("request-2"),
+                Action::ConnectionRemoved,
+                Outcome::Succeeded,
+                Some(&alice()),
+                target.clone(),
+            )
+            .expect_err("changed tuple must refuse");
+        assert!(
+            matches!(conflict, AuditError::StableEventConflict(id) if id == "transaction-audit-event-2")
+        );
+        assert_eq!(
+            journal
+                .by_event_id("transaction-audit-event-2")
+                .expect("event query"),
+            vec![original]
+        );
+
+        let attempted = journal
+            .record_terminal_once(
+                "transaction-audit-event-3",
+                &RequestId::for_test("request-3"),
+                Action::ConnectionCreated,
+                Outcome::Attempted,
+                Some(&alice()),
+                target,
+            )
+            .expect_err("stable append is terminal only");
+        assert!(matches!(attempted, AuditError::StableEventNotTerminal));
+        assert!(journal
+            .by_event_id("transaction-audit-event-3")
+            .expect("event query")
+            .is_empty());
+    }
+
+    #[test]
+    fn stable_terminal_event_is_concurrent_across_independent_bindings() {
+        let root = scratch("stable-terminal-concurrent");
+        let path = root.join("audit").join("events.sqlite3");
+        let first = AuditJournal::bind_for_test(&path, 2_000_000_000).expect("first binding");
+        let second = AuditJournal::bind_for_test(&path, 2_000_000_001).expect("second binding");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let workers = [
+            (first, "concurrent-request-a"),
+            (second, "concurrent-request-b"),
+        ]
+        .map(|(journal, request_id)| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                journal.record_terminal_once(
+                    "transaction-audit-event-4",
+                    &RequestId::for_test(request_id),
+                    Action::CredentialRotated,
+                    Outcome::Succeeded,
+                    Some(&alice()),
+                    Target::Credential {
+                        connector: "github".to_owned(),
+                        credential: "token".to_owned(),
+                    },
+                )
+            })
+        });
+        let [left, right] = workers.map(|worker| worker.join().expect("worker"));
+        assert_eq!(left.expect("first result"), right.expect("second result"));
+
+        let reopened = AuditJournal::bind_for_test(&path, 2_000_000_002).expect("reopened");
+        assert_eq!(
+            reopened
+                .by_event_id("transaction-audit-event-4")
+                .expect("event query")
+                .len(),
+            1
+        );
     }
 
     #[test]

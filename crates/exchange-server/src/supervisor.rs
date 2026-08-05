@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::protocol_identity::{
-    ProtocolVersions, CONNECTION_PLAN_V1, EFFECTIVE_CATALOGUE_RESPONSE_V1, EXCHANGE_API_V1,
-    INVOKE_REQUEST_V1, INVOKE_RESPONSE_V1, PROTOCOL_VERSIONS, SUPERVISOR_READY_V1,
+    ProtocolVersions, CONNECTION_PLAN_V2, EFFECTIVE_CATALOGUE_RESPONSE_V1, EXCHANGE_API_V1,
+    INVOKE_REQUEST_V1, INVOKE_RESPONSE_V1, LOCAL_MANAGEMENT_V1, PROTOCOL_VERSIONS,
+    SERVICE_ACCOUNT_HANDOFF_V1, SUPERVISOR_READY_V2,
 };
 
 /// Maximum accepted size of the complete one-shot readiness object.
@@ -51,7 +52,7 @@ pub fn compatibility_json() -> Result<Vec<u8>, String> {
     canonical_json(&Compatibility {
         protocols: PROTOCOL_VERSIONS,
         release: ReleaseIdentity::compiled(),
-        schema: "exchange.compatibility.v1",
+        schema: "exchange.compatibility.v2",
     })
 }
 
@@ -175,11 +176,11 @@ pub struct VerifiedReadiness {
     pub bind: VerifiedBind,
     /// Diagnostic PID plus native anti-reuse identity.
     pub process: VerifiedProcess,
-    /// Six exact provider protocol identities.
+    /// Eight exact provider protocol identities.
     pub protocols: VerifiedProtocols,
     /// Release and executable identity.
     pub release: VerifiedRelease,
-    /// Exact `exchange.supervisor-ready.v1` schema identity.
+    /// Exact `exchange.supervisor-ready.v2` schema identity.
     pub schema: String,
 }
 
@@ -205,7 +206,7 @@ pub struct VerifiedProcess {
     pub start_identity: VerifiedStartIdentity,
 }
 
-/// Closed six-field protocol object.
+/// Closed eight-field protocol object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VerifiedProtocols {
@@ -219,6 +220,10 @@ pub struct VerifiedProtocols {
     pub invoke_request: String,
     /// Invocation response identity.
     pub invoke_response: String,
+    /// Owner-authenticated FXLM local-management identity.
+    pub local_management: String,
+    /// One-frame Service Account handoff identity.
+    pub service_account_handoff: String,
     /// Supervision identity.
     pub supervisor: String,
 }
@@ -252,7 +257,7 @@ pub enum ReadinessRefusal {
     #[error("readiness is not UTF-8")]
     InvalidUtf8,
     /// JSON syntax, members or types did not match the closed schema.
-    #[error("readiness is not one closed exchange.supervisor-ready.v1 object: {0}")]
+    #[error("readiness is not one closed exchange.supervisor-ready.v2 object: {0}")]
     InvalidObject(String),
     /// Bytes did not equal the RFC 8785-equivalent canonical serialization.
     #[error("readiness is not canonical JSON")]
@@ -293,7 +298,7 @@ fn validate_record(
     expected: &ReadinessExpectation,
 ) -> Result<(), ReadinessRefusal> {
     let mismatch = |reason: &str| ReadinessRefusal::Mismatch(reason.to_owned());
-    if record.schema != SUPERVISOR_READY_V1.as_str() {
+    if record.schema != SUPERVISOR_READY_V2.as_str() {
         return Err(mismatch("schema"));
     }
     if record.bind.scheme != "http"
@@ -319,12 +324,14 @@ fn validate_record(
         return Err(mismatch("native process-start identity"));
     }
     let protocols = &record.protocols;
-    if protocols.connection_plan != CONNECTION_PLAN_V1.as_str()
+    if protocols.connection_plan != CONNECTION_PLAN_V2.as_str()
         || protocols.exchange_api != EXCHANGE_API_V1.as_str()
         || protocols.effective_catalogue_response != EFFECTIVE_CATALOGUE_RESPONSE_V1.as_str()
         || protocols.invoke_request != INVOKE_REQUEST_V1.as_str()
         || protocols.invoke_response != INVOKE_RESPONSE_V1.as_str()
-        || protocols.supervisor != SUPERVISOR_READY_V1.as_str()
+        || protocols.local_management != LOCAL_MANAGEMENT_V1.as_str()
+        || protocols.service_account_handoff != SERVICE_ACCOUNT_HANDOFF_V1.as_str()
+        || protocols.supervisor != SUPERVISOR_READY_V2.as_str()
         || protocols.supervisor != record.schema
     {
         return Err(mismatch("protocols"));
@@ -471,7 +478,7 @@ impl Supervision {
                 tag: release.tag,
                 version: release.version,
             },
-            schema: SUPERVISOR_READY_V1.as_str(),
+            schema: SUPERVISOR_READY_V2.as_str(),
         })?;
         if bytes.len() > MAX_READINESS_BYTES {
             return Err(format!(
@@ -889,6 +896,9 @@ struct ReadyWriter(std::fs::File);
 struct LivenessReader(std::fs::File);
 
 #[cfg(windows)]
+use crate::windows_handle::validate_supervisor_handle as validate_windows_handle;
+
+#[cfg(windows)]
 fn discover_capabilities(
     arguments: &[std::ffi::OsString],
 ) -> Result<(ReadyWriter, LivenessReader), String> {
@@ -921,71 +931,6 @@ fn discover_capabilities(
     // SAFETY: as above for liveness.
     let liveness = unsafe { std::fs::File::from_raw_handle(liveness.cast()) };
     Ok((ReadyWriter(readiness), LivenessReader(liveness)))
-}
-
-#[cfg(windows)]
-fn validate_windows_handle(
-    handle: windows_sys::Win32::Foundation::HANDLE,
-    read: bool,
-    name: &str,
-) -> Result<(), String> {
-    use windows_sys::Wdk::Foundation::{NtQueryObject, ObjectBasicInformation};
-    use windows_sys::Win32::Foundation::{
-        GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT,
-    };
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileType, FILE_READ_DATA, FILE_TYPE_PIPE, FILE_WRITE_DATA,
-    };
-    use windows_sys::Win32::System::WindowsProgramming::PUBLIC_OBJECT_BASIC_INFORMATION;
-
-    let mut inherited = 0_u32;
-    // SAFETY: output storage is valid and the numeric capability is only observed.
-    if unsafe { GetHandleInformation(handle, &mut inherited) } == 0
-        || inherited & HANDLE_FLAG_INHERIT == 0
-    {
-        return Err(format!(
-            "supervisor {name} HANDLE is absent or not inherited"
-        ));
-    }
-    // SAFETY: the call only identifies the validated inherited handle.
-    if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
-        return Err(format!("supervisor {name} HANDLE is not a pipe"));
-    }
-    let mut information = PUBLIC_OBJECT_BASIC_INFORMATION::default();
-    let expected_size = std::mem::size_of::<PUBLIC_OBJECT_BASIC_INFORMATION>() as u32;
-    let mut returned_size = 0_u32;
-    // A zero-byte `ReadFile` on an empty synchronous pipe can block on Windows. Querying the
-    // kernel-granted access mask proves direction without consuming or waiting on either stream.
-    // SAFETY: the typed public output structure is live for the complete native query.
-    let status = unsafe {
-        NtQueryObject(
-            handle,
-            ObjectBasicInformation,
-            (&mut information as *mut PUBLIC_OBJECT_BASIC_INFORMATION).cast(),
-            expected_size,
-            &mut returned_size,
-        )
-    };
-    if status < 0 || returned_size != expected_size {
-        return Err(format!(
-            "cannot inspect supervisor {name} HANDLE access without reading it"
-        ));
-    }
-    let (required, forbidden) = if read {
-        (FILE_READ_DATA, FILE_WRITE_DATA)
-    } else {
-        (FILE_WRITE_DATA, FILE_READ_DATA)
-    };
-    if information.GrantedAccess & required == 0 || information.GrantedAccess & forbidden != 0 {
-        return Err(format!("supervisor {name} HANDLE has the wrong direction"));
-    }
-    // SAFETY: clearing inheritance on the discovered capability cannot widen authority.
-    if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) } == 0 {
-        return Err(format!(
-            "cannot protect supervisor {name} HANDLE from child processes"
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(windows)]
@@ -1069,17 +1014,19 @@ mod tests {
                         start_identity: start_identity.clone(),
                     },
                     protocols: VerifiedProtocols {
-                        connection_plan: CONNECTION_PLAN_V1.as_str().to_owned(),
+                        connection_plan: CONNECTION_PLAN_V2.as_str().to_owned(),
                         effective_catalogue_response: EFFECTIVE_CATALOGUE_RESPONSE_V1
                             .as_str()
                             .to_owned(),
                         exchange_api: EXCHANGE_API_V1.as_str().to_owned(),
                         invoke_request: INVOKE_REQUEST_V1.as_str().to_owned(),
                         invoke_response: INVOKE_RESPONSE_V1.as_str().to_owned(),
-                        supervisor: SUPERVISOR_READY_V1.as_str().to_owned(),
+                        local_management: LOCAL_MANAGEMENT_V1.as_str().to_owned(),
+                        service_account_handoff: SERVICE_ACCOUNT_HANDOFF_V1.as_str().to_owned(),
+                        supervisor: SUPERVISOR_READY_V2.as_str().to_owned(),
                     },
                     release: release.clone(),
-                    schema: SUPERVISOR_READY_V1.as_str().to_owned(),
+                    schema: SUPERVISOR_READY_V2.as_str().to_owned(),
                 },
                 expected: ReadinessExpectation {
                     release: ExpectedRelease {
@@ -1153,7 +1100,7 @@ mod tests {
         );
 
         let mut duplicate = bytes[..bytes.len() - 1].to_vec();
-        duplicate.extend_from_slice(b",\"schema\":\"exchange.supervisor-ready.v1\"}");
+        duplicate.extend_from_slice(b",\"schema\":\"exchange.supervisor-ready.v2\"}");
         assert_refused(&duplicate, &fixture.expected);
         assert_refused(
             &changed(&fixture, |value| value["unknown"] = serde_json::json!(true)),
@@ -1239,7 +1186,19 @@ mod tests {
                 v["protocols"]["exchange_api"] = serde_json::json!("exchange.api.v2")
             }),
             changed(&fixture, |v| {
-                v["protocols"]["supervisor"] = serde_json::json!("exchange.supervisor-ready.v2")
+                v["protocols"]["supervisor"] = serde_json::json!("exchange.supervisor-ready.v3")
+            }),
+            changed(&fixture, |v| {
+                v["protocols"]
+                    .as_object_mut()
+                    .expect("protocol object")
+                    .remove("local_management");
+            }),
+            changed(&fixture, |v| {
+                v["protocols"]
+                    .as_object_mut()
+                    .expect("protocol object")
+                    .remove("service_account_handoff");
             }),
             changed(&fixture, |v| {
                 v["process"]["unknown"] = serde_json::json!(true)
@@ -1260,6 +1219,8 @@ mod tests {
             "exchange_api",
             "invoke_request",
             "invoke_response",
+            "local_management",
+            "service_account_handoff",
             "supervisor",
         ] {
             assert_refused(
@@ -1348,7 +1309,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_is_exact_canonical_json_from_the_six_field_source() {
+    fn compatibility_is_exact_canonical_json_from_the_eight_field_source() {
         let bytes = compatibility_json().expect("compatibility JSON");
         let build_id = serde_json::to_string(env!("FLUX_EXCHANGE_COMPILED_BUILD_ID"))
             .expect("build id string");
@@ -1356,15 +1317,15 @@ mod tests {
             .expect("source commit string");
         let version = env!("CARGO_PKG_VERSION");
         let expected = format!(
-            "{{\"protocols\":{{\"connection_plan\":\"exchange.connection-plan.v1\",\"effective_catalogue_response\":\"exchange.effective-catalogue-response.v1\",\"exchange_api\":\"exchange.api.v1\",\"invoke_request\":\"exchange.invoke-request.v1\",\"invoke_response\":\"exchange.invoke-response.v1\",\"supervisor\":\"exchange.supervisor-ready.v1\"}},\"release\":{{\"build_id\":{build_id},\"source_commit\":{source_commit},\"tag\":\"refs/tags/v{version}\",\"version\":\"{version}\"}},\"schema\":\"exchange.compatibility.v1\"}}"
+            "{{\"protocols\":{{\"connection_plan\":\"exchange.connection-plan.v2\",\"effective_catalogue_response\":\"exchange.effective-catalogue-response.v1\",\"exchange_api\":\"exchange.api.v1\",\"invoke_request\":\"exchange.invoke-request.v1\",\"invoke_response\":\"exchange.invoke-response.v1\",\"local_management\":\"exchange.local-management.v1\",\"service_account_handoff\":\"exchange.service-account-handoff.v1\",\"supervisor\":\"exchange.supervisor-ready.v2\"}},\"release\":{{\"build_id\":{build_id},\"source_commit\":{source_commit},\"tag\":\"refs/tags/v{version}\",\"version\":\"{version}\"}},\"schema\":\"exchange.compatibility.v2\"}}"
         );
         assert_eq!(bytes, expected.as_bytes());
         assert!(!bytes.ends_with(b"\n"));
         let value: serde_json::Value = serde_json::from_slice(&bytes).expect("compatibility value");
-        assert_eq!(value["schema"], "exchange.compatibility.v1");
+        assert_eq!(value["schema"], "exchange.compatibility.v2");
         assert_eq!(
             value["protocols"]["supervisor"],
-            SUPERVISOR_READY_V1.as_str()
+            SUPERVISOR_READY_V2.as_str()
         );
         assert_eq!(canonical_json(&value).expect("canonical value"), bytes);
         assert_ne!(value["release"]["source_commit"], "unknown");

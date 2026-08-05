@@ -9,18 +9,22 @@ pub struct Protocols {
     pub invoke_request: String,
     pub invoke_response: String,
     pub connection_plan: String,
+    pub local_management: String,
+    pub service_account_handoff: String,
     pub supervisor: String,
 }
 
 impl Protocols {
-    pub fn v1() -> Self {
+    pub fn v2() -> Self {
         Self {
             exchange_api: "exchange.api.v1".into(),
             effective_catalogue_response: "exchange.effective-catalogue-response.v1".into(),
             invoke_request: "exchange.invoke-request.v1".into(),
             invoke_response: "exchange.invoke-response.v1".into(),
-            connection_plan: "exchange.connection-plan.v1".into(),
-            supervisor: "exchange.supervisor-ready.v1".into(),
+            connection_plan: "exchange.connection-plan.v2".into(),
+            local_management: "exchange.local-management.v1".into(),
+            service_account_handoff: "exchange.service-account-handoff.v1".into(),
+            supervisor: "exchange.supervisor-ready.v2".into(),
         }
     }
 }
@@ -202,6 +206,8 @@ pub struct CompatibilityRelease {
 pub struct FixtureSet {
     pub schema: String,
     pub exchange_commit: String,
+    #[serde(default)]
+    pub native_evidence_sha256: String,
     pub files: BTreeMap<String, String>,
     pub cases: Vec<FixtureCase>,
     /// Native process cases bound to exact tests on the five release runners.
@@ -212,7 +218,11 @@ pub struct FixtureSet {
 #[serde(deny_unknown_fields)]
 pub struct NativeFixtureCase {
     pub id: String,
+    #[serde(default)]
+    pub authority: String,
     pub evidence: Vec<NativeFixtureEvidence>,
+    #[serde(default)]
+    pub release_evidence: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

@@ -34,7 +34,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use connector_secrets::{FileStore, SecretStore, StoreError};
+use connector_secrets::{FileStore, PreparedSecretStore, SecretStore, StoreError};
 
 // The two path questions this module used to answer for itself. They moved to `crate::paths` when
 // X-47 added a second file store beside this one: the walk that decides whether a store would sit
@@ -167,6 +167,15 @@ impl CredentialStore {
         self.store.clone()
     }
 
+    /// The same bound store, as the crash-recoverable prepared-transaction port.
+    ///
+    /// This clone and [`secrets`](Self::secrets) retain one concrete [`FileStore`]. In particular,
+    /// a transaction coordinator must keep this port rather than reopen the path: the concrete
+    /// store owns one exclusive writer/recovery lease for its complete lifetime.
+    pub fn prepared_secrets(&self) -> Arc<dyn PreparedSecretStore> {
+        self.store.clone()
+    }
+
     /// The line a binary prints at startup, naming the store it is actually holding.
     ///
     /// The path comes from the bound store rather than from the value that was configured, so it
@@ -255,7 +264,11 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
-    use connector_secrets::{CredentialRef, Secret};
+    use connector_secrets::{
+        CredentialRef, CredentialScope, PreparedSecretError, Secret, SecretBatch,
+        SecretProposalDigest, SecretTransactionGeneration, SecretTransactionId,
+        SecretTransactionState,
+    };
 
     use super::*;
 
@@ -337,6 +350,108 @@ mod tests {
     fn reference() -> CredentialRef {
         CredentialRef::new("dev-local", "com.zendesk.api", "support", "api_token")
             .expect("a valid address")
+    }
+
+    /// Exhaustive on purpose: adding a provider refusal must break Exchange's consumer evidence
+    /// instead of silently entering an assumed catch-all.
+    fn prepared_result(
+        result: Result<SecretTransactionState, PreparedSecretError>,
+    ) -> Result<SecretTransactionState, &'static str> {
+        result.map_err(|error| match error {
+            PreparedSecretError::Unsupported => "unsupported",
+            PreparedSecretError::Busy => "busy",
+            PreparedSecretError::DigestMismatch => "digest_mismatch",
+            PreparedSecretError::TransactionIdReused => "transaction_id_reused",
+            PreparedSecretError::NotPrepared => "not_prepared",
+            PreparedSecretError::AlreadyCommitted => "already_committed",
+            PreparedSecretError::Retired => "retired",
+            PreparedSecretError::Capacity => "capacity",
+            PreparedSecretError::InvalidBatch => "invalid_batch",
+            PreparedSecretError::Backend => "backend",
+        })
+    }
+
+    #[test]
+    fn ordinary_and_prepared_ports_share_one_bound_file_store() {
+        let scratch = Scratch::new("shared-prepared-store");
+        let store = CredentialStore::bind(scratch.join("state").join("credentials"))
+            .expect("a fresh store");
+        let ordinary: Arc<dyn crate::SecretStore> = store.secrets();
+        let prepared: Arc<dyn crate::PreparedSecretStore> = store.prepared_secrets();
+        let reference = reference();
+        block_on(ordinary.put(&reference, &Secret::new("BEFORE-PREPARE")))
+            .expect("the ordinary write lands");
+
+        let generation = SecretTransactionGeneration::from_protocol_bytes(1_u64.to_be_bytes())
+            .expect("generation one is valid");
+        let transaction = SecretTransactionId::new(generation, [0x31; 24]);
+        let digest = SecretProposalDigest::from_protocol_bytes([0x52; 32]);
+        let mut batch = SecretBatch::new(
+            CredentialScope::new(reference.tenant(), reference.authority())
+                .expect("the reference provides a valid scope"),
+        );
+        batch
+            .put(reference.clone(), Secret::new("AFTER-COMMIT"))
+            .expect("the replacement stays inside its scope");
+
+        assert_eq!(
+            prepared_result(block_on(prepared.prepare(transaction, digest, &batch))),
+            Ok(SecretTransactionState::Prepared)
+        );
+        assert_eq!(
+            block_on(ordinary.get(&reference))
+                .expect("ordinary reads retain the committed image")
+                .expose_secret(),
+            "BEFORE-PREPARE"
+        );
+        assert_eq!(
+            prepared_result(block_on(prepared.commit(transaction))),
+            Ok(SecretTransactionState::Committed)
+        );
+        assert_eq!(
+            block_on(ordinary.get(&reference))
+                .expect("ordinary reads see the prepared port's commit")
+                .expose_secret(),
+            "AFTER-COMMIT"
+        );
+    }
+
+    #[test]
+    fn exported_ports_keep_the_exclusive_lease_until_the_last_clone_drops() {
+        let scratch = Scratch::new("prepared-store-lease");
+        let path = scratch.join("state").join("credentials");
+        let store = CredentialStore::bind(&path).expect("a fresh store");
+        let ordinary: Arc<dyn crate::SecretStore> = store.secrets();
+        let prepared: Arc<dyn crate::PreparedSecretStore> = store.prepared_secrets();
+        drop(store);
+
+        let refused = CredentialStore::bind(&path)
+            .expect_err("the ordinary and prepared ports must retain the writer lease");
+        assert!(
+            matches!(
+                refused,
+                CredentialStoreError::Unusable {
+                    source: StoreError::Conflict { .. },
+                    ..
+                }
+            ),
+            "a second opener must receive the provider's lease conflict"
+        );
+
+        drop(ordinary);
+        let refused = CredentialStore::bind(&path)
+            .expect_err("the prepared port alone must retain the writer lease");
+        assert!(matches!(
+            refused,
+            CredentialStoreError::Unusable {
+                source: StoreError::Conflict { .. },
+                ..
+            }
+        ));
+
+        drop(prepared);
+        CredentialStore::bind(&path)
+            .expect("dropping the last port releases the provider-owned kernel lease");
     }
 
     #[test]
@@ -601,12 +716,17 @@ mod tests {
         )
         .expect("the write lands");
 
-        let left: Vec<_> = fs::read_dir(&directory)
+        let mut left: Vec<_> = fs::read_dir(&directory)
             .expect("the directory is readable")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(left, vec!["credentials".to_string()]);
+        left.sort();
+        assert_eq!(
+            left,
+            vec![".credentials.lease".to_string(), "credentials".to_string()],
+            "the fixed provider lease is durable state; no atomic-write temporary may remain"
+        );
     }
 
     #[test]

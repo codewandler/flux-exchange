@@ -24,7 +24,8 @@ USAGE:
   flux-exchange-release sign <payload> --secret-key-env <NAME> --trust-directory <dir> --root-policy <file> --now <UTC-seconds> --role <channel|release> --output-directory <dir>
   flux-exchange-release verify-transport-fixture <fixture.json>
   flux-exchange-release verify-compatibility --executable <path> --entry <entry.json> --executable-sha256 <digest>
-  flux-exchange-release self-test <tests/fixtures/exchange-release-v1>
+  flux-exchange-release native-authority <validate|matrix|bindings|report|verify-reports> [arguments]
+  flux-exchange-release self-test <tests/fixtures/exchange-release-v2>
 
 Every production verification command requires explicit pinned root policy. Policies marked
 test_only are refused unless --allow-test-policy is explicit; self-test is the only command that
@@ -68,10 +69,75 @@ fn run(arguments: Vec<String>) -> anyhow::Result<()> {
             verify_transport_fixture(Path::new(positional(&arguments[1..], 0)?))?
         }
         "verify-compatibility" => verify_compatibility(&arguments[1..])?,
+        "native-authority" => native_authority(&arguments[1..])?,
         "self-test" => self_test(Path::new(positional(&arguments[1..], 0)?))?,
         unknown => bail!("unknown command {unknown:?}\n\n{HELP}"),
     }
     Ok(())
+}
+
+fn native_authority(arguments: &[String]) -> anyhow::Result<()> {
+    let authority = release::native_evidence::NativeEvidenceAuthority::bundled()?;
+    match positional(arguments, 0)? {
+        "validate" => status(&NativeAuthorityStatus {
+            schema: release::native_evidence::SCHEMA,
+            result: "accepted",
+            sha256: authority.identity()?,
+        }),
+        "matrix" => {
+            println!(
+                "{}",
+                String::from_utf8(canonical::encode(&authority.workflow_matrix())?)?
+            );
+            Ok(())
+        }
+        "bindings" => {
+            let target = positional(arguments, 1)?;
+            for binding in authority.runnable_bindings(target)? {
+                let kind = match binding.cargo_target.kind {
+                    release::native_evidence::CargoTargetKind::Lib => "lib",
+                    release::native_evidence::CargoTargetKind::Test => "test",
+                };
+                println!(
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    binding.id,
+                    binding.package,
+                    kind,
+                    binding.cargo_target.name,
+                    binding.exact_test,
+                    binding.features.join(",")
+                );
+            }
+            Ok(())
+        }
+        "report" => {
+            let report = authority.report(positional(arguments, 1)?, positional(arguments, 2)?)?;
+            print!("{}", String::from_utf8(canonical::encode(&report)?)?);
+            Ok(())
+        }
+        "verify-reports" => {
+            let source_commit = positional(arguments, 1)?;
+            let paths = arguments.get(2..).unwrap_or_default();
+            let mut reports = Vec::new();
+            for path in paths {
+                reports.push(canonical::parse::<
+                    release::native_evidence::NativeEvidenceReport,
+                >(
+                    &std::fs::read(path)
+                        .with_context(|| format!("cannot read native report {path:?}"))?,
+                    release::native_evidence::MAX_BYTES,
+                )?);
+            }
+            authority.validate_reports(&reports, source_commit)?;
+            status(&NativeReportsStatus {
+                schema: release::native_evidence::REPORT_SCHEMA,
+                result: "accepted",
+                source_commit,
+                reports: reports.len(),
+            })
+        }
+        mode => bail!("unknown native-authority mode {mode:?}"),
+    }
 }
 
 fn verify_set(
@@ -93,7 +159,7 @@ fn verify_set(
         directory,
         &policy,
         now,
-        &Protocols::v1(),
+        &Protocols::v2(),
         &prior,
         archive_target,
     )?;
@@ -282,7 +348,7 @@ fn update_channel(arguments: &[String]) -> anyhow::Result<()> {
     let output = Path::new(required_option(arguments, "--output")?);
     let bytes = if existing_path == "-" {
         canonical::encode(&Channel {
-            schema: "exchange.release-channel.v1".into(),
+            schema: "exchange.release-channel.v2".into(),
             channel: "stable".into(),
             origin: release::ORIGIN.into(),
             generation: 1,
@@ -440,7 +506,7 @@ fn execute_compatibility(
 fn self_test(directory: &Path) -> anyhow::Result<()> {
     let manifest_path = directory.join("fixture-set.json");
     let fixture: FixtureSet = read_canonical(&manifest_path, 256 * 1024)?;
-    if fixture.schema != "exchange.release-fixture-set.v1" {
+    if fixture.schema != "exchange.release-fixture-set.v2" {
         bail!("unknown fixture-set schema");
     }
     let mut actual_files = BTreeMap::new();
@@ -546,70 +612,21 @@ fn self_test(directory: &Path) -> anyhow::Result<()> {
             "fixture-set provider case inventory disagrees; missing={missing:?}; unexpected={unexpected:?}"
         );
     }
-    let mut native_ids = BTreeSet::new();
-    let mut native_bindings = BTreeSet::new();
-    for native in &fixture.native_cases {
-        if !native_ids.insert(native.id.as_str()) {
-            bail!("fixture-set has duplicate native case {:?}", native.id);
-        }
-        if case_ids.contains(native.id.as_str()) {
-            bail!("fixture case {:?} is both portable and native", native.id);
-        }
-        if native.evidence.is_empty() {
-            bail!(
-                "native fixture case {:?} has no process evidence",
-                native.id
-            );
-        }
-        for evidence in &native.evidence {
-            let targets: BTreeSet<_> = evidence.targets.iter().map(String::as_str).collect();
-            if targets.len() != evidence.targets.len()
-                || targets
-                    .iter()
-                    .any(|target| !release::SUPPORTED_TARGETS.contains(target))
-            {
-                bail!(
-                    "native fixture case {:?} has duplicate or unsupported targets",
-                    native.id
-                );
-            }
-            let target_list = targets.into_iter().collect::<Vec<_>>().join(",");
-            if !native_bindings.insert((
-                native.id.as_str(),
-                target_list,
-                evidence.test_target.as_str(),
-                evidence.exact_test.as_str(),
-            )) {
-                bail!("fixture-set has duplicate native process evidence");
-            }
-        }
+    let native_authority = release::native_evidence::NativeEvidenceAuthority::bundled()?;
+    let authority_identity = native_authority.identity()?;
+    if fixture.native_evidence_sha256 != authority_identity {
+        bail!("fixture-set names stale native-evidence authority bytes");
     }
-    let required_native: BTreeSet<_> = REQUIRED_NATIVE_CASES.iter().copied().collect();
-    if required_native.len() != REQUIRED_NATIVE_CASES.len() {
-        bail!("compiled required native inventory contains a duplicate id");
+    let derived_native = native_authority.fixture_cases()?;
+    if canonical::encode(&fixture.native_cases)? != canonical::encode(&derived_native)? {
+        bail!("fixture-set native projection is not derived from native-evidence-v1.json");
     }
-    if native_ids != required_native {
-        let missing: Vec<_> = required_native.difference(&native_ids).copied().collect();
-        let unexpected: Vec<_> = native_ids.difference(&required_native).copied().collect();
-        bail!(
-            "fixture-set native inventory disagrees; missing={missing:?}; unexpected={unexpected:?}"
-        );
-    }
-    let required_bindings: BTreeSet<_> = REQUIRED_NATIVE_BINDINGS
+    if fixture
+        .native_cases
         .iter()
-        .map(|binding| {
-            (
-                binding.id,
-                binding.targets.join(","),
-                binding.test_target,
-                binding.exact_test,
-            )
-        })
-        .collect();
-    if required_bindings.len() != REQUIRED_NATIVE_BINDINGS.len()
-        || native_bindings != required_bindings
+        .any(|native| case_ids.contains(native.id.as_str()))
     {
-        bail!("fixture-set native cases are not bound to the exact reviewed process tests");
+        bail!("one fixture case is both portable and native");
     }
     status(&SelfTestStatus {
         schema: "exchange.release-self-test.v1",
@@ -786,124 +803,6 @@ const REQUIRED_PROVIDER_CASES: &[&str] = &[
     "higher-channel-target-fails-x86_64-unknown-linux-gnu",
 ];
 
-const REQUIRED_NATIVE_CASES: &[&str] = &[
-    "expiry-equality-live",
-    "supervisor-death-normal-responsive-unix",
-    "supervisor-death-normal-wedged-unix",
-    "supervisor-death-sigkill-responsive-unix",
-    "supervisor-death-sigkill-wedged-unix",
-    "supervisor-death-terminate-responsive-windows",
-    "supervisor-death-terminate-wedged-windows",
-    "unix-inherited-abi",
-    "windows-inherited-abi",
-];
-
-struct RequiredNativeBinding {
-    id: &'static str,
-    targets: &'static [&'static str],
-    test_target: &'static str,
-    exact_test: &'static str,
-}
-
-const UNIX_RELEASE_TARGETS: &[&str] = &[
-    "aarch64-apple-darwin",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-];
-const WINDOWS_RELEASE_TARGETS: &[&str] = &["x86_64-pc-windows-msvc"];
-
-const REQUIRED_NATIVE_BINDINGS: &[RequiredNativeBinding] = &[
-    RequiredNativeBinding {
-        id: "expiry-equality-live",
-        targets: UNIX_RELEASE_TARGETS,
-        test_target: "supervised_unix",
-        exact_test: "verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop",
-    },
-    RequiredNativeBinding {
-        id: "expiry-equality-live",
-        targets: WINDOWS_RELEASE_TARGETS,
-        test_target: "supervised_windows",
-        exact_test: "verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop",
-    },
-    RequiredNativeBinding {
-        id: "supervisor-death-normal-responsive-unix",
-        targets: UNIX_RELEASE_TARGETS,
-        test_target: "supervised_unix",
-        exact_test: "real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof",
-    },
-    RequiredNativeBinding {
-        id: "supervisor-death-normal-wedged-unix",
-        targets: UNIX_RELEASE_TARGETS,
-        test_target: "supervised_unix",
-        exact_test: "native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged",
-    },
-    RequiredNativeBinding {
-        id: "supervisor-death-sigkill-responsive-unix",
-        targets: UNIX_RELEASE_TARGETS,
-        test_target: "supervised_unix",
-        exact_test:
-            "sigkill_of_the_real_supervisor_kills_a_responsive_exchange_and_releases_its_port",
-    },
-    RequiredNativeBinding {
-        id: "supervisor-death-sigkill-wedged-unix",
-        targets: UNIX_RELEASE_TARGETS,
-        test_target: "supervised_unix",
-        exact_test:
-            "sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its_port",
-    },
-    RequiredNativeBinding {
-        id: "supervisor-death-terminate-responsive-windows",
-        targets: WINDOWS_RELEASE_TARGETS,
-        test_target: "supervised_windows",
-        exact_test: "terminate_process_of_supervisor_kills_responsive_exchange_and_releases_port",
-    },
-    RequiredNativeBinding {
-        id: "supervisor-death-terminate-wedged-windows",
-        targets: WINDOWS_RELEASE_TARGETS,
-        test_target: "supervised_windows",
-        exact_test: "terminate_process_of_supervisor_kills_wedged_exchange_and_releases_port",
-    },
-    RequiredNativeBinding {
-        id: "unix-inherited-abi",
-        targets: UNIX_RELEASE_TARGETS,
-        test_target: "supervised_unix",
-        exact_test: "exact_unix_abi_refuses_missing_and_wrong_capabilities",
-    },
-    RequiredNativeBinding {
-        id: "unix-inherited-abi",
-        targets: UNIX_RELEASE_TARGETS,
-        test_target: "supervised_unix",
-        exact_test: "unix_abi_refuses_alias_wrong_kind_direction_and_extra_inherited_fd",
-    },
-    RequiredNativeBinding {
-        id: "unix-inherited-abi",
-        targets: UNIX_RELEASE_TARGETS,
-        test_target: "supervised_unix",
-        exact_test: "unix_abi_refuses_each_missing_fd_and_does_not_discover_env_other_fd_or_stdout",
-    },
-    RequiredNativeBinding {
-        id: "windows-inherited-abi",
-        targets: WINDOWS_RELEASE_TARGETS,
-        test_target: "supervised_windows",
-        exact_test: "malformed_windows_handle_flags_refuse_without_stdout_readiness",
-    },
-    RequiredNativeBinding {
-        id: "windows-inherited-abi",
-        targets: WINDOWS_RELEASE_TARGETS,
-        test_target: "supervised_windows",
-        exact_test:
-            "environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities",
-    },
-    RequiredNativeBinding {
-        id: "windows-inherited-abi",
-        targets: WINDOWS_RELEASE_TARGETS,
-        test_target: "lib",
-        exact_test:
-            "supervisor::tests::windows_validator_refuses_noninherited_nonpipe_and_each_wrong_direction",
-    },
-];
-
 struct CaseObservation {
     state: RollbackState,
     install: Option<release::InstalledIdentity>,
@@ -1003,7 +902,7 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
                     &input,
                     &policy,
                     now,
-                    &Protocols::v1(),
+                    &Protocols::v2(),
                     &case.prior_state,
                     Some(&case.platform),
                 );
@@ -1030,7 +929,7 @@ fn execute_case(directory: &Path, case: &release::FixtureCase) -> CaseObservatio
                     &policy,
                     release::parse_utc(&case.clock)?,
                     release::parse_utc(&expiry.commit_clock)?,
-                    &Protocols::v1(),
+                    &Protocols::v2(),
                     &case.prior_state,
                     Some(&case.platform),
                 );
@@ -1132,7 +1031,7 @@ fn execute_manifest_mutation(directory: &Path, id: &str) -> anyhow::Result<()> {
             manifest.origin = "https://example.invalid/foreign".into()
         }
         "unsupported-protocol-set" => {
-            manifest.protocols.supervisor = "exchange.supervisor-ready.v2".into()
+            manifest.protocols.supervisor = "exchange.supervisor-ready.v3".into()
         }
         "id-or-basename-unsafe" => manifest.assets[0].archive = "unsafe/name".into(),
         "basename-empty" => manifest.assets[0].archive.clear(),
@@ -1542,4 +1441,19 @@ struct SelfTestStatus {
     result: &'static str,
     cases: usize,
     fixture_set_sha256: String,
+}
+
+#[derive(Serialize)]
+struct NativeAuthorityStatus {
+    schema: &'static str,
+    result: &'static str,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+struct NativeReportsStatus<'a> {
+    schema: &'static str,
+    result: &'static str,
+    source_commit: &'a str,
+    reports: usize,
 }

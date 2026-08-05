@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 
 fn main() -> anyhow::Result<()> {
     let root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v1");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v2");
+    let exchange_commit = fixture_source_commit()?;
     if std::env::args().nth(1).as_deref() == Some("--refresh-manifest") {
-        return refresh_manifest(&root);
+        return refresh_manifest(&root, &exchange_commit);
     }
     if root.exists() {
         std::fs::remove_dir_all(&root)?;
@@ -133,13 +134,13 @@ fn main() -> anyhow::Result<()> {
     }
     assets.sort_by(|left, right| left.target.cmp(&right.target));
     let manifest = Manifest {
-        schema: "exchange.release-manifest.v1".into(),
+        schema: "exchange.release-manifest.v2".into(),
         origin: ORIGIN.into(),
         tag: format!("refs/tags/v{version}"),
         version: version.into(),
         source_commit: "4e398a73dcb8de17466cbedea77122dd489bed4f".into(),
         build_id: "TEST-ONLY-X126-FIXTURE".into(),
-        protocols: Protocols::v1(),
+        protocols: Protocols::v2(),
         signing_key_ids: vec![release_id.into()],
         assets,
     };
@@ -165,7 +166,7 @@ fn main() -> anyhow::Result<()> {
         protocols: manifest.protocols.clone(),
     };
     let channel = Channel {
-        schema: "exchange.release-channel.v1".into(),
+        schema: "exchange.release-channel.v2".into(),
         channel: "stable".into(),
         origin: ORIGIN.into(),
         generation: 7,
@@ -424,7 +425,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     let mut incompatible_channel = channel.clone();
     incompatible_channel.generation = 8;
-    incompatible_channel.releases[0].protocols.supervisor = "exchange.supervisor-ready.v2".into();
+    incompatible_channel.releases[0].protocols.supervisor = "exchange.supervisor-ready.v3".into();
     signed_channel_variant(
         &root,
         "higher-no-compatible",
@@ -461,7 +462,7 @@ fn main() -> anyhow::Result<()> {
     newer.tag = "refs/tags/v0.18.0".into();
     newer.source_commit = "5e398a73dcb8de17466cbedea77122dd489bed4f".into();
     newer.manifest_sha256 = "d".repeat(64);
-    newer.protocols.supervisor = "exchange.supervisor-ready.v2".into();
+    newer.protocols.supervisor = "exchange.supervisor-ready.v3".into();
     higher_incompatible.releases.push(newer);
     signed_channel_variant(
         &root,
@@ -556,7 +557,7 @@ fn main() -> anyhow::Result<()> {
     write(
         &root.join("compatibility.json"),
         &canonical::encode(&Compatibility {
-            schema: "exchange.compatibility.v1".into(),
+            schema: "exchange.compatibility.v2".into(),
             release: CompatibilityRelease {
                 tag: entry.tag.clone(),
                 version: entry.version.clone(),
@@ -580,7 +581,7 @@ fn main() -> anyhow::Result<()> {
             serde_json::json!({"filetime":"1","kind":"windows-process-creation"}),
         ),
     ] {
-        let readiness = serde_json::json!({"bind":{"host":"127.0.0.1","port":1,"scheme":"http"},"process":{"pid":1,"start_identity":identity},"protocols":entry.protocols,"release":{"build_id":entry.build_id,"executable_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":entry.source_commit,"tag":entry.tag,"version":entry.version},"schema":"exchange.supervisor-ready.v1"});
+        let readiness = serde_json::json!({"bind":{"host":"127.0.0.1","port":1,"scheme":"http"},"process":{"pid":1,"start_identity":identity},"protocols":entry.protocols,"release":{"build_id":entry.build_id,"executable_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":entry.source_commit,"tag":entry.tag,"version":entry.version},"schema":"exchange.supervisor-ready.v2"});
         write(&root.join(name), &canonical::encode(&readiness)?)?;
     }
     let mut bad_bind: serde_json::Value =
@@ -671,7 +672,7 @@ fn main() -> anyhow::Result<()> {
     )?;
     write(
         &root.join("invalid-noncanonical.json"),
-        br#"{ "schema":"exchange.release-manifest.v1"}"#,
+        br#"{ "schema":"exchange.release-manifest.v2"}"#,
     )?;
     let mut unknown_manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
     unknown_manifest["unknown"] = serde_json::json!(true);
@@ -941,7 +942,7 @@ fn main() -> anyhow::Result<()> {
     write(
         &root.join("no-compatible.json"),
         &canonical::encode(
-            &serde_json::json!({"releases":[ReleaseEntry::test("1.0.0", Protocols { supervisor: "exchange.supervisor-ready.v2".into(), ..Protocols::v1() })],"supported":Protocols::v1()}),
+            &serde_json::json!({"releases":[ReleaseEntry::test("1.0.0", Protocols { supervisor: "exchange.supervisor-ready.v3".into(), ..Protocols::v2() })],"supported":Protocols::v2()}),
         )?,
     )?;
 
@@ -978,15 +979,17 @@ fn main() -> anyhow::Result<()> {
     let mut files = BTreeMap::new();
     inventory_files(&root, &root, &mut files)?;
     files.remove("fixture-set.json");
+    let native_authority = release::native_evidence::NativeEvidenceAuthority::bundled()?;
     let fixture_set = FixtureSet {
-        schema: "exchange.release-fixture-set.v1".into(),
+        schema: "exchange.release-fixture-set.v2".into(),
         // This is the committed provider/verifier baseline from which these generated bytes were
         // produced. The fixture-set digest identifies this manifest without requiring an
         // impossible self-referential Git commit hash.
-        exchange_commit: "6bf620b91f789303f76a2069d7ef3ff7f1e59eb1".into(),
+        exchange_commit,
+        native_evidence_sha256: native_authority.identity()?,
         files,
         cases,
-        native_cases: native_fixture_cases(),
+        native_cases: native_authority.fixture_cases()?,
     };
     write(
         &root.join("fixture-set.json"),
@@ -996,7 +999,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn refresh_manifest(root: &Path) -> anyhow::Result<()> {
+fn refresh_manifest(root: &Path, exchange_commit: &str) -> anyhow::Result<()> {
     let path = root.join("fixture-set.json");
     let previous =
         canonical::parse_value(&release::read_bounded_file(&path, 256 * 1024)?, 256 * 1024)?;
@@ -1009,138 +1012,29 @@ fn refresh_manifest(root: &Path) -> anyhow::Result<()> {
     let mut files = BTreeMap::new();
     inventory_files(root, root, &mut files)?;
     files.remove("fixture-set.json");
+    let native_authority = release::native_evidence::NativeEvidenceAuthority::bundled()?;
     let fixture_set = FixtureSet {
-        schema: "exchange.release-fixture-set.v1".into(),
-        exchange_commit: "6bf620b91f789303f76a2069d7ef3ff7f1e59eb1".into(),
+        schema: "exchange.release-fixture-set.v2".into(),
+        exchange_commit: exchange_commit.into(),
+        native_evidence_sha256: native_authority.identity()?,
         files,
         cases,
-        native_cases: native_fixture_cases(),
+        native_cases: native_authority.fixture_cases()?,
     };
     write(&path, &canonical::encode(&fixture_set)?)
 }
 
-fn native_fixture_cases() -> Vec<NativeFixtureCase> {
-    const UNIX: &[&str] = &[
-        "aarch64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-apple-darwin",
-        "x86_64-unknown-linux-gnu",
-    ];
-    const WINDOWS: &[&str] = &["x86_64-pc-windows-msvc"];
-
-    fn evidence(targets: &[&str], test_target: &str, exact_test: &str) -> NativeFixtureEvidence {
-        NativeFixtureEvidence {
-            targets: targets.iter().map(|target| (*target).into()).collect(),
-            test_target: test_target.into(),
-            exact_test: exact_test.into(),
-        }
+fn fixture_source_commit() -> anyhow::Result<String> {
+    let value = std::env::var("FLUX_EXCHANGE_FIXTURE_SOURCE_COMMIT")
+        .map_err(|_| anyhow::anyhow!("FLUX_EXCHANGE_FIXTURE_SOURCE_COMMIT is required"))?;
+    if value.len() != 40
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("FLUX_EXCHANGE_FIXTURE_SOURCE_COMMIT must be one full lowercase commit SHA");
     }
-
-    vec![
-        NativeFixtureCase {
-            id: "expiry-equality-live".into(),
-            evidence: vec![
-                evidence(
-                    UNIX,
-                    "supervised_unix",
-                    "verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop",
-                ),
-                evidence(
-                    WINDOWS,
-                    "supervised_windows",
-                    "verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop",
-                ),
-            ],
-        },
-        NativeFixtureCase {
-            id: "supervisor-death-normal-responsive-unix".into(),
-            evidence: vec![evidence(
-                UNIX,
-                "supervised_unix",
-                "real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof",
-            )],
-        },
-        NativeFixtureCase {
-            id: "supervisor-death-normal-wedged-unix".into(),
-            evidence: vec![evidence(
-                UNIX,
-                "supervised_unix",
-                "native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged",
-            )],
-        },
-        NativeFixtureCase {
-            id: "supervisor-death-sigkill-responsive-unix".into(),
-            evidence: vec![evidence(
-                UNIX,
-                "supervised_unix",
-                "sigkill_of_the_real_supervisor_kills_a_responsive_exchange_and_releases_its_port",
-            )],
-        },
-        NativeFixtureCase {
-            id: "supervisor-death-sigkill-wedged-unix".into(),
-            evidence: vec![evidence(
-                UNIX,
-                "supervised_unix",
-                "sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its_port",
-            )],
-        },
-        NativeFixtureCase {
-            id: "supervisor-death-terminate-responsive-windows".into(),
-            evidence: vec![evidence(
-                WINDOWS,
-                "supervised_windows",
-                "terminate_process_of_supervisor_kills_responsive_exchange_and_releases_port",
-            )],
-        },
-        NativeFixtureCase {
-            id: "supervisor-death-terminate-wedged-windows".into(),
-            evidence: vec![evidence(
-                WINDOWS,
-                "supervised_windows",
-                "terminate_process_of_supervisor_kills_wedged_exchange_and_releases_port",
-            )],
-        },
-        NativeFixtureCase {
-            id: "unix-inherited-abi".into(),
-            evidence: vec![
-                evidence(
-                    UNIX,
-                    "supervised_unix",
-                    "exact_unix_abi_refuses_missing_and_wrong_capabilities",
-                ),
-                evidence(
-                    UNIX,
-                    "supervised_unix",
-                    "unix_abi_refuses_alias_wrong_kind_direction_and_extra_inherited_fd",
-                ),
-                evidence(
-                    UNIX,
-                    "supervised_unix",
-                    "unix_abi_refuses_each_missing_fd_and_does_not_discover_env_other_fd_or_stdout",
-                ),
-            ],
-        },
-        NativeFixtureCase {
-            id: "windows-inherited-abi".into(),
-            evidence: vec![
-                evidence(
-                    WINDOWS,
-                    "supervised_windows",
-                    "malformed_windows_handle_flags_refuse_without_stdout_readiness",
-                ),
-                evidence(
-                    WINDOWS,
-                    "supervised_windows",
-                    "environment_stdout_and_handles_outside_the_explicit_list_are_not_capabilities",
-                ),
-                evidence(
-                    WINDOWS,
-                    "lib",
-                    "supervisor::tests::windows_validator_refuses_noninherited_nonpipe_and_each_wrong_direction",
-                ),
-            ],
-        },
-    ]
+    Ok(value)
 }
 
 struct FixtureDigests {

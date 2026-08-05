@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use exchange_host::GrantTransactions;
 use exchange_host::{
     AuthPosture, ConnectionRegistry, ConnectionSettings, Identity, Invoker, Principal,
     PureEditorTools, SecretStore, WorkflowStore,
@@ -10,16 +11,18 @@ use exchange_host::{
 use crate::audit::AuditJournal;
 use crate::bind::IdentityBinding;
 use crate::channel::ChannelSupervisor;
-use crate::connection_guard::ConnectionGuard;
+use crate::connection_guard::{Claim, ConnectionGuard};
 use crate::credential_acquisition::AcquisitionBindings;
+use crate::credential_head::CredentialHeadStore;
 use crate::dev_identity::DevIdentity;
 use crate::local_identity::LocalUsers;
+use crate::local_management::TransactionCoordinator;
 use crate::managed_apps::ManagedAppSupervisor;
 use crate::oidc::Oidc;
 use crate::operator::OperatorPolicy;
 use crate::service_account::ServiceAccountStore;
 use crate::tenancy::Tenancy;
-use crate::traffic::{InvocationClaim, Traffic, TrafficRefusal};
+use crate::traffic::{HostedClaim, InvocationClaim, Traffic, TrafficRefusal};
 use crate::workflow_runs::WorkflowRunStore;
 
 /// The state the router hands to every route.
@@ -41,6 +44,14 @@ pub struct AppState {
     /// route that would reach for one refuses rather than pretending — see
     /// [`crate::routes::connections`].
     credentials: Option<Arc<dyn SecretStore>>,
+    /// The one recovered prepared-transaction coordinator shared by native and hosted management.
+    coordinator: Option<Arc<TransactionCoordinator>>,
+    /// Durable opaque heads for labelled credential partitions.
+    credential_heads: Option<Arc<CredentialHeadStore>>,
+    /// The startup-validated byte-exact origin admitted by the hosted management transport.
+    hosted_origin: Option<Arc<str>>,
+    /// The revisioned whole-set grant port retained from the same store invocation reads.
+    grant_transactions: Option<Arc<dyn GrantTransactions>>,
     /// Startup-selected policy over connector-declared credential-acquisition hazards.
     auth_posture: AuthPosture,
     /// Explicit server bindings for released connector acquisition declarations.
@@ -246,6 +257,10 @@ impl AppState {
             identity: BoundIdentity::None,
             sign_in: SignIn::Unconfigured,
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
             settings: None,
@@ -279,6 +294,10 @@ impl AppState {
             identity: BoundIdentity::Real(identity),
             sign_in: SignIn::Unconfigured,
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
             settings: None,
@@ -309,6 +328,10 @@ impl AppState {
             identity: BoundIdentity::Development(identity),
             sign_in: SignIn::Development { automatic: false },
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
             settings: None,
@@ -341,6 +364,10 @@ impl AppState {
             identity: BoundIdentity::LocalUsers(identity),
             sign_in: SignIn::LocalUsers,
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
             settings: None,
@@ -374,6 +401,10 @@ impl AppState {
             identity: BoundIdentity::Real(oidc.clone()),
             sign_in: SignIn::Oidc(oidc),
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
             settings: None,
@@ -404,6 +435,10 @@ impl AppState {
             identity: BoundIdentity::None,
             sign_in: SignIn::NoTokenExchange,
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
             settings: None,
@@ -483,6 +518,83 @@ impl AppState {
     /// caller supplied.
     pub fn credentials(&self) -> Option<&Arc<dyn SecretStore>> {
         self.credentials.as_ref()
+    }
+
+    /// Bind the one recovered coordinator used by every local-management transport.
+    pub fn with_transaction_coordinator(
+        mut self,
+        coordinator: Arc<TransactionCoordinator>,
+    ) -> Self {
+        self.coordinator = Some(coordinator);
+        self
+    }
+
+    /// The recovered transaction coordinator, if this composition bound one.
+    pub fn transaction_coordinator(&self) -> Option<&Arc<TransactionCoordinator>> {
+        self.coordinator.as_ref()
+    }
+
+    /// Whether a provider-committed connection image is still being published for this key.
+    pub(crate) fn connection_publication_pending(
+        &self,
+        tenant: &exchange_host::Tenant,
+        connector: &str,
+    ) -> Result<bool, ()> {
+        self.coordinator
+            .as_ref()
+            .map(|coordinator| {
+                coordinator
+                    .publication_pending_for(tenant.as_str(), connector)
+                    .map_err(|_| ())
+            })
+            .unwrap_or(Ok(false))
+    }
+
+    /// Claim a mutation only when no durable post-decision publication owns the same key.
+    pub(crate) fn claim_connection(
+        &self,
+        tenant: &exchange_host::Tenant,
+        connector: &str,
+    ) -> Option<Claim> {
+        matches!(
+            self.connection_publication_pending(tenant, connector),
+            Ok(false)
+        )
+        .then(|| self.connections.claim(tenant, connector))
+        .flatten()
+    }
+
+    /// Bind the one owner-root credential-head store shared by plans and ceremonies.
+    pub(crate) fn with_credential_heads(mut self, heads: Arc<CredentialHeadStore>) -> Self {
+        self.credential_heads = Some(heads);
+        self
+    }
+
+    /// The durable value-free credential-head store, when startup migration completed.
+    pub(crate) fn credential_heads(&self) -> Option<&Arc<CredentialHeadStore>> {
+        self.credential_heads.as_ref()
+    }
+
+    /// Bind the canonical origin admitted by hosted local management.
+    pub fn with_hosted_origin(mut self, origin: impl Into<Arc<str>>) -> Self {
+        self.hosted_origin = Some(origin.into());
+        self
+    }
+
+    /// The byte-exact hosted origin selected before route service begins.
+    pub fn hosted_origin(&self) -> Option<&str> {
+        self.hosted_origin.as_deref()
+    }
+
+    /// Bind the local-management grant transaction port retained from the invocation store.
+    pub fn with_grant_transactions(mut self, grants: Arc<dyn GrantTransactions>) -> Self {
+        self.grant_transactions = Some(grants);
+        self
+    }
+
+    /// The revisioned grant transaction port, when this composition bound one.
+    pub fn grant_transactions(&self) -> Option<&Arc<dyn GrantTransactions>> {
+        self.grant_transactions.as_ref()
     }
 
     /// Bind deployment policy and explicit connector acquisition performers together.
@@ -730,6 +842,14 @@ impl AppState {
         principal: &Principal,
     ) -> Result<InvocationClaim, TrafficRefusal> {
         self.traffic.begin_invocation(principal)
+    }
+
+    /// Claim one exact hosted local-management ceremony slot.
+    pub(crate) fn begin_local_management(
+        &self,
+        principal: &Principal,
+    ) -> Result<HostedClaim, TrafficRefusal> {
+        self.traffic.begin_local_management(principal)
     }
 
     /// Fixed-cardinality process traffic measurements.

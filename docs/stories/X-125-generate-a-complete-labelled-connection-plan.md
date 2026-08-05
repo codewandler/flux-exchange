@@ -102,6 +102,11 @@ label from X-14, not a host, authority, credential address, instance UUID or run
 
 ## Progress
 
+- 2026-08-05: X-134 superseded this story's unpublished v1 wire contract with the closed v2 plan.
+  The positive `exchange-connection-plan-v1` fixture was retired so no executable consumer can
+  mistake this historical Acceptance for the released contract; X-134 and the local-release design
+  now own the v2 producer, consumer and fixture evidence.
+
 - 2026-08-03: Filed from cross-repository Decision 0002 after the first-run tutorial exposed that a
   runtime-ready GitLab/Jira path still cannot be established from either client. X-80 was promoted to
   priority-zero ready work as this story's explicit response-contract prerequisite.

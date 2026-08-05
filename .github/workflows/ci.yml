@@ -19,6 +19,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      native_target:
+        description: Optional one-target native evidence projection; empty runs the complete authority.
+        required: false
+        type: string
+      native_binding:
+        description: Optional one-binding diagnostic; requires native_target and emits no native report.
+        required: false
+        type: string
 
 # Least privilege. Every job here only reads the checkout: nothing comments on a pull request,
 # uploads an artifact, or touches a package. `crates-io.yml` declares the same `contents: read` and
@@ -45,6 +55,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # Release-fixture tests inspect the committed candidate named by the non-self-referential
+          # follow-up manifest, so the candidate object must be present in the offline checkout.
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         # The same pin `crates-io.yml` carries, and the same one ../flux and ../flux-connectors
@@ -153,25 +167,41 @@ jobs:
       - name: Build on the declared MSRV
         run: cargo build --workspace --locked
 
+  native-authority-matrix:
+    name: derive native evidence runners
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.authority.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Project the sole native authority
+        id: authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested='${{ inputs.native_target }}'
+          binding='${{ inputs.native_binding }}'
+          if [[ -n "$binding" && -z "$requested" ]]; then
+            echo "a diagnostic native binding requires one canonical native target" >&2
+            exit 1
+          fi
+          matrix="$(jq -ce --arg requested "$requested" '[.targets | to_entries[] | select($requested == "" or .key == $requested) | {target: .key, runner: .value.runner}]' crates/exchange-release/native-evidence-v1.json)"
+          if [[ "$matrix" == '[]' ]]; then
+            echo "requested native target is absent from the canonical authority" >&2
+            exit 1
+          fi
+          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+
   native-local-state:
     name: local state · ${{ matrix.target }}
     # Platform support is the real credential-bearing composition, not a cross-compiled health
     # handler. Each row runs on its target architecture and exercises the shared logical formats,
     # the native owner-only filesystem binding and the real --dev process restart.
+    needs: native-authority-matrix
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
+        include: ${{ fromJson(needs.native-authority-matrix.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -191,32 +221,11 @@ jobs:
       - name: Compile the complete server and local composition
         run: cargo check --workspace --all-targets --locked --target ${{ matrix.target }}
 
-      - name: Exercise native owner-only storage fixtures
-        run: cargo test -p codewandler-flux-exchange-host --locked private_fs
-
-      - name: Exercise zero-configuration state selection
-        run: cargo test -p flux-exchange --bin flux-exchange --locked local_state
-
-      - name: Exercise the native Unix supervisor ABI and owner-death path
-        if: runner.os != 'Windows'
-        run: cargo test -p flux-exchange --test supervised_unix --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }}
-
-      - name: Exercise the native Windows supervisor ABI and owner-death path
-        if: runner.os == 'Windows'
-        run: cargo test -p flux-exchange --test supervised_windows --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }}
-
-      - name: Exercise native Windows capability-kind and direction validation
-        if: runner.os == 'Windows'
-        run: cargo test -p flux-exchange --lib --features supervisor-test-wedge,supervisor-test-bind-refusal --locked --target ${{ matrix.target }} supervisor::tests::windows_validator_refuses_noninherited_nonpipe_and_each_wrong_direction
-
-      - name: Refuse unsafe Windows stores through the real startup composition
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/check-windows-state-refusals.ps1
-
-      - name: Restart the real development composition over durable state
+      - name: Execute every authority-selected native process proof exactly
         shell: bash
-        run: ./scripts/check-dev-signin.sh
+        env:
+          FLUX_EXCHANGE_NATIVE_BINDING: ${{ inputs.native_binding }}
+        run: ./scripts/release-native-fixtures.sh '${{ matrix.target }}'
 
   console:
     name: console · audit · test · build
@@ -375,6 +384,11 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
+      - name: Prove and run the offline publication readiness boundary
+        run: |
+          ./scripts/check-publication-readiness.sh --self-test
+          ./scripts/check-publication-readiness.sh
+
       - name: Install release-verifier toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
@@ -397,4 +411,4 @@ jobs:
       - name: Run the provider-owned release fixture set through the production verifier
         run: >-
           cargo run --locked -p flux-exchange-release --
-          self-test tests/fixtures/exchange-release-v1
+          self-test tests/fixtures/exchange-release-v2

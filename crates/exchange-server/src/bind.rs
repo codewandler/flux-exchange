@@ -120,6 +120,18 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// The value-free prepared-transaction journal or provider recovery could not be bound.
+    TransactionCoordinator {
+        /// The redaction-safe journal or provider refusal.
+        reason: String,
+    },
+
+    /// The hosted management origin was explicitly invalid for this startup mode.
+    HostedOrigin {
+        /// The value-free canonical-origin refusal.
+        reason: String,
+    },
+
     /// The bind is reachable from outside this machine and nothing could authenticate a caller.
     ReachableBindWithoutIdentity {
         /// The address that was asked for.
@@ -284,6 +296,8 @@ impl fmt::Display for StartupRefusal {
             Self::Tenancy { reason } => write!(f, "{reason}"),
             Self::LocalUsers { reason } => write!(f, "{reason}"),
             Self::LocalState { reason } => write!(f, "{reason}"),
+            Self::TransactionCoordinator { reason } => write!(f, "{reason}"),
+            Self::HostedOrigin { reason } => write!(f, "{reason}"),
             // Names both things that would have worked, because the operator cannot tell from the
             // outside which half of the pair they meant to change.
             Self::ReachableBindWithoutIdentity { bind } => write!(
@@ -354,6 +368,8 @@ impl std::error::Error for StartupRefusal {
             | Self::Tenancy { .. }
             | Self::LocalUsers { .. }
             | Self::LocalState { .. }
+            | Self::TransactionCoordinator { .. }
+            | Self::HostedOrigin { .. }
             | Self::CredentialStore { .. }
             | Self::ServiceAccountStore { .. }
             | Self::SettingsStore { .. }

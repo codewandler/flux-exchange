@@ -46,13 +46,23 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # The gate proves the frozen fixture against its earlier candidate commit without a
+          # network fetch, so retain the history that contains that immutable object.
+          fetch-depth: 0
+
+      - name: Refuse an unpublished or incomplete tagged tree before tokens or tools
+        run: |
+          ./scripts/check-publication-readiness.sh --self-test
+          ./scripts/check-publication-readiness.sh
 
       # First, before a toolchain is installed or anything is packaged: a missing secret must stop
       # the run here, not surface as an upload failure after the artifact is already live.
       - name: Check the publish token is configured
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
             echo "::error::CARGO_REGISTRY_TOKEN is not set. It is an org-level secret on codewandler with SELECTED visibility — add this repository under Settings → Secrets and variables → Actions → CARGO_REGISTRY_TOKEN → Repository access."
@@ -104,4 +114,6 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: bash scripts/publish-crates-io.sh

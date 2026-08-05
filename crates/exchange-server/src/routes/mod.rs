@@ -18,10 +18,16 @@ mod apps;
 pub(crate) mod catalogue;
 mod channels;
 mod connections;
+pub(crate) use connections::{
+    native_plan_query, native_plan_snapshot, NativePlanRefusal, NativePlanSnapshot,
+};
 mod grants;
 mod health;
 mod identity;
 mod invoke;
+mod local_management_frames;
+#[cfg(feature = "native-deadline-test-seam")]
+pub(crate) use local_management_frames::run_deadline_process_fixture as run_hosted_deadline_process_fixture;
 mod metrics;
 mod onboarding;
 mod service_accounts;
@@ -59,6 +65,7 @@ const MODULES: &[Module] = &[
     connections::MODULE,
     service_accounts::MODULE,
     invoke::MODULE,
+    local_management_frames::MODULE,
     grants::MODULE,
     onboarding::MODULE,
     workflows::MODULE,
@@ -1760,6 +1767,9 @@ mod tests {
             // host mints, verifies and revokes nothing for a service.
             ("service-accounts", "/api/service-accounts"),
             ("service-accounts", "/api/service-accounts/{id}"),
+            // Hosted FXLM carries secret-bearing ceremonies, and only an authenticated deployment
+            // operator may upgrade into that authority-bearing transport.
+            ("local-management-frames", "/api/onboarding/frames"),
             // Reading and editing what a tenant may run (X-62). Only a signed-in human, and this
             // is the entry that makes the four above worth having: whoever may edit a grant
             // decides which operations run at all, for every principal of the tenant and across

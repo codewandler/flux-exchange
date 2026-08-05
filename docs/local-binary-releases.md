@@ -116,10 +116,10 @@ workflows before credentials or publication unless the tree consumes the checksu
 release of `codewandler-connector-secrets` 0.20.0, contains only the final v2/eight-protocol
 producers and has a complete digest-checked v2 fixture inventory. There is no override flag or
 readiness marker. The six-protocol compatibility shape previously implemented and fixture-tested is
-unpublished implementation evidence only. Until X-134's owner-bound local management, direct vendor credential
-insertion and one-shot Service Account credential-handoff pass their native fixtures, there is no production
-trust ceremony, tag, crates.io publication, public binary asset, stable-channel update or X-126
-completion.
+unpublished implementation evidence only; release candidates must carry the owner-bound local
+management, direct vendor-secret insertion and one-shot Service Account credential-handoff contract
+and pass its native fixtures before any production trust ceremony, tag, crates.io publication,
+public binary asset, stable-channel update or X-126 completion.
 
 ## Compatibility identity
 
@@ -131,7 +131,7 @@ flux-exchange compatibility --json
 ```
 
 The first public release writes JSON only, with this exact v2 shape and eight protocol keys. The
-current six-field implementation is deliberately unpublished and cannot pass release preflight:
+older six-field implementation is deliberately unpublished and cannot pass release preflight:
 
 ```json
 {
@@ -165,6 +165,42 @@ This is what keeps releases independent. A compatible Exchange release, includin
 newly released connector catalogue, reaches existing Flux installations through the signed channel
 without a Flux release. A new Flux release is required only when it must learn an unsupported
 protocol/client contract or change the pinned offline-root/trust policy.
+
+## Owner-bound local onboarding
+
+The native onboarding endpoint belongs only to the supervised single-user composition. It is an
+owner-only Unix socket below the native state root or a Windows named pipe with a protected
+current-user/System DACL, and it
+authenticates the peer as the same operating-system account before mapping that peer to local
+operator authority inside the management dispatcher. That mapping is never an HTTP identity
+provider. It cannot authenticate loopback TCP, hosted routes, another account, Service Account
+runtime requests or a process started with `--dev`; readiness, liveness and lifecycle control remain
+separate value-free channels.
+
+With no explicit state override, production discovers its root from the authenticated native
+account: the effective uid's account-database home on Linux and macOS, and the current account's
+Local AppData known folder on Windows. Inherited `HOME`, `XDG_STATE_HOME`, `USERPROFILE`,
+`LOCALAPPDATA` and equivalent variables do not select it. An explicit root or store path is still
+validated from its trusted account boundary through every component. Symlinks or reparse points,
+foreign ownership, an untrusted-writable ancestor and widened root/descendant permissions refuse.
+Exchange never narrows modes, changes ownership, rewrites an ACL, repairs an unsafe ancestor or
+falls back to memory.
+
+The native `flux-exchange` helper owns secret-bearing input; Flux owns only bounded, non-secret
+request and result capabilities. When a vendor value is requested, the helper opens `/dev/tty` or
+the Windows console directly, sends the raw value only over the authenticated management connection,
+and returns a value-free receipt or refusal to Flux. It does not open a terminal for a ceremony that
+needs no secret. Service Account mint uses a separate write-only handoff capability, so the one-time
+credential travels from Exchange to its receiver without entering ordinary JSON, argv, environment,
+stdout, stderr, readiness, liveness or diagnostics. The handoff proves only that Exchange committed
+the verifier and wrote one frame; the receiver alone can claim that its own credential store
+committed the value.
+
+The compatibility object above is the complete release inventory: four unchanged HTTP identities,
+`exchange.connection-plan.v2`, `exchange.local-management.v1`,
+`exchange.service-account-handoff.v1` and `exchange.supervisor-ready.v2`. Local management is not a
+ninth lifecycle protocol, and changing any of these byte contracts requires a new identity rather
+than silently widening an existing one.
 
 ## Update, rollback and expiry
 

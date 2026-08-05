@@ -116,12 +116,12 @@ pub(crate) fn verify_channel(
     let path = directory.join("flux-exchange-release-channel.json");
     let bytes = read_bounded_file(&path, 256 * 1024)?;
     let channel: Channel = crate::canonical::parse(&bytes, 256 * 1024)?;
-    if channel.schema != "exchange.release-channel.v1"
+    if channel.schema != "exchange.release-channel.v2"
         || channel.channel != "stable"
         || channel.origin != ORIGIN
     {
         return Err(Error::Schema(
-            "channel schema, name or origin is not provider stable v1".into(),
+            "channel schema, name or origin is not provider stable v2".into(),
         ));
     }
     if channel.generation == 0 || channel.generation > JCS_SAFE_INTEGER {
@@ -201,9 +201,9 @@ pub(crate) fn verify_manifest(
         ));
     }
     let manifest: Manifest = crate::canonical::parse(&bytes, 256 * 1024)?;
-    if manifest.schema != "exchange.release-manifest.v1" || manifest.origin != ORIGIN {
+    if manifest.schema != "exchange.release-manifest.v2" || manifest.origin != ORIGIN {
         return Err(Error::Schema(
-            "manifest schema or origin is not provider v1".into(),
+            "manifest schema or origin is not provider v2".into(),
         ));
     }
     crate::verify_manifest_identity(&manifest, selected)?;
@@ -236,9 +236,9 @@ pub(crate) fn verify_manifest(
 }
 
 pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
-    if manifest.schema != "exchange.release-manifest.v1" || manifest.origin != ORIGIN {
+    if manifest.schema != "exchange.release-manifest.v2" || manifest.origin != ORIGIN {
         return Err(Error::Schema(
-            "manifest schema or origin is not provider v1".into(),
+            "manifest schema or origin is not provider v2".into(),
         ));
     }
     validate_release_identity(

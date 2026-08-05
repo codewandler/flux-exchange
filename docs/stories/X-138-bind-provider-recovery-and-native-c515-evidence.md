@@ -52,6 +52,23 @@ without a second store, point-write emulation or secret-shaped Exchange state.
 - Provider composition at accepted checkpoint `bd9ad187c89eccbfb1f9b70c2bfc20b010284011`
   and later coordinator/recovery tests are useful implementation evidence. Exact five-target
   process selection and complete crash/query/replay closure remain required here.
+- The Unix/macOS process target now has exactly one parent test,
+  `unix_connect_crashes_recover_before_readiness_and_replay_one_receipt`. It abruptly terminates a
+  real server after an allocated secret-bearing BEGIN, proves startup aborts the invisible row,
+  and crosses settings, authority, head, audit and label post-decision crash boundaries. Each case
+  then proves readiness-gated roll-forward, QUERY equals byte-identical replay, a changed proposal
+  is a value-free conflict, a second restart is byte-stable, and the journal retains exactly one
+  terminal row rather than allocating another. Linux list/exact execution is green with one passed,
+  zero ignored and zero filtered.
+- The corresponding one-test Windows process target now applies the same zero-row pre-decision and
+  one-row post-decision ratchets plus changed-proposal conflict. MinGW clippy with warnings denied
+  and the complete Windows executable link are green; native MSVC execution remains required.
+- `credential_store_process_lease` now contains only the exact parent test named by Acceptance. Its
+  child opener re-enters that same test under a closed environment mode, so both the parent report
+  and each real second-process opener have one passed and zero filtered. Linux exact execution
+  proves lease refusal through recovery/readiness, abrupt release and committed-state reopen;
+  MinGW clippy/link evidence is green. X-139 still must bind this exact test and the inherited
+  connector-secrets release identities across all five native reports.
 
 ## Notes
 

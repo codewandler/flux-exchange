@@ -1,7 +1,7 @@
 ---
 id: X-137
 title: "Prove Windows private input and FXHA in production"
-status: blocked
+status: in-progress
 epic: connections
 areas: [exchange-server, protocol, tests, windows]
 depends_on: [X-136]
@@ -49,6 +49,31 @@ writer HANDLE to the immediately following MINT without a new protocol or secret
 
 - X-134 already contains typed helper/endpoint/duplication primitives and passing MinGW checks.
   Those are supplemental and do not satisfy the native process rows in this story.
+- The production process test now contains exactly one test named
+  `supervised_windows_service_account_helper_delivers_exact_fxsa_and_closes_fxha_adversaries`.
+  It launches the real supervised server and suspended released helper, proves the helper handle
+  list excludes a live inheritable canary before resume, reads exact FXSA plus EOF, requires helper
+  exit zero, queries the durable receipt, and keeps ordinary PLAN plus multi-frame CONNECT on the
+  shared endpoint state machine.
+- Its table mutates every fixed FXHA field and covers zero/planted, aliased, wrong-object and
+  wrong-direction handles, extra bytes, second FXHA, non-MINT, truncated-client rearm and durable
+  state stability. Production now revalidates client PID, creation identity, SID, session and
+  liveness immediately before `DuplicateHandle`; the pure production predicate has mutation tests
+  for every component.
+- MinGW links the complete process test. Native `windows-2025` execution and the real `CONIN$`
+  execution remains required before any Acceptance row is checked.
+- The same single production-process test now hosts the released vendor helper in a supported
+  pseudoconsole, passes only request-read/response-write in its explicit handle list, and proves an
+  unrelated inheritable canary is absent. Production nulls all three standard handles, opens the
+  real `CONIN$`, and a feature-only non-secret probe on that console observes echo disabled before
+  input and the exact original mode restored after success and deadline cancellation. The test
+  reads the committed secret back through the label's durable instance after server exit, while
+  four-form scans exclude it from the helper response, console transcript, server diagnostics and
+  every non-provider state file.
+- MinGW clippy with warnings denied and a full test-executable link are green with the console,
+  helper-deadline and owner-root features. CI selects the one exact test with a one-pass,
+  zero-ignored, zero-filtered assertion; only its native `windows-2025` MSVC execution can close the
+  remaining evidence boundary.
 
 ## Notes
 

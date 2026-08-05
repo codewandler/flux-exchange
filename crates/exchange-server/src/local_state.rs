@@ -41,6 +41,10 @@ pub struct LocalStatePaths {
     pub workflows: PathBuf,
     pub audit: PathBuf,
     pub service_accounts: PathBuf,
+    /// Value-free prepared-transaction recovery state below the authenticated owner root.
+    pub coordinator: Option<PathBuf>,
+    /// Authenticated owner root containing value-free per-label credential heads.
+    pub credential_heads_root: Option<PathBuf>,
     pub apps: Option<PathBuf>,
 }
 
@@ -56,6 +60,8 @@ impl LocalStatePaths {
             workflows: root.join("workflows"),
             audit: root.join("audit/events.sqlite3"),
             service_accounts: root.join("service-accounts/store.json"),
+            coordinator: Some(root.join("coordinator/transactions.sqlite3")),
+            credential_heads_root: Some(root.to_path_buf()),
             apps: Some(root.join("apps")),
         }
     }
@@ -108,6 +114,8 @@ impl LocalStatePaths {
             workflows: PathBuf::from(&configured[WORKFLOW_STORE_SETTING]),
             audit: PathBuf::from(&configured[AUDIT_SETTING]),
             service_accounts: PathBuf::from(&configured[SERVICE_ACCOUNT_STORE_SETTING]),
+            coordinator: None,
+            credential_heads_root: None,
             apps: None,
         })
     }
@@ -131,11 +139,7 @@ fn select(
     let configured = configured?;
 
     if development || root.is_some() {
-        let root = match root {
-            Some(root) => root,
-            None => conventional_root()?,
-        };
-        let root = ensure_owner_only_root(&root)?;
+        let root = owner_root(root)?;
         return Ok(Some(
             LocalStatePaths::development(&root).with_explicit(&configured),
         ));
@@ -144,8 +148,23 @@ fn select(
     if configured.is_empty() {
         Ok(None)
     } else {
-        LocalStatePaths::explicit(&configured).map(Some)
+        let owner = owner_root(None)?;
+        let mut paths = LocalStatePaths::explicit(&configured)?;
+        paths.coordinator = Some(owner.join("coordinator/transactions.sqlite3"));
+        paths.credential_heads_root = Some(owner);
+        Ok(Some(paths))
     }
+}
+
+fn owner_root(requested: Option<PathBuf>) -> Result<PathBuf, LocalStateRefusal> {
+    #[cfg(windows)]
+    let account_default = requested.is_none();
+    let root = requested.map_or_else(conventional_root, Ok)?;
+    #[cfg(windows)]
+    let root = ensure_owner_only_root(&root, account_default)?;
+    #[cfg(not(windows))]
+    let root = ensure_owner_only_root(&root)?;
+    Ok(root)
 }
 
 fn read_explicit() -> Result<BTreeMap<&'static str, String>, LocalStateRefusal> {
@@ -178,128 +197,185 @@ fn read_explicit_with(
 }
 
 fn conventional_root() -> Result<PathBuf, LocalStateRefusal> {
-    #[cfg(target_os = "windows")]
-    const BASE: &str = "LOCALAPPDATA";
-    #[cfg(not(target_os = "windows"))]
-    const BASE: &str = "XDG_STATE_HOME";
-
-    #[cfg(target_os = "windows")]
-    if let Some(base) = std::env::var_os(BASE).filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(base).join("Flux/Exchange"));
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    if let Some(base) = std::env::var_os(BASE).filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(base).join("flux-exchange"));
-    }
-
-    let home = std::env::var_os(if cfg!(target_os = "windows") {
-        "USERPROFILE"
-    } else {
-        "HOME"
-    })
-    .filter(|value| !value.is_empty())
-    .ok_or(LocalStateRefusal::NoPerUserRoot { setting: BASE })?;
-
-    #[cfg(target_os = "macos")]
-    return Ok(PathBuf::from(home).join("Library/Application Support/Flux/Exchange"));
-    #[cfg(all(unix, not(target_os = "macos")))]
-    return Ok(PathBuf::from(home).join(".local/state/flux-exchange"));
-    #[cfg(target_os = "windows")]
-    return Ok(PathBuf::from(home).join("AppData/Local/Flux/Exchange"));
-    #[allow(unreachable_code)]
-    Err(LocalStateRefusal::UnsupportedPlatform)
+    crate::native_root::authenticated_account_state_root()
+        .map_err(|reason| LocalStateRefusal::NoPerUserRoot { reason })
 }
 
 #[cfg(unix)]
 fn ensure_owner_only_root(root: &Path) -> Result<PathBuf, LocalStateRefusal> {
-    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt as _};
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::path::Component;
 
-    match std::fs::symlink_metadata(root) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_dir() {
+    let absolute = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| LocalStateRefusal::UnusableRoot {
+                path: root.to_path_buf(),
+                source,
+            })?
+            .join(root)
+    };
+    if absolute
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(LocalStateRefusal::UnsafeRoot {
+            path: absolute,
+            reason: "it contains a parent-directory traversal; name the owner root directly"
+                .to_owned(),
+        });
+    }
+
+    let mut directory =
+        std::fs::File::open("/").map_err(|source| LocalStateRefusal::UnusableRoot {
+            path: PathBuf::from("/"),
+            source,
+        })?;
+    // SAFETY: `geteuid` has no pointer arguments and returns the identity enforced by openat.
+    let process_owner = unsafe { libc::geteuid() };
+    let names = absolute
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name),
+            Component::RootDir | Component::CurDir => None,
+            Component::Prefix(_) | Component::ParentDir => unreachable!("checked above"),
+        })
+        .collect::<Vec<_>>();
+    let mut inspected = PathBuf::from("/");
+    let mut owner_boundary = false;
+
+    for (index, name) in names.iter().enumerate() {
+        inspected.push(name);
+        let final_component = index + 1 == names.len();
+        let native_name =
+            CString::new(name.as_bytes()).map_err(|_| LocalStateRefusal::UnsafeRoot {
+                path: inspected.clone(),
+                reason: "a path component contains a NUL byte".to_owned(),
+            })?;
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: the parent descriptor and NUL-terminated component remain live for the call.
+        let mut descriptor =
+            unsafe { libc::openat(directory.as_raw_fd(), native_name.as_ptr(), flags) };
+        if descriptor < 0 {
+            let refusal = io::Error::last_os_error();
+            if refusal.kind() != io::ErrorKind::NotFound {
+                let reason = if matches!(refusal.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+                {
+                    "it is a symlink or not a directory; Exchange did not follow or replace it"
+                        .to_owned()
+                } else {
+                    format!("native no-follow traversal refused it: {refusal}")
+                };
                 return Err(LocalStateRefusal::UnsafeRoot {
-                    path: root.to_path_buf(),
-                    reason: "it is not a directory".to_owned(),
+                    path: inspected,
+                    reason,
+                });
+            }
+            if !owner_boundary {
+                return Err(LocalStateRefusal::UnsafeRoot {
+                    path: inspected,
+                    reason: "its missing parent chain has no existing authenticated-owner boundary; create an owner-only directory first. Exchange did not create or repair a shared ancestor".to_owned(),
+                });
+            }
+            // SAFETY: same live parent/component as openat; the kernel applies the requested mode
+            // atomically at creation and the descriptor is reopened and inspected immediately.
+            let created =
+                unsafe { libc::mkdirat(directory.as_raw_fd(), native_name.as_ptr(), 0o700) };
+            if created != 0 {
+                return Err(LocalStateRefusal::UnusableRoot {
+                    path: inspected,
+                    source: io::Error::last_os_error(),
+                });
+            }
+            descriptor =
+                unsafe { libc::openat(directory.as_raw_fd(), native_name.as_ptr(), flags) };
+            if descriptor < 0 {
+                return Err(LocalStateRefusal::UnusableRoot {
+                    path: inspected,
+                    source: io::Error::last_os_error(),
                 });
             }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(root)
-                .map_err(|source| LocalStateRefusal::UnusableRoot {
-                    path: root.to_path_buf(),
-                    source,
-                })?;
-        }
-        Err(source) => {
-            return Err(LocalStateRefusal::UnusableRoot {
-                path: root.to_path_buf(),
+        // SAFETY: a nonnegative openat return owns one new descriptor, transferred exactly once.
+        let next = unsafe { std::fs::File::from_raw_fd(descriptor) };
+        let metadata = next
+            .metadata()
+            .map_err(|source| LocalStateRefusal::UnusableRoot {
+                path: inspected.clone(),
                 source,
-            })
+            })?;
+        let mode = metadata.permissions().mode() & 0o7777;
+        let writable_by_untrusted = mode & 0o022 != 0;
+        let sticky_shared = !owner_boundary && mode & 0o1000 != 0 && !final_component;
+
+        if owner_boundary {
+            if metadata.uid() != process_owner || writable_by_untrusted {
+                return Err(LocalStateRefusal::UnsafeRoot {
+                    path: inspected,
+                    reason: format!(
+                        "an ancestor below the authenticated-owner boundary is owned by uid {} with mode {mode:04o}; it must remain owned by effective uid {process_owner} and not writable by untrusted accounts. Exchange did not chmod or chown it",
+                        metadata.uid()
+                    ),
+                });
+            }
+        } else if metadata.uid() == process_owner && !writable_by_untrusted {
+            owner_boundary = true;
+        } else if writable_by_untrusted && !sticky_shared {
+            return Err(LocalStateRefusal::UnsafeRoot {
+                path: inspected,
+                reason: format!(
+                    "a shared ancestor is writable by untrusted accounts (mode {mode:04o}); create an owner-only child boundary first. Exchange did not chmod or chown it"
+                ),
+            });
         }
-    }
-    // Inspect after creation too: a umask may narrow creation but can never make it wider, while a
-    // concurrently replaced object must still be refused as what is actually present now.
-    let metadata =
-        std::fs::symlink_metadata(root).map_err(|source| LocalStateRefusal::UnusableRoot {
-            path: root.to_path_buf(),
-            source,
-        })?;
-    if !metadata.file_type().is_dir() {
-        return Err(LocalStateRefusal::UnsafeRoot {
-            path: root.to_path_buf(),
-            reason: "it is not a directory".to_owned(),
-        });
-    }
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode != 0o700 {
-        return Err(LocalStateRefusal::UnsafeRoot {
-            path: root.to_path_buf(),
-            reason: format!(
-                "its mode is {mode:04o}; create a private child directory at mode 0700. Exchange did not change the existing metadata"
-            ),
-        });
-    }
-    // SAFETY: `geteuid` takes no pointer, has no preconditions, and reads process identity. It is
-    // the authority the filesystem checks; HOME may name another user under sudo.
-    let process_owner = unsafe { libc::geteuid() };
-    if metadata.uid() != process_owner {
-        return Err(LocalStateRefusal::UnsafeRoot {
-            path: root.to_path_buf(),
-            reason: format!(
-                "it is owned by uid {}, not the process effective uid {process_owner}; Exchange did not change the owner",
-                metadata.uid()
-            ),
-        });
+
+        if final_component
+            && (metadata.uid() != process_owner || mode & 0o777 != 0o700 || !owner_boundary)
+        {
+            return Err(LocalStateRefusal::UnsafeRoot {
+                path: inspected,
+                reason: format!(
+                    "the Exchange root is owned by uid {} with mode {mode:04o}; it must be owned by effective uid {process_owner} at mode 0700. Exchange did not chmod or chown it",
+                    metadata.uid()
+                ),
+            });
+        }
+        directory = next;
     }
 
-    let resolved = root
-        .canonicalize()
-        .map_err(|source| LocalStateRefusal::UnusableRoot {
-            path: root.to_path_buf(),
-            source,
-        })?;
-    if let Some(worktree) = resolved
+    if let Some(worktree) = absolute
         .ancestors()
         .find(|path| path.join(".git").exists())
         .map(Path::to_path_buf)
     {
         return Err(LocalStateRefusal::UnsafeRoot {
-            path: resolved,
+            path: absolute,
             reason: format!(
                 "it is inside the working tree at {}; Exchange did not create a store there",
                 worktree.display()
             ),
         });
     }
-    Ok(resolved)
+    Ok(absolute)
 }
 
 #[cfg(windows)]
-fn ensure_owner_only_root(root: &Path) -> Result<PathBuf, LocalStateRefusal> {
+fn ensure_owner_only_root(
+    root: &Path,
+    authenticated_account_default: bool,
+) -> Result<PathBuf, LocalStateRefusal> {
+    if authenticated_account_default {
+        return crate::native_root::ensure_authenticated_account_state_root(root).map_err(
+            |reason| LocalStateRefusal::UnsafeRoot {
+                path: root.to_path_buf(),
+                reason,
+            },
+        );
+    }
     exchange_host::ensure_private_state_directory(root).map_err(|source| {
         LocalStateRefusal::UnsafeRoot {
             path: root.to_path_buf(),
@@ -344,9 +420,8 @@ pub enum LocalStateRefusal {
         missing: Vec<&'static str>,
     },
     NoPerUserRoot {
-        setting: &'static str,
+        reason: String,
     },
-    UnsupportedPlatform,
     UnsafeRoot {
         path: PathBuf,
         reason: String,
@@ -374,13 +449,10 @@ impl std::fmt::Display for LocalStateRefusal {
                 configured.join(", "),
                 missing.join(", ")
             ),
-            Self::NoPerUserRoot { setting } => write!(
+            Self::NoPerUserRoot { reason } => write!(
                 formatter,
-                "cannot select a conventional per-user Exchange state root because {setting} and the platform home setting are unset"
+                "cannot select the authenticated account's conventional Exchange state root: {reason}"
             ),
-            Self::UnsupportedPlatform => {
-                formatter.write_str("this platform has no supported local-state root")
-            }
             Self::UnsafeRoot { path, reason } => write!(
                 formatter,
                 "refusing local state root `{}`: {reason}. Use {LOCAL_STATE_SETTING} to name a conventional owner-only root outside every working tree",
@@ -502,7 +574,9 @@ mod tests {
         let refusal = ensure_owner_only_root(&root).expect_err("0755 must refuse");
         let message = refusal.to_string();
         assert!(message.contains(&root.display().to_string()), "{message}");
-        assert!(message.contains("private child directory"), "{message}");
+        assert!(message.contains("mode 0755"), "{message}");
+        assert!(message.contains("mode 0700"), "{message}");
+        assert!(message.contains("did not chmod or chown"), "{message}");
         assert!(!message.contains("chmod 700 /tmp"), "{message}");
         assert_eq!(
             std::fs::metadata(&root)

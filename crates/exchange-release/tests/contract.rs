@@ -10,6 +10,166 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
+fn fixture_and_release_guards_are_derived_from_the_candidate_commit() {
+    use flux_exchange_release::native_evidence::NativeEvidenceAuthority;
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixture_path = root.join("tests/fixtures/exchange-release-v2/fixture-set.json");
+    let fixture: FixtureSet = canonical::parse(
+        &read_bounded_file(&fixture_path, 256 * 1024).expect("bounded fixture manifest"),
+        256 * 1024,
+    )
+    .expect("canonical fixture manifest");
+    let authority = NativeEvidenceAuthority::bundled().expect("canonical native authority");
+
+    assert_eq!(
+        fixture.native_evidence_sha256,
+        authority.identity().expect("authority identity"),
+        "the frozen fixture was not regenerated from the current canonical authority"
+    );
+    assert_eq!(
+        canonical::encode(&fixture.native_cases).expect("frozen native projection"),
+        canonical::encode(
+            &authority
+                .fixture_cases()
+                .expect("derived native projection")
+        )
+        .expect("canonical derived projection"),
+        "the frozen fixture carries a copied or stale native projection"
+    );
+    assert_eq!(fixture.exchange_commit.len(), 40, "full candidate SHA");
+    assert!(
+        fixture
+            .exchange_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "candidate SHA is not lowercase hexadecimal"
+    );
+
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        fixture.exchange_commit, head,
+        "the frozen fixture cannot name its own self-referential follow-up commit"
+    );
+    let ancestor = Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &fixture.exchange_commit,
+            &head,
+        ])
+        .current_dir(&root)
+        .status()
+        .expect("inspect candidate ancestry");
+    assert!(
+        ancestor.success(),
+        "fixture source is not a committed ancestor"
+    );
+
+    let candidate_authority = git(
+        &root,
+        &[
+            "show",
+            &format!(
+                "{}:crates/exchange-release/native-evidence-v1.json",
+                fixture.exchange_commit
+            ),
+        ],
+    );
+    let candidate: NativeEvidenceAuthority = canonical::parse(
+        candidate_authority.as_bytes(),
+        flux_exchange_release::native_evidence::MAX_BYTES,
+    )
+    .expect("candidate authority");
+    candidate.validate().expect("candidate authority contract");
+    assert_eq!(
+        candidate.identity().expect("candidate authority identity"),
+        fixture.native_evidence_sha256,
+        "fixture authority identity did not come from the named candidate"
+    );
+    assert_eq!(
+        canonical::encode(&candidate.fixture_cases().expect("candidate projection"))
+            .expect("canonical candidate projection"),
+        canonical::encode(&fixture.native_cases).expect("canonical frozen projection"),
+        "fixture selection did not come from the named candidate"
+    );
+
+    let candidate_generator = git(
+        &root,
+        &[
+            "show",
+            &format!(
+                "{}:crates/exchange-release/examples/generate_fixtures.rs",
+                fixture.exchange_commit
+            ),
+        ],
+    );
+    for required in [
+        "FLUX_EXCHANGE_FIXTURE_SOURCE_COMMIT",
+        "native_authority.identity()",
+        "native_authority.fixture_cases()",
+    ] {
+        assert!(
+            candidate_generator.contains(required),
+            "candidate generator does not derive {required}"
+        );
+    }
+
+    for relative in [
+        "scripts/release-native-fixtures.sh",
+        "scripts/check-publication-readiness.sh",
+        ".github/workflows/ci.yml",
+        ".github/workflows/local-release.yml",
+    ] {
+        let source = fs::read_to_string(root.join(relative)).expect("release guard source");
+        assert!(
+            source.contains("native-evidence-v1.json") || source.contains("native-authority"),
+            "{relative} does not consume the canonical native authority"
+        );
+        for forbidden in [
+            "EXPECTED_MATRIX_SHA256",
+            "native_fixture_cases()",
+            "native-evidence.tsv",
+            "native_cases.tsv",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{relative} retains duplicate native oracle {forbidden}"
+            );
+        }
+    }
+
+    let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("CI workflow");
+    assert_eq!(
+        ci.matches("Execute every authority-selected native process proof exactly")
+            .count(),
+        1,
+        "CI must invoke one authority-derived exact runner"
+    );
+    assert!(
+        !ci.contains("--exact $name") && !ci.contains("--exact \"$name\""),
+        "CI retains a hand-written exact-test inventory outside the authority runner"
+    );
+}
+
+fn git(root: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(root)
+        .output()
+        .expect("run git for release fixture contract");
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git output is UTF-8")
+        .trim()
+        .to_owned()
+}
+
+#[test]
 fn noncanonical_json_refuses() {
     let result = canonical::parse_value(br#"{ "schema":"x"}"#, 32);
     assert!(result.is_err());
@@ -17,15 +177,15 @@ fn noncanonical_json_refuses() {
 
 #[test]
 fn selection_skips_a_newer_incompatible_release() {
-    let supported = Protocols::v1();
+    let supported = Protocols::v2();
     let mut incompatible = supported.clone();
-    incompatible.supervisor = "exchange.supervisor-ready.v2".into();
+    incompatible.supervisor = "exchange.supervisor-ready.v3".into();
     let releases = [
         ReleaseEntry::test("1.0.0", supported),
         ReleaseEntry::test("2.0.0", incompatible),
     ];
     let selected =
-        select_compatible(&releases, &Protocols::v1()).expect("older compatible release");
+        select_compatible(&releases, &Protocols::v2()).expect("older compatible release");
     assert_eq!(selected.version, "1.0.0");
 }
 
@@ -106,7 +266,7 @@ struct RedirectFixture {
 #[test]
 fn rust_and_python_transport_admission_match_the_shared_fixture_inventory() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let fixtures = root.join("tests/fixtures/exchange-release-v1");
+    let fixtures = root.join("tests/fixtures/exchange-release-v2");
     let set: FixtureSet = canonical::parse(
         &read_bounded_file(&fixtures.join("fixture-set.json"), 256 * 1024)
             .expect("bounded fixture manifest"),
@@ -321,7 +481,7 @@ fn bounded_reader_and_support_member_contract_refuse_widening() {
     assert!(read_bounded_file(&oversized, 4).is_err());
 
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/exchange-release-v1/positive");
+        .join("../../tests/fixtures/exchange-release-v2/positive");
     let mut manifest: Manifest = canonical::parse(
         &read_bounded_file(
             &fixtures.join("flux-exchange-release-manifest.json"),
@@ -362,7 +522,7 @@ fn packager_refuses_documentation_under_an_unadmitted_basename() {
 #[test]
 fn delegated_signer_uses_a_half_open_validity_interval() {
     let trust_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/exchange-release-v1/positive/flux-exchange-release-trust.json");
+        .join("../../tests/fixtures/exchange-release-v2/positive/flux-exchange-release-trust.json");
     let trust: TrustDocument = canonical::parse(
         &read_bounded_file(&trust_path, 64 * 1024).expect("trust bytes"),
         64 * 1024,

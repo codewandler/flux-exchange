@@ -19,10 +19,64 @@ supervisor-test-wedge = []
 # Process-only acceptance seam. The fixture supplies an already occupied address so the production
 # listener path receives a real OS bind refusal after all stores and safety checks have opened.
 supervisor-test-bind-refusal = []
+# Process-only acceptance seam. It reports the production account-derived root without creating
+# it, so native runners can poison inherited home variables and inspect the real binary decision.
+native-root-test-seam = []
+# Native CI only: run each production deadline transport with a paused monotonic clock from one
+# dedicated integration-test executable. Released binaries do not recognize these commands.
+native-deadline-test-seam = ["tokio/test-util", "dep:tokio-tungstenite"]
+# Native helper process evidence only: shorten the otherwise fixed 335-second outer result cap.
+# Released binaries do not consult the test environment variable guarded by this feature.
+native-helper-deadline-test-seam = []
+# Native Windows process evidence only: let an attached probe report the mode of the real
+# pseudoconsole-backed `CONIN$` while the production helper owns its private read.
+native-console-test-seam = []
+# Native Windows FXHA evidence only: execute the production pinned-client predicate from one
+# dedicated process target so the release authority can select it with zero filtered tests.
+native-fxha-identity-test-seam = []
+# Release-native selection compiles one exact verdict from a historical multi-test target. Default
+# builds retain every test; `--all-features` does too through `native-evidence-all`.
+native-evidence-select = []
+native-evidence-all = []
+native-evidence-x128-expiry-unix = []
+native-evidence-x128-unix-abi-alias = []
+native-evidence-x128-unix-abi-missing = []
+native-evidence-x128-unix-abi-shape = []
+native-evidence-x128-unix-death-normal = []
+native-evidence-x128-unix-death-sigkill = []
+native-evidence-x128-unix-death-sigkill-wedged = []
+native-evidence-x128-unix-death-wedged = []
+native-evidence-x128-expiry-windows = []
+native-evidence-x128-windows-abi-list = []
+native-evidence-x128-windows-abi-shape = []
+native-evidence-x128-windows-death-terminate = []
+native-evidence-x128-windows-death-wedged = []
+native-evidence-x134-root-account = []
+native-evidence-x134-unix-owner-bootstrap = []
+native-evidence-x134-unix-peer-refusal = []
+native-evidence-x134-unix-root-symlink = []
+native-evidence-x134-unix-root-writable = []
+native-evidence-x134-windows-root-reparse = []
+native-evidence-x134-windows-root-writable = []
 
 [[bin]]
 name = "flux-exchange"
 path = "src/main.rs"
+
+[[test]]
+name = "local_management_hosted_deadline"
+path = "tests/local_management_hosted_deadline.rs"
+required-features = ["native-deadline-test-seam"]
+
+[[test]]
+name = "local_management_unix_deadline"
+path = "tests/local_management_unix_deadline.rs"
+required-features = ["native-deadline-test-seam"]
+
+[[test]]
+name = "local_management_windows_fxha_identity"
+path = "tests/local_management_windows_fxha_identity.rs"
+required-features = ["native-fxha-identity-test-seam"]
 
 [dependencies]
 exchange-host.workspace = true
@@ -59,6 +113,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 tokio-util.workspace = true
 thiserror.workspace = true
 tower.workspace = true
@@ -75,10 +130,15 @@ windows-sys = { workspace = true, features = [
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
 ] }
 
 [dev-dependencies]
 flux-exchange-release = { path = "../exchange-release" }
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true

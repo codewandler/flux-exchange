@@ -74,6 +74,7 @@ mod connections;
 // on Unix, process SID ownership and a protected owner-only DACL on Windows.
 mod credentials;
 mod grant;
+mod grant_cas;
 mod instances;
 mod invoke;
 mod lease;
@@ -104,8 +105,10 @@ pub use async_trait::async_trait;
 /// the actual problem is a dependency line. There is one credential addressing scheme in this
 /// ecosystem and this is a doorway to it, not a second copy.
 pub use connector_secrets::{
-    CredentialRef, CredentialScope, InstanceId, Layout, Secret, SecretBatch, SecretStore,
-    StoreError, TenantInstances, TenantLayout, TENANTS_ROOT,
+    CredentialRef, CredentialScope, InstanceId, Layout, PreparedSecretError, PreparedSecretStore,
+    Secret, SecretBatch, SecretProposalDigest, SecretStore, SecretTransactionGeneration,
+    SecretTransactionId, SecretTransactionState, StoreError, TenantInstances, TenantLayout,
+    TENANTS_ROOT,
 };
 
 /// The pack's transport and configuration ports, re-exported for the same reason
@@ -166,8 +169,14 @@ pub use grant::{
     InboundGrant, InboundGranted, OperationFacts, Risk, Selector,
 };
 pub use grant::{GrantStore, GrantStoreError};
+pub use grant_cas::{
+    GrantApplyReceipt, GrantCandidate, GrantCandidateInbound, GrantDecisionObserver, GrantPreview,
+    GrantProposalDigest, GrantReceiptId, GrantSelector, GrantTransactionRefusal, GrantTransactions,
+    StoreRevision,
+};
 pub use instances::{
-    ConnectionLabel, ConnectionRegistry, MemoryConnectionRegistry, NamedConnection, RegistryRefusal,
+    ConnectionLabel, ConnectionRegistry, MemoryConnectionRegistry, NamedConnection,
+    RegisteredConnection, RegistryRefusal,
 };
 pub use instances::{ConnectionRegistryStore, ConnectionRegistryStoreError};
 pub use invoke::{

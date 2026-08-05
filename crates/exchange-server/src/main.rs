@@ -19,12 +19,22 @@ mod bind;
 pub mod channel;
 mod connection_guard;
 pub mod credential_acquisition;
+mod credential_head;
 mod dev_identity;
 pub use flux_exchange::entropy;
 mod execution;
+mod hosted_origin;
+mod local_helper;
+mod local_helper_plan;
+#[cfg(unix)]
+mod local_helper_unix;
+#[cfg(windows)]
+mod local_helper_windows;
 mod local_identity;
+pub mod local_management;
 mod local_state;
 mod managed_apps;
+mod native_root;
 mod oidc;
 mod operator;
 pub mod protocol;
@@ -43,7 +53,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use exchange_host::{Deployment, Runtime};
+use exchange_host::{Deployment, PreparedSecretStore, Runtime, SecretStore};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -54,11 +64,13 @@ use crate::channel::{
     CatalogueChannelDeclarations, ChannelSupervisor, DeploymentChannelPlacement,
     GeneratedChannelRunner,
 };
+use crate::credential_head::{CredentialHeadKey, CredentialHeadStore};
 use crate::dev_identity::{DevIdentity, DEV_IDENTITY_ENV};
 use crate::execution::{channel_execution_system, invoker};
 use crate::local_identity::{
     generate as generate_local_user, LocalUserRefusal, LocalUsers, LOCAL_USERS_SETTING,
 };
+use crate::local_management::TransactionCoordinator;
 use crate::managed_apps::ManagedAppSupervisor;
 use crate::oidc::config::{ConfigRefusal, OidcConfig};
 use crate::oidc::http_exchange::HttpTokenExchange;
@@ -78,7 +90,12 @@ const USER_ENV: &str = "USER";
 #[derive(Debug, PartialEq, Eq)]
 enum Startup {
     /// The ordinary provider composition, with tenancy selected independently from identity.
-    Configured { tenancy: Tenancy },
+    Configured {
+        tenancy: Tenancy,
+        /// The command-line state declaration survives an explicit identity roster taking
+        /// precedence. Identity and durable-state selection are independent axes.
+        development_requested: bool,
+    },
     /// One loopback-only development principal, fixed to the one `dev` tenant at startup.
     Development {
         roster: String,
@@ -122,6 +139,7 @@ impl Startup {
         if explicit_roster || !requested {
             return Ok(Self::Configured {
                 tenancy: configured_tenancy.unwrap_or_default(),
+                development_requested: requested,
             });
         }
 
@@ -158,7 +176,7 @@ impl Startup {
     /// The runtime class selected by this startup declaration.
     const fn deployment(&self) -> Deployment {
         match self {
-            Self::Configured { tenancy } | Self::Development { tenancy, .. } => {
+            Self::Configured { tenancy, .. } | Self::Development { tenancy, .. } => {
                 tenancy.deployment()
             }
         }
@@ -167,7 +185,7 @@ impl Startup {
     /// The tenancy policy applied at the identity boundary.
     fn tenancy(&self) -> &Tenancy {
         match self {
-            Self::Configured { tenancy } | Self::Development { tenancy, .. } => tenancy,
+            Self::Configured { tenancy, .. } | Self::Development { tenancy, .. } => tenancy,
         }
     }
 
@@ -189,9 +207,15 @@ impl Startup {
         }
     }
 
-    /// Whether this is the zero-configuration durable local composition.
-    const fn is_development(&self) -> bool {
-        matches!(self, Self::Development { .. })
+    /// Whether the command line requested `--dev`, independent from the chosen identity provider.
+    const fn development_requested(&self) -> bool {
+        match self {
+            Self::Configured {
+                development_requested,
+                ..
+            } => *development_requested,
+            Self::Development { .. } => true,
+        }
     }
 }
 
@@ -208,6 +232,72 @@ where
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    #[cfg(all(windows, feature = "native-console-test-seam"))]
+    if arguments.len() == 2 && arguments[0] == "native-console-mode-test-seam" {
+        let Some(writer) = arguments[1]
+            .to_str()
+            .filter(|value| !value.is_empty() && !value.starts_with('0'))
+            .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            return ExitCode::FAILURE;
+        };
+        return ExitCode::from(local_helper_windows::report_console_mode_for_test(writer).code());
+    }
+    #[cfg(feature = "native-deadline-test-seam")]
+    if arguments == [OsStr::new("hosted-deadline-test-seam")] {
+        return match routes::run_hosted_deadline_process_fixture() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(all(unix, feature = "native-deadline-test-seam"))]
+    if arguments == [OsStr::new("unix-deadline-test-seam")] {
+        return match local_management::run_unix_deadline_process_fixture() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(all(windows, feature = "native-deadline-test-seam"))]
+    if arguments == [OsStr::new("native-deadline-test-seam")] {
+        return match local_management::run_deadline_process_fixture() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(all(windows, feature = "native-fxha-identity-test-seam"))]
+    if arguments == [OsStr::new("native-fxha-identity-test-seam")] {
+        return match local_management::run_fxha_identity_process_fixture() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    #[cfg(feature = "native-root-test-seam")]
+    if arguments == [OsStr::new("native-root-test-seam")] {
+        return match native_root::authenticated_account_state_root() {
+            Ok(path) => {
+                println!("{}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(refusal) => {
+                eprintln!("{refusal}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if arguments == [OsStr::new("compatibility"), OsStr::new("--json")] {
         return match supervisor::compatibility_json().and_then(|bytes| {
             use std::io::Write;
@@ -222,6 +312,68 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+    if arguments.first().map(std::ffi::OsString::as_os_str) == Some(OsStr::new("local")) {
+        #[cfg(unix)]
+        {
+            return match local_helper::parse_local_helper(
+                local_helper::HelperPlatform::Unix,
+                &arguments,
+            ) {
+                Ok(invocation) => {
+                    #[cfg(feature = "native-helper-deadline-test-seam")]
+                    if let Some(value) = std::env::var_os("FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS")
+                    {
+                        let Some(milliseconds) = value
+                            .to_str()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|milliseconds| *milliseconds != 0)
+                        else {
+                            return ExitCode::FAILURE;
+                        };
+                        return ExitCode::from(
+                            local_helper_unix::run_with_result_budget_for_test(
+                                invocation,
+                                std::time::Duration::from_millis(milliseconds),
+                            )
+                            .code(),
+                        );
+                    }
+                    ExitCode::from(local_helper_unix::run(invocation).code())
+                }
+                Err(_) => ExitCode::FAILURE,
+            };
+        }
+        #[cfg(windows)]
+        {
+            return match local_helper::parse_local_helper(
+                local_helper::HelperPlatform::Windows,
+                &arguments,
+            ) {
+                Ok(invocation) => {
+                    #[cfg(feature = "native-helper-deadline-test-seam")]
+                    if let Some(value) = std::env::var_os("FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS")
+                    {
+                        let Some(milliseconds) = value
+                            .to_str()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|milliseconds| *milliseconds != 0)
+                        else {
+                            return ExitCode::FAILURE;
+                        };
+                        return ExitCode::from(
+                            local_helper_windows::run_with_result_budget_for_test(
+                                invocation,
+                                std::time::Duration::from_millis(milliseconds),
+                            )
+                            .code(),
+                        );
+                    }
+                    ExitCode::from(local_helper_windows::run(invocation).code())
+                }
+                Err(_) => ExitCode::FAILURE,
+            };
+        }
     }
     if arguments
         .first()
@@ -398,7 +550,10 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
     } else {
         configured_bind()?
     };
-    let state = compose(&startup, bind, supervised)?;
+    let hosted_origin = hosted_origin::configured(startup.development_requested(), bind)
+        .map_err(|reason| StartupRefusal::HostedOrigin { reason })?;
+    let composition = compose(&startup, bind, supervised, hosted_origin).await?;
+    let state = composition.state;
 
     report_deployment(startup.deployment());
     report_surface();
@@ -438,6 +593,14 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
         .local_addr()
         .map_err(|source| StartupRefusal::BindUnavailable { bind, source })?;
 
+    let local_management = local_management::LocalManagement::bind_for_mode(
+        supervised,
+        state.clone(),
+        composition.coordinator.clone(),
+    )
+    .map_err(|reason| StartupRefusal::Supervised { reason })?;
+    let local_management_task = local_management.map(|endpoint| tokio::spawn(endpoint.serve()));
+
     if let Some(supervision) = supervision {
         supervision
             .ready(local)
@@ -466,13 +629,18 @@ async fn serve(supervision: Option<supervisor::Supervision>) -> Result<(), Start
         ),
     }
 
-    axum::serve(
+    let result = axum::serve(
         listener,
         routes::app_with_console(state, console.as_deref()),
     )
     .with_graceful_shutdown(stop_requested())
     .await
-    .map_err(|source| StartupRefusal::Serving { source })
+    .map_err(|source| StartupRefusal::Serving { source });
+    if let Some(task) = local_management_task {
+        task.abort();
+        let _ = task.await;
+    }
+    result
 }
 
 /// Where the built console lives, if this deployment serves one.
@@ -510,23 +678,35 @@ fn configured_console() -> Option<PathBuf> {
 /// so nothing here has to be turned *off* to be safe — only turned on to be useful.
 ///
 /// The development identity is armed by [`DEV_FLAG`] or [`DEV_IDENTITY_ENV`]; failing that, OIDC
-/// sign-in is offered if it was configured; the credential store and Service Account store are bound by
-/// their own settings. Unset and unconfigured binds nothing, which is the state a reachable bind is
-/// already refused in.
+/// sign-in is offered if it was configured. [`DEV_FLAG`] independently selects the complete
+/// development-local store defaults even when an explicit roster takes identity precedence.
+/// Without that declaration, durable ports remain bound only by their own settings.
 ///
 /// The development identity is checked first and wins. An operator who armed a roster is working
 /// locally, and quietly federating instead would be the more surprising of the two.
-fn compose(
+struct Composition {
+    state: AppState,
+    coordinator: Option<Arc<TransactionCoordinator>>,
+}
+
+async fn compose(
     startup: &Startup,
     bind: SocketAddr,
     supervised: bool,
-) -> Result<AppState, StartupRefusal> {
-    let local_state =
-        local_state::configured(startup.is_development() || supervised).map_err(|source| {
-            StartupRefusal::LocalState {
-                reason: source.to_string(),
-            }
-        })?;
+    hosted_origin: Option<String>,
+) -> Result<Composition, StartupRefusal> {
+    if startup.development_requested() {
+        info!(
+            armed_by = DEV_FLAG,
+            "development-local durable state defaults requested"
+        );
+    }
+    let development_state = startup.development_requested() || supervised;
+    let local_state = local_state::configured(development_state).map_err(|source| {
+        StartupRefusal::LocalState {
+            reason: source.to_string(),
+        }
+    })?;
     // Read deployment policy before binding any store or background authority. No released
     // connector declares a hazard yet; X-75 hands this posture to the acquisition binding when the
     // first one does. Parsing it now makes an unknown opt-in a startup refusal instead of a policy
@@ -541,6 +721,9 @@ fn compose(
             auth_posture,
             Arc::new(credential_acquisition::AcquisitionBindings::default()),
         );
+    if let Some(origin) = hosted_origin {
+        state = state.with_hosted_origin(origin);
+    }
     let operators = startup
         .development_operator()
         .map_or_else(OperatorPolicy::from_env, |subject| {
@@ -578,12 +761,29 @@ fn compose(
         state = state.with_audit(audit);
     }
 
-    if let Some(registry) = connection_registry(
+    let registry = connection_registry(
         local_state
             .as_ref()
             .map(|paths| paths.connections.as_path()),
-    )? {
-        state = state.with_connection_registry(registry);
+    )?;
+    let legacy_head_keys = registry
+        .as_ref()
+        .map(|binding| binding.legacy_head_keys.clone())
+        .unwrap_or_default();
+    if let Some(binding) = registry {
+        state = state.with_connection_registry(binding.port);
+    }
+    if let Some(root) = local_state
+        .as_ref()
+        .and_then(|paths| paths.credential_heads_root.as_deref())
+    {
+        let heads =
+            CredentialHeadStore::migrate_legacy(root, &legacy_head_keys).map_err(|error| {
+                StartupRefusal::LocalState {
+                    reason: error.to_string(),
+                }
+            })?;
+        state = state.with_credential_heads(Arc::new(heads));
     }
 
     // Bound before the invoker, because the invoker reads it. A composition with no settings store
@@ -602,18 +802,45 @@ fn compose(
     // see `grant_store`: an invoker built without one could only be built by choosing what to do in
     // its absence, and the only available choice is to admit everything.
     let grants = grant_store(local_state.as_ref().map(|paths| paths.grants.as_path()))?;
+    if let Some(grants) = grants.as_ref() {
+        state = state.with_grant_transactions(grants.transactions.clone());
+    }
 
     let channels = channel_store(local_state.as_ref().map(|paths| paths.channels.as_path()))?;
+    let mut coordinator = None;
     if let Some(store) =
         credential_store(local_state.as_ref().map(|paths| paths.credential.as_path()))?
     {
+        if let Some(path) = local_state
+            .as_ref()
+            .and_then(|paths| paths.coordinator.as_deref())
+        {
+            let bound = Arc::new(
+                TransactionCoordinator::bind(path, store.prepared.clone()).map_err(|error| {
+                    StartupRefusal::TransactionCoordinator {
+                        reason: error.to_string(),
+                    }
+                })?,
+            );
+            bound
+                .recover()
+                .await
+                .map_err(|refusal| StartupRefusal::TransactionCoordinator {
+                    reason: format!(
+                        "transaction recovery refused with {}/{}/{}/{}",
+                        refusal.code, refusal.status, refusal.retry, refusal.commit
+                    ),
+                })?;
+            state = state.with_transaction_coordinator(bound.clone());
+            coordinator = Some(bound);
+        }
         // The invoker is built from the same store the connections surface writes to, and only
         // when there is one. A composition with no store could still resolve a principal and look
         // an operation up, and would then send every request unauthenticated — a fail-closed `401`
         // from the vendor, but one an agent treating `401` as retryable loops on forever. Binding
         // nothing means `POST /api/operations/{operation}/invoke` refuses with `503` and names the
         // setting, which is the honest answer rather than a hole.
-        if let Some(grants) = grants {
+        if let Some(grants) = grants.as_ref() {
             // An empty configuration when nothing was bound, and deliberately not a refusal: the
             // settings store is what the *templated* connectors need, and a host without one is
             // still a working host for the rest of the catalogue. What it must not do is pretend —
@@ -621,9 +848,9 @@ fn compose(
             state = state.with_invoker(Arc::new(
                 invoker(
                     startup.deployment(),
-                    store.clone(),
+                    store.ordinary.clone(),
                     Arc::clone(&configuration),
-                    grants,
+                    grants.ordinary.clone(),
                 )
                 .map_err(|reason| StartupRefusal::Invoker { reason })?,
             ));
@@ -631,7 +858,7 @@ fn compose(
 
         if let Some(channels) = channels {
             let planner = Arc::new(exchange_host::ConnectorChannelPlanner::new(
-                store.clone(),
+                store.ordinary.clone(),
                 Arc::clone(&configuration),
             ));
             let execution_system = channel_execution_system()
@@ -655,12 +882,22 @@ fn compose(
         // than an oversight: a host with credentials and no grants is one an operator can connect a
         // vendor to and nobody can run anything on, which is the honest state to be in on the way
         // to granting something.
-        state = state.with_credentials(store);
+        state = state.with_credentials(store.ordinary);
     } else if channels.is_some() {
         warn!(
             "a channel store is bound but no credential store is available, so channel management \
              refuses instead of supervising unauthenticated vendor connections"
         );
+    }
+    if let Some(bound) = coordinator.as_ref() {
+        // Provider recovery reaches its one-way terminal decision first. Only then may Exchange
+        // roll the retained value-free metadata/head/audit image forward. This happens before the
+        // listener, native endpoint, readiness signal or any route becomes reachable.
+        local_management::Dispatcher::new(state.clone(), bound.clone())
+            .recover_publications()
+            .map_err(|refusal| StartupRefusal::TransactionCoordinator {
+                reason: refusal.startup_reason().to_owned(),
+            })?;
     }
     if let Some((workflows, pure, runs)) =
         workflow_store(local_state.as_ref().map(|paths| paths.workflows.as_path()))?
@@ -674,7 +911,7 @@ fn compose(
         state = state.with_apps(apps);
     }
 
-    Ok(state)
+    Ok(Composition { state, coordinator })
 }
 
 /// Bind installed App declarations and the per-App durable Flux event logs, or bind neither.
@@ -872,9 +1109,14 @@ fn service_account_store_path(canonical: Option<&str>) -> Result<Option<String>,
 ///
 /// `connector-secrets` owns the platform binding: Unix owner/mode checks and Windows process-SID /
 /// protected-DACL checks reach this composition through the same safe [`CredentialStore`] API.
+struct CredentialBinding {
+    ordinary: Arc<dyn SecretStore>,
+    prepared: Arc<dyn PreparedSecretStore>,
+}
+
 fn credential_store(
     configured: Option<&std::path::Path>,
-) -> Result<Option<Arc<dyn exchange_host::SecretStore>>, StartupRefusal> {
+) -> Result<Option<CredentialBinding>, StartupRefusal> {
     use exchange_host::{CredentialStore, CREDENTIAL_STORE_SETTING};
 
     let Some(configured) = configured else {
@@ -896,7 +1138,10 @@ fn credential_store(
     // Read back off the bound store, so this line cannot name a file this process did not open.
     info!("{}", store.banner());
 
-    Ok(Some(store.secrets()))
+    Ok(Some(CredentialBinding {
+        ordinary: store.secrets(),
+        prepared: store.prepared_secrets(),
+    }))
 }
 
 /// Bind the grant store the environment names, or bind none.
@@ -914,9 +1159,14 @@ fn credential_store(
 ///
 /// The portable file binding applies the same native owner-only boundary as the credential store,
 /// because somebody who can write this file decides what runs with a tenant's credentials.
+struct GrantBinding {
+    ordinary: Arc<dyn exchange_host::Grants>,
+    transactions: Arc<dyn exchange_host::GrantTransactions>,
+}
+
 fn grant_store(
     configured: Option<&std::path::Path>,
-) -> Result<Option<Arc<dyn exchange_host::Grants>>, StartupRefusal> {
+) -> Result<Option<GrantBinding>, StartupRefusal> {
     use exchange_host::{GrantStore, GRANT_STORE_SETTING};
 
     let Some(configured) = configured else {
@@ -939,7 +1189,11 @@ fn grant_store(
     // Read back off the bound store, so this line cannot name a file this process did not open.
     info!("{}", store.banner());
 
-    Ok(Some(Arc::new(store)))
+    let store = Arc::new(store);
+    Ok(Some(GrantBinding {
+        ordinary: store.clone(),
+        transactions: store,
+    }))
 }
 
 /// Bind the connection-settings store the environment names, or bind none.
@@ -987,10 +1241,15 @@ fn settings_store(
     Ok(Some(Arc::new(store)))
 }
 
+struct ConnectionRegistryBinding {
+    port: Arc<dyn exchange_host::ConnectionRegistry>,
+    legacy_head_keys: Vec<CredentialHeadKey>,
+}
+
 /// Bind the durable label-to-UUID overlay, or bind none for sole-connection compatibility.
 fn connection_registry(
     configured: Option<&std::path::Path>,
-) -> Result<Option<Arc<dyn exchange_host::ConnectionRegistry>>, StartupRefusal> {
+) -> Result<Option<ConnectionRegistryBinding>, StartupRefusal> {
     use exchange_host::{ConnectionRegistryStore, CONNECTION_REGISTRY_SETTING};
 
     let Some(configured) = configured else {
@@ -1005,8 +1264,28 @@ fn connection_registry(
             reason: source.to_string(),
         }
     })?;
+    let legacy_head_keys = store
+        .all_entries()
+        .map_err(|source| StartupRefusal::ConnectionRegistry {
+            reason: source.to_string(),
+        })?
+        .into_iter()
+        .map(|entry| {
+            CredentialHeadKey::new(
+                entry.tenant.as_str(),
+                entry.connector,
+                entry.connection.label.as_str(),
+            )
+            .map_err(|error| StartupRefusal::ConnectionRegistry {
+                reason: error.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     info!("{}", store.banner());
-    Ok(Some(Arc::new(store)))
+    Ok(Some(ConnectionRegistryBinding {
+        port: Arc::new(store),
+        legacy_head_keys,
+    }))
 }
 
 /// Bind the identity port this composition serves with.
@@ -1278,11 +1557,16 @@ mod tests {
             .expect("a startup user makes the development shorthand usable");
         assert_eq!(dev.deployment(), Deployment::SingleTenant);
         assert_eq!(dev.development_roster(), Some("user:timo@dev"));
+        assert!(dev.development_requested());
 
         let explicit = Startup::select(true, true, Some("timo"), None)
             .expect("an explicit development roster remains authoritative");
         assert_eq!(explicit.deployment(), Deployment::MultiTenant);
         assert_eq!(explicit.development_roster(), None);
+        assert!(
+            explicit.development_requested(),
+            "an explicit identity roster must not erase the --dev state declaration"
+        );
     }
 
     /// The production declaration is independent from the provider: both OIDC/local users and an
@@ -1297,11 +1581,13 @@ mod tests {
             Some("acme")
         );
         assert_eq!(hosted.development_roster(), None);
+        assert!(!hosted.development_requested());
 
         let rostered = Startup::select(true, true, Some("ignored"), Some("acme"))
             .expect("an explicit roster may use the same independent declaration");
         assert_eq!(rostered.deployment(), Deployment::SingleTenant);
         assert_eq!(rostered.development_roster(), None);
+        assert!(rostered.development_requested());
 
         let refusal = Startup::select(true, false, Some("timo"), Some("other"))
             .expect_err("--dev always means dev and must not be silently redefined")

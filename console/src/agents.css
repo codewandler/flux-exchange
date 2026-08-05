@@ -1,5 +1,5 @@
 /*
- * The mint screen: the one page in this console that renders a credential value.
+ * The Service Account metadata and owner-local creation guidance screen.
  *
  * These rules belong to `src/Agents.mts`, which is a render function rather than a single-file
  * component — so it carries no `<style scoped>` and its rules live here, the arrangement

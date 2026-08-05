@@ -1,4 +1,7 @@
-#![cfg(any(target_os = "linux", target_os = "macos"))]
+#![cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    feature = "native-root-test-seam"
+))]
 
 use std::ffi::OsStr;
 use std::io::{BufRead, Read, Write};
@@ -135,6 +138,13 @@ struct SupervisedChild {
     dynamic_authority_values: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+enum EndpointFixture {
+    Clean,
+    SymlinkRun,
+    StaleSocket,
+}
+
 impl SupervisedChild {
     fn spawn(root_mode: u32) -> Self {
         Self::spawn_with(root_mode, false)
@@ -144,15 +154,43 @@ impl SupervisedChild {
         Self::spawn_config(root_mode, wedge, None, None)
     }
 
+    fn spawn_endpoint_fixture(fixture: EndpointFixture, expected_peer_uid: Option<u32>) -> Self {
+        Self::spawn_config_full(0o700, false, None, None, fixture, expected_peer_uid)
+    }
+
     fn spawn_config(
         root_mode: u32,
         wedge: bool,
         bind: Option<&OsStr>,
         occupied_bind: Option<SocketAddr>,
     ) -> Self {
+        Self::spawn_config_full(
+            root_mode,
+            wedge,
+            bind,
+            occupied_bind,
+            EndpointFixture::Clean,
+            None,
+        )
+    }
+
+    fn spawn_config_full(
+        root_mode: u32,
+        wedge: bool,
+        bind: Option<&OsStr>,
+        occupied_bind: Option<SocketAddr>,
+        endpoint_fixture: EndpointFixture,
+        expected_peer_uid: Option<u32>,
+    ) -> Self {
         use std::os::unix::fs::PermissionsExt;
 
-        let root = std::env::temp_dir().join(format!(
+        // macOS commonly spells its temporary root below `/var`, which is a symlink to
+        // `/private/var`. Production must refuse that configured ancestor; this liveness harness
+        // names the physical directory so it tests supervision rather than root poisoning.
+        let physical_temp = std::env::temp_dir()
+            .canonicalize()
+            .expect("physical temporary root");
+        let root = physical_temp.join(format!(
             "flux-exchange-x128-{}-{}",
             std::process::id(),
             unique_counter()
@@ -163,6 +201,22 @@ impl SupervisedChild {
         let dynamic_authority_values = seed_production_authority_stores(&root);
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(root_mode))
             .expect("fixture root mode");
+        match endpoint_fixture {
+            EndpointFixture::Clean => {}
+            EndpointFixture::SymlinkRun => {
+                std::os::unix::fs::symlink(&root, root.join("run")).expect("planted run symlink");
+            }
+            EndpointFixture::StaleSocket => {
+                let run = root.join("run");
+                std::fs::create_dir(&run).expect("stale run directory");
+                std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700))
+                    .expect("owner-only stale run directory");
+                drop(
+                    std::os::unix::net::UnixListener::bind(run.join("local-management-v1.sock"))
+                        .expect("stale local-management socket"),
+                );
+            }
+        }
         let readiness = PipeEnds::new();
         let liveness = PipeEnds::new();
         let readiness_source = duplicate_high(readiness.write);
@@ -172,6 +226,7 @@ impl SupervisedChild {
         command
             .arg("--supervised")
             .env("FLUX_EXCHANGE_STATE", &root)
+            .env("FLUX_EXCHANGE_TEST_LOCAL_MANAGEMENT_ROOT", &root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if wedge {
@@ -184,6 +239,12 @@ impl SupervisedChild {
             command.env(
                 "FLUX_EXCHANGE_TEST_OCCUPIED_BIND",
                 occupied_bind.to_string(),
+            );
+        }
+        if let Some(expected_peer_uid) = expected_peer_uid {
+            command.env(
+                "FLUX_EXCHANGE_TEST_LOCAL_MANAGEMENT_PEER_UID",
+                expected_peer_uid.to_string(),
             );
         }
         // SAFETY: the closure uses only async-signal-safe descriptor operations before exec.
@@ -287,7 +348,7 @@ impl SupervisedChild {
 
 fn assert_new_start_refuses_at_metadata_expiry(target: &str) {
     let fixture_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v1");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/exchange-release-v2");
     let fixture: flux_exchange_release::FixtureSet = flux_exchange_release::canonical::parse(
         &flux_exchange_release::read_bounded_file(
             &fixture_root.join("fixture-set.json"),
@@ -315,7 +376,7 @@ fn assert_new_start_refuses_at_metadata_expiry(target: &str) {
         &fixture_root.join(&case.input),
         &policy,
         flux_exchange_release::parse_utc(&case.clock).expect("fixture clock"),
-        &flux_exchange_release::Protocols::v1(),
+        &flux_exchange_release::Protocols::v2(),
         &case.prior_state,
         Some(target),
     );
@@ -336,12 +397,176 @@ fn native_unix_target() -> &'static str {
     }
 }
 
+fn fxlm_frame(direction: u8, opcode: u16, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(12 + payload.len());
+    frame.extend_from_slice(b"FXLM");
+    frame.push(1);
+    frame.push(direction);
+    frame.extend_from_slice(&opcode.to_be_bytes());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-unix-owner-bootstrap"
+))]
+#[test]
+fn supervised_unix_binds_owner_authenticated_fxlm_before_readiness() {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::net::UnixStream;
+
+    let mut server = SupervisedChild::spawn(0o700);
+    let ready: serde_json::Value =
+        serde_json::from_slice(&server.readiness()).expect("readiness object");
+    let journal = server.state_root.join("coordinator/transactions.sqlite3");
+    assert!(
+        journal.is_file(),
+        "coordinator recovery journal must be bound before readiness"
+    );
+    let credential_path = server.state_root.join("credentials/store.txt");
+    let contention = exchange_host::CredentialStore::bind(&credential_path)
+        .expect_err("the serving process retains its one credential-store lease");
+    assert!(contention.to_string().contains("lease"), "{contention}");
+    let socket = server.state_root.join("run/local-management-v1.sock");
+    let run_metadata = std::fs::symlink_metadata(server.state_root.join("run"))
+        .expect("run existed when readiness was emitted");
+    let socket_metadata =
+        std::fs::symlink_metadata(&socket).expect("endpoint existed when readiness was emitted");
+    // SAFETY: geteuid has no pointer arguments or preconditions.
+    let euid = unsafe { libc::geteuid() };
+    assert_eq!(run_metadata.uid(), euid);
+    assert_eq!(run_metadata.permissions().mode() & 0o7777, 0o700);
+    assert!(socket_metadata.file_type().is_socket());
+    assert_eq!(socket_metadata.uid(), euid);
+    assert_eq!(socket_metadata.permissions().mode() & 0o7777, 0o600);
+
+    let request = fxlm_frame(1, 0x0007, br#"{"connector":"gitlab","selection":null}"#);
+    let mut stream = UnixStream::connect(&socket).expect("same-owner native connection");
+    for chunk in request.chunks(5) {
+        stream.write_all(chunk).expect("split FXLM stream write");
+    }
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("one logical operation EOF");
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .expect("closed FXLM response");
+    assert!(response.len() >= 12, "complete FXLM PLAN frame");
+    assert_eq!(&response[..4], b"FXLM");
+    assert_eq!(response[4], 1, "FXLM version");
+    assert_eq!(response[5], 2, "server-to-client direction");
+    assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0x0008);
+    let payload_length =
+        u32::from_be_bytes([response[8], response[9], response[10], response[11]]) as usize;
+    assert_eq!(response.len(), 12 + payload_length, "one exact PLAN frame");
+    let payload = &response[12..];
+    let plan = flux_exchange_release::canonical::parse_value(payload, 65_536)
+        .expect("canonical value-free PLAN");
+    assert_eq!(
+        flux_exchange_release::canonical::encode(&plan).expect("canonical PLAN bytes"),
+        payload
+    );
+    assert_eq!(plan["version"], "exchange.connection-plan.v2");
+    assert_eq!(plan["connector"], "gitlab");
+    assert_eq!(plan["selection"], serde_json::Value::Null);
+
+    let address = format!(
+        "{}:{}",
+        ready["bind"]["host"].as_str().expect("readiness host"),
+        ready["bind"]["port"].as_u64().expect("readiness port")
+    );
+    let mut http = TcpStream::connect(address).expect("loopback HTTP");
+    http.write_all(
+        b"GET /api/grants HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer local-owner\r\nConnection: close\r\n\r\n",
+    )
+    .expect("spoof attempt");
+    let mut http_response = String::new();
+    http.read_to_string(&mut http_response)
+        .expect("HTTP refusal");
+    assert!(
+        http_response.starts_with("HTTP/1.1 401"),
+        "loopback HTTP reproduced local-owner authority: {http_response}"
+    );
+
+    let output = server.finish();
+    assert!(!output.status.success());
+}
+
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-unix-peer-refusal"
+))]
+#[test]
+fn supervised_unix_rejects_an_injected_wrong_peer_before_reading() {
+    use std::os::unix::net::UnixStream;
+
+    // SAFETY: geteuid has no pointer arguments or preconditions.
+    let wrong_uid = unsafe { libc::geteuid() }.wrapping_add(1);
+    let mut server =
+        SupervisedChild::spawn_endpoint_fixture(EndpointFixture::Clean, Some(wrong_uid));
+    assert!(!server.readiness().is_empty());
+    let socket = server.state_root.join("run/local-management-v1.sock");
+    let mut stream = UnixStream::connect(socket).expect("connection reaches peer verifier");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("bounded peer refusal read");
+    let mut byte = [0_u8; 1];
+    assert_eq!(stream.read(&mut byte).expect("peer refusal EOF"), 0);
+    let output = server.finish();
+    assert!(!output.status.success());
+}
+
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
+#[test]
+fn supervised_unix_refuses_planted_endpoint_metadata_without_repair() {
+    for fixture in [EndpointFixture::SymlinkRun, EndpointFixture::StaleSocket] {
+        let mut server = SupervisedChild::spawn_endpoint_fixture(fixture, None);
+        assert!(
+            server.readiness().is_empty(),
+            "planted endpoint emitted readiness"
+        );
+        let planted = match fixture {
+            EndpointFixture::SymlinkRun => server.state_root.join("run"),
+            EndpointFixture::StaleSocket => server.state_root.join("run/local-management-v1.sock"),
+            EndpointFixture::Clean => unreachable!("closed fixture list"),
+        };
+        assert!(
+            std::fs::symlink_metadata(&planted).is_ok(),
+            "Exchange removed planted metadata at {}",
+            planted.display()
+        );
+        let output = server.finish();
+        assert!(!output.status.success());
+    }
+}
+
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-expiry-unix"
+))]
 #[test]
 fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
     let mut server = SupervisedChild::spawn(0o700);
     let pid = server.child.id();
-    let ready: serde_json::Value =
-        serde_json::from_slice(&server.readiness()).expect("readiness object");
+    let readiness = server.readiness();
+    if readiness.is_empty() {
+        let output = server.finish();
+        panic!(
+            "supervised server exited before readiness: status={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let ready: serde_json::Value = serde_json::from_slice(&readiness).expect("readiness object");
     let address: SocketAddr = format!(
         "{}:{}",
         ready["bind"]["host"].as_str().expect("host"),
@@ -364,6 +589,11 @@ fn verified_metadata_expiry_keeps_the_same_healthy_child_until_owner_stop() {
     assert!(TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_err());
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-death-wedged"
+))]
 #[test]
 fn native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged() {
     let mut server = SupervisedChild::spawn_with(0o700, true);
@@ -385,6 +615,10 @@ fn native_liveness_exits_an_exchange_whose_tokio_main_future_is_wedged() {
     assert!(TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_err());
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn any_liveness_byte_exits_without_waiting_for_eof() {
     let mut server = SupervisedChild::spawn(0o700);
@@ -460,11 +694,7 @@ fn assert_no_authority_values(bytes: &[u8], values: &[String]) {
     }
 }
 
-#[test]
-fn supervisor_helper_process() {
-    if std::env::var_os("X128_RUN_SUPERVISOR_HELPER").is_none() {
-        return;
-    }
+fn run_supervisor_helper_process() {
     let wedge = std::env::var_os("X128_HELPER_WEDGE").is_some();
     let mut server = SupervisedChild::spawn_with(0o700, wedge);
     let readiness = server.readiness();
@@ -480,20 +710,44 @@ fn supervisor_helper_process() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-death-sigkill-wedged"
+))]
 #[test]
 fn sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its_port() {
-    assert_sigkill_supervisor(true);
+    if std::env::var_os("X128_RUN_SUPERVISOR_HELPER").is_some() {
+        run_supervisor_helper_process();
+        return;
+    }
+    assert_sigkill_supervisor(
+        true,
+        "sigkill_of_the_real_supervisor_kills_a_tokio_wedged_exchange_and_releases_its_port",
+    );
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-death-sigkill"
+))]
 #[test]
 fn sigkill_of_the_real_supervisor_kills_a_responsive_exchange_and_releases_its_port() {
-    assert_sigkill_supervisor(false);
+    if std::env::var_os("X128_RUN_SUPERVISOR_HELPER").is_some() {
+        run_supervisor_helper_process();
+        return;
+    }
+    assert_sigkill_supervisor(
+        false,
+        "sigkill_of_the_real_supervisor_kills_a_responsive_exchange_and_releases_its_port",
+    );
 }
 
-fn assert_sigkill_supervisor(wedge: bool) {
+fn assert_sigkill_supervisor(wedge: bool, exact_test: &str) {
     let mut command = Command::new(std::env::current_exe().expect("integration test executable"));
     command
-        .args(["--exact", "supervisor_helper_process", "--nocapture"])
+        .args(["--exact", exact_test, "--nocapture"])
         .env("X128_RUN_SUPERVISOR_HELPER", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -553,6 +807,11 @@ fn assert_sigkill_supervisor(wedge: bool) {
     let _ = std::fs::remove_dir_all(state_root);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-death-normal"
+))]
 #[test]
 fn real_server_emits_one_canonical_record_after_bind_and_dies_on_liveness_eof() {
     let mut server = SupervisedChild::spawn(0o700);
@@ -689,6 +948,10 @@ fn captured_native_start_identity(pid: u32) -> VerifiedStartIdentity {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn unsafe_store_refusal_emits_no_readiness_or_sentinel() {
     let mut server = SupervisedChild::spawn(0o777);
@@ -700,6 +963,10 @@ fn unsafe_store_refusal_emits_no_readiness_or_sentinel() {
     assert_no_sentinels(&output.stderr);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn preselected_or_nonloopback_bind_refuses_before_readiness() {
     for bind in ["127.0.0.1:8080", "127.0.0.2:0", "0.0.0.0:0"] {
@@ -710,6 +977,10 @@ fn preselected_or_nonloopback_bind_refuses_before_readiness() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn non_unicode_supervised_bind_refuses_before_state_or_readiness() {
     use std::os::unix::ffi::OsStringExt;
@@ -763,6 +1034,10 @@ fn non_unicode_supervised_bind_refuses_before_state_or_readiness() {
     assert!(!root.exists(), "invalid bind opened local state");
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 #[cfg(feature = "supervisor-test-bind-refusal")]
 fn real_bind_refusal_after_store_validation_emits_no_readiness() {
@@ -778,6 +1053,11 @@ fn real_bind_refusal_after_store_validation_emits_no_readiness() {
     drop(occupied);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-abi-shape"
+))]
 #[test]
 fn exact_unix_abi_refuses_missing_and_wrong_capabilities() {
     let output = exchange_command()
@@ -839,6 +1119,11 @@ fn exact_unix_abi_refuses_missing_and_wrong_capabilities() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-abi-alias"
+))]
 #[test]
 fn unix_abi_refuses_alias_wrong_kind_direction_and_extra_inherited_fd() {
     fn refusal(mode: &str) -> std::process::Output {
@@ -936,6 +1221,11 @@ fn unix_abi_refuses_alias_wrong_kind_direction_and_extra_inherited_fd() {
     }
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all",
+    feature = "native-evidence-x128-unix-abi-missing"
+))]
 #[test]
 fn unix_abi_refuses_each_missing_fd_and_does_not_discover_env_other_fd_or_stdout() {
     fn missing(target: RawFd) -> std::process::Output {
@@ -1020,6 +1310,10 @@ fn unix_abi_refuses_each_missing_fd_and_does_not_discover_env_other_fd_or_stdout
     assert_no_sentinels(&output.stderr);
 }
 
+#[cfg(any(
+    not(feature = "native-evidence-select"),
+    feature = "native-evidence-all"
+))]
 #[test]
 fn compatibility_is_exact_and_never_opens_a_store_or_listener() {
     let root = std::env::temp_dir().join(format!(
@@ -1039,7 +1333,7 @@ fn compatibility_is_exact_and_never_opens_a_store_or_listener() {
     assert!(!root.exists(), "compatibility opened the configured store");
     let value: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("exact compatibility object");
-    assert_eq!(value["schema"], "exchange.compatibility.v1");
+    assert_eq!(value["schema"], "exchange.compatibility.v2");
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = Command::new("git")
         .args(["rev-parse", "HEAD"])

@@ -60,6 +60,17 @@ pub struct NamedConnection {
     pub instance: InstanceId,
 }
 
+/// One value-free durable registry row for startup migrations that must cover every tenant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredConnection {
+    /// Tenant stored in the registry address.
+    pub tenant: Tenant,
+    /// Connector stored in the registry address.
+    pub connector: String,
+    /// Mutable human label and immutable instance id.
+    pub connection: NamedConnection,
+}
+
 /// The label overlay a composition binds.
 pub trait ConnectionRegistry: Send + Sync {
     /// Every name recorded for this tenant and connector.
@@ -407,6 +418,30 @@ mod file {
                 "connection registry: {} (file store, labels and host-minted UUIDs only)",
                 self.path.display()
             )
+        }
+
+        /// Snapshot every tenant's value-free label row for the complete owner-root migration.
+        pub fn all_entries(&self) -> Result<Vec<RegisteredConnection>, RegistryRefusal> {
+            let values = self.read_values()?;
+            let mut rows = Vec::new();
+            for (tenant, connectors) in values.iter() {
+                let tenant =
+                    Tenant::new(tenant.clone()).map_err(|error| RegistryRefusal::Unavailable {
+                        reason: error.to_string(),
+                    })?;
+                for connector in connectors.keys() {
+                    rows.extend(
+                        super::entries(&values, &tenant, connector)?
+                            .into_iter()
+                            .map(|connection| RegisteredConnection {
+                                tenant: tenant.clone(),
+                                connector: connector.clone(),
+                                connection,
+                            }),
+                    );
+                }
+            }
+            Ok(rows)
         }
 
         fn read_values(&self) -> Result<RwLockReadGuard<'_, Values>, RegistryRefusal> {

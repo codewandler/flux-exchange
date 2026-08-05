@@ -21,21 +21,33 @@ PY
   [ "$dist_targets" = "$expected" ] || fail "dist-workspace target set differs from the Flux five-platform contract: $dist_targets"
   [ "$(awk -F '\t' '!/^#/ && NF {print $1}' "$target_path" | sort | uniq -d | wc -l)" = 0 ] || fail 'release target set contains duplicates'
   expected_matrix="$(awk -F '\t' '!/^#/ && NF {print $1 ":" $2}' "$target_path" | LC_ALL=C sort)"
-  actual_matrix="$(sed -n '/^[[:space:]]*matrix:/,/^[[:space:]]*runs-on:/p' "$workflow_path" | awk '
-    /^[[:space:]]*- runner:/ { runner = $3 }
-    /^[[:space:]]*target:/ { print $2 ":" runner; runner = "" }
-  ' | LC_ALL=C sort)"
+  actual_matrix="$(python3 - "$root/crates/exchange-release/native-evidence-v1.json" <<'PY'
+import json
+import pathlib
+import sys
+
+authority = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+for target, facts in sorted(authority["targets"].items()):
+    print(f'{target}:{facts["runner"]}')
+PY
+)"
   [ "$actual_matrix" = "$expected_matrix" ] || {
     diff <(printf '%s\n' "$expected_matrix") <(printf '%s\n' "$actual_matrix") >&2 || true
-    fail 'workflow native matrix is not the exact target/runner set'
+    fail 'canonical native authority differs from the exact release target/runner set'
   }
+  grep -Fq 'native_matrix: ${{ steps.native-authority.outputs.matrix }}' "$workflow_path" \
+    || fail 'release preflight does not export the authority-derived native matrix'
+  grep -Fq 'matrix="$(jq -ce '\''[.targets | to_entries[] | {target: .key, runner: .value.runner}]'\'' crates/exchange-release/native-evidence-v1.json)"' "$workflow_path" \
+    || fail 'release preflight does not derive its matrix from the canonical native authority'
+  grep -Fq 'include: ${{ fromJson(needs.preflight.outputs.native_matrix) }}' "$workflow_path" \
+    || fail 'native release jobs do not consume the preflight authority matrix'
+  grep -Fq 'runs-on: ${{ matrix.runner }}' "$workflow_path" \
+    || fail 'native release jobs do not select the authority-derived runner'
   while IFS=$'\t' read -r target runner format executable; do
     case "$target:$runner:$format:$executable" in
       aarch64-apple-darwin:macos-15:tar.zst:flux-exchange|x86_64-apple-darwin:macos-15-intel:tar.zst:flux-exchange|aarch64-unknown-linux-gnu:ubuntu-24.04-arm:tar.zst:flux-exchange|x86_64-unknown-linux-gnu:ubuntu-24.04:tar.zst:flux-exchange|x86_64-pc-windows-msvc:windows-2025:zip:flux-exchange.exe) ;;
       *) fail "target row violates the native platform contract: $target:$runner:$format:$executable" ;;
     esac
-    grep -Fq "target: $target" "$workflow_path" || fail "workflow omits target $target"
-    grep -Fq "runner: $runner" "$workflow_path" || fail "workflow omits native runner $runner"
   done < <(awk '!/^#/ && NF' "$target_path")
   grep -Fq 'cargo run --locked -p flux-exchange-release -- verify-staged' "$workflow_path" || fail 'staged assets do not pass the production verifier'
   grep -Fq 'scripts/release-stage.sh' "$workflow_path" || fail 'staged assets bypass the exact archive-set producer'
@@ -61,10 +73,20 @@ PY
     '"effective_catalogue_response": "exchange.effective-catalogue-response.v1"' \
     '"invoke_request": "exchange.invoke-request.v1"' \
     '"invoke_response": "exchange.invoke-response.v1"' \
-    '"connection_plan": "exchange.connection-plan.v1"' \
-    '"supervisor": "exchange.supervisor-ready.v1"'; do
+    '"connection_plan": "exchange.connection-plan.v2"' \
+    '"local_management": "exchange.local-management.v1"' \
+    '"service_account_handoff": "exchange.service-account-handoff.v1"' \
+    '"supervisor": "exchange.supervisor-ready.v2"'; do
     grep -Fq "$protocol" "$workflow_path" || fail "native compatibility expectation omits $protocol"
   done
+  checkout_line="$(grep -nF 'uses: actions/checkout@' "$workflow_path" | head -n1 | cut -d: -f1)"
+  readiness_line="$(grep -nF './scripts/check-publication-readiness.sh --self-test' "$workflow_path" | head -n1 | cut -d: -f1)"
+  toolchain_line="$(grep -nF 'uses: dtolnay/rust-toolchain@' "$workflow_path" | head -n1 | cut -d: -f1)"
+  [ -n "$checkout_line" ] && [ -n "$readiness_line" ] && [ -n "$toolchain_line" ] \
+    && [ "$checkout_line" -lt "$readiness_line" ] && [ "$readiness_line" -lt "$toolchain_line" ] \
+    || fail 'publication readiness is not the first preflight action after checkout'
+  grep -Fq './scripts/check-publication-readiness.sh' "$workflow_path" \
+    || fail 'local release preflight omits publication readiness'
   grep -Fq '[ "$GITHUB_REF" = "refs/tags/$RELEASE_TAG" ]' "$workflow_path" || fail 'resumable publication is not bound to the immutable tag ref used by provenance'
   grep -Fq '[ "$GITHUB_SHA" = "$source" ]' "$workflow_path" || fail 'checked-out source is not bound to the workflow provenance SHA'
   if grep -Fq 'gh release download' "$workflow_path"; then
@@ -121,10 +143,11 @@ if [ "${1:-}" = --self-test ]; then
   printf '%s\n' 'riscv64-unknown-linux-gnu ubuntu-24.04 tar.zst flux-exchange' >>"$scratch/targets.tsv"
   if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted an undeclared platform'; fi
   cp "$targets" "$scratch/targets.tsv"
-  sed -i.bak '/^[[:space:]]*runs-on: \${{ matrix.runner }}/i\
-          - runner: ubuntu-24.04\
-            target: riscv64-unknown-linux-gnu' "$scratch/workflow.yml"
-  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted an extra native build matrix target'; fi
+  sed -i.bak 's#crates/exchange-release/native-evidence-v1.json#crates/exchange-release/missing-native-evidence.json#' "$scratch/workflow.yml"
+  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted a native matrix derived from a non-authoritative file'; fi
+  cp "$workflow" "$scratch/workflow.yml"
+  sed -i.bak 's/needs.preflight.outputs.native_matrix/needs.preflight.outputs.other_matrix/' "$scratch/workflow.yml"
+  if (check "$scratch/workflow.yml" "$scratch/targets.tsv" "$scratch/release-download.sh" >/dev/null 2>&1); then fail 'self-test accepted native jobs detached from the preflight authority matrix'; fi
   cp "$workflow" "$scratch/workflow.yml"
   sed -i.bak 's/--max-redirs 0/--location/' "$scratch/workflow.yml"
   # The workflow delegates transport to release-download.sh, so mutating its required call is the

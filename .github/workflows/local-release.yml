@@ -40,18 +40,32 @@ jobs:
       build_id: ${{ steps.identity.outputs.build_id }}
       channel_key_id: ${{ steps.delegation.outputs.channel_key_id }}
       release_key_id: ${{ steps.delegation.outputs.release_key_id }}
-    env:
-      FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64 }}
-      FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64 }}
+      native_matrix: ${{ steps.native-authority.outputs.matrix }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
+      - name: Derive the native runner matrix from its sole authority
+        id: native-authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix="$(jq -ce '[.targets | to_entries[] | {target: .key, runner: .value.runner}]' crates/exchange-release/native-evidence-v1.json)"
+          echo "matrix=$matrix" >>"$GITHUB_OUTPUT"
+
+      - name: Refuse an unpublished or incomplete tagged tree before secrets or tools
+        run: |
+          ./scripts/check-publication-readiness.sh --self-test
+          ./scripts/check-publication-readiness.sh
+
       - name: Refuse absent production trust inputs and bind the immutable tag
         id: identity
         shell: bash
+        env:
+          FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64 }}
+          FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64 }}
         run: |
           set -euo pipefail
           case "$RELEASE_TAG" in
@@ -94,6 +108,9 @@ jobs:
       - name: Prove both secret-derived keys have distinct current delegated roles
         id: delegation
         shell: bash
+        env:
+          FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_CHANNEL_SIGNING_KEY_B64 }}
+          FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64: ${{ secrets.FLUX_EXCHANGE_RELEASE_SIGNING_KEY_B64 }}
         run: |
           set -euo pipefail
           now="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
@@ -177,17 +194,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: macos-15
-            target: aarch64-apple-darwin
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
+        include: ${{ fromJson(needs.preflight.outputs.native_matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -247,8 +254,10 @@ jobs:
                   "effective_catalogue_response": "exchange.effective-catalogue-response.v1",
                   "invoke_request": "exchange.invoke-request.v1",
                   "invoke_response": "exchange.invoke-response.v1",
-                  "connection_plan": "exchange.connection-plan.v1",
-                  "supervisor": "exchange.supervisor-ready.v1",
+                  "connection_plan": "exchange.connection-plan.v2",
+                  "local_management": "exchange.local-management.v1",
+                  "service_account_handoff": "exchange.service-account-handoff.v1",
+                  "supervisor": "exchange.supervisor-ready.v2",
               },
           }
           print(json.dumps(entry, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
@@ -273,7 +282,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: exchange-${{ matrix.target }}
-          path: dist/*
+          path: |
+            dist/*
+            native-evidence-report-${{ matrix.target }}.json
           if-no-files-found: error
           retention-days: 7
 
@@ -307,6 +318,14 @@ jobs:
           pattern: exchange-*
           path: packages
           merge-multiple: true
+
+      - name: Require one terminal native-evidence report from every authoritative runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t reports < <(find packages -maxdepth 1 -type f -name 'native-evidence-report-*.json' -print | LC_ALL=C sort)
+          cargo run --locked -p flux-exchange-release -- native-authority verify-reports \
+            '${{ needs.preflight.outputs.source }}' "${reports[@]}"
 
       - name: Re-prove delegation, generate and sign canonical manifest, verify closed staging
         shell: bash

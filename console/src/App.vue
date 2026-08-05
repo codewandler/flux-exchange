@@ -49,7 +49,6 @@ import {
   previewGrant,
   replaceGrants,
   removeChannel,
-  rotateCredential,
   saveWorkflow,
   saveWorkflowGraph,
   signOut,
@@ -81,7 +80,6 @@ import {
   type GrantsState,
   type PreviewState,
   type ProposedGrant,
-  type RotationOutcome,
   type SessionState,
   type SignInAvailabilityState,
   type WorkflowDraft,
@@ -434,7 +432,7 @@ async function retryConnectionPlan() {
   }
 }
 
-/** Apply the complete plan and retain only its value-free result and fresh projection. */
+/** Run the hosted FXLM ceremony, then read a fresh value-free projection. */
 async function connectChosen(
   connector: string,
   selection: string | null,
@@ -451,8 +449,14 @@ async function connectChosen(
   connecting.value = false
 
   if (outcome.value.status === 'answered') {
-    connectionPlan.value = { status: 'ready', plan: outcome.value.result.plan }
-    selectedConnectionLabel.value = outcome.value.result.plan.selection
+    const label = outcome.value.result.label
+    selectedConnectionLabel.value = label
+    const planTicket = connectionPlanRequests.begin(connector, label)
+    connectionPlan.value = { status: 'loading' }
+    const state = await loadConnectionPlan(connector, label)
+    if (connectionPlanRequests.admits(planTicket, chosen.value, selectedConnectionLabel.value)) {
+      connectionPlan.value = state
+    }
     await reloadConnections()
   }
 }
@@ -467,13 +471,9 @@ async function changeConnectionAuthority(identity: string, transition: Connectio
 
   const field = current.plan.fields.find((candidate) => candidate.identity === identity)
   const authority = field?.authority
-  const advertised = transition.action.method === 'PUT'
-    ? authority?.state === 'proposed' ? authority.actions.approve : undefined
-    : authority?.state === 'proposed' || authority?.state === 'approved' ? authority.actions.revoke : undefined
   if (field?.service === null || field?.service !== transition.service || field.binds !== transition.field ||
-      authority?.revision !== transition.revision || advertised?.method !== transition.action.method ||
-      advertised.target !== transition.action.target) return
-  if (transition.action.method === 'PUT') {
+      authority?.revision !== transition.revision || !authority.actions.includes(transition.action)) return
+  if (transition.action === 'approve') {
     const reviewed = authorityInspection.value
     if (reviewed?.status !== 'answered' || reviewed.result.connector !== transition.connector ||
         reviewed.result.label !== transition.label || reviewed.result.service !== transition.service ||
@@ -514,7 +514,7 @@ async function inspectAuthority(identity: string, request: ConnectionAuthorityIn
   const authority = field?.authority
   if (field?.service === null || field?.service !== request.service || field.binds !== request.field ||
       authority?.state !== request.state || authority.revision !== request.revision ||
-      authority.state !== 'proposed' || authority.actions.approve === undefined) return
+      authority.state !== 'proposed' || !authority.actions.includes('approve')) return
 
   const ticket = authorityInspectionRequests.begin(request.connector, request.label)
   authorityInspecting.value = identity
@@ -525,24 +525,11 @@ async function inspectAuthority(identity: string, request: ConnectionAuthorityIn
   authorityInspection.value = answered
 }
 
-const rotating = shallowRef('')
-const rotationOutcome = shallowRef<RotationOutcome | null>(null)
-
-async function rotateHeld(connector: string, credential: string, value: string) {
-  if (rotating.value) return
-  rotating.value = `${connector}/${credential}`
-  rotationOutcome.value = await rotateCredential(connector, credential, value)
-  rotating.value = ''
-  if (rotationOutcome.value.status === 'rotated') await reloadConnections()
-}
-
 // ---------------------------------------------------------------------------------------------
 // Grants: what this tenant may run. The half of X-62 the service already had.
 //
-// Read here and passed down, which is this file's ordinary arrangement — and deliberately *not*
-// `Agents.mts`'s exception. That one exists because a minted token must not reach this component,
-// which is the root and outlives every screen. A grant is a policy: it carries no secret, it is
-// meant to be read back, and holding it here costs nothing.
+// Read here and passed down, which is this file's ordinary arrangement. A grant is a policy: it
+// carries no secret, is meant to be read back, and costs nothing to retain at the root.
 //
 // Four pieces of state. The draft is **not** among them: it lives in `Grants.mts`, which emits a
 // proposal when it changes and a whole set when it is saved.
@@ -681,16 +668,9 @@ const active = computed(() => surfaceOfRoute(route.value.name))
       </template>
 
       <!--
-        Where an operator mints one, and the one screen in this console that renders a credential
-        value.
-
-        It is passed the session and nothing else, and it reads `/api/service-accounts` for itself rather than
-        being handed a result — deliberately, and against this file's usual arrangement. This
-        component is the root, so it outlives every screen; anything it were handed would still be
-        in memory after the reader had navigated away, and what the mint answers with is the one
-        value on this host that cannot be shown a second time. Holding it here would make that a
-        claim about `App.vue` instead of a property of the view. `Agents.mts` sets out the whole of
-        it.
+        Service Account metadata and owner-local creation guidance. This view may list and revoke
+        value-free records, but it never initiates creation: the one-shot FXSA response belongs to
+        the verified native helper and must never enter this browser or its JSON client.
       -->
       <template v-else-if="route.name === 'service-accounts'">
         <Agents :session="session" />
@@ -719,10 +699,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
           <Journey :connections="readyConnections" :grants="readyGrants" active="connect" />
           <Connections
             :state="connections"
-            :rotating="rotating"
-            :rotation-outcome="rotationOutcome"
             @retry="reloadConnections"
-            @rotate="rotateHeld"
           />
           <Connect
             :connectors="connectors"

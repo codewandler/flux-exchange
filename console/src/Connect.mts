@@ -5,7 +5,6 @@ import { defineComponent, h, ref, watch, type PropType, type VNode } from 'vue'
 import ConnectorPicker from './ConnectorPicker.mts'
 import type { Connector } from './catalog.mts'
 import {
-  CONNECTION_PLAN_VERSION,
   type ConnectionAuthorityAction,
   type ConnectionAuthorityInspectionOutcome,
   type ConnectionAuthorityInspectionRequest,
@@ -41,44 +40,50 @@ function refusalNotice(refusal: ServiceRefusal): VNode {
 }
 
 /**
- * Read the controls the plan admits. Values are materialised only for the immediate request and
- * are keyed by the service's target identity; aliases sharing a target are consumed once.
+ * Read the controls the plan admits. The value-free BEGIN and raw ordinal secret frames are built
+ * separately; aliases sharing a target are consumed once.
  */
 export function connectionPlanSubmission(plan: ConnectionPlan, data: FormData): ConnectionPlanSubmission {
   const name = data.get('name')
-  const values: Record<string, string> = {}
-  const expectedRevisions: Record<string, string> = {}
+  const begin: ConnectionPlanSubmission['begin'] = {
+    authorities: [],
+    connector: plan.connector,
+    label: typeof name === 'string' ? name : '',
+    plan_revision: plan.plan_revision,
+    settings: [],
+    targets: [],
+  }
+  const secrets: ConnectionPlanSubmission['secrets'] = []
   const consumed = new Set<string>()
+  const requiredTargets = new Set(plan.fields.flatMap((field) =>
+    field.required && field.target !== null ? [field.target.id] : []))
 
   for (const field of plan.fields) {
-    const target = field.target?.id
-    if (!field.routable || target === undefined || target === 'connection.name') continue
-    if (!consumed.has(target)) {
-      consumed.add(target)
-      const value = data.get(target)
-      if (typeof value === 'string' && value !== '') values[target] = value
+    const target = field.target
+    if (!field.routable || target === null || consumed.has(target.id)) continue
+    consumed.add(target.id)
+    const value = target.id === 'connection.name' ? begin.label : data.get(target.id)
+    const selected = requiredTargets.has(target.id) || typeof value === 'string' && value !== ''
+    if (!selected) continue
+    begin.targets.push({ target: target.id, revision: target.revision })
+    if (target.id === 'connection.name') continue
+    if (field.secret) {
+      secrets.push({ target: target.id, value: new TextEncoder().encode(typeof value === 'string' ? value : '') })
+      continue
     }
-    const authority = field.authority
-    if (target in values && authority !== undefined && authority.state !== 'unset' && authority.revision !== null) {
-      expectedRevisions[target] = authority.revision
+    begin.settings.push({ target: target.id, value: typeof value === 'string' ? value : '' })
+    if (field.authority !== null) {
+      begin.authorities.push({ target: target.id, revision: field.authority.revision })
     }
   }
 
-  const selected = plan.selection
-  const chosenName = typeof name === 'string' ? name : ''
-  return {
-    version: CONNECTION_PLAN_VERSION,
-    name: chosenName,
-    ...(selected !== null && selected !== chosenName ? { current_name: selected } : {}),
-    values,
-    expected_revisions: expectedRevisions,
-  }
+  return { begin, secrets }
 }
 
-function fieldControl(field: ConnectionPlanField): VNode {
+function fieldControl(field: ConnectionPlanField, required: boolean): VNode {
   const target = field.target
   if (target === null) {
-    return h('p', { class: 'connect__unroutable', role: 'alert' }, field.reason)
+    return h('p', { class: 'connect__unroutable', role: 'alert' }, field.reason ?? '')
   }
 
   const common = {
@@ -86,8 +91,9 @@ function fieldControl(field: ConnectionPlanField): VNode {
     name: target.id,
     'data-plan-target': target.id,
     disabled: !field.routable,
+    required,
   }
-  if (field.choices !== undefined && field.choices.length > 0) {
+  if (field.choices !== null && field.choices.length > 0) {
     return h('select', { ...common, class: 'connect__select' }, [
       h('option', { value: '', selected: true }, field.set ? 'Keep the current choice' : 'Choose…'),
       ...field.choices.map((choice) => h('option', { key: choice.value, value: choice.value }, choice.label)),
@@ -119,7 +125,7 @@ function authorityBody(
   inspect: (identity: string, request: ConnectionAuthorityInspectionRequest) => void,
 ): VNode | null {
   const authority = field.authority
-  if (authority === undefined) return null
+  if (authority === null) return null
 
   const explanation = {
     unset: 'No authority has been proposed, so the runtime has no origin to use.',
@@ -143,10 +149,8 @@ function authorityBody(
   }
   const working = busy === field.identity
   const reviewing = inspecting === field.identity
-  const approve = authority.state === 'proposed' ? authority.actions.approve : undefined
-  const revoke = authority.state === 'proposed' || authority.state === 'approved'
-    ? authority.actions.revoke
-    : undefined
+  const approve = authority.actions.includes('approve') ? 'approve' : undefined
+  const revoke = authority.actions.includes('revoke') ? 'revoke' : undefined
   const inspected = inspection?.status === 'answered' && plan.selection !== null && field.service !== null &&
     field.binds !== null && inspection.result.connector === plan.connector &&
     inspection.result.label === plan.selection && inspection.result.service === field.service &&
@@ -178,7 +182,7 @@ function authorityBody(
         : h('span', { class: 'connect__authority-revision' }, `Revision ${authority.revision}`),
     ]),
     h('p', { class: 'connect__authority-help' }, explanation),
-    authority.actions === null ? null : h('div', { class: 'connect__authority-actions' }, [
+    authority.actions.length === 0 ? null : h('div', { class: 'connect__authority-actions' }, [
       approve === undefined
         ? null
         : h('button', {
@@ -215,6 +219,8 @@ function planFields(
   inspect: (identity: string, request: ConnectionAuthorityInspectionRequest) => void,
 ): VNode {
   const controls = new Map<string, ConnectionPlanField>()
+  const requiredTargets = new Set(plan.fields.flatMap((field) =>
+    field.required && field.target !== null ? [field.target.id] : []))
   return h('div', { class: 'connect__fields' }, plan.fields.map((field) => {
     const target = field.target?.id ?? null
     const first = target === null ? null : controls.get(target)
@@ -225,7 +231,7 @@ function planFields(
       h('span', { class: 'connect__requirement' }, status),
       h('span', { class: 'connect__provenance', 'data-provenance': field.provenance }, field.provenance),
       field.service === null ? null : h('code', { class: 'connect__service' }, field.service),
-      h('span', { class: 'connect__set' }, field.set ? 'Set' : 'Missing'),
+      h('span', { class: 'connect__set' }, field.set === null ? 'Not reported' : field.set ? 'Set' : 'Missing'),
     ]
 
     let control: VNode
@@ -239,7 +245,7 @@ function planFields(
         'Uses the same submitted value as ', h('strong', null, first.label), '.',
       ])
     } else {
-      control = fieldControl(field)
+      control = fieldControl(field, plan.selection === null && target !== null && requiredTargets.has(target))
     }
 
     return h('section', {
@@ -352,29 +358,13 @@ function resultBody(outcome: ConnectionPlanOutcome): VNode {
     ])
   }
 
-  const result = outcome.result
-  const title = {
-    complete: 'Connection complete', incomplete: 'Connection incomplete',
-    refused: 'Connection refused', partial: 'Connection partially applied',
-  }[result.outcome]
   return h('section', {
-    class: ['connect__result', `connect__result--${result.outcome}`],
-    role: result.outcome === 'complete' ? 'status' : 'alert',
-    'data-outcome': result.outcome,
+    class: ['connect__result', 'connect__result--complete'],
+    role: 'status',
+    'data-outcome': 'complete',
   }, [
-    h('h3', null, title),
-    result.steps.length === 0 ? null : h('ol', { class: 'connect__steps' }, result.steps.map((step) =>
-      h('li', { key: step.target, 'data-step-outcome': step.outcome }, [
-        h('code', null, step.target), ` — ${step.outcome}`,
-        'reason' in step && step.reason ? `: ${step.reason}` : '',
-        'action' in step
-          ? `: proposal revision ${step.revision} may have happened; re-read the authority state before retrying.`
-          : '',
-      ])
-    )),
-    h('p', null, result.plan.state === 'complete'
-      ? 'The fresh plan reports every required field set.'
-      : 'The fresh plan still reports missing or unroutable required fields.'),
+    h('h3', null, outcome.result.replayed ? 'Connection already committed' : 'Connection committed'),
+    h('p', null, 'The value-free receipt is durable. Refresh the plan to read current non-secret state.'),
   ])
 }
 
@@ -397,9 +387,10 @@ export default defineComponent({
   setup(props, { emit }) {
     const element = ref<HTMLFormElement | null>(null)
     watch(() => props.outcome, (outcome) => {
-      // Once any answer arrives, submitted values have no reason to remain in the DOM. The fresh
-      // value-free plan says what survived and the operator can retry only what is still missing.
-      if (outcome !== null) element.value?.reset()
+      // Only a durable receipt makes the proposal safe to forget. A lost response has no receipt id,
+      // so the contract requires a byte-identical proposal replay; keeping the uncontrolled DOM
+      // controls lets the operator retry without creating a secret-bearing reactive mirror.
+      if (outcome?.status === 'answered') element.value?.reset()
     })
 
     function submit(event: Event): void {
@@ -418,13 +409,13 @@ export default defineComponent({
       const picker = props.catalogConnectors.length > 0
         ? props.catalogConnectors
         : props.connectors.map((id) => ({ id, vendor: id, description: '', operationCount: 0, channelCount: 0, operations: [] }))
-      const ready = props.plan?.status === 'ready'
+      const ready = props.plan?.status === 'ready' && props.plan.plan.selection === null
 
       return h('section', { class: 'connect', 'data-connect': 'panel' }, [
         h('h2', { class: 'connect__title' }, 'Connect a connector'),
         h('p', { class: 'connect__intro' }, [
-          'This form is exactly the versioned plan the service returned. Stored values never come back; ',
-          'only whether each declared field is set.',
+          'This form follows the value-free v2 plan. Secret controls cross only as raw local-management frames; ',
+          'they never enter JSON.',
         ]),
         h('form', { class: 'connect__form', 'data-connect': 'form', ref: element, onSubmit: submit }, [
           h(ConnectorPicker, {
@@ -447,7 +438,7 @@ export default defineComponent({
           h('button', {
             type: 'submit', class: 'connect__submit', 'data-connect': 'submit',
             disabled: props.busy || !ready,
-          }, props.busy ? 'Applying…' : 'Apply connection plan'),
+          }, props.busy ? 'Connecting…' : ready ? 'Connect' : 'Select “Create a new label” to connect'),
         ]),
         props.authorityInspection === null ? null : authorityInspectionFailure(props.authorityInspection),
         props.authorityOutcome === null ? null : authorityOutcomeBody(props.authorityOutcome),

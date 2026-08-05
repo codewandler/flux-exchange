@@ -74,7 +74,7 @@
 //! can spend. `exchange_host::CredentialStore` refuses both, and correctly — every byte of *that*
 //! file is a live vendor credential.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 #[cfg(test)]
 use std::fs;
@@ -199,6 +199,66 @@ fn hex(bytes: &[u8]) -> String {
     encoded
 }
 
+fn decode_receipt_id(encoded: &str) -> Result<[u8; 32], ()> {
+    if admit_receipt_id(encoded).is_err() {
+        return Err(());
+    }
+    let mut decoded = [0; 32];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        decoded[index] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+    }
+    Ok(decoded)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, ()> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        _ => Err(()),
+    }
+}
+
+fn admit_receipt_id(encoded: &str) -> Result<(), String> {
+    if encoded.len() != 64
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || encoded.bytes().all(|byte| byte == b'0')
+    {
+        return Err("a Service Account mint receipt id is not nonzero 64-lowerhex".to_owned());
+    }
+    Ok(())
+}
+
+fn admit_proposal_identity(encoded: &str) -> Result<(), String> {
+    if encoded.len() != 64
+        || !encoded
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("a Service Account mint proposal identity is not 64-lowerhex".to_owned());
+    }
+    Ok(())
+}
+
+fn mint_proposal_identity(id: &str, expires_at: i64) -> Result<String, serde_json::Error> {
+    #[derive(Serialize)]
+    struct Proposal<'a> {
+        expires_at: String,
+        id: &'a str,
+    }
+
+    let canonical = serde_json::to_vec(&Proposal {
+        expires_at: expires_at.to_string(),
+        id,
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(b"exchange.local-management.v1.service-account-mint-proposal");
+    digest.update([0]);
+    digest.update(canonical);
+    Ok(hex(&digest.finalize()))
+}
+
 /// When a Service Account token stops resolving.
 ///
 /// Two fields and no default, following `session::Expiry::Credential`: `as_of` is the caller's
@@ -268,6 +328,68 @@ pub struct Minted {
     pub expires_at: i64,
 }
 
+/// A terminal owner-bound Service Account mint result.
+///
+/// The token is deliberately absent. A committed result follows the one successful handoff; replay
+/// and query can recover only this value-free identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DurableMintOutcome {
+    /// The verifier, proposal identity and receipt were published together after the handoff.
+    Committed {
+        /// The Service Account identifier from the canonical proposal.
+        id: String,
+        /// The opaque receipt identity allocated by the local-management coordinator.
+        receipt_id: [u8; 32],
+    },
+    /// The same canonical proposal was already committed; no token was minted or handed off.
+    Replay {
+        /// The Service Account identifier from the canonical proposal.
+        id: String,
+        /// The original receipt identity.
+        receipt_id: [u8; 32],
+    },
+}
+
+/// Why an atomic owner-bound mint refused.
+#[derive(Debug)]
+pub enum DurableMintError<E> {
+    /// This tenant already holds the id under another proposal or legacy mint.
+    Conflict,
+    /// The actor, identifier, expiry or receipt identity is outside the closed contract.
+    InvalidRequest,
+    /// The one-shot token writer refused; no verifier or receipt was published.
+    Handoff(E),
+    /// The complete verifier/receipt image could not be durably replaced.
+    StoreUnavailable,
+    /// Entropy or an impossible receipt collision refused the operation.
+    Internal,
+    /// The absolute pre-decision budget closed before the atomic replacement started.
+    DecisionExpired,
+}
+
+/// Value-free observation of the atomic verifier-and-receipt decision boundary.
+pub trait DurableMintObserver {
+    /// Called immediately before the atomic durable replacement; `false` prevents the write.
+    fn starting(&mut self, receipt_id: [u8; 32]) -> bool;
+
+    /// Called once the receipt is durable or a byte-identical replay is discovered.
+    fn decided(&mut self, receipt_id: [u8; 32]);
+}
+
+impl<Starting, Decided> DurableMintObserver for (Starting, Decided)
+where
+    Starting: FnMut([u8; 32]) -> bool,
+    Decided: FnMut([u8; 32]),
+{
+    fn starting(&mut self, receipt_id: [u8; 32]) -> bool {
+        self.0(receipt_id)
+    }
+
+    fn decided(&mut self, receipt_id: [u8; 32]) {
+        self.1(receipt_id);
+    }
+}
+
 /// A Service Account as the management API may list it.
 ///
 /// No token and no verifier field can be serialized from this type; the route receives only the
@@ -281,13 +403,40 @@ pub struct ServiceAccountSummary {
 }
 
 /// The file as it is written. A version, so a later shape can be read rather than guessed at.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredFile {
-    /// The format version. `1` is the only one this build writes or reads.
+    /// The format version. Version 2 adds terminal local-management mint receipts to the same
+    /// atomic image as their verifiers.
     version: u32,
     /// Verifier to agent.
     #[serde(rename = "agents")]
     service_accounts: BTreeMap<Verifier, ServiceAccount>,
+    /// Value-free terminal mint records, keyed by their opaque receipt identity.
+    #[serde(default)]
+    mint_receipts: Option<BTreeMap<String, StoredMintReceipt>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MintTerminalState {
+    Committed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredMintReceipt {
+    tenant: String,
+    id: String,
+    expires_at: i64,
+    proposal_identity: String,
+    state: MintTerminalState,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StoreState {
+    service_accounts: BTreeMap<Verifier, ServiceAccount>,
+    mint_receipts: BTreeMap<String, StoredMintReceipt>,
 }
 
 /// The service_accounts this host has minted tokens for.
@@ -298,9 +447,9 @@ struct StoredFile {
 pub struct ServiceAccountStore {
     /// The file this store is kept in, resolved.
     path: PathBuf,
-    /// Verifier to agent. Written through to [`path`](Self::path) inside this lock, so no two mints
-    /// can serialise two different views of the same map.
-    live: Mutex<BTreeMap<Verifier, ServiceAccount>>,
+    /// Verifiers and their value-free terminal receipts. Both are written through to
+    /// [`path`](Self::path) inside this one lock, so no mint can publish only one half.
+    state: Mutex<StoreState>,
 }
 
 impl ServiceAccountStore {
@@ -341,7 +490,7 @@ impl ServiceAccountStore {
             })?;
         }
 
-        let live =
+        let state =
             match exchange_host::read_private_state_file(&path, 1024 * 1024).map_err(|source| {
                 ServiceAccountStoreError::Unusable {
                     path: path.display().to_string(),
@@ -351,12 +500,12 @@ impl ServiceAccountStore {
                 Some(bytes) => read(&bytes, &path)?,
                 // Nothing minted yet. The file is created by the first mint with native owner-only metadata, rather than
                 // here — an empty store has nothing to protect and nothing to lose.
-                None => BTreeMap::new(),
+                None => StoreState::default(),
             };
 
         Ok(Self {
             path,
-            live: Mutex::new(live),
+            state: Mutex::new(state),
         })
     }
 
@@ -425,14 +574,17 @@ impl ServiceAccountStore {
         let expires_at = admit_expiry(expiry)?;
         let tenant = minted_by.tenant().clone();
 
-        let mut live = self.live();
+        let mut state = self.state();
 
         // Swept first, so the bound below is tested against service_accounts somebody can still use and an
         // expired one does not hold a place against it.
-        live.retain(|_, agent| !agent.has_expired(expiry.as_of));
+        state
+            .service_accounts
+            .retain(|_, agent| !agent.has_expired(expiry.as_of));
+        retain_receipts_with_verifier(&mut state);
 
         // Refuse; never repair. Expiry bounds how long an entry lives, never how many there are.
-        if live.len() >= MAX_LIVE_SERVICE_ACCOUNTS {
+        if state.service_accounts.len() >= MAX_LIVE_SERVICE_ACCOUNTS {
             return Err(ServiceAccountError::TooManyLive {
                 max: MAX_LIVE_SERVICE_ACCOUNTS,
             });
@@ -441,7 +593,8 @@ impl ServiceAccountStore {
         // Scoped to the minting principal's tenant, so this refusal can only ever be about a Service Account
         // the caller's own tenant holds. A check across the whole store would answer a caller with
         // the fact that some other tenant uses that name.
-        if live
+        if state
+            .service_accounts
             .values()
             .any(|agent| agent.id == id && agent.tenant == tenant.as_str())
         {
@@ -452,7 +605,7 @@ impl ServiceAccountStore {
             .map_err(|source| ServiceAccountError::NoEntropy { source })?;
         let verifier = Verifier::of(token.as_str());
 
-        live.insert(
+        state.service_accounts.insert(
             verifier.clone(),
             ServiceAccount {
                 tenant: tenant.as_str().to_string(),
@@ -464,8 +617,8 @@ impl ServiceAccountStore {
         // Written before the token is handed out, and rolled back if it cannot be. A token this
         // host returned but did not record is a token nobody can revoke and nobody can even see —
         // the one-way door X-38 exists to close, held open by a failed write.
-        if let Err(source) = self.write(&live) {
-            live.remove(&verifier);
+        if let Err(source) = self.write(&state) {
+            state.service_accounts.remove(&verifier);
             return Err(ServiceAccountError::Unwritable {
                 path: self.path.display().to_string(),
                 source,
@@ -477,6 +630,151 @@ impl ServiceAccountStore {
             principal: Principal::new(PrincipalKind::ServiceAccount, id, tenant),
             expires_at,
         })
+    }
+
+    /// Mint through the retained store's one atomic verifier-and-receipt authority.
+    ///
+    /// The handoff runs before the candidate image is published. If it refuses, the in-memory and
+    /// durable images remain unchanged, so a failed one-shot writer cannot leave an authenticating
+    /// verifier behind. After it succeeds, one owner-only atomic replacement publishes the verifier,
+    /// canonical value-free proposal identity, receipt, tenant/id and terminal state together.
+    ///
+    /// A byte-identical proposal returns the original receipt without drawing or disclosing another
+    /// token. The callback is never called on replay.
+    pub fn mint_with_receipt<E>(
+        &self,
+        minted_by: &Principal,
+        id: &str,
+        expiry: Expiry,
+        receipt_id: [u8; 32],
+        handoff: impl FnOnce(&ServiceAccountToken) -> Result<(), E>,
+    ) -> Result<DurableMintOutcome, DurableMintError<E>> {
+        self.mint_with_receipt_observed(
+            minted_by,
+            id,
+            expiry,
+            receipt_id,
+            handoff,
+            &mut (|_| true, |_| {}),
+        )
+    }
+
+    /// Mint while exposing the exact durable decision instant to the local protocol controller.
+    ///
+    /// The observer runs immediately before the atomic store replacement and can refuse it without
+    /// touching durable state, then runs again immediately after the replacement is durable,
+    /// before the in-memory projection changes. A byte-identical replay reports only the retained
+    /// decision. Both observations receive only the opaque receipt identity.
+    pub fn mint_with_receipt_observed<E>(
+        &self,
+        minted_by: &Principal,
+        id: &str,
+        expiry: Expiry,
+        receipt_id: [u8; 32],
+        handoff: impl FnOnce(&ServiceAccountToken) -> Result<(), E>,
+        observer: &mut dyn DurableMintObserver,
+    ) -> Result<DurableMintOutcome, DurableMintError<E>> {
+        if minted_by.kind() != PrincipalKind::User {
+            return Err(DurableMintError::InvalidRequest);
+        }
+        let id = admit_id(id).map_err(|_| DurableMintError::InvalidRequest)?;
+        if receipt_id == [0; 32] {
+            return Err(DurableMintError::InvalidRequest);
+        }
+        let tenant = minted_by.tenant().clone();
+        let proposal_identity = mint_proposal_identity(&id, expiry.expires_at)
+            .map_err(|_| DurableMintError::Internal)?;
+        let encoded_receipt = hex(&receipt_id);
+
+        let mut state = self.state();
+        state
+            .service_accounts
+            .retain(|_, account| !account.has_expired(expiry.as_of));
+        retain_receipts_with_verifier(&mut state);
+        if let Some((existing_id, existing_receipt)) =
+            state.mint_receipts.iter().find(|(_, receipt)| {
+                receipt.tenant == tenant.as_str() && receipt.proposal_identity == proposal_identity
+            })
+        {
+            let existing_receipt_id =
+                decode_receipt_id(existing_id).map_err(|_| DurableMintError::Internal)?;
+            observer.decided(existing_receipt_id);
+            return Ok(DurableMintOutcome::Replay {
+                id: existing_receipt.id.clone(),
+                receipt_id: existing_receipt_id,
+            });
+        }
+
+        if state.mint_receipts.contains_key(&encoded_receipt) {
+            return Err(DurableMintError::Internal);
+        }
+        let expires_at = admit_expiry(expiry).map_err(|_| DurableMintError::InvalidRequest)?;
+        if state.service_accounts.len() >= MAX_LIVE_SERVICE_ACCOUNTS {
+            return Err(DurableMintError::StoreUnavailable);
+        }
+        if state
+            .service_accounts
+            .values()
+            .any(|account| account.id == id && account.tenant == tenant.as_str())
+        {
+            return Err(DurableMintError::Conflict);
+        }
+
+        let token = ServiceAccountToken::draw().map_err(|_| DurableMintError::Internal)?;
+        let verifier = Verifier::of(token.as_str());
+        handoff(&token).map_err(DurableMintError::Handoff)?;
+
+        let mut candidate = state.clone();
+        candidate.service_accounts.insert(
+            verifier,
+            ServiceAccount {
+                tenant: tenant.as_str().to_owned(),
+                id: id.clone(),
+                expires_at,
+            },
+        );
+        candidate.mint_receipts.insert(
+            encoded_receipt,
+            StoredMintReceipt {
+                tenant: tenant.as_str().to_owned(),
+                id: id.clone(),
+                expires_at,
+                proposal_identity,
+                state: MintTerminalState::Committed,
+            },
+        );
+        if !observer.starting(receipt_id) {
+            return Err(DurableMintError::DecisionExpired);
+        }
+        self.write(&candidate)
+            .map_err(|_| DurableMintError::StoreUnavailable)?;
+        observer.decided(receipt_id);
+        *state = candidate;
+
+        Ok(DurableMintOutcome::Committed { id, receipt_id })
+    }
+
+    /// Query a terminal mint receipt inside the authenticated tenant.
+    ///
+    /// This returns no token, verifier, expiry or proposal fact. An unknown or cross-tenant receipt
+    /// is simply absent.
+    pub fn query_mint_receipt(
+        &self,
+        tenant: &Tenant,
+        receipt_id: [u8; 32],
+    ) -> Option<DurableMintOutcome> {
+        if receipt_id == [0; 32] {
+            return None;
+        }
+        let encoded = hex(&receipt_id);
+        self.state()
+            .mint_receipts
+            .get(&encoded)
+            .filter(|receipt| receipt.tenant == tenant.as_str())
+            .map(|receipt| DurableMintOutcome::Replay {
+                id: receipt.id.clone(),
+                receipt_id,
+            })
     }
 
     /// The Service Account principal a presented token names, if it names one at `as_of`.
@@ -510,7 +808,8 @@ impl ServiceAccountStore {
             return None;
         }
 
-        self.live()
+        self.state()
+            .service_accounts
             .get(&Verifier::of(presented))
             .filter(|agent| !agent.has_expired(as_of))
             .and_then(|agent| {
@@ -532,7 +831,8 @@ impl ServiceAccountStore {
     ) -> Result<Vec<ServiceAccountSummary>, ServiceAccountError> {
         admit_manager(actor)?;
         let mut accounts: Vec<_> = self
-            .live()
+            .state()
+            .service_accounts
             .values()
             .filter(|account| {
                 account.tenant == actor.tenant().as_str() && !account.has_expired(as_of)
@@ -554,12 +854,16 @@ impl ServiceAccountStore {
     pub fn revoke(&self, actor: &Principal, id: &str) -> Result<(), ServiceAccountError> {
         admit_manager(actor)?;
         let id = admit_id(id)?;
-        let mut live = self.live();
-        let mut candidate = live.clone();
-        let before = candidate.len();
+        let mut state = self.state();
+        let mut candidate = state.clone();
+        let before = candidate.service_accounts.len();
         candidate
+            .service_accounts
             .retain(|_, account| account.tenant != actor.tenant().as_str() || account.id != id);
-        if candidate.len() == before {
+        candidate
+            .mint_receipts
+            .retain(|_, receipt| receipt.tenant != actor.tenant().as_str() || receipt.id != id);
+        if candidate.service_accounts.len() == before {
             return Err(ServiceAccountError::NotFound { id });
         }
         self.write(&candidate)
@@ -567,7 +871,7 @@ impl ServiceAccountStore {
                 path: self.path.display().to_string(),
                 source,
             })?;
-        *live = candidate;
+        *state = candidate;
         Ok(())
     }
 
@@ -580,10 +884,11 @@ impl ServiceAccountStore {
     ///
     /// Called with the map's guard held, so the bytes on disk are always some state this map was
     /// actually in.
-    fn write(&self, live: &BTreeMap<Verifier, ServiceAccount>) -> io::Result<()> {
+    fn write(&self, state: &StoreState) -> io::Result<()> {
         let encoded = serde_json::to_vec_pretty(&StoredFile {
             version: FORMAT_VERSION,
-            service_accounts: live.clone(),
+            service_accounts: state.service_accounts.clone(),
+            mint_receipts: Some(state.mint_receipts.clone()),
         })
         .map_err(io::Error::other)?;
 
@@ -596,40 +901,71 @@ impl ServiceAccountStore {
     /// the guarded value has no cross-key invariant a panic could have left half-updated, and
     /// refusing every subsequent request because an unrelated handler panicked would turn one
     /// failure into an outage.
-    fn live(&self) -> std::sync::MutexGuard<'_, BTreeMap<Verifier, ServiceAccount>> {
-        self.live
+    fn state(&self) -> std::sync::MutexGuard<'_, StoreState> {
+        self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
+fn retain_receipts_with_verifier(state: &mut StoreState) {
+    let service_accounts = &state.service_accounts;
+    state.mint_receipts.retain(|_, receipt| {
+        service_accounts.values().any(|account| {
+            account.tenant == receipt.tenant
+                && account.id == receipt.id
+                && account.expires_at == receipt.expires_at
+        })
+    });
+}
+
 /// The only format version this build writes or reads.
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Parse a store file, re-validating everything a hand edit could have introduced.
 ///
 /// `Tenant` and the id are checked here rather than trusted, because the file is a thing an operator
 /// can open in an editor and because `Tenant` deliberately has no `Deserialize` — validating at
 /// construction is worth nothing if a deserializer can walk around it.
-fn read(
-    bytes: &[u8],
-    path: &Path,
-) -> Result<BTreeMap<Verifier, ServiceAccount>, ServiceAccountStoreError> {
+fn read(bytes: &[u8], path: &Path) -> Result<StoreState, ServiceAccountStoreError> {
     let stored: StoredFile =
         serde_json::from_slice(bytes).map_err(|source| ServiceAccountStoreError::Unreadable {
             path: path.display().to_string(),
             reason: source.to_string(),
         })?;
 
-    if stored.version != FORMAT_VERSION {
+    if stored.version != 1 && stored.version != FORMAT_VERSION {
         return Err(ServiceAccountStoreError::Unreadable {
             path: path.display().to_string(),
             reason: format!(
-                "it is format version {}, and this build reads version {FORMAT_VERSION}",
+                "it is format version {}, and this build reads versions 1 and {FORMAT_VERSION}",
                 stored.version,
             ),
         });
     }
+    let mint_receipts = match (stored.version, stored.mint_receipts) {
+        (1, None) => BTreeMap::new(),
+        (FORMAT_VERSION, Some(receipts)) => receipts,
+        (1, Some(_)) => {
+            return Err(ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: "format version 1 cannot contain local-management mint receipts".to_owned(),
+            });
+        }
+        (FORMAT_VERSION, None) => {
+            return Err(ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: "format version 2 is missing its local-management mint receipt ledger"
+                    .to_owned(),
+            });
+        }
+        (version, _) => {
+            return Err(ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: format!("format version {version} is unsupported"),
+            });
+        }
+    };
 
     for service_account in stored.service_accounts.values() {
         Tenant::new(service_account.tenant.clone()).map_err(|source| {
@@ -647,7 +983,79 @@ fn read(
         })?;
     }
 
-    Ok(stored.service_accounts)
+    let mut proposals = BTreeSet::new();
+    for (receipt_id, receipt) in &mint_receipts {
+        admit_receipt_id(receipt_id).map_err(|reason| ServiceAccountStoreError::Unreadable {
+            path: path.display().to_string(),
+            reason,
+        })?;
+        Tenant::new(receipt.tenant.clone()).map_err(|source| {
+            ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: format!(
+                    "Service Account mint receipt `{receipt_id}` names an unusable tenant: {source}"
+                ),
+            }
+        })?;
+        admit_id(&receipt.id).map_err(|source| ServiceAccountStoreError::Unreadable {
+            path: path.display().to_string(),
+            reason: source.to_string(),
+        })?;
+        if receipt.expires_at <= 0 {
+            return Err(ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: format!(
+                    "Service Account mint receipt `{receipt_id}` has a non-positive expiry"
+                ),
+            });
+        }
+        admit_proposal_identity(&receipt.proposal_identity).map_err(|reason| {
+            ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason,
+            }
+        })?;
+        let expected = mint_proposal_identity(&receipt.id, receipt.expires_at).map_err(|source| {
+            ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: format!(
+                    "Service Account mint receipt `{receipt_id}` proposal cannot be encoded: {source}"
+                ),
+            }
+        })?;
+        if receipt.proposal_identity != expected {
+            return Err(ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: format!(
+                    "Service Account mint receipt `{receipt_id}` has a noncanonical proposal identity"
+                ),
+            });
+        }
+        if !proposals.insert((receipt.tenant.clone(), receipt.proposal_identity.clone())) {
+            return Err(ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: "more than one receipt claims the same Service Account mint proposal"
+                    .to_owned(),
+            });
+        }
+        if !stored.service_accounts.values().any(|account| {
+            account.tenant == receipt.tenant
+                && account.id == receipt.id
+                && account.expires_at == receipt.expires_at
+        }) {
+            return Err(ServiceAccountStoreError::Unreadable {
+                path: path.display().to_string(),
+                reason: format!(
+                    "Service Account mint receipt `{receipt_id}` has no verifier in the same image"
+                ),
+            });
+        }
+    }
+
+    Ok(StoreState {
+        service_accounts: stored.service_accounts,
+        mint_receipts,
+    })
 }
 
 /// Validate a Service Account identifier.
@@ -1226,7 +1634,7 @@ mod tests {
             .is_ok());
 
         assert_eq!(
-            store.live().len(),
+            store.state().service_accounts.len(),
             1,
             "neither refusal may leave an entry, and the admitted one must",
         );
@@ -1492,8 +1900,8 @@ mod tests {
         let path = scratch.store();
         let store = ServiceAccountStore::open(&path).expect("open");
         {
-            let mut live = store.live();
-            live.insert(
+            let mut state = store.state();
+            state.service_accounts.insert(
                 Verifier::of(LEGACY),
                 ServiceAccount {
                     tenant: "acme".to_owned(),
@@ -1501,7 +1909,7 @@ mod tests {
                     expires_at: NOW + 3600,
                 },
             );
-            store.write(&live).expect("persist legacy-shaped record");
+            store.write(&state).expect("persist legacy-shaped record");
         }
         drop(store);
 
@@ -1622,9 +2030,9 @@ mod tests {
         // Inserted directly. Minting 4096 times would write the file 4096 times, and what is under
         // test is the bound rather than the writing — which its own tests cover.
         {
-            let mut live = store.live();
+            let mut state = store.state();
             for n in 0..MAX_LIVE_SERVICE_ACCOUNTS {
-                live.insert(
+                state.service_accounts.insert(
                     Verifier(format!("{n:064x}")),
                     ServiceAccount {
                         tenant: "acme".to_string(),
@@ -1659,7 +2067,7 @@ mod tests {
             "a store full of expired service_accounts must admit an honest caller",
         );
         assert_eq!(
-            store.live().len(),
+            store.state().service_accounts.len(),
             1,
             "and the expired service_accounts must be gone rather than merely unresolvable",
         );
