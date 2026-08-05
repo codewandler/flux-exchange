@@ -123,6 +123,12 @@ impl WindowsHandle {
     pub const fn native_value(self) -> usize {
         self.0
     }
+
+    /// Construct one test-process capability after the feature-only grammar validated it.
+    #[cfg(all(windows, feature = "native-console-test-seam"))]
+    pub(crate) const fn from_test_process(value: usize) -> Self {
+        Self(value)
+    }
 }
 
 /// A closed Service Account identifier (1..=64 ASCII label bytes).

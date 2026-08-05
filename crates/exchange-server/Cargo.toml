@@ -28,6 +28,9 @@ native-deadline-test-seam = ["tokio/test-util"]
 # Native helper process evidence only: shorten the otherwise fixed 335-second outer result cap.
 # Released binaries do not consult the test environment variable guarded by this feature.
 native-helper-deadline-test-seam = []
+# Native Windows process evidence only: let an attached probe report the mode of the real
+# pseudoconsole-backed `CONIN$` while the production helper owns its private read.
+native-console-test-seam = []
 
 [[bin]]
 name = "flux-exchange"
@@ -85,6 +88,7 @@ windows-sys = { workspace = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
     "Win32_System_Com",
+    "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",

@@ -61,7 +61,19 @@ writer HANDLE to the immediately following MINT without a new protocol or secret
   liveness immediately before `DuplicateHandle`; the pure production predicate has mutation tests
   for every component.
 - MinGW links the complete process test. Native `windows-2025` execution and the real `CONIN$`
-  null-stdio/mode-restoration process leg remain required before any Acceptance row is checked.
+  execution remains required before any Acceptance row is checked.
+- The same single production-process test now hosts the released vendor helper in a supported
+  pseudoconsole, passes only request-read/response-write in its explicit handle list, and proves an
+  unrelated inheritable canary is absent. Production nulls all three standard handles, opens the
+  real `CONIN$`, and a feature-only non-secret probe on that console observes echo disabled before
+  input and the exact original mode restored after success and deadline cancellation. The test
+  reads the committed secret back through the label's durable instance after server exit, while
+  four-form scans exclude it from the helper response, console transcript, server diagnostics and
+  every non-provider state file.
+- MinGW clippy with warnings denied and a full test-executable link are green with the console,
+  helper-deadline and owner-root features. CI selects the one exact test with a one-pass,
+  zero-ignored, zero-filtered assertion; only its native `windows-2025` MSVC execution can close the
+  remaining evidence boundary.
 
 ## Notes
 

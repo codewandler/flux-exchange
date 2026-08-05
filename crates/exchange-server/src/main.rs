@@ -232,6 +232,19 @@ where
 
 fn main() -> ExitCode {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    #[cfg(all(windows, feature = "native-console-test-seam"))]
+    if arguments.len() == 2 && arguments[0] == "native-console-mode-test-seam" {
+        let Some(writer) = arguments[1]
+            .to_str()
+            .filter(|value| !value.is_empty() && !value.starts_with('0'))
+            .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|value| value.parse::<u64>().ok())
+            .and_then(|value| usize::try_from(value).ok())
+        else {
+            return ExitCode::FAILURE;
+        };
+        return ExitCode::from(local_helper_windows::report_console_mode_for_test(writer).code());
+    }
     #[cfg(all(windows, feature = "native-deadline-test-seam"))]
     if arguments == [OsStr::new("native-deadline-test-seam")] {
         return match local_management::run_deadline_process_fixture() {
@@ -307,7 +320,27 @@ fn main() -> ExitCode {
                 local_helper::HelperPlatform::Windows,
                 &arguments,
             ) {
-                Ok(invocation) => ExitCode::from(local_helper_windows::run(invocation).code()),
+                Ok(invocation) => {
+                    #[cfg(feature = "native-helper-deadline-test-seam")]
+                    if let Some(value) = std::env::var_os("FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS")
+                    {
+                        let Some(milliseconds) = value
+                            .to_str()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|milliseconds| *milliseconds != 0)
+                        else {
+                            return ExitCode::FAILURE;
+                        };
+                        return ExitCode::from(
+                            local_helper_windows::run_with_result_budget_for_test(
+                                invocation,
+                                std::time::Duration::from_millis(milliseconds),
+                            )
+                            .code(),
+                        );
+                    }
+                    ExitCode::from(local_helper_windows::run(invocation).code())
+                }
                 Err(_) => ExitCode::FAILURE,
             };
         }

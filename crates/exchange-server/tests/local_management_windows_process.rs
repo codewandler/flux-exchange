@@ -8,6 +8,7 @@ use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
@@ -20,15 +21,18 @@ use windows_sys::Win32::Security::{
     GetLengthSid, GetTokenInformation, IsValidSid, TokenUser, SECURITY_ATTRIBUTES, TOKEN_QUERY,
     TOKEN_USER,
 };
-use windows_sys::Win32::Storage::FileSystem::ReadFile;
+use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+use windows_sys::Win32::System::Console::{
+    ClosePseudoConsole, CreatePseudoConsole, COORD, ENABLE_ECHO_INPUT, HPCON,
+};
 use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, OpenProcessToken, ResumeThread,
     TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
-    STARTUPINFOW,
+    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+    STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
 const PIPE_PREFIX: &str = r"\\.\pipe\flux-exchange-local-management-v1-";
@@ -43,6 +47,8 @@ const CONNECT_COMMIT: u16 = 0x0004;
 const CONNECT_RECEIPT: u16 = 0x0006;
 const SERVICE_ACCOUNT_QUERY: u16 = 0x0021;
 const SERVICE_ACCOUNT_RECEIPT: u16 = 0x0022;
+const TEST_RESULT_BUDGET_MILLIS: u64 = 2_000;
+const PRIVATE_CONSOLE_SENTINEL: &[u8] = b"x137-windows-conin-secret";
 const CONNECT_SENTINEL: &[u8] = b"x137-windows-connect-secret";
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
@@ -51,6 +57,8 @@ struct SupervisedServer {
     process: HANDLE,
     readiness: HANDLE,
     liveness: HANDLE,
+    stdout: Option<JoinHandle<Vec<u8>>>,
+    stderr: Option<JoinHandle<Vec<u8>>>,
     state_root: PathBuf,
 }
 
@@ -84,7 +92,12 @@ impl SupervisedServer {
         clear_inherit(readiness_read);
         clear_inherit(liveness_write);
 
-        let inherited = [readiness_write, liveness_read];
+        let stdout = NativePipe::new();
+        let stderr = NativePipe::new();
+        let stdout_writer = stdout.write.as_raw_handle() as HANDLE;
+        let stderr_writer = stderr.write.as_raw_handle() as HANDLE;
+
+        let inherited = [readiness_write, liveness_read, stdout_writer, stderr_writer];
         let mut attribute_bytes = 0_usize;
         // SAFETY: the documented sizing call writes only the required byte count.
         unsafe {
@@ -127,6 +140,10 @@ impl SupervisedServer {
         let mut environment = child_environment(&state_root);
         let mut startup = STARTUPINFOEXW::default();
         startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        startup.StartupInfo.hStdInput = std::ptr::null_mut();
+        startup.StartupInfo.hStdOutput = stdout_writer;
+        startup.StartupInfo.hStdError = stderr_writer;
         startup.lpAttributeList = attribute_list;
         let mut process = PROCESS_INFORMATION::default();
         // SAFETY: all pointers reference live Windows structures or NUL-terminated mutable buffers;
@@ -155,11 +172,17 @@ impl SupervisedServer {
         );
         close(readiness_write);
         close(liveness_read);
+        drop(stdout.write);
+        drop(stderr.write);
+        let stdout = std::thread::spawn(move || read_owned_to_end(stdout.read));
+        let stderr = std::thread::spawn(move || read_owned_to_end(stderr.read));
         close(process.hThread);
         Self {
             process: process.hProcess,
             readiness: readiness_read,
             liveness: liveness_write,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
             state_root,
         }
     }
@@ -193,7 +216,7 @@ impl SupervisedServer {
         serde_json::from_slice(&bytes).expect("canonical supervisor readiness")
     }
 
-    fn stop(mut self) {
+    fn stop(mut self) -> (PathBuf, Vec<u8>, Vec<u8>) {
         close(std::mem::replace(&mut self.liveness, std::ptr::null_mut()));
         // SAFETY: this is the exact still-open child process handle.
         assert_eq!(
@@ -202,7 +225,19 @@ impl SupervisedServer {
             "liveness EOF did not stop the supervised process"
         );
         close(std::mem::replace(&mut self.process, std::ptr::null_mut()));
-        let _ = std::fs::remove_dir_all(&self.state_root);
+        let stdout = self
+            .stdout
+            .take()
+            .expect("captured server stdout")
+            .join()
+            .expect("server stdout reader");
+        let stderr = self
+            .stderr
+            .take()
+            .expect("captured server stderr")
+            .join()
+            .expect("server stderr reader");
+        (std::mem::take(&mut self.state_root), stdout, stderr)
     }
 }
 
@@ -218,7 +253,15 @@ impl Drop for SupervisedServer {
             }
             close(std::mem::replace(&mut self.process, std::ptr::null_mut()));
         }
-        let _ = std::fs::remove_dir_all(&self.state_root);
+        if let Some(stdout) = self.stdout.take() {
+            let _ = stdout.join();
+        }
+        if let Some(stderr) = self.stderr.take() {
+            let _ = stderr.join();
+        }
+        if !self.state_root.as_os_str().is_empty() {
+            let _ = std::fs::remove_dir_all(&self.state_root);
+        }
     }
 }
 
@@ -314,6 +357,10 @@ fn supervised_windows_service_account_helper_delivers_exact_fxsa_and_closes_fxha
         );
     }
 
+    windows_private_console_input_survives_null_stdio_and_restores_mode(&server);
+
+    // Re-query after the first durable connection: its publication intentionally changes the plan
+    // revision, so a cached BEGIN would be a stale-plan test rather than ActiveSession evidence.
     let github_plan = plan_query("github", None);
     let begin = connect_begin(&github_plan, "windows-active-session");
     let proposal = serde_json::to_vec(&begin).expect("canonical CONNECT proposal");
@@ -501,7 +548,122 @@ fn supervised_windows_service_account_helper_delivers_exact_fxsa_and_closes_fxha
         "loopback HTTP reproduced native local-owner authority: {http_reply}"
     );
 
-    server.stop();
+    let (state_root, stdout, stderr) = server.stop();
+    let private_forms = transformed_forms(PRIVATE_CONSOLE_SENTINEL);
+    assert_forms_absent(&stdout, &private_forms, "server stdout");
+    assert_forms_absent(&stderr, &private_forms, "server stderr");
+    assert_tree_excludes_except_credentials(&state_root, &private_forms);
+    let registry =
+        exchange_host::ConnectionRegistryStore::bind(state_root.join("connections/store.json"))
+            .expect("reopen value-free connection registry");
+    let tenant = exchange_host::Tenant::new("local").expect("local tenant");
+    let label = exchange_host::ConnectionLabel::new("windows-private-console")
+        .expect("private-console label");
+    let instance = exchange_host::ConnectionRegistry::resolve(&registry, &tenant, "github", &label)
+        .expect("resolve private-console label")
+        .expect("private-console instance");
+    let credentials =
+        exchange_host::CredentialStore::bind(state_root.join("credentials/store.txt"))
+            .expect("reopen retained credential provider after server exit");
+    let reference = exchange_host::CredentialRef::for_instance(
+        "local",
+        "com.github.api",
+        instance.as_str(),
+        "default",
+        "token",
+    )
+    .expect("private-console GitHub credential address");
+    let private_secret = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("credential read runtime")
+        .block_on(credentials.secrets().get(&reference))
+        .expect("private-console secret committed through retained provider");
+    assert_eq!(
+        private_secret.expose_secret().as_bytes(),
+        PRIVATE_CONSOLE_SENTINEL
+    );
+    drop(credentials);
+    drop(registry);
+    let _ = std::fs::remove_dir_all(state_root);
+}
+
+fn windows_private_console_input_survives_null_stdio_and_restores_mode(server: &SupervisedServer) {
+    // The released vendor helper has no standard streams and opens the real attached `CONIN$`
+    // only after its complete BEGIN capability reaches EOF. A feature-only probe attached to the
+    // same supported pseudoconsole observes the production echo transition; it carries no secret
+    // and is not a helper protocol or a production route.
+    let console = PseudoConsole::new(&server.state_root);
+    let original_mode = console.mode();
+    assert_ne!(
+        original_mode & ENABLE_ECHO_INPUT,
+        0,
+        "the test console must begin with echo enabled"
+    );
+    let private_plan = plan_query("github", None);
+    let private_begin = connect_begin(&private_plan, "windows-private-console");
+    let private_request = frame(
+        CLIENT,
+        CONNECT_BEGIN,
+        &serde_json::to_vec(&private_begin).expect("canonical private-console BEGIN"),
+    );
+    assert_forms_absent(
+        &private_request,
+        &transformed_forms(PRIVATE_CONSOLE_SENTINEL),
+        "helper BEGIN capability",
+    );
+    let mut private_helper =
+        VendorHelper::spawn(&server.state_root, &private_request, None, console.handle());
+    private_helper.wait_for_private_console_read(&console);
+    console.write_line(PRIVATE_CONSOLE_SENTINEL);
+    let private_response = private_helper.finish(0);
+    let private_receipt = decode_server_control(&private_response, CONNECT_RECEIPT);
+    assert_eq!(private_receipt["connector"], "github");
+    assert_eq!(private_receipt["label"], "windows-private-console");
+    assert_eq!(
+        console.mode(),
+        original_mode,
+        "helper restored `CONIN$` mode"
+    );
+    assert_forms_absent(
+        &private_response,
+        &transformed_forms(PRIVATE_CONSOLE_SENTINEL),
+        "helper terminal response",
+    );
+
+    // The same production process seam shortens only the otherwise fixed 335-second result cap.
+    // Holding the real console read beyond that cap must cancel ReadConsoleW, restore the exact
+    // original mode, close the result capability without bytes and return the fixed transport exit.
+    let deadline_plan = plan_query("github", None);
+    let deadline_begin = connect_begin(&deadline_plan, "windows-private-console-deadline");
+    let deadline_request = frame(
+        CLIENT,
+        CONNECT_BEGIN,
+        &serde_json::to_vec(&deadline_begin).expect("canonical deadline BEGIN"),
+    );
+    let mut deadline_helper = VendorHelper::spawn(
+        &server.state_root,
+        &deadline_request,
+        Some(TEST_RESULT_BUDGET_MILLIS),
+        console.handle(),
+    );
+    deadline_helper.wait_for_private_console_read(&console);
+    let deadline_response = deadline_helper.finish(1);
+    assert!(
+        deadline_response.is_empty(),
+        "expired helper result capability closes value-free"
+    );
+    assert_eq!(
+        console.mode(),
+        original_mode,
+        "deadline cancellation restored `CONIN$` mode"
+    );
+    let console_transcript = console.finish();
+    assert_forms_absent(
+        &console_transcript,
+        &transformed_forms(PRIVATE_CONSOLE_SENTINEL),
+        "pseudoconsole transcript",
+    );
 }
 
 fn plan_query(connector: &str, selection: Option<&str>) -> Value {
@@ -613,6 +775,284 @@ fn assert_attachment_refusal(response: (u16, Vec<u8>), code: &str) {
     assert_eq!(body["code"], code);
     assert_eq!(body["commit"], "none");
     assert_eq!(body["retry"], "never");
+}
+
+struct PseudoConsole {
+    handle: HPCON,
+    input: Option<OwnedHandle>,
+    output: Option<JoinHandle<Vec<u8>>>,
+    state_root: PathBuf,
+}
+
+impl PseudoConsole {
+    fn new(state_root: &Path) -> Self {
+        let input = NativePipe::new();
+        let output = NativePipe::new();
+        clear_inherit(input.write.as_raw_handle() as HANDLE);
+        clear_inherit(output.write.as_raw_handle() as HANDLE);
+        let mut handle = 0_isize;
+        let created = unsafe {
+            CreatePseudoConsole(
+                COORD { X: 80, Y: 25 },
+                input.read.as_raw_handle() as HANDLE,
+                output.write.as_raw_handle() as HANDLE,
+                0,
+                &mut handle,
+            )
+        };
+        assert!(
+            created >= 0,
+            "CreatePseudoConsole failed with HRESULT {created:#x}"
+        );
+        drop(input.read);
+        drop(output.write);
+        let output = std::thread::spawn(move || read_owned_to_end(output.read));
+        Self {
+            handle,
+            input: Some(input.write),
+            output: Some(output),
+            state_root: state_root.to_path_buf(),
+        }
+    }
+
+    fn handle(&self) -> HPCON {
+        self.handle
+    }
+
+    fn mode(&self) -> u32 {
+        let report = NativePipe::new();
+        let writer = report.write.as_raw_handle() as HANDLE;
+        let command = format!(
+            "\"{}\" native-console-mode-test-seam {}",
+            env!("CARGO_BIN_EXE_flux-exchange"),
+            writer as usize
+        );
+        let child = spawn_attached(self.handle, &[writer], &command, &self.state_root, None);
+        drop(report.write);
+        assert_ne!(unsafe { ResumeThread(child.hThread) }, u32::MAX);
+        close(child.hThread);
+        let mut bytes = [0_u8; 4];
+        read_exact_handle(&report.read, &mut bytes);
+        let mut eof = [0_u8; 1];
+        assert_eq!(read_handle(&report.read, &mut eof), 0, "mode probe EOF");
+        assert_eq!(
+            unsafe { WaitForSingleObject(child.hProcess, 5_000) },
+            WAIT_OBJECT_0,
+            "console-mode probe exit deadline"
+        );
+        assert_process_exit(child.hProcess, 0, "console-mode probe");
+        close(child.hProcess);
+        u32::from_be_bytes(bytes)
+    }
+
+    fn write_line(&self, secret: &[u8]) {
+        let input = self.input.as_ref().expect("live pseudoconsole input");
+        write_handle_all(input, secret);
+        write_handle_all(input, b"\r");
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        drop(self.input.take());
+        if self.handle != 0 {
+            unsafe { ClosePseudoConsole(self.handle) };
+            self.handle = 0;
+        }
+        self.output
+            .take()
+            .expect("pseudoconsole output reader")
+            .join()
+            .expect("pseudoconsole output task")
+    }
+}
+
+impl Drop for PseudoConsole {
+    fn drop(&mut self) {
+        drop(self.input.take());
+        if self.handle != 0 {
+            unsafe { ClosePseudoConsole(self.handle) };
+            self.handle = 0;
+        }
+        if let Some(output) = self.output.take() {
+            let _ = output.join();
+        }
+    }
+}
+
+struct VendorHelper {
+    process: HANDLE,
+    response: Option<OwnedHandle>,
+}
+
+impl VendorHelper {
+    fn spawn(
+        state_root: &Path,
+        request: &[u8],
+        result_budget_millis: Option<u64>,
+        console: HPCON,
+    ) -> Self {
+        let request_pipe = NativePipe::new();
+        let response_pipe = NativePipe::new();
+        let canary = NativePipe::new();
+        set_inherit(request_pipe.read.as_raw_handle() as HANDLE);
+        clear_inherit(request_pipe.write.as_raw_handle() as HANDLE);
+        let request_reader = request_pipe.read.as_raw_handle() as HANDLE;
+        let response_writer = response_pipe.write.as_raw_handle() as HANDLE;
+        let command = format!(
+            "\"{}\" local vendor-secret --request-handle {} --response-handle {}",
+            env!("CARGO_BIN_EXE_flux-exchange"),
+            request_reader as usize,
+            response_writer as usize
+        );
+        let child = spawn_attached(
+            console,
+            &[request_reader, response_writer],
+            &command,
+            state_root,
+            result_budget_millis,
+        );
+        drop(request_pipe.read);
+        drop(response_pipe.write);
+        drop(canary.write);
+        assert_pipe_closed_without_bytes(&canary.read);
+        assert_ne!(unsafe { ResumeThread(child.hThread) }, u32::MAX);
+        close(child.hThread);
+        write_handle_all(&request_pipe.write, request);
+        drop(request_pipe.write);
+        Self {
+            process: child.hProcess,
+            response: Some(response_pipe.read),
+        }
+    }
+
+    fn wait_for_private_console_read(&mut self, console: &PseudoConsole) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if unsafe { WaitForSingleObject(self.process, 0) } == WAIT_OBJECT_0 {
+                let mut code = u32::MAX;
+                assert_ne!(unsafe { GetExitCodeProcess(self.process, &mut code) }, 0);
+                panic!("vendor helper exited before its private `CONIN$` read: {code}");
+            }
+            if console.mode() & ENABLE_ECHO_INPUT == 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "vendor helper never entered its no-echo `CONIN$` read"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn finish(mut self, expected_exit: u32) -> Vec<u8> {
+        let response = read_owned_to_end(self.response.take().expect("helper response capability"));
+        assert_eq!(
+            unsafe { WaitForSingleObject(self.process, 10_000) },
+            WAIT_OBJECT_0,
+            "released Windows vendor helper exit deadline"
+        );
+        assert_process_exit(
+            self.process,
+            expected_exit,
+            "released Windows vendor helper",
+        );
+        close(std::mem::replace(&mut self.process, std::ptr::null_mut()));
+        response
+    }
+}
+
+impl Drop for VendorHelper {
+    fn drop(&mut self) {
+        if !self.process.is_null() {
+            unsafe {
+                TerminateProcess(self.process, 1);
+                WaitForSingleObject(self.process, 5_000);
+            }
+            close(std::mem::replace(&mut self.process, std::ptr::null_mut()));
+        }
+    }
+}
+
+fn spawn_attached(
+    console: HPCON,
+    inherited: &[HANDLE],
+    command: &str,
+    state_root: &Path,
+    result_budget_millis: Option<u64>,
+) -> PROCESS_INFORMATION {
+    let mut attribute_bytes = 0_usize;
+    unsafe {
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut attribute_bytes);
+    }
+    let mut attribute_storage =
+        vec![0_usize; attribute_bytes.div_ceil(std::mem::size_of::<usize>())];
+    let attribute_list = attribute_storage.as_mut_ptr().cast();
+    assert_ne!(
+        unsafe { InitializeProcThreadAttributeList(attribute_list, 2, 0, &mut attribute_bytes) },
+        0
+    );
+    assert_ne!(
+        unsafe {
+            UpdateProcThreadAttribute(
+                attribute_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                inherited.as_ptr().cast(),
+                std::mem::size_of_val(inherited),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    assert_ne!(
+        unsafe {
+            UpdateProcThreadAttribute(
+                attribute_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE as usize,
+                console as usize as *const std::ffi::c_void,
+                std::mem::size_of::<HPCON>(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_flux-exchange"));
+    let application = wide(executable.as_os_str());
+    let mut command_line = wide(OsStr::new(command));
+    let mut environment = child_environment_with_budget(state_root, result_budget_millis);
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = std::ptr::null_mut();
+    startup.StartupInfo.hStdOutput = std::ptr::null_mut();
+    startup.StartupInfo.hStdError = std::ptr::null_mut();
+    startup.lpAttributeList = attribute_list;
+    let mut child = PROCESS_INFORMATION::default();
+    let created = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+            environment.as_mut_ptr().cast(),
+            std::ptr::null(),
+            (&startup as *const STARTUPINFOEXW).cast::<STARTUPINFOW>(),
+            &mut child,
+        )
+    };
+    unsafe { DeleteProcThreadAttributeList(attribute_list) };
+    assert_ne!(
+        created,
+        0,
+        "create pseudoconsole-attached production process: {}",
+        std::io::Error::last_os_error()
+    );
+    child
 }
 
 struct MintHelper {
@@ -833,6 +1273,38 @@ fn read_handle(read: &OwnedHandle, output: &mut [u8]) -> usize {
     }
 }
 
+fn write_handle_all(write: &OwnedHandle, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        let mut written = 0_u32;
+        let success = unsafe {
+            WriteFile(
+                write.as_raw_handle() as HANDLE,
+                bytes.as_ptr(),
+                bytes.len() as u32,
+                &mut written,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(success, 0, "native capability write");
+        assert_ne!(written, 0, "native capability write made no progress");
+        bytes = &bytes[written as usize..];
+    }
+}
+
+fn read_owned_to_end(handle: OwnedHandle) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    std::fs::File::from(handle)
+        .read_to_end(&mut bytes)
+        .expect("native capability read to EOF");
+    bytes
+}
+
+fn assert_process_exit(process: HANDLE, expected: u32, surface: &str) {
+    let mut code = u32::MAX;
+    assert_ne!(unsafe { GetExitCodeProcess(process, &mut code) }, 0);
+    assert_eq!(code, expected, "{surface} exit code");
+}
+
 fn committed_mint_receipt(stored: &[u8], expires_at: u64) -> String {
     let stored: Value = serde_json::from_slice(stored).expect("Service Account JSON");
     let receipts = stored["mint_receipts"]
@@ -908,6 +1380,32 @@ fn assert_forms_absent(bytes: &[u8], forms: &[Vec<u8>], surface: &str) {
             "secret representation {index} entered {surface}"
         );
     }
+}
+
+fn assert_tree_excludes_except_credentials(root: &Path, forms: &[Vec<u8>]) {
+    fn walk(path: &Path, root: &Path, forms: &[Vec<u8>]) {
+        for entry in std::fs::read_dir(path).expect("read durable state directory") {
+            let entry = entry.expect("durable state entry");
+            let path = entry.path();
+            if path
+                .strip_prefix(root)
+                .expect("state entry below root")
+                .components()
+                .next()
+                .is_some_and(|component| component.as_os_str() == "credentials")
+            {
+                continue;
+            }
+            let kind = entry.file_type().expect("durable state entry type");
+            if kind.is_dir() {
+                walk(&path, root, forms);
+            } else if kind.is_file() {
+                let bytes = std::fs::read(&path).expect("read durable state file");
+                assert_forms_absent(&bytes, forms, &path.display().to_string());
+            }
+        }
+    }
+    walk(root, root, forms);
 }
 
 fn open_owner_pipe() -> std::fs::File {
@@ -1000,6 +1498,12 @@ fn decode_server_frame(bytes: &[u8]) -> (u16, &[u8]) {
     (u16::from_be_bytes([bytes[6], bytes[7]]), &bytes[12..])
 }
 
+fn decode_server_control(bytes: &[u8], expected_opcode: u16) -> Value {
+    let (opcode, payload) = decode_server_frame(bytes);
+    assert_eq!(opcode, expected_opcode);
+    serde_json::from_slice(payload).expect("canonical server control JSON")
+}
+
 fn frame(direction: u8, opcode: u16, payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(12 + payload.len());
     frame.extend_from_slice(b"FXLM");
@@ -1019,6 +1523,10 @@ fn assert_nonzero_lowerhex(value: &str) {
 }
 
 fn child_environment(state_root: &Path) -> Vec<u16> {
+    child_environment_with_budget(state_root, None)
+}
+
+fn child_environment_with_budget(state_root: &Path, result_budget_millis: Option<u64>) -> Vec<u16> {
     let mut values = std::env::vars_os().collect::<BTreeMap<OsString, OsString>>();
     values.retain(|name, _| {
         !name
@@ -1030,6 +1538,12 @@ fn child_environment(state_root: &Path) -> Vec<u16> {
         "FLUX_EXCHANGE_STATE".into(),
         state_root.as_os_str().to_owned(),
     );
+    if let Some(milliseconds) = result_budget_millis {
+        values.insert(
+            "FLUX_EXCHANGE_TEST_HELPER_RESULT_MILLIS".into(),
+            milliseconds.to_string().into(),
+        );
+    }
     let mut block = Vec::new();
     for (name, value) in values {
         block.extend(name.encode_wide());
@@ -1050,6 +1564,14 @@ fn clear_inherit(handle: HANDLE) {
     // SAFETY: only the inheritance flag of this exact owned pipe handle changes.
     assert_ne!(
         unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) },
+        0
+    );
+}
+
+fn set_inherit(handle: HANDLE) {
+    use windows_sys::Win32::Foundation::SetHandleInformation;
+    assert_ne!(
+        unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) },
         0
     );
 }

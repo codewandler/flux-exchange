@@ -34,6 +34,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, GetFileType, GetFinalPathNameByHandleW, ReadFile, WriteFile, FILE_NAME_NORMALIZED,
     FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_PIPE, OPEN_EXISTING, SYNCHRONIZE, VOLUME_NAME_NT,
 };
+use windows_sys::Win32::System::Console::{
+    GetStdHandle, SetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+};
 use windows_sys::Win32::System::Pipes::{
     GetNamedPipeInfo, GetNamedPipeServerProcessId, PeekNamedPipe, PIPE_SERVER_END,
 };
@@ -45,8 +48,8 @@ use windows_sys::Win32::System::IO::CancelSynchronousIo;
 
 use crate::local_helper::{
     ExpiresAt, HelperDeadlineSchedule, HelperExit, LocalHelperInvocation, MintWriterCapability,
-    ServiceAccountId, VendorSecretCapabilities, WindowsHandle, HELPER_SETUP_DEADLINE,
-    MAX_HELPER_FRAME_BYTES,
+    ServiceAccountId, VendorSecretCapabilities, WindowsHandle, HELPER_RESULT_DEADLINE,
+    HELPER_SETUP_DEADLINE, MAX_HELPER_FRAME_BYTES,
 };
 use crate::local_helper_plan::{VendorBegin, VendorOperation};
 
@@ -80,10 +83,15 @@ pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
         LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Windows {
             request,
             response,
-        }) => match NativeVendorCeremony::new() {
-            Ok(mut ceremony) => run_vendor(request, response, &mut ceremony),
-            Err(_) => HelperExit::CapabilityOrTransportFailure,
-        },
+        }) => {
+            if detach_standard_handles().is_err() {
+                return HelperExit::CapabilityOrTransportFailure;
+            }
+            match NativeVendorCeremony::new() {
+                Ok(mut ceremony) => run_vendor(request, response, &mut ceremony),
+                Err(_) => HelperExit::CapabilityOrTransportFailure,
+            }
+        }
         LocalHelperInvocation::ServiceAccountMint {
             id,
             expires_at,
@@ -94,6 +102,64 @@ pub(crate) fn run(invocation: LocalHelperInvocation) -> HelperExit {
         },
         _ => HelperExit::CapabilityOrTransportFailure,
     }
+}
+
+#[cfg(feature = "native-helper-deadline-test-seam")]
+pub(crate) fn run_with_result_budget_for_test(
+    invocation: LocalHelperInvocation,
+    result_budget: Duration,
+) -> HelperExit {
+    match invocation {
+        LocalHelperInvocation::VendorSecret(VendorSecretCapabilities::Windows {
+            request,
+            response,
+        }) => {
+            if detach_standard_handles().is_err() {
+                return HelperExit::CapabilityOrTransportFailure;
+            }
+            match NativeVendorCeremony::new() {
+                Ok(mut ceremony) => {
+                    run_vendor_with_result_budget(request, response, &mut ceremony, result_budget)
+                }
+                Err(_) => HelperExit::CapabilityOrTransportFailure,
+            }
+        }
+        _ => HelperExit::CapabilityOrTransportFailure,
+    }
+}
+
+fn detach_standard_handles() -> Result<(), WindowsHelperError> {
+    for stream in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        if unsafe { SetStdHandle(stream, null_mut()) } == 0
+            || !unsafe { GetStdHandle(stream) }.is_null()
+        {
+            return Err(WindowsHelperError::Capability);
+        }
+    }
+    Ok(())
+}
+
+/// Report the real attached `CONIN$` mode to one feature-only test capability.
+#[cfg(feature = "native-console-test-seam")]
+pub(crate) fn report_console_mode_for_test(writer: usize) -> HelperExit {
+    let writer = match inherited_pipe(WindowsHandle::from_test_process(writer), PipeEnd::Write) {
+        Ok(writer) => writer,
+        Err(_) => return HelperExit::CapabilityOrTransportFailure,
+    };
+    if clear_inheritance(writer.as_raw_handle() as HANDLE).is_err() {
+        return HelperExit::CapabilityOrTransportFailure;
+    }
+    let mut console = KernelConsole;
+    let mode = console
+        .open_current_input()
+        .and_then(|input| console.mode(&input));
+    let Ok(mode) = mode else {
+        return HelperExit::CapabilityOrTransportFailure;
+    };
+    let deadline = Instant::now()
+        .checked_add(HELPER_SETUP_DEADLINE)
+        .unwrap_or_else(Instant::now);
+    finish_response(writer, mode.to_be_bytes().to_vec(), deadline)
 }
 
 /// One request whose frame and EOF passed the Windows Flux-to-helper capability boundary.
@@ -692,6 +758,15 @@ pub(crate) fn run_vendor<C: VendorCeremony>(
     response: WindowsHandle,
     ceremony: &mut C,
 ) -> HelperExit {
+    run_vendor_with_result_budget(request, response, ceremony, HELPER_RESULT_DEADLINE)
+}
+
+fn run_vendor_with_result_budget<C: VendorCeremony>(
+    request: WindowsHandle,
+    response: WindowsHandle,
+    ceremony: &mut C,
+    result_budget: Duration,
+) -> HelperExit {
     let capabilities = match VendorCapabilities::take(request, response) {
         Ok(capabilities) => capabilities,
         Err(_) => return HelperExit::CapabilityOrTransportFailure,
@@ -701,7 +776,11 @@ pub(crate) fn run_vendor<C: VendorCeremony>(
         .checked_add(HELPER_SETUP_DEADLINE)
         .unwrap_or_else(Instant::now);
     let parsed_request = read_request(&request, request_by);
-    let Some(deadlines) = HelperDeadlineSchedule::from_request_eof(Instant::now()) else {
+    let Some(deadlines) = HelperDeadlineSchedule::from_request_eof_with_budgets(
+        Instant::now(),
+        HELPER_SETUP_DEADLINE,
+        result_budget,
+    ) else {
         return HelperExit::CapabilityOrTransportFailure;
     };
     let request = match parsed_request {
