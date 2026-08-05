@@ -710,6 +710,7 @@ fn read_named_pipe_to_end(pipe: &mut std::fs::File) -> Vec<u8> {
     }
 }
 
+#[track_caller]
 fn read_frame(pipe: &mut std::fs::File) -> (u16, Vec<u8>) {
     let mut header = [0_u8; 12];
     pipe.read_exact(&mut header).expect("complete FXLM header");

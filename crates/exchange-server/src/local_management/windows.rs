@@ -86,7 +86,7 @@ impl WindowsEndpoint {
         };
         // Holding the first instance is part of startup admission, not deferred work in the serve
         // task. Readiness can therefore never precede ownership of the authenticated endpoint.
-        endpoint.waiting = Some(endpoint.create_first_instance()?);
+        endpoint.waiting = Some(endpoint.create_instance(true)?);
         Ok(endpoint)
     }
 
@@ -102,18 +102,21 @@ impl WindowsEndpoint {
         Ok(AuthenticatedPipe { pipe, client })
     }
 
-    fn rearm(&mut self, pipe: NamedPipeServer) -> Result<(), WindowsEndpointRefusal> {
+    fn rearm(&mut self, retired: NamedPipeServer) -> Result<(), WindowsEndpointRefusal> {
         if self.waiting.is_some() {
             return Err(WindowsEndpointRefusal::Bind);
         }
-        // `DisconnectNamedPipe` makes this secured first-instance handle available to accept the
-        // next client. Retaining it preserves the startup namespace-ownership assertion and avoids
-        // a close/create interval in which the owner endpoint is absent or can be preempted.
-        self.waiting = Some(pipe);
+        // Tokio/Mio treats `ERROR_NO_DATA` from a reused instance as a completed connection. A
+        // client closing just after `DisconnectNamedPipe` can therefore make immediate reuse look
+        // authenticated and then yield EOF. Create the sole replacement while the retired secured
+        // handle still owns the namespace, then close the retired handle. `max_instances(2)` exists
+        // only for this atomic ownership handoff; `waiting` still admits one sequential ceremony.
+        self.waiting = Some(self.create_instance(false)?);
+        drop(retired);
         Ok(())
     }
 
-    fn create_first_instance(&self) -> Result<NamedPipeServer, WindowsEndpointRefusal> {
+    fn create_instance(&self, first: bool) -> Result<NamedPipeServer, WindowsEndpointRefusal> {
         let descriptor = SecurityDescriptor::owner_and_system(&self.owner_sid)?;
         let mut attributes = SECURITY_ATTRIBUTES {
             nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>())
@@ -126,16 +129,17 @@ impl WindowsEndpoint {
             .pipe_mode(PipeMode::Byte)
             .access_inbound(true)
             .access_outbound(true)
-            .first_pipe_instance(true)
+            .first_pipe_instance(first)
             .reject_remote_clients(true)
-            .max_instances(1)
+            .max_instances(2)
             .in_buffer_size(MAX_FRAME_BYTES)
             .out_buffer_size(MAX_FRAME_BYTES);
 
         // SAFETY: `attributes` and its descriptor allocation remain live until CreateNamedPipeW
         // returns. Tokio always adds FILE_FLAG_OVERLAPPED; the options additionally select byte
-        // mode, FILE_FLAG_FIRST_PIPE_INSTANCE and PIPE_REJECT_REMOTE_CLIENTS. Rearm retains this
-        // exact server handle instead of making a second namespace claim.
+        // mode and PIPE_REJECT_REMOTE_CLIENTS. Startup additionally selects
+        // FILE_FLAG_FIRST_PIPE_INSTANCE; replacement creation occurs while that secured namespace
+        // remains held by the disconnected retiring handle.
         unsafe {
             options.create_with_security_attributes_raw(
                 std::ffi::OsStr::new(&self.pipe_name),
@@ -1439,13 +1443,13 @@ mod tests {
         let owner_text = sid_string(endpoint.owner_sid.as_ptr()).expect("owner SID text");
         let pipe = endpoint.waiting.as_ref().expect("owner pipe");
         assert_eq!(
-            endpoint.create_first_instance().err(),
+            endpoint.create_instance(true).err(),
             Some(WindowsEndpointRefusal::Bind),
             "the exact first-instance name cannot be preempted"
         );
         let info = pipe.info().expect("named-pipe metadata");
         assert_eq!(info.mode, PipeMode::Byte);
-        assert_eq!(info.max_instances, 1);
+        assert_eq!(info.max_instances, 2);
 
         let mut owner = null_mut();
         let mut dacl = null_mut();
