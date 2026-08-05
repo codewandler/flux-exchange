@@ -255,7 +255,16 @@ impl SupervisedServer {
         stream
             .write_all(&frame(CLIENT, PLAN_QUERY, &payload))
             .expect("plan query");
-        decode_server_control(&read_frame(&mut stream), PLAN_RESPONSE)
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("complete PLAN request");
+        let plan = decode_server_control(&read_frame(&mut stream), PLAN_RESPONSE);
+        let mut terminal = Vec::new();
+        stream
+            .read_to_end(&mut terminal)
+            .expect("PLAN terminal clean EOF");
+        assert!(terminal.is_empty(), "PLAN emitted surplus terminal bytes");
+        plan
     }
 
     fn finish(&mut self, sentinel: &[u8]) {
