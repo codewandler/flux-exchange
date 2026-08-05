@@ -75,6 +75,13 @@ report_tmp="$(mktemp "${TMPDIR:-/tmp}/flux-exchange-native-report.XXXXXX")"
 trap 'rm -f -- "$bindings" "$report_tmp"' EXIT
 release_cli bindings "$target" >"$bindings"
 [ -s "$bindings" ] || fail "release target $target selected zero exact tests"
+requested_binding="${FLUX_EXCHANGE_NATIVE_BINDING:-}"
+if [ -n "$requested_binding" ]; then
+  selected="$(awk -F '\t' -v requested="$requested_binding" '$1 == requested' "$bindings")"
+  [ "$(printf '%s\n' "$selected" | grep -c . || true)" = 1 ] \
+    || fail "diagnostic binding $requested_binding is absent or duplicated for $target"
+  printf '%s\n' "$selected" >"$bindings"
+fi
 
 while IFS=$'\t' read -r binding_id package kind test_target exact_test features; do
   [ -n "$binding_id" ] && [ -n "$package" ] && [ -n "$exact_test" ] \
@@ -98,6 +105,12 @@ while IFS=$'\t' read -r binding_id package kind test_target exact_test features;
   printf '%s\n' "$result"
   require_one_clean_pass "$exact_test" "$result"
 done <"$bindings"
+
+if [ -n "$requested_binding" ]; then
+  printf 'PASS diagnostic target=%s runner=%s binding=%s\n' \
+    "$target" "$runner" "$requested_binding"
+  exit 0
+fi
 
 source_commit="$(git -C "$root" rev-parse HEAD)"
 release_cli report "$target" "$source_commit" >"$report_tmp"

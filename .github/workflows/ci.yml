@@ -25,6 +25,10 @@ on:
         description: Optional one-target native evidence projection; empty runs the complete authority.
         required: false
         type: string
+      native_binding:
+        description: Optional one-binding diagnostic; requires native_target and emits no native report.
+        required: false
+        type: string
 
 # Least privilege. Every job here only reads the checkout: nothing comments on a pull request,
 # uploads an artifact, or touches a package. `crates-io.yml` declares the same `contents: read` and
@@ -176,6 +180,11 @@ jobs:
         run: |
           set -euo pipefail
           requested='${{ inputs.native_target }}'
+          binding='${{ inputs.native_binding }}'
+          if [[ -n "$binding" && -z "$requested" ]]; then
+            echo "a diagnostic native binding requires one canonical native target" >&2
+            exit 1
+          fi
           matrix="$(jq -ce --arg requested "$requested" '[.targets | to_entries[] | select($requested == "" or .key == $requested) | {target: .key, runner: .value.runner}]' crates/exchange-release/native-evidence-v1.json)"
           if [[ "$matrix" == '[]' ]]; then
             echo "requested native target is absent from the canonical authority" >&2
@@ -214,6 +223,8 @@ jobs:
 
       - name: Execute every authority-selected native process proof exactly
         shell: bash
+        env:
+          FLUX_EXCHANGE_NATIVE_BINDING: ${{ inputs.native_binding }}
         run: ./scripts/release-native-fixtures.sh '${{ matrix.target }}'
 
   console:
