@@ -404,7 +404,8 @@ fn fxlm_frame(direction: u8, opcode: u16, payload: &[u8]) -> Vec<u8> {
 
 #[cfg(any(
     not(feature = "native-evidence-select"),
-    feature = "native-evidence-all"
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-unix-owner-bootstrap"
 ))]
 #[test]
 fn supervised_unix_binds_owner_authenticated_fxlm_before_readiness() {
@@ -481,7 +482,8 @@ fn supervised_unix_binds_owner_authenticated_fxlm_before_readiness() {
 
 #[cfg(any(
     not(feature = "native-evidence-select"),
-    feature = "native-evidence-all"
+    feature = "native-evidence-all",
+    feature = "native-evidence-x134-unix-peer-refusal"
 ))]
 #[test]
 fn supervised_unix_rejects_an_injected_wrong_peer_before_reading() {

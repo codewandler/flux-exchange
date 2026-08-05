@@ -19,6 +19,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # Least privilege. Every job here only reads the checkout: nothing comments on a pull request,
 # uploads an artifact, or touches a package. `crates-io.yml` declares the same `contents: read` and

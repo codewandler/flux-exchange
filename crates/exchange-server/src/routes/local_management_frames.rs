@@ -534,6 +534,112 @@ mod tests {
                 .expect("test server");
         });
 
+        let mut cross_origin = format!("ws://{address}/api/onboarding/frames")
+            .into_client_request()
+            .expect("cross-origin WebSocket request");
+        cross_origin.headers_mut().insert(
+            ws_header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer owner"),
+        );
+        cross_origin.headers_mut().insert(
+            ws_header::ORIGIN,
+            HeaderValue::from_static("https://attacker.invalid"),
+        );
+        cross_origin.headers_mut().insert(
+            ws_header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(PROTOCOL),
+        );
+        let refused = tokio_tungstenite::connect_async(cross_origin)
+            .await
+            .expect_err("valid credentials never override the pinned hosted origin");
+        let tokio_tungstenite::tungstenite::Error::Http(refused) = refused else {
+            panic!("cross-origin handshake returned a non-HTTP refusal: {refused}");
+        };
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            refused.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store"))
+        );
+
+        let mut text_request = format!("ws://{address}/api/onboarding/frames")
+            .into_client_request()
+            .expect("text WebSocket request");
+        text_request.headers_mut().insert(
+            ws_header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer owner"),
+        );
+        text_request
+            .headers_mut()
+            .insert(ws_header::ORIGIN, HeaderValue::from_static(origin));
+        text_request.headers_mut().insert(
+            ws_header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(PROTOCOL),
+        );
+        let (mut text_socket, _) = tokio_tungstenite::connect_async(text_request)
+            .await
+            .expect("authenticated text-message upgrade");
+        text_socket
+            .send(ClientMessage::Text("{}".into()))
+            .await
+            .expect("text message write");
+        let text_close = text_socket
+            .next()
+            .await
+            .expect("text refusal close")
+            .expect("text refusal frame");
+        let ClientMessage::Close(Some(text_close)) = text_close else {
+            panic!("text input did not close the hosted operation: {text_close:?}");
+        };
+        assert_eq!(text_close.code, CloseCode::Unsupported);
+        assert!(text_close.reason.is_empty());
+
+        let mut surplus_request = format!("ws://{address}/api/onboarding/frames")
+            .into_client_request()
+            .expect("surplus WebSocket request");
+        surplus_request.headers_mut().insert(
+            ws_header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer owner"),
+        );
+        surplus_request
+            .headers_mut()
+            .insert(ws_header::ORIGIN, HeaderValue::from_static(origin));
+        surplus_request.headers_mut().insert(
+            ws_header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static(PROTOCOL),
+        );
+        let (mut surplus_socket, _) = tokio_tungstenite::connect_async(surplus_request)
+            .await
+            .expect("authenticated surplus-message upgrade");
+        let query = client_control(
+            0x0005,
+            br#"{"receipt_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        );
+        let mut surplus = query.clone();
+        surplus.extend_from_slice(&query);
+        surplus_socket
+            .send(ClientMessage::Binary(surplus.into()))
+            .await
+            .expect("coalesced hosted message write");
+        let refusal = surplus_socket
+            .next()
+            .await
+            .expect("surplus refusal response")
+            .expect("surplus refusal frame");
+        let ClientMessage::Binary(refusal) = refusal else {
+            panic!("coalesced frames did not produce one canonical error: {refusal:?}");
+        };
+        assert_eq!(&refusal[..4], b"FXLM");
+        assert_eq!(u16::from_be_bytes([refusal[6], refusal[7]]), 0x7fff);
+        let surplus_close = surplus_socket
+            .next()
+            .await
+            .expect("surplus close")
+            .expect("surplus close frame");
+        let ClientMessage::Close(Some(surplus_close)) = surplus_close else {
+            panic!("surplus operation did not close: {surplus_close:?}");
+        };
+        assert!(surplus_close.reason.is_empty());
+
         let mut request = format!("ws://{address}/api/onboarding/frames")
             .into_client_request()
             .expect("WebSocket request");
