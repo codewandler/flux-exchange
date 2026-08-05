@@ -972,7 +972,7 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&root).expect("private test root");
+        exchange_host::ensure_private_state_directory(&root).expect("private test root");
         root
     }
 
