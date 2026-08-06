@@ -38,7 +38,9 @@ fn retained_provider_recovery_and_lease_evidence_is_exact_and_joined() {
     // Both supported Linux runners project each named Exchange proof exactly once, and every
     // projected row is one terminal pass — never a skipped, filtered or gap row.
     for (target, runner) in LINUX_RUNNERS {
-        let report = authority.report(target, SOURCE_COMMIT).expect("target report");
+        let report = authority
+            .report(target, SOURCE_COMMIT)
+            .expect("target report");
         assert_eq!(report.runner, runner);
         assert!(
             report
@@ -76,7 +78,10 @@ fn retained_provider_recovery_and_lease_evidence_is_exact_and_joined() {
         .chain(authority.target_sets.keys())
     {
         for absent in ["windows", "macos", "darwin", "msvc"] {
-            assert!(!id.contains(absent), "authority retains a {absent} row: {id}");
+            assert!(
+                !id.contains(absent),
+                "authority retains a {absent} row: {id}"
+            );
         }
     }
     let inherited = authority
