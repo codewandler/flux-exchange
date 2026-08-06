@@ -8,6 +8,16 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **The published native inventory now pins the retained provider recovery, replay and lease
+  evidence** (X-138). `NativeEvidenceAuthority::validate` refuses a substituted or dropped
+  `real_server_retains_the_c515_lease_through_recovery_and_readiness` or
+  `unix_connect_crashes_recover_before_readiness_and_replay_one_receipt` binding, a recovery/lease
+  obligation that does not cover both supported Linux targets, an inherited C-515 release-evidence
+  set that is not the five applicable published tests, and any Exchange process binding whose class
+  the retained-lease assertion join does not select. The upstream 0.20.0 checksum, released commit
+  and portable provider evidence are unchanged, and `native-evidence-v1.json` itself stays X-139's
+  to finalize.
+
 - **Hosted and owner-native local management now share one non-resetting decision deadline**
   (X-135). Admission owns the 300-second pre-decision budget, durable decision starts one fixed
   30-second receipt-bearing roll-forward budget, and cancellation can abort only before that

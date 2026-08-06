@@ -108,10 +108,10 @@ only a byte-idempotent resume at an already authorized immutable tag; it is not 
 the tag. X-126 remains active after the implementation merge until that production release passes
 the public two-target verifier.
 
-X-137's platform contraction is not publication authorization. Ordinary publication readiness
-remains stopped until X-138 supplies the required provider recovery/lease evidence and X-139 commits
-the final native-evidence authority, reports and candidate identity. No tag, secret or workflow
-input bypasses that content-derived stop.
+X-137's platform contraction is not publication authorization. X-138 has since bound the required
+provider recovery, replay and lease evidence into the authority's validation, but ordinary
+publication readiness remains stopped until X-139 commits the final native-evidence authority,
+reports and candidate identity. No tag, secret or workflow input bypasses that content-derived stop.
 
 Decision 0007 adds another independent stop. A permanent content-derived preflight closes both tag
 workflows before credentials or publication unless the tree consumes the checksummed registry
