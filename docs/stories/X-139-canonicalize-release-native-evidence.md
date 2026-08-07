@@ -75,6 +75,11 @@ literal count, stale fixture or non-Linux report may certify publication.
   class rather than by what the document calls its authorities, with counts left to the array
   lengths. Ordinary publication readiness no longer stops on this story; X-126's trust, signing and
   public verification stops are untouched.
+- 2026-08-07: review rework. The renamed/dropped/invented-family assertions had been added inside
+  the pre-existing `native_evidence_authority_rejects_each_missing_family_target_and_test`, which
+  already passed at the pinned base, so no argv could show them failing first. They now live in
+  their own `native_evidence_authority_rejects_a_renamed_dropped_or_invented_family`, which matches
+  no test at the base commit.
 
 ## Notes
 

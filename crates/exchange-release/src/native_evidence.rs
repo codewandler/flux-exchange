@@ -887,9 +887,35 @@ mod tests {
             );
         }
 
-        // Regenerating the frozen projection may not launder a changed family inventory. The
-        // retained inherited obligations and literal families are the document's own contract, so
-        // renaming, dropping or inventing one refuses before anything is frozen or reported.
+        let source_commit = "0123456789abcdef0123456789abcdef01234567";
+        let mut reports = authority
+            .targets
+            .keys()
+            .map(|target| authority.report(target, source_commit).expect("report"))
+            .collect::<Vec<_>>();
+        authority
+            .validate_reports(&reports, source_commit)
+            .expect("complete reports");
+        reports.pop();
+        assert!(authority.validate_reports(&reports, source_commit).is_err());
+        reports = authority
+            .targets
+            .keys()
+            .map(|target| authority.report(target, source_commit).expect("report"))
+            .collect();
+        reports[0].runner.push_str("-substituted");
+        assert!(authority.validate_reports(&reports, source_commit).is_err());
+    }
+
+    /// Regenerating the frozen projection may not launder a changed family inventory. The frozen
+    /// digest only refuses drift that was *not* regenerated, so the retained inherited obligations
+    /// and literal families are held as the document's own contract: renaming, dropping or
+    /// inventing one refuses before anything is frozen or reported.
+    #[test]
+    fn native_evidence_authority_rejects_a_renamed_dropped_or_invented_family() {
+        let authority = NativeEvidenceAuthority::bundled().expect("canonical authority");
+        authority.validate().expect("canonical inventory validates");
+
         let mut renamed = authority.clone();
         let family = renamed
             .obligations
@@ -927,24 +953,5 @@ mod tests {
             invented.validate().is_err(),
             "an invented literal family retained publication authority"
         );
-
-        let source_commit = "0123456789abcdef0123456789abcdef01234567";
-        let mut reports = authority
-            .targets
-            .keys()
-            .map(|target| authority.report(target, source_commit).expect("report"))
-            .collect::<Vec<_>>();
-        authority
-            .validate_reports(&reports, source_commit)
-            .expect("complete reports");
-        reports.pop();
-        assert!(authority.validate_reports(&reports, source_commit).is_err());
-        reports = authority
-            .targets
-            .keys()
-            .map(|target| authority.report(target, source_commit).expect("report"))
-            .collect();
-        reports[0].runner.push_str("-substituted");
-        assert!(authority.validate_reports(&reports, source_commit).is_err());
     }
 }
