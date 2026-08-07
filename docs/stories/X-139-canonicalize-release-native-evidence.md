@@ -1,7 +1,7 @@
 ---
 id: X-139
 title: "Canonicalize the two-target Linux native-evidence inventory"
-status: ready
+status: done
 epic: connections
 areas: [exchange-release, tests, workflows, docs]
 depends_on: [X-135, X-136, X-137, X-138]
@@ -20,25 +20,25 @@ literal count, stale fixture or non-Linux report may certify publication.
 
 ## Acceptance
 
-- [ ] Failing first, `native_evidence_authority_rejects_each_missing_family_target_and_test`
+- [x] Failing first, `native_evidence_authority_rejects_each_missing_family_target_and_test`
       removes or substitutes each authority class, family, target, runner, feature and exact Cargo
       binding independently and makes publication fail. The sole source is
       `crates/exchange-release/native-evidence-v1.json`; no TSV, Python/digest oracle,
       `native_fixture_cases()`, copied YAML target matrix, frozen family/binding count or
       `EXPECTED_MATRIX_SHA256` remains.
-- [ ] The JSON models literal X-134, inherited X-128 and inherited C-515 authority classes;
+- [x] The JSON models literal X-134, inherited X-128 and inherited C-515 authority classes;
       obligations; exact Cargo tests/features; named adversarial cases; inherited release evidence;
       and the cross-cutting connector-secrets 0.20 lease assertion. Its supported target/runner set
       is exactly `aarch64-unknown-linux-gnu`/`ubuntu-24.04-arm` and
       `x86_64-unknown-linux-gnu`/`ubuntu-24.04`. It contains no Darwin/MSVC target, Windows family or
       skipped/gap row. `all-native` and `linux-native` both mean exactly those two targets;
       `unix-native` and `windows-native` are absent.
-- [ ] Derived projections alone drive the Rust generator, complete frozen fixture tree and digest,
+- [x] Derived projections alone drive the Rust generator, complete frozen fixture tree and digest,
       publication/readiness checkers, GitHub target matrix and exact native runner. Every selected
       test is listed exactly once, executes with `--exact`, proves one passed/zero ignored/zero
       filtered and emits a target/runner/inventory-identity report. Publication requires terminal
       reports from both targets and permits no `gap` row.
-- [ ] The retained X-128 obligations are exactly `x128-expiry-live`,
+- [x] The retained X-128 obligations are exactly `x128-expiry-live`,
       `x128-supervisor-sigkill-responsive`, `x128-supervisor-sigkill-wedged`,
       `x128-supervisor-unix-normal`, `x128-supervisor-unix-wedged` and
       `x128-unix-inherited-abi`, projected onto Linux only. The retained X-134 families are exactly
@@ -49,13 +49,13 @@ literal count, stale fixture or non-Linux report may certify publication.
       `x134-native-stream-framing` and `x134-production-root-safety`. X-138's
       exact portable C-515 release identity and Linux Exchange bindings are included. Counts remain
       derived; non-Linux families are absent, not copied into a negative or optional inventory.
-- [ ] Failing first, `fixture_and_release_guards_are_derived_from_the_candidate_commit` proves the
+- [x] Failing first, `fixture_and_release_guards_are_derived_from_the_candidate_commit` proves the
       fixture inventory, hashes and selection are regenerated from the final candidate-bearing
       commit, followed by the required non-self-referential signed fixture commit. Both readiness
       and native-fixture checkers pass self-test and real mode without stale v1/five-target
       consumers. The release workflow runs publication readiness as the first post-checkout action;
       deriving a matrix or taking another candidate action before readiness is rejected.
-- [ ] X-126 remains in progress: trust, signing, tag/manual-resume and public verification remain
+- [x] X-126 remains in progress: trust, signing, tag/manual-resume and public verification remain
       its blockers. This story may not claim a release, publish a crate or weaken the public
       verifier.
 
@@ -67,6 +67,14 @@ literal count, stale fixture or non-Linux report may certify publication.
 - 2026-08-07: unblocked. This story was filed `blocked` as the serialized tail of the X-134
   sequence; X-135, X-136, X-137 and X-138 are all `done` on canonical `origin/main`, so the exact
   production tests this story consumes now exist and it is dispatchable.
+- 2026-08-07: done. The sequence X-135–X-138 had already moved every projection onto the single
+  canonical `native-evidence-v1.json`, so what remained was the inventory itself: the frozen digest
+  only refuses drift that was *not* regenerated, and a family renamed, dropped or invented beside a
+  regenerated fixture still certified publication. `NativeEvidenceAuthority::validate` now holds the
+  retained inherited X-128 obligations and literal X-134 families by name, grouped by authority
+  class rather than by what the document calls its authorities, with counts left to the array
+  lengths. Ordinary publication readiness no longer stops on this story; X-126's trust, signing and
+  public verification stops are untouched.
 
 ## Notes
 
