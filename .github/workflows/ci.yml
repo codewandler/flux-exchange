@@ -80,7 +80,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # `--locked` here, not on the four gate steps below: it makes a stale or hand-edited
       # `Cargo.lock` an obvious, named failure rather than something cargo silently repairs, while
@@ -159,7 +159,7 @@ jobs:
 
       - name: Cache cargo
         # Keyed by toolchain version, so this gets its own entry rather than fighting `check` for one.
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # `--locked`: a consumer builds the dependency versions we committed. Letting cargo resolve
       # something newer here would test a tree nobody ships, and a dependency that has raised its own
@@ -214,7 +214,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: local-state-${{ matrix.target }}
 
@@ -293,7 +293,7 @@ jobs:
           toolchain: "1.97.0"
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install cargo-audit 0.22.0
         run: cargo install cargo-audit --version 0.22.0 --locked
@@ -394,7 +394,7 @@ jobs:
           toolchain: "1.97.0"
 
       - name: Cache release-verifier dependencies
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: local-release-contract
 
