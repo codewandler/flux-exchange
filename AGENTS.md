@@ -10,24 +10,80 @@ repository's story Goal and Acceptance still define done; if they conflict with 
 decision, amend or supersede the story before implementation.
 
 <!-- BEGIN track:agents -->
-## Start here (every session) — track backlog
+## Start here (every session) — Flux Board backlog
 
-This project tracks work with the **track** framework: every unit of work is a markdown story in
-`docs/stories/`, and the board (`docs/stories/README.md`) is generated from story frontmatter.
+This project keeps one markdown story per unit of work in `docs/stories/`; Flux Board reads that
+frontmatter and generates `docs/stories/README.md`. JSON is the agent API. Run these commands from the
+repository root, keep the returned revision for guarded mutations, and never hand-edit the generated
+board marker region.
 
-1. **Orient** — read the latest user request, then run `git status --short --branch`. Treat
-   uncommitted changes as user-owned unless you made them.
-2. **What to work on** — if the user named work, do that. Otherwise open the
-   [board](docs/stories/README.md) and take the top `ready` story by `priority` (lower = higher).
-3. **The contract** — read the story's `## Goal` and `## Acceptance`; Acceptance defines "done". Read
-   any linked `design:`.
-4. **Do the work** — set the story `in-progress`; non-trivial design goes in `docs/designs/` first;
-   implement; satisfy Acceptance with a **failing-first test**; keep the gate green.
-5. **On done** — set `status: done`, add a CHANGELOG entry, regenerate the board.
-6. **New or unscoped work?** Create a story first, so the next agent inherits the context.
+1. **Orient and inspect the installed contract** — read the latest request, preserve every pre-existing
+   change reported by `git status --short --branch`, then inspect the CLI and board:
 
-The board's status lists are generated — after any change to a story's `status`/`priority`/`title`/
-`epic`, regenerate it. Story frontmatter is the single source of truth.
+   ```bash
+   flux board --root . schema --output json
+   flux board --root . show --output json
+   ```
+
+2. **Select the contract** — if the user named work, inspect that item; otherwise take the first ready
+   item returned by priority. For example:
+
+   ```bash
+   flux board --root . next --limit 1 --output json
+   flux board --root . get X-140 --output json
+   ```
+
+   Read the story's complete `## Goal` and `## Acceptance`, plus its linked `design` when non-null.
+3. **Transition before implementation** — use the revision returned by the preceding read and a stable
+   retry key (replace `REV` and `KEY`):
+
+   ```bash
+   flux board --root . transition X-140 in-progress --if-revision REV --idempotency-key KEY --output json
+   ```
+
+4. **Do the work** — non-trivial design goes in `docs/designs/` first. Implement the smallest complete
+   change, establish a failing-first test, and keep the ordinary gate green. Append the exact command
+   and result as structured evidence rather than editing generated state:
+
+   ```bash
+   flux board --root . evidence X-140 'RED: ./scripts/check-agent-workflow.sh exited 1' --if-revision REV --idempotency-key KEY --output json
+   ```
+
+5. **Finish the story** — check every Acceptance box, add the changelog entry, then use guarded done,
+   validation, and regeneration (refresh `REV` between mutations):
+
+   ```bash
+   flux board --root . done X-140 --changelog CHANGELOG.md --if-revision REV --idempotency-key KEY --output json
+   flux board --root . check --output json
+   flux board --root . sync --if-revision REV --idempotency-key KEY --output json
+   ```
+
+6. **New or unscoped work** — create it with `flux board --root . create --help`; do not silently fold
+   another story into the current one.
+
+### Fleet acknowledgement and handoff
+
+Run Fleet commands from the workspace root containing `.flux/fleet.toml`. A worker acknowledges its
+addressed assignment to the durable main agent, rather than writing a state file or scraping a terminal:
+
+```bash
+flux fleet message main 'Acknowledged exchange/X-140; implementation started' --wait delivered --output json
+```
+
+The wait states are intentionally different: **accepted** means only that Fleet durably accepted the
+journal entry and does not mean the main agent or worker answered; **delivered** means the addressed
+agent consumed it; **completed** means that agent produced its answer. Inspect only bounded records and
+send the final receipt through the typed handoff:
+
+```bash
+flux fleet inspect worker WORKER --limit 50 --output json
+flux fleet inspect result RESULT --limit 20 --output json
+flux fleet events --limit 100 --follow --output ndjson
+flux fleet handoff WAVE exchange/X-140 --worker WORKER --commit SHA --write-set PATH --test-arg './scripts/check-agent-workflow.sh' --failing-before --passing-after --summary 'Board/Fleet workflow is executable'
+```
+
+`flux fleet dashboard --output json` is useful operator context, but the dashboard is a snapshot, not a
+watch stream. Live automation consumes the NDJSON events above; tmux is an operator view, never IPC.
 <!-- END track:agents -->
 
 ## What this is
@@ -57,8 +113,10 @@ activity. Since X-101 it persists
 and supervises generated connector WebSocket channels, gates closed declared event sets, and fans
 them out through authenticated `/api/subscribe`. Since X-14 a tenant may hold several labelled
 connections to one connector; invocation selects one explicitly and the first-to-second credential
-migration is atomic. Since X-127 the complete local composition persists owner-only on all five Flux
-targets, and since X-128/X-129 its supervised readiness and four delivered HTTP contracts have exact
+migration is atomic. Since X-127 the complete local composition persists owner-only, and X-137
+constrains the released server, helper, supervisor ABI, runtime and publication to the Linux-only
+`aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu` targets. Since X-128/X-129 its supervised
+readiness and four delivered HTTP contracts have exact
 provider-owned v1 identities and conformance fixtures.** `cargo run` binds loopback and refuses to start
 on a reachable address with no identity provider configured.
 

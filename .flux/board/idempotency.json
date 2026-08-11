@@ -1,0 +1,14 @@
+{
+  "x140-start": {
+    "fingerprint": "4675df4e1c0812e5",
+    "human": "X-140 updated",
+    "data": {
+      "changed": true,
+      "dry_run": false,
+      "id": "X-140",
+      "patch": null
+    },
+    "warnings": [],
+    "revision": "08caf3bb3504a19e"
+  }
+}

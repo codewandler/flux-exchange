@@ -90,6 +90,13 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- **Repository agents now use the installed Flux Board and Fleet operator workflow** (X-140).
+  Contributor policy gives copyable JSON commands for story selection, guarded transitions, evidence,
+  completion, validation and generated-board sync, plus addressed Fleet acknowledgement, bounded
+  result inspection, live NDJSON events and typed commit handoff. A hermetic contract test executes the
+  documented read-only Board commands, checks mutating operations against installed schemas and
+  rejects private Track commands; public and contributor status now state the Linux-only runtime.
+
 - **Exchange runtime and binary releases now have one exact Linux product boundary** (X-137).
   Release selection, packaging, download policy, workflows and interim native fixtures close over
   `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, each as a deterministic `tar.zst`

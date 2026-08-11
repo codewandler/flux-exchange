@@ -17,6 +17,10 @@ live versus target architecture.
 > [!WARNING]
 > **Status: v0.17.0 — Wave #2: canonical callers, complete public boundaries, and instance-bound channels.**
 >
+> **Runtime boundary:** Exchange is Linux-only. The released server, helper, supervisor ABI and binary
+> archives support exactly `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`; macOS and
+> Windows runtime/publication paths are not shipped.
+>
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and binds the
 > complete durable local composition below the conventional per-user state directory without any
 > storage setting. It serves health, the connector catalogue and a session without OIDC setup. The ordinary composition supports both a

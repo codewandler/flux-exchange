@@ -1,8 +1,7 @@
 ---
 id: X-140
 title: "Repository agents use the installed Board and Fleet operator workflow"
-status: ready
-priority: 0
+status: in-progress
 areas: [agents, docs, tests]
 note: "Fleet dogfood — replace private Track workflow and pin the bounded handoff/watch commands a plain agent can run"
 ---

@@ -342,6 +342,9 @@ jobs:
           ./scripts/check-repository-security.sh --self-test
           ./scripts/check-repository-security.sh
 
+      - name: Repository agents use the installed Board and Fleet contracts
+        run: ./scripts/check-agent-workflow.sh
+
   crate-versions:
     name: workspace, host pin and current prose versions agree
     runs-on: ubuntu-latest

@@ -1,8 +1,8 @@
 # flux-exchange docs
 
 Start here to find anything inside the repository. These are the internal contributor docs: vision,
-roadmap, story status, design records, and notes. Work is tracked with the **track** framework — see
-[AGENTS.md](../AGENTS.md) → **"Start here"** for the working loop.
+roadmap, story status, design records, and notes. Work is managed through the installed **Flux Board**
+CLI — see [AGENTS.md](../AGENTS.md) → **"Start here"** for its copyable JSON workflow.
 
 ## Map
 
@@ -20,8 +20,9 @@ roadmap, story status, design records, and notes. Work is tracked with the **tra
 
 ## Working here
 
-Every contributor — human or agent — starts at [AGENTS.md](../AGENTS.md) → **"Start here"**: open the
-[board](stories/README.md), take the top `ready` story by priority, follow the loop, keep the gate
-green. New or unscoped work? Create a story first (`/track:story`) so the next agent inherits the
-context. After any change to a story's status/priority/title/epic/note, run `/track:board`. Optional
-story `areas` are query-only subsystem tags for selection, e.g. `/track:next flux-lang`.
+Every contributor — human or agent — starts at [AGENTS.md](../AGENTS.md) → **"Start here"**. Use
+`flux board --root . next --limit 1 --output json` to select ready work, or inspect the item the user
+named; use the guarded transition, evidence, done, check and sync commands documented there. New or
+unscoped work is created through the Board CLI so the next agent inherits its context. The released
+Exchange runtime and binary are Linux-only on `aarch64-unknown-linux-gnu` and
+`x86_64-unknown-linux-gnu`; historical stories may describe superseded platform work.
