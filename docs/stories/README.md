@@ -43,6 +43,9 @@ lockfile and compile-time tests.
 - [X-140 — Repository agents use the installed Board and Fleet operator workflow](X-140-use-installed-board-fleet-operator-workflow.md) · Fleet dogfood — replace private Track workflow and pin the bounded handoff/watch commands a plain agent can run
 - [X-141 — Exchange story workers publish bounded Fleet handoff evidence](X-141-publish-bounded-fleet-handoff-evidence.md) · Fleet dogfood — one deterministic targeted-check receipt without terminal scraping or duplicate full gates
 
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
+
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
