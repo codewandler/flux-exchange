@@ -8,6 +8,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A family renamed, dropped or invented beside a regenerated fixture no longer certifies
+  publication** (X-139). The frozen digest only ever refused drift that was *not* regenerated, so the
+  inventory itself is now held by name: `NativeEvidenceAuthority::validate` pins the retained
+  inherited X-128 obligations and the literal X-134 families, grouped by authority class rather than
+  by what the document calls its own authorities, with counts left to the array lengths.
+  `native-evidence-v1.json` is the sole source and its supported set is exactly
+  `aarch64-unknown-linux-gnu`/`ubuntu-24.04-arm` and `x86_64-unknown-linux-gnu`/`ubuntu-24.04`.
+  X-126's trust, signing and public-verification blockers are untouched.
+
 - **The published native inventory now pins the retained provider recovery, replay and lease
   evidence** (X-138). `NativeEvidenceAuthority::validate` refuses a substituted or dropped
   `real_server_retains_the_c515_lease_through_recovery_and_readiness` or
