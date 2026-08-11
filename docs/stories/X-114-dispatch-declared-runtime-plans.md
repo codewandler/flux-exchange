@@ -4,15 +4,16 @@ title: "Dispatch declared connector runtime plans through one host seam"
 status: backlog
 epic: rich-connector-runtimes
 design: docs/designs/rich-connector-runtimes.md
-note: "generalize the admitted/granted invoke chain beyond HttpRequestTool while keeping connector-pack as the only compiled behavior path and runtime caller-immutable"
+note: "Exchange dispatches connector-declared plans after admission and grants; Flux supplies guarded substrate but no second official execution placement"
 ---
 
 # Dispatch declared connector runtime plans through one host seam
 
 ## Goal
 
-Consume flux-connectors' zero-IO runtime plan after the existing runtime and grant gates, then hand it
-to a closed runtime registry without teaching Exchange how any vendor request or command is built.
+Exchange dispatches the connector-declared runtime plan after the existing runtime and grant gates,
+through a closed registry, without teaching Exchange how any vendor request or command is built.
+Flux contributes guarded runtime substrate, not a second official-integration execution placement.
 
 ## Acceptance
 
@@ -23,6 +24,8 @@ to a closed runtime registry without teaching Exchange how any vendor request or
       addresses and lifecycle.
 - [ ] `exchange-host` retains no transport and no second request/process/handshake construction path;
       `exchange-server` only binds generic runtime implementations.
+- [ ] Every official operation reaches the registry through Exchange; an unavailable binding is a
+      named refusal and never falls back to a local Flux or vendor/plugin execution path.
 - [ ] Failing-first tests exercise a synthetic non-HTTP catalogue operation through invoke and prove
       hardcoding `Http` or bypassing either gate cannot satisfy the dispatch API.
 
@@ -32,5 +35,5 @@ to a closed runtime registry without teaching Exchange how any vendor request or
 
 ## Notes
 
-- Depends on flux-connectors C-504. Read `docs/designs/invoke.md`, “Where the locks stop”, before
-  changing dependency or source fences.
+- Depends on X-113 and flux-connectors C-504. Read `docs/designs/invoke.md`, “Where the locks stop”,
+  before changing dependency or source fences.

@@ -1,7 +1,7 @@
 ---
 id: X-75
 title: "The host trades a username and a password for a token, and keeps only the token"
-status: ready
+status: in-progress
 priority: 3
 epic: credential-acquisition
 design: docs/designs/credential-acquisition.md
@@ -72,7 +72,17 @@ trait and no transport.
       supplied a credential* must not record a credential nobody supplied as though a human pasted it.
 
 ## Progress
-- (not started)
+- 2026-08-03 — implementation started from the already-landed X-74 posture. The local seam is an
+  explicit server-owned acquisition binding injected into `AppState`; no released connector is
+  treated as declaring the path while upstream C-440 remains unreleased.
+- 2026-08-03 — the in-tree seam now runs end to end through the real atomic credential store. The
+  fail-closed posture is checked before the performer, password input is immediately secret-shaped
+  and never persisted or echoed, access/refresh/expiry are one batch, refresh rotates the pair, and
+  MFA has a distinct value-free refusal. Sole and labelled connections move and remove the reserved
+  companion records with the ordinary access-token address. Audit evidence records `acquired` and
+  `initiated_by`, never a human supplier. Focused host boundary/no-second-request-path tests and all
+  375 server tests outside a concurrent onboarding-descriptor failure pass. The story remains open
+  because released C-440 metadata and live babelforce proof do not yet exist.
 
 ## Notes
 - Blocked on nothing in this repository. It reads better after **C-440** upstream declares the

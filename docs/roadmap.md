@@ -3,16 +3,22 @@
 What is delivered, what is next, and the epics that group the work. The operational detail lives on
 the [board](stories/README.md); this document is the narrative around it.
 
+For work named by `../flux-roadmap/programs/`, the cross-repository schedule and Decision 0001 take
+precedence over this local narrative. Repo-local story Goal and Acceptance remain the definition of
+done.
+
 ## Status
 
-_As of 2026-08-03:_ **v0.16.0 — Service Accounts, gated operations, versioned workflows and
-generated connector channels.**
+_As of 2026-08-03:_ **v0.17.0 — Wave #2: canonical callers, complete public boundaries and
+instance-bound channels.**
 `cargo run -- --dev` is the loopback single-tenant shorthand; reachable binds still require a real
 identity provider. Complete OIDC sign-in, per-tenant connections and settings, metadata grants,
 ordinary connector invocation, immutable workflow publication, durable value-free workflow run
-records, canonical Service Account lifecycle and bearer identity, persistent generated WebSocket
+records, multiple labelled connections per connector with explicit invocation selection, canonical
+Service Account lifecycle and bearer identity, persistent generated WebSocket
 channels and authenticated live subscriptions are built.
-Webhook channels, durable event replay/inboxes and leases-in-anger remain unbuilt.
+The authenticated effective Service Account catalogue, webhook channels, durable event
+replay/inboxes and leases-in-anger remain unbuilt.
 
 `crates/exchange-host` carries the vocabulary and rules, the credential/settings/grant bindings,
 ordinary invocation and the tenant workflow runtime. A workflow is a stored Flux program rather
@@ -27,7 +33,7 @@ upstream Flux editor schema, and manages the declared event subsets of persisten
 
 ## The engine line
 
-`connector-pack` 0.17 and the engine crates are aligned on Flux 0.54 for X-101. They remain one atomic
+`connector-pack` 0.19 and the engine crates are aligned on Flux 0.54 for X-125. They remain one atomic
 pin set: two engine versions are two incompatible `Tool` traits even when their names are identical.
 The manifest, resolved-lock and compile-time seam tests keep that rule executable.
 
@@ -38,16 +44,22 @@ The manifest, resolved-lock and compile-time seam tests keep that rule executabl
 HTTP invocation and generated connector WebSocket channels are delivered slices, not the hosted
 boundary. The accepted family direction moves Docker, Kubernetes, SQL, observability, secret stores,
 collaboration tools, and every other official integration into flux-connectors. Exchange executes
-the same declared connector address under tenant-derived authority; it does not invent its own
-vendor request or adapter path.
+every declared connector address under tenant-derived authority; it does not invent its own vendor
+request or adapter path. Flux contributes guarded substrate and an embedded client, not a second
+official execution placement or fallback.
 
-[[X-111]] tracks the program. [[X-113]] completes the remote invoke/subscribe/stream/lease protocol;
-[[X-114]] dispatches the pack's declared runtime plans; [[X-115]] binds all guarded runtimes in
-single-tenant mode; [[X-116]] adds fail-closed per-tenant isolation for shared deployments; [[X-117]]
-and [[X-118]] own streams, cancellation and leases; [[X-119]] installs only digest-pinned attested
-artifacts; and [[X-120]] proves local/hosted parity through Docker, Kubernetes, SQL and a streamed
-operation. Delivered [[X-107]] Service Account authentication and X-101–X-105 channel work are
-prerequisites, not duplicate stories. Design:
+[[X-111]] tracks the program and [[X-124]] fixes its cross-repository execution contract. The first
+independently shippable milestone is [[X-113]]: an authenticated effective Service Account catalogue
+with stable generation identity beside the existing one-shot HTTP invoke. Streams, cancellation and
+terminal outcomes stay in [[X-117]], and leases stay in [[X-118]], so neither blocks that useful path.
+
+After the HTTP milestone, [[X-114]] dispatches connector-declared runtime plans through Exchange;
+[[X-115]] binds Flux's guarded substrate in local single-tenant Exchange; [[X-119]] installs only
+digest-pinned connector artifacts through the connector/Exchange pipeline; and [[X-120]] runs the
+accumulated migration corpus through that local Exchange. [[X-116]] separately adds fail-closed
+per-tenant isolation for a hosted multi-tenant deployment and does not block the local proof.
+Delivered [[X-107]] Service Account authentication and X-101–X-105 channel work are prerequisites,
+not duplicate stories. Design:
 [`docs/designs/rich-connector-runtimes.md`](designs/rich-connector-runtimes.md).
 
 ### A public documentation site
@@ -193,7 +205,7 @@ Two decisions worth making deliberately rather than by accident. **The catalogue
 admits, and the grant model becomes folklore. And **it must not be silently filtered by grant**: an
 agent that cannot see an operation it lacks cannot report that it was refused.
 
-### Connections and credentials — X-08 · ✅ **DONE** (X-14, X-21 open on the same slug)
+### Connections and credentials — X-08, X-14 · ✅ **LIVE** (X-21 open on the same slug)
 
 An operator connects a provider; a tenant's credentials are reachable only by that tenant.
 
@@ -204,6 +216,11 @@ fallback to memory. The last one matters most — a host that fell back would st
 serve every route correctly, look exactly like a working one, and lose everything on the next
 restart.
 
+X-14 adds several labelled instances of one connector without changing the sole legacy address.
+The host mints the UUID, existence remains derived from credentials, migrations are checked atomic
+batches, and invocation refuses ambiguity rather than choosing an account. X-122 follows with the
+separate durable binding generated channels need to survive connection-label renames.
+
 ### Service Account access — X-35, X-107 · ✅ **LIVE** (legacy spelling removal X-121)
 
 The old Agent-access stories delivered the durable non-human principal in slices: one-time token
@@ -213,8 +230,8 @@ model + loop + bounded capabilities that Flux calls an Agent.
 
 A Service Account receives no authority merely by existing. Invocation and inbound subscriptions
 remain bounded by the tenant's grants, selected from declared metadata, and a token never yields a
-credential. `POST /api/agents` and `FLUX_EXCHANGE_AGENTS` are v0.16 compatibility spellings only;
-X-121 removes them in v0.17 without invalidating verifier-keyed tokens. See
+credential. The v0.16 Agent-named aliases are removed in v0.17 without invalidating verifier-keyed
+tokens. See
 [`docs/designs/service-accounts.md`](designs/service-accounts.md).
 
 ### Machine onboarding — X-41, X-42 · ✅ **LIVE**
@@ -227,13 +244,14 @@ canonical Service Account creation and bearer authentication.
 This is discovery, not authority: learning that a capability exists does not grant it. An installed
 App and hosted Agent remain target architecture, defined in [`docs/concepts.md`](concepts.md).
 
-### Invoke — X-11…X-13 · 🔄 **UNBLOCKED, X-12 in progress**
+### Invoke — X-11…X-14 · ✅ **LIVE**
 
-Where the confused-deputy answer becomes code: the caller names an operation id, and nothing else
-about the request is theirs to choose. Not the host — the URL comes from the operation's own compiled
-Flux. Not the credential — the address is derived. Not the tenant — it comes from the session.
+Where the confused-deputy answer becomes code: the caller names an operation id and, when several
+connections exist, one tenant-scoped operator label. Nothing else about the request is theirs to
+choose. Not the host — the URL comes from the operation's own compiled Flux. Not the credential —
+the address is derived. Not the tenant — it comes from the resolved principal.
 
-**X-12's hardest criterion is structural, not behavioural:** a test that fails if a second
+**X-12's hardest criterion is structural, not behavioural:** a test fails if a second
 request-building path ever appears. This host constructs no request of its own, and that is the
 property that keeps it from becoming the credential-injecting proxy the family already rejected.
 
@@ -250,26 +268,21 @@ preference to be re-litigated per story:
   **lease liveness**, because this host must learn that a holder died in order to release what it is
   holding for them.
 
-flux needs no new concept to consume this: `flux-channels` already has a generic `connector` channel
-kind, and a `mode = "remote"` setting opens a stream instead of binding a listener. The event names
-come from the same manifest either way, so `trigger { on = … }` is unchanged.
+Flux's embedded Exchange binding consumes both transports. `flux-channels` already has a generic
+`connector` channel kind, and its Exchange-backed mode opens the authenticated stream instead of
+binding a vendor listener. Event names still come from the connector manifest, so `trigger { on =
+… }` is unchanged; the placement is always Exchange for an official external integration.
 
 ## The formerly unfiled platform work is now owned
 
 Generated `subscribe` shipped in X-101–X-105 and workflows plus execution records shipped in X-98.
-The remaining general work is no longer an unscoped direction: streams and cancellation are X-117,
-leases are X-118, isolated rich runtimes are X-114–X-116, artifact trust is X-119, and X-120 holds
-the end-to-end migration proof. Webhook/poll hosting and durable replay remain outside this runtime
-epic and still require their own designs before implementation.
+The remaining general work is no longer an unscoped direction: the effective catalogue and one-shot
+HTTP contract are X-113; streams and cancellation are X-117; leases are X-118; rich runtime dispatch
+and placement are X-114–X-116; artifact trust is X-119; and X-120 holds the local single-tenant
+migration-corpus proof. Webhook/poll hosting and durable replay remain outside this runtime epic and
+still require their own designs before implementation.
 
-**Unblocked 2026-08-01.** flux-connectors published 0.9.0: `connector-pack` requires
-`flux-runtime ^0.46` where it required `^0.41` against a flux line at 0.45. X-11 landed the upgrade
-and proved `connector-pack` **links** — `crates/exchange-host/tests/engine_line.rs` packs a real
-connector into a `flux_runtime::ToolRegistry` through `flux_web`'s `HttpRequestTool`. X-12 is in
-progress; X-13 follows it, and X-14 (per-instance addresses) unblocked with it because the same
-release carries the instance dimension.
-
-Two decisions X-11 made that the rest of the epic inherits: `connector-pack` is a **dev-dependency**
-until X-12 promotes it, so a published crate does not carry the flux engine to satisfy a proof; and
-the engine line is pinned at **0.46, not the newest** — `flux-runtime` 0.47 exists and taking it
-would recreate the two-incompatible-types failure that blocked this epic in the first place.
+**Current dependency boundary, 2026-08-04.** connector v0.19 and Flux v0.54.4 move as one registry-only
+graph. `connector-pack` and `flux-runtime` are ordinary host dependencies because Exchange executes
+operations. The manifest, resolved lock and compile-time seam tests prove one engine line; neither a
+path nor a Git override participates in a release.

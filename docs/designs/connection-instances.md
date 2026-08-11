@@ -1,6 +1,6 @@
 # Design: two instances of one connector
 
-**Status:** accepted · **Epic:** `connections` · **Stories:** X-14
+**Status:** delivered in v0.16 · **Epic:** `connections` · **Stories:** X-14
 
 ## Why
 
@@ -193,3 +193,17 @@ X-14's Acceptance is the executable contract. The shape it defers to this docume
 **operator-chosen label scoped to its own tenant**, the uuid is minted by the host and never named by
 a caller, existence stays derived from the credential store, and the ambiguous case is refused rather
 than defaulted.
+
+## Delivered shape
+
+`ConnectionRegistryStore` is the durable naming overlay selected by `FLUX_EXCHANGE_CONNECTIONS`.
+Management lives at `/api/connections/{connector}/instances/{label}`, with parallel settings and
+credential-rotation resources. The first label may be attached to a legacy sole connection without
+moving it; creating the second atomically qualifies the first and writes the second. Removing one of
+two atomically destroys the selected credential set and returns the survivor to the legacy address.
+
+The registry row is intentionally committed before the credential batch. It remains inert when a
+batch fails, and a retry reuses its UUID. Listing intersects labels with scoped credential
+references, so deleting the whole naming file leaves every held UUID visible and unnamed. The file
+store supports inventory and atomic batches. A point-only backend keeps the pre-X-14 sole connection
+surface, but plural management refuses explicitly rather than attempting a point-write migration.

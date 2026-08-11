@@ -1,0 +1,9 @@
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = []
+targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
+install-updater = false

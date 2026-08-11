@@ -5,6 +5,8 @@
 //! GET    /api/connections               every connection this tenant holds
 //! POST   /api/connections/{connector}   connect one, with the values it declares
 //! GET    /api/connections/{connector}   one connection, as addresses and never as values
+//! GET/POST /api/connections/{connector}/plan
+//!                                       project and apply a labelled declaration-driven plan
 //! DELETE /api/connections/{connector}   disconnect, destroying every credential it holds
 //! PUT    /api/connections/{connector}/credentials/{credential}
 //!                                       replace one credential's value, in place
@@ -14,6 +16,16 @@
 //!                                       supply one non-secret per-connection value
 //! DELETE /api/connections/{connector}/settings/{service}/{field}
 //!                                       unset one
+//! PUT    /api/connections/{connector}/label
+//!                                       label the sole legacy connection
+//! POST   /api/connections/{connector}/instances/{label}
+//!                                       create another named connection
+//! GET/PUT/DELETE /api/connections/{connector}/instances/{label}
+//!                                       inspect, rename or destroy one named connection
+//! GET/PUT/DELETE .../instances/{label}/settings/...
+//!                                       manage one instance's non-secret settings
+//! PUT    .../instances/{label}/credentials/{credential}
+//!                                       rotate one instance's credential
 //! ```
 //!
 //! # The settings half, and why it is a second store rather than more credentials (X-47)
@@ -38,10 +50,12 @@
 //! `default`, because `contentful` declares `endpoint.space_id` under two services and a value
 //! silently filed under the wrong one is a management write into a space nobody named.
 //!
-//! **Values go in and do not come back out**, as everywhere else on this surface: `GET` answers with
-//! `binds` targets and a `set` boolean. That is stricter than the "not a secret" argument requires,
-//! and it is the direction that cannot be wrong — a `username` field holds an account name or an
-//! email address, which is a customer's personal data whatever the field is called.
+//! **Tenant values go in and do not come back out**, as everywhere else on this surface: `GET`
+//! answers with `binds` targets, a `set` boolean, and any closed choices the catalogue declares.
+//! Those choices are connector metadata, never the tenant's stored value. Withholding the stored
+//! value is stricter than the "not a secret" argument requires, and it is the direction that cannot
+//! be wrong — a `username` field holds an account name or an email address, which is a customer's
+//! personal data whatever the field is called.
 //!
 //! # Where the tenant comes from, and what a caller may say
 //!
@@ -58,7 +72,8 @@
 //!
 //! # Who may touch a connection, decided per route (X-47, X-54)
 //!
-//! Every route here requires a principal, and three of them require one of a particular **kind**.
+//! Every route here requires a principal, and every write that supplies a credential, changes a
+//! label, or steers an endpoint requires one particular **kind**.
 //! The division is *writing a credential or the value that steers where it goes* against
 //! *everything else*, and it is declared as data on each [`Route`] rather than checked inside a
 //! handler, so `super::tests::the_kind_gated_surface_is_only_what_was_declared` can walk it:
@@ -72,6 +87,9 @@
 //! | `PUT .../credentials/{credential}` | a `User` | the same substitution as `POST`, and invisible — it replaces in place |
 //! | `GET .../settings` | any kind | `binds` targets and a `set` boolean, never a value |
 //! | `PUT`/`DELETE .../settings/{service}/{field}` | a `User` | the value is substituted into the operation's own request |
+//! | `PUT .../label`; `POST`/`PUT .../instances/{label}` | a `User` | naming or creating an external account is operator work |
+//! | `GET`/`DELETE .../instances/{label}` | any kind | safe metadata read or visible destructive undo |
+//! | instance settings and credential routes | the same as their sole-connection counterparts | selecting an instance does not reduce the authority |
 //!
 //! [`MAY_SUPPLY_A_CREDENTIAL`] and [`MAY_CONFIGURE`] carry the arguments, including why `Service` is
 //! refused alongside `Agent` and the within-tenant gap **neither** of them closes — there is no
@@ -96,15 +114,16 @@
 //! sentinel stored, and asserts it appears in no response body. `AGENTS.md` § Invariants: name the
 //! address, never the value.
 //!
-//! # The second connection to one connector is refused
+//! # Plural connections are explicit and atomic (X-14)
 //!
-//! `tenants/<tenant>/<authority>/<credential>` has nowhere to say *which* Zendesk, so a tenant with
-//! a sandbox and a production account renders one address for both and the second write would
-//! silently replace the first. That is refused with `409` rather than accepted, and the refusal
-//! quotes the `@instances/<uuid>` level that has landed upstream (flux-connectors C-406) and is not
-//! published yet. **This refusal is the placeholder for that level** — see [`already_connected`],
-//! `exchange_host::ConnectorDeclaration::address_of_declared` for the seam it is inserted at, and
-//! `docs/designs/connections.md` for the argument.
+//! The legacy `POST /api/connections/{connector}` remains create-only and refuses an occupied
+//! connector; it never became an upsert. The label-scoped resource is the explicit plural path.
+//! The host mints the UUID, resolves labels within the principal's tenant, and derives existence
+//! from scoped credential references rather than from the naming overlay. Creating the second
+//! connection atomically moves every legacy credential under the first UUID and writes the second;
+//! deleting one of two atomically moves the survivor back to its legacy address. A store without
+//! scoped inventory and checked atomic batches keeps the sole legacy surface but refuses plural
+//! management—point writes are never used as a migration fallback.
 //!
 //! # What one tenant may occupy, refused before anything is written
 //!
@@ -169,10 +188,10 @@
 //! `GET` still answers `200` for such a connection, with each credential's `held` telling the truth
 //! about it. **That is deliberate and X-18 decided not to change it here**: a connector may legally
 //! hold a subset of what it declares — `tests::a_connection_may_carry_a_subset_of_what_is_declared`
-//! — so "half destroyed" and "deliberately partial" render identically, and nothing distinguishes
-//! them without a record beside the store, which this module deliberately does not keep (see
-//! [`list`]). Giving `GET` a status of its own therefore needs that record designed first, and is
-//! its own story rather than a line here.
+//! — so "half destroyed" and "deliberately partial" render identically. X-60's audit projection
+//! records successful suppliers, not deletion intent or connection state, and therefore does not
+//! turn that evidence into a lifecycle status. Giving `GET` a status of its own still needs that
+//! state designed first and remains its own story rather than a line here.
 //!
 //! Each refusal is a check-then-write, so it only means anything while nothing interleaves with it,
 //! and the two are decided from reads of different width — so
@@ -194,7 +213,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put, MethodRouter};
@@ -202,16 +221,27 @@ use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
     address_path, admit_tenant_occupancy, declared_settings, host_pinning, stored_bytes,
-    ConnectionRefusal, ConnectorDeclaration, CredentialRef, DeclaredCredential, DeclaredSetting,
-    HostPinning, Principal, PrincipalKind, Secret, SecretStore, SettingsRefusal, StoreError,
-    Tenant,
+    AcquisitionRefusal, AuthPostureRefusal, ConnectionLabel, ConnectionRefusal, ConnectionRegistry,
+    ConnectorDeclaration, CredentialRef, CredentialScope, DeclaredCredential, DeclaredSetting,
+    HostPinning, InstanceId, PasswordRedemption, Principal, RefreshRedemption, RegistryRefusal,
+    Secret, SecretBatch, SecretStore, SettingsRefusal, StoreError, Tenant, TenantInstances,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{error, warn};
 
 use super::{Access, Module, Route};
+use crate::audit::{
+    Action as AuditAction, Outcome as AuditOutcome, RequestId, Target as AuditTarget,
+};
 use crate::state::AppState;
+
+mod plan;
+
+pub(crate) use plan::{
+    native_query as native_plan_query, native_snapshot as native_plan_snapshot, NativePlanRefusal,
+    NativePlanSnapshot,
+};
 
 /// The setting that names the credential store, quoted when none is bound.
 ///
@@ -220,24 +250,14 @@ use crate::state::AppState;
 ///
 /// `pub(super)` since X-12: [`invoke`](super::invoke) refuses in the same terms when no store is
 /// bound, and one setting quoted from two places would be two strings to keep in step.
-#[cfg(unix)]
 pub(super) const STORE_SETTING: &str = exchange_host::CREDENTIAL_STORE_SETTING;
-/// The same, where the file store does not exist. Only `FileStore` is `#[cfg(unix)]`; the port is
-/// not, so a composition on another platform binds its own store rather than this one.
-#[cfg(not(unix))]
-pub(super) const STORE_SETTING: &str = "FLUX_EXCHANGE_CREDENTIALS";
 
 /// The setting that names the connection-settings store, quoted when none is bound.
 ///
 /// Spelled through the host's own constant for [`STORE_SETTING`]'s reason. `pub(super)` for its
 /// reason too: [`invoke`](super::invoke) points a refused invocation at this surface, and one
 /// setting quoted from two places would be two strings to keep in step.
-#[cfg(unix)]
 pub(super) const SETTINGS_SETTING: &str = exchange_host::CONNECTION_SETTINGS_SETTING;
-/// The same, where the file store does not exist. Only the file binding is `#[cfg(unix)]`; the port
-/// is not, so a composition on another platform binds its own store rather than this one.
-#[cfg(not(unix))]
-pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
 
 /// **Who may write a connection setting: a `User`, and nothing else.**
 ///
@@ -300,8 +320,6 @@ pub(super) const SETTINGS_SETTING: &str = "FLUX_EXCHANGE_SETTINGS";
 /// can name an origin. Closing that needs a place for an **operator** to pin an allowed host per
 /// tenant — a surface that does not exist, with its own authorization question. See
 /// `docs/designs/connection-settings.md` § 4.
-pub(super) const MAY_CONFIGURE: &[PrincipalKind] = &[PrincipalKind::User];
-
 /// **Who may put a credential value into this tenant's store: a `User`, and nothing else.**
 ///
 /// The two routes that write a credential — `POST /api/connections/{connector}` and
@@ -325,11 +343,10 @@ pub(super) const MAY_CONFIGURE: &[PrincipalKind] = &[PrincipalKind::User];
 /// stated test — *what does this outlive?* — and the same test is what puts these two on the other
 /// side of it:
 ///
-/// - **Nothing records who supplied a credential.** A connection is what the credential store says
-///   it is (`docs/designs/connections.md`) — there is no record beside it, by design — so
-///   `GET /api/connections` answers `held: true` for a value an agent planted exactly as it does
-///   for the one a human did. A rotation is more invisible still: it replaces in place, with no
-///   observable state in which anything is missing.
+/// - **At the time of X-54, nothing recorded who supplied a credential.** X-60 subsequently
+///   projected X-95's successful audit evidence beside `held`, without making that evidence the
+///   source of connection existence. The gate remains defence in depth: missing retained evidence
+///   honestly reads `unknown`, and attribution does not undo a substitution.
 /// - **Revocation is not a remedy.** Revoking the agent's token stops the agent; it does not take
 ///   the value back out of the store, and nothing points an operator at the address to look at.
 ///   That is `agents::MAY_MINT`'s argument — an incomplete remedy an operator cannot see — reached
@@ -384,12 +401,20 @@ pub(super) const MAY_CONFIGURE: &[PrincipalKind] = &[PrincipalKind::User];
 /// an `Operator` variant on [`PrincipalKind`] here would put a policy model in the identity
 /// vocabulary, where nothing mints it, nothing revokes it and no identity port knows how to return
 /// it. It is written down rather than left to be inferred from the absence of a test.
-pub(super) const MAY_SUPPLY_A_CREDENTIAL: &[PrincipalKind] = &[PrincipalKind::User];
-
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
     name: "connections",
     routes: &[
+        Route {
+            path: "/api/connections/{connector}/plan",
+            access: Access::User,
+            method_router: plan::read_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/plan",
+            access: Access::Operator,
+            method_router: plan::write_route,
+        },
         Route {
             // Under `/api` for the reason the session route is: `vite dev` owns the origin and
             // proxies `/api` to this host, so anything outside that prefix is answered by the SPA
@@ -401,7 +426,7 @@ pub(super) const MODULE: Module = Module {
             // can say so instead of failing an invocation for a reason nobody can act on — the
             // same argument the settings `GET` collection is open on.
             path: "/api/connections",
-            access: Access::Principal,
+            access: Access::Operator,
             method_router: collection_route,
         },
         Route {
@@ -417,7 +442,7 @@ pub(super) const MODULE: Module = Module {
             // Whether an agent should reach a destructive route is the grant-shaped question,
             // which is X-13's. See `crate::routes::service_accounts`.
             path: "/api/connections/{connector}",
-            access: Access::Principal,
+            access: Access::Operator,
             method_router: connection_route,
         },
         Route {
@@ -429,7 +454,7 @@ pub(super) const MODULE: Module = Module {
             // has been granted the credential position, nothing records who supplied one, and
             // revoking the token that did it does not take the value back out.
             path: "/api/connections/{connector}",
-            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            access: Access::Operator,
             method_router: create_route,
         },
         Route {
@@ -447,7 +472,7 @@ pub(super) const MODULE: Module = Module {
             // of the substitution [`MAY_SUPPLY_A_CREDENTIAL`] describes — and rotation exists for
             // revoking a leaked secret, which is an operator's act rather than a caller's.
             path: "/api/connections/{connector}/credentials/{credential}",
-            access: Access::PrincipalOfKind(MAY_SUPPLY_A_CREDENTIAL),
+            access: Access::Operator,
             method_router: credential_route,
         },
         Route {
@@ -455,7 +480,7 @@ pub(super) const MODULE: Module = Module {
             // The answer is derived from the connector's own operations and from the resolved
             // principal, and carries no value.
             path: "/api/connections/{connector}/settings",
-            access: Access::Principal,
+            access: Access::Operator,
             method_router: settings_route,
         },
         Route {
@@ -469,8 +494,43 @@ pub(super) const MODULE: Module = Module {
             // credential to — and an agent's token grants access to an operation, never to a
             // credential. [`MAY_CONFIGURE`] carries the argument, including why the gate is the
             // whole write surface rather than the host-shaped fields alone.
-            access: Access::PrincipalOfKind(MAY_CONFIGURE),
+            access: Access::Operator,
             method_router: setting_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/label",
+            access: Access::Operator,
+            method_router: legacy_label_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}",
+            access: Access::Operator,
+            method_router: instance_read_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}",
+            access: Access::Operator,
+            method_router: instance_write_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}/settings",
+            access: Access::Operator,
+            method_router: instance_settings_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
+            access: Access::Operator,
+            method_router: instance_setting_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
+            access: Access::Operator,
+            method_router: plan::authority_route,
+        },
+        Route {
+            path: "/api/connections/{connector}/instances/{label}/credentials/{credential}",
+            access: Access::Operator,
+            method_router: instance_credential_route,
         },
     ],
 };
@@ -490,11 +550,11 @@ fn connection_route() -> MethodRouter<AppState> {
 
 /// The third verb on that path, gated to [`MAY_SUPPLY_A_CREDENTIAL`].
 fn create_route() -> MethodRouter<AppState> {
-    post(create)
+    production_secret_json_route(create)
 }
 
 fn credential_route() -> MethodRouter<AppState> {
-    put(rotate)
+    production_secret_json_put_route(rotate)
 }
 
 fn settings_route() -> MethodRouter<AppState> {
@@ -503,6 +563,74 @@ fn settings_route() -> MethodRouter<AppState> {
 
 fn setting_route() -> MethodRouter<AppState> {
     put(set_setting).delete(clear_setting)
+}
+
+fn legacy_label_route() -> MethodRouter<AppState> {
+    put(label_legacy)
+}
+
+fn instance_read_route() -> MethodRouter<AppState> {
+    get(show_instance).delete(remove_instance)
+}
+
+fn instance_write_route() -> MethodRouter<AppState> {
+    production_secret_json_route(create_instance).put(rename_instance)
+}
+
+fn instance_settings_route() -> MethodRouter<AppState> {
+    get(list_instance_settings)
+}
+
+fn instance_setting_route() -> MethodRouter<AppState> {
+    put(set_instance_setting).delete(clear_instance_setting)
+}
+
+fn instance_credential_route() -> MethodRouter<AppState> {
+    production_secret_json_put_route(rotate_instance)
+}
+
+/// Keep historical handler-level unit fixtures available while the shipped binary refuses every
+/// legacy secret-bearing JSON route before body extraction. Native and hosted FXLM are now the sole
+/// credential input surfaces; integration tests exercise this non-test composition.
+fn production_secret_json_route<H, T>(legacy_test_handler: H) -> MethodRouter<AppState>
+where
+    H: axum::handler::Handler<T, AppState>,
+    T: 'static,
+{
+    #[cfg(test)]
+    {
+        post(legacy_test_handler)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = legacy_test_handler;
+        post(secret_json_forbidden)
+    }
+}
+
+fn production_secret_json_put_route<H, T>(legacy_test_handler: H) -> MethodRouter<AppState>
+where
+    H: axum::handler::Handler<T, AppState>,
+    T: 'static,
+{
+    #[cfg(test)]
+    {
+        put(legacy_test_handler)
+    }
+    #[cfg(not(test))]
+    {
+        let _ = legacy_test_handler;
+        put(secret_json_forbidden)
+    }
+}
+
+#[cfg(not(test))]
+async fn secret_json_forbidden() -> Response {
+    (
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        Json(json!({ "code": "secret_json_forbidden" })),
+    )
+        .into_response()
 }
 
 /// The values a caller supplies when it connects a connector.
@@ -521,7 +649,28 @@ fn setting_route() -> MethodRouter<AppState> {
 #[derive(Deserialize)]
 struct NewConnection {
     /// Declared credential name to value. At least one, and every name declared by the connector.
+    #[serde(default)]
     credentials: BTreeMap<String, String>,
+    /// Resource-owner values used once by an explicitly bound acquisition performer.
+    #[serde(default)]
+    acquisition: Option<PasswordAcquisition>,
+}
+
+/// Password acquisition input. No `Debug`: both strings are converted to [`Secret`] immediately.
+#[derive(Deserialize)]
+struct PasswordAcquisition {
+    username: String,
+    password: String,
+}
+
+#[derive(Default, Deserialize)]
+struct AcquisitionQuery {
+    acquire: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LabelBody {
+    label: String,
 }
 
 /// The one value a caller supplies when it rotates a credential.
@@ -540,15 +689,17 @@ struct NewConnection {
 #[derive(Deserialize)]
 struct RotatedCredential {
     /// The value to put at the credential's existing address.
-    value: String,
+    #[serde(default)]
+    value: Option<String>,
 }
 
 /// Every connection this tenant holds.
 ///
-/// Derived from the store rather than from a record beside it: a connection exists exactly when the
-/// store holds a value at one of the addresses derived for that tenant and connector. There is no
-/// second source of truth to disagree with the credentials, which is also what makes `DELETE`
-/// destroying them not a step somebody could forget.
+/// Existence is derived from the store: a connection exists exactly when it holds a value at one of
+/// the addresses derived for that tenant and connector. Retained audit evidence is projected only
+/// as supplier attribution and degrades to `unknown`, so there is no second source of connection
+/// truth to disagree with the credentials. That is also what makes `DELETE` destroying them not a
+/// step somebody could forget.
 async fn list(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -563,18 +714,12 @@ async fn list(
         let declared = declared_credentials(provider);
         let declaration = declaration(provider, &declared);
 
-        // A connector with no authority or no declared credential has no address, so this tenant
-        // cannot hold a connection to it and there is nothing to report. The refusal for *asking*
-        // about one is `show`'s and `create`'s; a listing that refused because some unrelated
-        // connector is unaddressable would be useless.
-        let Ok(addresses) = declaration.addresses(principal.tenant()) else {
+        if declaration.authority.is_none() || declaration.credentials.is_empty() {
             continue;
-        };
-
-        match held(store, &addresses).await {
-            Ok(held) if held.is_empty() => {}
-            Ok(held) => connections.push(view(provider, &addresses, &held)),
-            Err(error) => return store_failed(&error),
+        }
+        match connection_views(&state, store, principal.tenant(), provider, &declaration).await {
+            Ok(views) => connections.extend(views),
+            Err(response) => return response,
         }
     }
 
@@ -596,17 +741,27 @@ async fn show(
 
     let declared = declared_credentials(provider);
     let declaration = declaration(provider, &declared);
-    let addresses = match declaration.addresses(principal.tenant()) {
-        Ok(addresses) => addresses,
-        Err(refusal) => return connection_refused(&refusal),
-    };
-
-    match held(store, &addresses).await {
-        Err(error) => store_failed(&error),
-        // Nothing here, and the refusal names **this tenant's** address — the one this host looked
-        // at. Never another tenant's, and never the fact that another tenant holds one.
-        Ok(held) if held.is_empty() => not_connected(provider, &addresses),
-        Ok(held) => Json(view(provider, &addresses, &held)).into_response(),
+    let views =
+        match connection_views(&state, store, principal.tenant(), provider, &declaration).await {
+            Ok(views) => views,
+            Err(response) => return response,
+        };
+    match views.as_slice() {
+        [] => {
+            let addresses = match declaration.addresses(principal.tenant()) {
+                Ok(addresses) => addresses,
+                Err(refusal) => return connection_refused(&refusal),
+            };
+            not_connected(provider, &addresses)
+        }
+        [sole] => Json(sole.clone()).into_response(),
+        _ => Json(json!({
+            "connector": provider.id,
+            "vendor": provider.vendor,
+            "authority": provider.authority,
+            "instances": views,
+        }))
+        .into_response(),
     }
 }
 
@@ -615,6 +770,7 @@ async fn create(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Path(connector): Path<String>,
+    Query(query): Query<AcquisitionQuery>,
     Json(body): Json<NewConnection>,
 ) -> Response {
     let Some(provider) = catalogued(&connector) else {
@@ -623,6 +779,31 @@ async fn create(
     let Some(store) = state.credentials() else {
         return no_store();
     };
+
+    if query.acquire.as_deref() == Some("password") {
+        if !body.credentials.is_empty() {
+            return acquisition_shape_refused(
+                provider,
+                "password acquisition cannot also carry pasted credentials",
+            );
+        }
+        let Some(acquisition) = body.acquisition else {
+            return acquisition_shape_refused(
+                provider,
+                "password acquisition requires `acquisition.username` and `acquisition.password`",
+            );
+        };
+        return create_acquired_connection(&state, store, &principal, provider, acquisition).await;
+    }
+    if query.acquire.is_some() {
+        return acquisition_shape_refused(provider, "unknown credential acquisition mode");
+    }
+    if body.acquisition.is_some() {
+        return acquisition_shape_refused(
+            provider,
+            "an acquisition body requires `?acquire=password`",
+        );
+    }
 
     let declared = declared_credentials(provider);
     let declaration = declaration(provider, &declared);
@@ -663,7 +844,7 @@ async fn create(
     // `POST`s both probe an empty address, both write and both answer `201` — one value silently
     // replaced, and the caller that lost told it succeeded. That is the exact failure the `409`
     // below exists to prevent, so leaving the window open would have made the refusal decorative.
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
 
@@ -724,6 +905,588 @@ async fn create(
         .into_response()
 }
 
+const ACQUISITION_SERVICE: &str = "exchange-acquisition";
+const REFRESH_TOKEN_LEAF: &str = "refresh_token";
+const EXPIRES_AT_LEAF: &str = "expires_at";
+const MANAGED_LEAF: &str = "managed";
+const MANAGED_VALUE: &str = "v1";
+const MAX_EXPIRY_VALUE_BYTES: usize = 20;
+const MAX_REFRESH_COMMIT_BYTES: usize =
+    2 * exchange_host::MAX_CREDENTIAL_VALUE_BYTES + MAX_EXPIRY_VALUE_BYTES + MANAGED_VALUE.len();
+
+async fn create_acquired_connection(
+    state: &AppState,
+    store: &Arc<dyn SecretStore>,
+    principal: &Principal,
+    provider: &'static Provider,
+    acquisition: PasswordAcquisition,
+) -> Response {
+    let Some(binding) = state.acquisitions().get(provider.id) else {
+        return acquisition_shape_refused(
+            provider,
+            "this connector has no released credential-acquisition declaration bound",
+        );
+    };
+    if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+        return auth_posture_refused(&refusal);
+    }
+
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let addresses = match declaration.addresses(principal.tenant()) {
+        Ok(addresses) => addresses,
+        Err(refusal) => return connection_refused(&refusal),
+    };
+    let access_reference = match declaration.address_of(principal.tenant(), binding.credential()) {
+        Ok(reference) => reference,
+        Err(refusal) => return connection_refused(&refusal),
+    };
+    let companions = match acquisition_companions(&access_reference) {
+        Ok(references) => references,
+        Err(response) => return *response,
+    };
+
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    match held(store, &addresses).await {
+        Err(error) => return store_failed(&error),
+        Ok(held) if !held.is_empty() => return already_connected(provider, &addresses),
+        Ok(_) => {}
+    }
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+
+    // Turn request strings into redacting values before the performer can observe them. These are
+    // borrowed for the one outbound call and fall out of scope without ever entering a store.
+    let username = Secret::new(&acquisition.username);
+    let password = Secret::new(&acquisition.password);
+    let acquired = match binding
+        .performer()
+        .redeem_password(PasswordRedemption::new(&username, &password))
+        .await
+    {
+        Ok(acquired) => acquired,
+        Err(refusal) => return acquisition_refused(refusal),
+    };
+    drop(password);
+    drop(username);
+    let (access_token, refresh_token, expires_at) = acquired.into_parts();
+    if let Err(response) = admit_acquired_value(provider, binding.credential(), &access_token) {
+        return *response;
+    }
+    if let Some(refresh_token) = refresh_token.as_ref() {
+        if let Err(response) = admit_acquired_value(provider, "refresh_token", refresh_token) {
+            return *response;
+        }
+    }
+    let expiry = expires_at.map(|value| Secret::new(value.to_string()));
+    let adding = stored_bytes(&access_token)
+        + refresh_token.as_ref().map_or(0, stored_bytes)
+        + expiry.as_ref().map_or(0, stored_bytes)
+        + MANAGED_VALUE.len();
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) = admit_tenant_occupancy(held_bytes, adding) {
+        return connection_refused(&refusal);
+    }
+
+    let scope = match CredentialScope::new(access_reference.tenant(), access_reference.authority())
+    {
+        Ok(scope) => scope,
+        Err(reason) => return acquisition_batch_refused(reason),
+    };
+    let mut batch = SecretBatch::new(scope);
+    if let Err(reason) = batch.put(access_reference.clone(), access_token) {
+        return acquisition_batch_refused(reason);
+    }
+    if let Some(refresh_token) = refresh_token {
+        if let Err(reason) = batch.put(companions.refresh.clone(), refresh_token) {
+            return acquisition_batch_refused(reason);
+        }
+    }
+    if let Some(expiry) = expiry {
+        if let Err(reason) = batch.put(companions.expiry.clone(), expiry) {
+            return acquisition_batch_refused(reason);
+        }
+    }
+    if let Err(reason) = batch.put(companions.managed, Secret::new(MANAGED_VALUE)) {
+        return acquisition_batch_refused(reason);
+    }
+    if let Err(error) = store.apply(&batch).await {
+        return store_failed(&error);
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "connector": provider.id,
+            "credential": binding.credential(),
+            "address": address_path(&access_reference),
+            "acquired": true,
+            "expires_at": expires_at,
+        })),
+    )
+        .into_response()
+}
+
+struct RefreshAcquisition<'a> {
+    state: &'a AppState,
+    store: &'a Arc<dyn SecretStore>,
+    principal: &'a Principal,
+    request_id: &'a RequestId,
+}
+
+async fn refresh_acquired_connection(
+    context: RefreshAcquisition<'_>,
+    provider: &'static Provider,
+    credential: &str,
+    instances: TenantInstances<'_>,
+    audit_target: AuditTarget,
+) -> Response {
+    let RefreshAcquisition {
+        state,
+        store,
+        principal,
+        request_id,
+    } = context;
+    let Some(binding) = state.acquisitions().get(provider.id) else {
+        return acquisition_shape_refused(
+            provider,
+            "this connector has no released credential-acquisition declaration bound",
+        );
+    };
+    if credential != binding.credential() {
+        return acquisition_shape_refused(
+            provider,
+            "refresh must name the acquired access credential",
+        );
+    }
+    if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+        return auth_posture_refused(&refusal);
+    }
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let access_reference =
+        match declaration.address_of_for(principal.tenant(), binding.credential(), instances) {
+            Ok(reference) => reference,
+            Err(refusal) => return connection_refused(&refusal),
+        };
+    let companions = match acquisition_companions(&access_reference) {
+        Ok(references) => references,
+        Err(response) => return *response,
+    };
+    let current_access = match store.get(&access_reference).await {
+        Ok(secret) => secret,
+        Err(error) if error.is_not_found() => {
+            return nothing_to_rotate(provider, credential, &access_reference)
+        }
+        Err(error) => return store_failed(&error),
+    };
+    let current_refresh = match store.get(&companions.refresh).await {
+        Ok(secret) => secret,
+        Err(error) if error.is_not_found() => {
+            return refuse(
+                StatusCode::CONFLICT,
+                "this acquired connection has no refresh token; reconnect with the password acquisition",
+                json!({ "connector": provider.id, "code": "refresh_token_unavailable" }),
+            )
+        }
+        Err(error) => return store_failed(&error),
+    };
+    let current_expiry = match store.get(&companions.expiry).await {
+        Ok(secret) => Some(secret),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return store_failed(&error),
+    };
+    let current_marker = match store.get(&companions.managed).await {
+        Ok(secret) => Some(secret),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return store_failed(&error),
+    };
+
+    // Everything this host can decide is decided before the vendor is allowed to rotate its
+    // refresh token. Reserve the worst legal result rather than learning after the call that an
+    // otherwise-valid larger token no longer fits. The final batch can still fail due to an
+    // external store outage; that unavoidable case has a separate non-retryable refusal below.
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+    let replacing = stored_bytes(&current_access)
+        + stored_bytes(&current_refresh)
+        + current_expiry.as_ref().map_or(0, stored_bytes)
+        + current_marker.as_ref().map_or(0, stored_bytes);
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) = admit_tenant_occupancy(
+        held_bytes.saturating_sub(replacing),
+        MAX_REFRESH_COMMIT_BYTES,
+    ) {
+        return connection_refused(&refusal);
+    }
+    let scope = match CredentialScope::new(access_reference.tenant(), access_reference.authority())
+    {
+        Ok(scope) => scope,
+        Err(reason) => return acquisition_batch_refused(reason),
+    };
+    if let Err(error) = store.apply(&SecretBatch::new(scope.clone())).await {
+        return store_failed(&error);
+    }
+
+    let acquired = match binding
+        .performer()
+        .redeem_refresh(RefreshRedemption::new(&current_refresh))
+        .await
+    {
+        Ok(acquired) => acquired,
+        Err(AcquisitionRefusal::RefreshOutcomeUnusable) => {
+            return refresh_commit_lost(
+                state,
+                request_id,
+                principal,
+                audit_target,
+                provider,
+                StatusCode::BAD_GATEWAY,
+                "the vendor accepted refresh but returned unusable rotated state",
+            )
+        }
+        Err(refusal) => return acquisition_refused(refusal),
+    };
+    let (access_token, rotated_refresh, expires_at) = acquired.into_parts();
+    if let Err(response) = admit_acquired_value(provider, binding.credential(), &access_token) {
+        drop(response);
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::BAD_GATEWAY,
+            "the vendor returned an access token outside the host credential bound",
+        );
+    }
+    let Some(next_refresh) = rotated_refresh.filter(|value| !value.expose_secret().is_empty())
+    else {
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::BAD_GATEWAY,
+            "the vendor did not return a rotated refresh token",
+        );
+    };
+    if let Err(response) = admit_acquired_value(provider, "refresh_token", &next_refresh) {
+        drop(response);
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::BAD_GATEWAY,
+            "the vendor returned a refresh token outside the host credential bound",
+        );
+    }
+    let next_expiry = expires_at.map(|value| Secret::new(value.to_string()));
+    let mut batch = SecretBatch::new(scope);
+    if let Err(reason) = batch.put(access_reference.clone(), access_token) {
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("the local refresh batch could not include its access token: {reason}"),
+        );
+    }
+    if let Err(reason) = batch.put(companions.refresh, next_refresh) {
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("the local refresh batch could not include its refresh token: {reason}"),
+        );
+    }
+    match next_expiry {
+        Some(expiry) => {
+            if let Err(reason) = batch.put(companions.expiry, expiry) {
+                return refresh_commit_lost(
+                    state,
+                    request_id,
+                    principal,
+                    audit_target,
+                    provider,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!("the local refresh batch could not include expiry: {reason}"),
+                );
+            }
+        }
+        None => {
+            if let Err(reason) = batch.delete(companions.expiry) {
+                return refresh_commit_lost(
+                    state,
+                    request_id,
+                    principal,
+                    audit_target,
+                    provider,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!("the local refresh batch could not clear expiry: {reason}"),
+                );
+            }
+        }
+    }
+    if current_marker.is_none() {
+        if let Err(reason) = batch.put(companions.managed, Secret::new(MANAGED_VALUE)) {
+            return refresh_commit_lost(
+                state,
+                request_id,
+                principal,
+                audit_target,
+                provider,
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("the local refresh batch could not mark managed state: {reason}"),
+            );
+        }
+    }
+    if let Err(error) = store.apply(&batch).await {
+        error!(%error, connector = provider.id, "a vendor-rotated refresh could not be committed locally");
+        return refresh_commit_lost(
+            state,
+            request_id,
+            principal,
+            audit_target,
+            provider,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the local credential store refused the vendor-rotated credential",
+        );
+    }
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
+    Json(json!({
+        "connector": provider.id,
+        "credential": binding.credential(),
+        "address": address_path(&access_reference),
+        "acquired": true,
+        "expires_at": expires_at,
+    }))
+    .into_response()
+}
+
+struct AcquisitionCompanions {
+    refresh: CredentialRef,
+    expiry: CredentialRef,
+    managed: CredentialRef,
+}
+
+fn acquisition_companions(access: &CredentialRef) -> Result<AcquisitionCompanions, Box<Response>> {
+    let build = |leaf| match access.instance() {
+        Some(instance) => CredentialRef::for_instance(
+            access.tenant(),
+            access.authority(),
+            instance.as_str(),
+            ACQUISITION_SERVICE,
+            leaf,
+        ),
+        None => CredentialRef::new(
+            access.tenant(),
+            access.authority(),
+            ACQUISITION_SERVICE,
+            leaf,
+        ),
+    };
+    let refresh =
+        build(REFRESH_TOKEN_LEAF).map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+    let expiry =
+        build(EXPIRES_AT_LEAF).map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+    let managed =
+        build(MANAGED_LEAF).map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+    Ok(AcquisitionCompanions {
+        refresh,
+        expiry,
+        managed,
+    })
+}
+
+async fn append_acquisition_companion_moves(
+    store: &Arc<dyn SecretStore>,
+    source_access: &CredentialRef,
+    destination_access: &CredentialRef,
+    batch: &mut SecretBatch,
+) -> Result<(), Box<Response>> {
+    let sources = acquisition_companions(source_access)?;
+    let destinations = acquisition_companions(destination_access)?;
+    let mut found = false;
+    let mut marker_found = false;
+    for (source, destination, is_marker) in [
+        (sources.refresh, destinations.refresh, false),
+        (sources.expiry, destinations.expiry, false),
+        (sources.managed, destinations.managed.clone(), true),
+    ]
+    .into_iter()
+    {
+        match store.get(&source).await {
+            Ok(_) => {
+                found = true;
+                marker_found |= is_marker;
+                batch
+                    .move_secret(source, destination)
+                    .map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(Box::new(store_failed(&error))),
+        }
+    }
+    // Upgrade pre-marker acquisition state while it is already moving atomically. This makes the
+    // convention self-describing after the first migration without relying on a live binding.
+    if found && !marker_found {
+        batch
+            .put(destinations.managed, Secret::new(MANAGED_VALUE))
+            .map_err(|reason| Box::new(acquisition_batch_refused(reason)))?;
+    }
+    Ok(())
+}
+
+async fn managed_rotation_refusal(
+    store: &Arc<dyn SecretStore>,
+    provider: &'static Provider,
+    reference: &CredentialRef,
+) -> Option<Response> {
+    let companions = match acquisition_companions(reference) {
+        Ok(companions) => companions,
+        Err(response) => return Some(*response),
+    };
+    for companion in [companions.refresh, companions.expiry, companions.managed] {
+        match store.get(&companion).await {
+            Ok(_) => {
+                return Some(refuse(
+                    StatusCode::CONFLICT,
+                    "this credential is managed by vendor acquisition; refresh it or disconnect and reconnect instead of pasting over its access token",
+                    json!({
+                        "connector": provider.id,
+                        "code": "acquired_credential_requires_refresh",
+                    }),
+                ));
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Some(store_failed(&error)),
+        }
+    }
+    None
+}
+
+fn admit_acquired_value(
+    provider: &'static Provider,
+    credential: &str,
+    secret: &Secret,
+) -> Result<(), Box<Response>> {
+    let bytes = stored_bytes(secret);
+    if bytes <= exchange_host::MAX_CREDENTIAL_VALUE_BYTES {
+        return Ok(());
+    }
+    Err(Box::new(connection_refused(
+        &ConnectionRefusal::CredentialTooLarge {
+            connector: provider.id.to_owned(),
+            credential: credential.to_owned(),
+            bytes,
+            limit: exchange_host::MAX_CREDENTIAL_VALUE_BYTES,
+        },
+    )))
+}
+
+fn auth_posture_refused(refusal: &AuthPostureRefusal) -> Response {
+    refuse(
+        StatusCode::FORBIDDEN,
+        refusal.to_string(),
+        json!({ "code": "authentication_hazard_not_allowed" }),
+    )
+}
+
+fn acquisition_refused(refusal: AcquisitionRefusal) -> Response {
+    let status = match refusal {
+        AcquisitionRefusal::MfaRequired => StatusCode::CONFLICT,
+        AcquisitionRefusal::CredentialsRejected => StatusCode::UNAUTHORIZED,
+        AcquisitionRefusal::VendorRejected | AcquisitionRefusal::InvalidResponse => {
+            StatusCode::BAD_GATEWAY
+        }
+        AcquisitionRefusal::RefreshOutcomeUnusable => StatusCode::BAD_GATEWAY,
+        AcquisitionRefusal::Unreachable => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    refuse(
+        status,
+        refusal.to_string(),
+        json!({ "code": refusal.code() }),
+    )
+}
+
+fn refresh_commit_lost(
+    state: &AppState,
+    request_id: &RequestId,
+    principal: &Principal,
+    target: AuditTarget,
+    provider: &'static Provider,
+    status: StatusCode,
+    internal_reason: &str,
+) -> Response {
+    error!(
+        connector = provider.id,
+        reason = internal_reason,
+        "a vendor refresh may have invalidated the locally stored refresh token"
+    );
+    if let Some(journal) = state.audit() {
+        if let Err(error) = journal.record(
+            request_id,
+            AuditAction::CredentialRefreshCommitLost,
+            AuditOutcome::Refused,
+            Some(principal),
+            target,
+        ) {
+            return super::audit_unavailable(error);
+        }
+    }
+    refuse(
+        status,
+        "the vendor may have rotated this credential, but the new state could not be committed locally; do not retry the stored refresh token — reconnect the credential",
+        json!({
+            "connector": provider.id,
+            "code": "refresh_commit_lost",
+            "retryable": false,
+            "credential_state": "uncertain",
+        }),
+    )
+}
+
+fn acquisition_shape_refused(provider: &'static Provider, reason: &'static str) -> Response {
+    refuse(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        reason,
+        json!({ "connector": provider.id, "code": "invalid_acquisition_request" }),
+    )
+}
+
+fn acquisition_batch_refused(reason: impl Into<String>) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        format!(
+            "the derived acquisition state cannot be stored atomically: {}",
+            reason.into()
+        ),
+        json!({ "code": "acquisition_state_unaddressable" }),
+    )
+}
+
 /// Take back the values this request had already written, and report whether that succeeded.
 ///
 /// Best effort by necessity: the store has just failed, so the deletes may fail too. What matters
@@ -746,6 +1509,1346 @@ async fn rollback(
     } else {
         Err(remaining)
     }
+}
+
+#[derive(Default)]
+struct ConnectionInventory {
+    legacy: Vec<CredentialRef>,
+    instances: BTreeMap<InstanceId, Vec<CredentialRef>>,
+}
+
+impl ConnectionInventory {
+    fn count(&self) -> usize {
+        usize::from(!self.legacy.is_empty()) + self.instances.len()
+    }
+
+    fn ids(&self) -> Vec<InstanceId> {
+        self.instances.keys().cloned().collect()
+    }
+
+    fn holds(&self, instance: &InstanceId) -> bool {
+        self.instances.contains_key(instance)
+    }
+}
+
+/// Enumerate connection existence from credential addresses, never from the naming overlay.
+async fn inventory(
+    store: &Arc<dyn SecretStore>,
+    tenant: &Tenant,
+    declaration: &ConnectorDeclaration<'_>,
+) -> Result<ConnectionInventory, Response> {
+    let Some(authority) = declaration.authority else {
+        return Err(connection_refused(
+            &ConnectionRefusal::UndeclaredAuthority {
+                connector: declaration.connector.to_owned(),
+            },
+        ));
+    };
+    let scope = CredentialScope::new(tenant.as_str(), authority).map_err(|reason| {
+        refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connector `{}` has no usable credential inventory scope: {reason}",
+                declaration.connector
+            ),
+            json!({ "connector": declaration.connector }),
+        )
+    })?;
+    let references = store
+        .references(&scope)
+        .await
+        .map_err(|error| store_failed(&error))?;
+    let mut answer = ConnectionInventory::default();
+    for reference in references {
+        let declared = declaration.credentials.iter().any(|credential| {
+            credential.leaf == reference.credential() && reference.is_default_service()
+        });
+        if !declared {
+            continue;
+        }
+        match reference.instance() {
+            Some(instance) => answer
+                .instances
+                .entry(instance.clone())
+                .or_default()
+                .push(reference),
+            None => answer.legacy.push(reference),
+        }
+    }
+    if !answer.legacy.is_empty() && !answer.instances.is_empty() {
+        return Err(refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connector `{}` has both legacy and instance-qualified credential addresses for this tenant; refusing rather than guessing which layout is current",
+                declaration.connector
+            ),
+            json!({ "connector": declaration.connector }),
+        ));
+    }
+    Ok(answer)
+}
+
+fn held_names(declaration: &ConnectorDeclaration<'_>, references: &[CredentialRef]) -> Vec<String> {
+    declaration
+        .credentials
+        .iter()
+        .filter(|declared| {
+            references
+                .iter()
+                .any(|reference| reference.credential() == declared.leaf)
+        })
+        .map(|declared| declared.name.to_owned())
+        .collect()
+}
+
+fn named_view(
+    provider: &'static Provider,
+    addresses: &[(DeclaredCredential<'_>, CredentialRef)],
+    held: &[String],
+    label: Option<&ConnectionLabel>,
+    instance: Option<&InstanceId>,
+) -> Value {
+    let mut answer = view(provider, addresses, held);
+    let object = answer
+        .as_object_mut()
+        .expect("the connection view is always an object");
+    object.insert(
+        "label".to_owned(),
+        json!(label.map(ConnectionLabel::as_str)),
+    );
+    object.insert(
+        "instance".to_owned(),
+        json!(instance.map(InstanceId::as_str)),
+    );
+    answer
+}
+
+async fn connection_views(
+    state: &AppState,
+    store: &Arc<dyn SecretStore>,
+    tenant: &Tenant,
+    provider: &'static Provider,
+    declaration: &ConnectorDeclaration<'_>,
+) -> Result<Vec<Value>, Response> {
+    match state.connection_publication_pending(tenant, provider.id) {
+        Ok(false) => {}
+        Ok(true) => return Err(change_in_flight(provider)),
+        Err(()) => return Err(no_store()),
+    }
+    // A composition without the naming overlay is deliberately the pre-X-14 compatibility mode.
+    // It may bind a store such as Vault that can do point operations but cannot prove a safe
+    // listing policy. Keep sole legacy connections working there; instance management below is
+    // the surface that requires address inventory and refuses when the store cannot provide it.
+    if state.connection_registry().is_none() {
+        let addresses = declaration
+            .addresses(tenant)
+            .map_err(|refusal| connection_refused(&refusal))?;
+        let held = held(store, &addresses)
+            .await
+            .map_err(|error| store_failed(&error))?;
+        if held.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut answer = named_view(provider, &addresses, &held, None, None);
+        add_supplier_attribution(state, tenant, provider, None, &mut answer)
+            .map_err(|response| *response)?;
+        return Ok(vec![answer]);
+    }
+    let inventory = inventory(store, tenant, declaration).await?;
+    let labels = match state.connection_registry() {
+        Some(registry) => registry
+            .entries(tenant, provider.id)
+            .map_err(|refusal| registry_refused(&refusal))?,
+        None => Vec::new(),
+    };
+    let mut views = Vec::new();
+    if !inventory.legacy.is_empty() {
+        let addresses = declaration
+            .addresses(tenant)
+            .map_err(|refusal| connection_refused(&refusal))?;
+        let label = (labels.len() == 1).then(|| &labels[0]);
+        let mut answer = named_view(
+            provider,
+            &addresses,
+            &held_names(declaration, &inventory.legacy),
+            label.map(|entry| &entry.label),
+            label.map(|entry| &entry.instance),
+        );
+        add_supplier_attribution(
+            state,
+            tenant,
+            provider,
+            // A label over a sole legacy address changes only the naming overlay. Its supplier
+            // evidence was recorded against the legacy connection target and remains there.
+            None,
+            &mut answer,
+        )
+        .map_err(|response| *response)?;
+        views.push(answer);
+    }
+    let ids = inventory.ids();
+    for (instance, references) in &inventory.instances {
+        let addresses = if ids.len() > 1 {
+            declaration
+                .addresses_for(tenant, TenantInstances::held(&ids, Some(instance)))
+                .map_err(|refusal| connection_refused(&refusal))?
+        } else {
+            // A lone qualified address is an interrupted or externally edited migration. List the
+            // addresses the store actually holds rather than hiding the connection or pretending
+            // its credentials live at the elided legacy path.
+            declaration
+                .credentials
+                .iter()
+                .filter_map(|declared| {
+                    references
+                        .iter()
+                        .find(|reference| reference.credential() == declared.leaf)
+                        .cloned()
+                        .map(|reference| (*declared, reference))
+                })
+                .collect()
+        };
+        let label = labels.iter().find(|entry| entry.instance == *instance);
+        let mut answer = named_view(
+            provider,
+            &addresses,
+            &held_names(declaration, references),
+            label.map(|entry| &entry.label),
+            Some(instance),
+        );
+        add_supplier_attribution(
+            state,
+            tenant,
+            provider,
+            label.map(|entry| entry.label.as_str()),
+            &mut answer,
+        )
+        .map_err(|response| *response)?;
+        views.push(answer);
+    }
+    Ok(views)
+}
+
+/// One connection projected for authenticated operation discovery.
+///
+/// The immutable instance UUID and every credential address stay inside this module. The caller
+/// receives only the optional operator label already accepted by `invoke` and the declared
+/// credential names used here to decide whether an operation has one complete mechanism.
+pub(super) struct EffectiveConnection {
+    pub(super) label: Option<String>,
+    pub(super) held_credentials: Vec<String>,
+    pub(super) instance: Option<InstanceId>,
+}
+
+/// Enumerate connections from the exact store invocation is bound to.
+///
+/// This is deliberately narrower than [`connection_views`]: no credential address, supplier
+/// evidence or instance UUID can reach the effective catalogue. A qualified instance without a
+/// live label is refused rather than advertised, because the HTTP invocation contract has no safe
+/// selector for it.
+pub(super) async fn effective_connections(
+    state: &AppState,
+    principal: &Principal,
+    provider: &'static Provider,
+    store: &Arc<dyn SecretStore>,
+) -> Result<Vec<EffectiveConnection>, Response> {
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+
+    // Connection existence is credential-backed today. A provider with no addressable credential
+    // has no connection lifecycle to intersect, even when one of its operations needs no
+    // credential. X-50 owns making that connector class connectable; advertising it before then
+    // would turn "compiled in" into "connected".
+    if declaration.authority.is_none() || declaration.credentials.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let Some(registry) = state.connection_registry() else {
+        let addresses = declaration
+            .addresses(principal.tenant())
+            .map_err(|refusal| connection_refused(&refusal))?;
+        let held_credentials = held(store, &addresses)
+            .await
+            .map_err(|error| store_failed(&error))?;
+        return Ok((!held_credentials.is_empty())
+            .then_some(EffectiveConnection {
+                label: None,
+                held_credentials,
+                instance: None,
+            })
+            .into_iter()
+            .collect());
+    };
+
+    let inventory = inventory(store, principal.tenant(), &declaration).await?;
+    let labels = registry
+        .entries(principal.tenant(), provider.id)
+        .map_err(|refusal| registry_refused(&refusal))?;
+    let mut connections = Vec::new();
+
+    if !inventory.legacy.is_empty() {
+        let label = match labels.as_slice() {
+            [] => None,
+            [named] => Some(named.label.to_string()),
+            _ => {
+                return Err(refuse(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "connector `{}` has one legacy connection but several labels; refusing to advertise an ambiguous invocation selector",
+                        provider.id
+                    ),
+                    json!({ "connector": provider.id, "code": "ambiguous_connection" }),
+                ));
+            }
+        };
+        connections.push(EffectiveConnection {
+            // The label is an invocation selector even while the sole credential address retains
+            // its legacy layout. `invocation_instance` resolves exactly this overlay case back to
+            // the elided address; no UUID crosses the surface.
+            label,
+            held_credentials: held_names(&declaration, &inventory.legacy),
+            instance: None,
+        });
+    }
+
+    for (instance, references) in &inventory.instances {
+        let Some(named) = labels.iter().find(|entry| entry.instance == *instance) else {
+            return Err(refuse(
+                StatusCode::CONFLICT,
+                format!(
+                    "connector `{}` has a connection instance with no usable label; refusing to advertise an invocation selector",
+                    provider.id
+                ),
+                json!({ "connector": provider.id, "code": "unlabelled_connection" }),
+            ));
+        };
+        connections.push(EffectiveConnection {
+            label: Some(named.label.to_string()),
+            held_credentials: held_names(&declaration, references),
+            instance: Some(instance.clone()),
+        });
+    }
+
+    // Registry storage is label-sorted today, while inventory is UUID-sorted. State the wire order
+    // independently so a backend change cannot churn a generation whose effective set is equal.
+    connections.sort_by(|left, right| left.label.cmp(&right.label));
+    Ok(connections)
+}
+
+/// Add current supplier evidence to a connection projection without making it existence state.
+///
+/// Only held credentials are queried. A historical record beside an empty address must not make a
+/// credential look current, just as a missing record beside a held address must not make the
+/// connection disappear. The durable journal is optional on loopback; no journal and no matching
+/// retained row are both represented honestly as `unknown`.
+fn add_supplier_attribution(
+    state: &AppState,
+    tenant: &Tenant,
+    provider: &'static Provider,
+    instance_label: Option<&str>,
+    connection: &mut Value,
+) -> Result<(), Box<Response>> {
+    let credentials = connection
+        .get_mut("credentials")
+        .and_then(Value::as_array_mut)
+        .expect("the connection view always carries a credential array");
+    for credential in credentials {
+        let held = credential["held"].as_bool().unwrap_or(false);
+        let name = credential["name"]
+            .as_str()
+            .expect("a projected credential always has its declared name");
+        let evidence = match (held, state.audit()) {
+            (true, Some(journal)) => journal
+                .latest_credential_supplier(tenant.as_str(), provider.id, name, instance_label)
+                .map_err(|error| Box::new(super::audit_unavailable(error)))?,
+            _ => None,
+        };
+        let attribution = match evidence.and_then(|record| {
+            record
+                .actor
+                .map(|actor| (record.action, actor.kind, actor.id, record.timestamp))
+        }) {
+            Some((
+                crate::audit::Action::CredentialAcquired
+                | crate::audit::Action::CredentialRefreshed,
+                kind,
+                id,
+                at,
+            )) => json!({
+                "status": "acquired",
+                "initiated_by": { "kind": kind, "id": id },
+                "at": at,
+            }),
+            Some((_, kind, id, at)) => json!({
+                "status": "known",
+                "principal": { "kind": kind, "id": id },
+                "at": at,
+            }),
+            None => json!({ "status": "unknown" }),
+        };
+        credential
+            .as_object_mut()
+            .expect("a projected credential is always an object")
+            .insert("last_supplied".to_owned(), attribution);
+    }
+    Ok(())
+}
+
+/// Resolve `?connection=` inside the principal's tenant for the invocation adapter.
+pub(super) async fn invocation_instance(
+    state: &AppState,
+    principal: &Principal,
+    provider: &'static Provider,
+    supplied: Option<&str>,
+) -> Result<Option<InstanceId>, Response> {
+    let Some(store) = state.credentials() else {
+        return Err(no_store());
+    };
+    invocation_instance_using(state, principal, provider, supplied, store).await
+}
+
+/// Resolve an invocation selector against the exact credential port execution will use.
+pub(super) async fn invocation_instance_using(
+    state: &AppState,
+    principal: &Principal,
+    provider: &'static Provider,
+    supplied: Option<&str>,
+    store: &Arc<dyn SecretStore>,
+) -> Result<Option<InstanceId>, Response> {
+    match state.connection_publication_pending(principal.tenant(), provider.id) {
+        Ok(false) => {}
+        Ok(true) => return Err(change_in_flight(provider)),
+        Err(()) => return Err(no_store()),
+    }
+    let Some(registry) = state.connection_registry() else {
+        if supplied.is_some() {
+            return Err(no_registry());
+        }
+        let declared = declared_credentials(provider);
+        let declaration = declaration(provider, &declared);
+        let addresses = declaration
+            .addresses(principal.tenant())
+            .map_err(|refusal| connection_refused(&refusal))?;
+        let held = held(store, &addresses)
+            .await
+            .map_err(|error| store_failed(&error))?;
+        return if held.is_empty() {
+            Err(disconnected(provider))
+        } else {
+            Ok(None)
+        };
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = inventory(store, principal.tenant(), &declaration).await?;
+    if inventory.count() == 0 {
+        return Err(disconnected(provider));
+    }
+    let Some(supplied) = supplied else {
+        return if inventory.count() > 1 {
+            Err(refuse(
+                StatusCode::CONFLICT,
+                format!(
+                    "this tenant holds {} connections to `{}`; pass `?connection=<label>` rather than letting this host choose an account",
+                    inventory.count(), provider.id
+                ),
+                json!({ "connector": provider.id, "code": "ambiguous_connection" }),
+            ))
+        } else {
+            Ok(None)
+        };
+    };
+    let label =
+        ConnectionLabel::new(supplied.to_owned()).map_err(|refusal| registry_refused(&refusal))?;
+    let instance = registry
+        .resolve(principal.tenant(), provider.id, &label)
+        .map_err(|refusal| registry_refused(&refusal))?
+        .ok_or_else(|| unknown_label(provider, &label))?;
+    if inventory.holds(&instance) {
+        return Ok(Some(instance));
+    }
+    if inventory.count() == 1 && !inventory.legacy.is_empty() {
+        // The UUID already names the sole connection in the overlay, while its address correctly
+        // elides the instance level until a second connection is created. Require it to be the
+        // overlay's only row: a stale row after an interrupted management write must not become an
+        // alias that silently selects the surviving account.
+        return if names_only_legacy(registry, principal.tenant(), provider.id, &instance)
+            .map_err(|response| *response)?
+        {
+            Ok(None)
+        } else {
+            Err(unknown_label(provider, &label))
+        };
+    }
+    Err(unknown_label(provider, &label))
+}
+
+fn disconnected(provider: &'static Provider) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        format!(
+            "this tenant has no connection to `{}`; connect it before invoking an operation",
+            provider.id
+        ),
+        json!({ "connector": provider.id, "code": "disconnected" }),
+    )
+}
+
+/// Resolve a management label to the immutable connection identity a channel persists.
+///
+/// Unlike invocation, a sole legacy address still needs its registry UUID: the address elides that
+/// level for compatibility, but a durable channel must retain the identity that survives a later
+/// first-to-second migration. No request spelling is ever parsed as a UUID here.
+pub(super) async fn channel_instance(
+    state: &AppState,
+    principal: &Principal,
+    provider: &'static Provider,
+    supplied: Option<&str>,
+) -> Result<InstanceId, Response> {
+    let Some(registry) = state.connection_registry() else {
+        return Err(no_registry());
+    };
+    let Some(store) = state.credentials() else {
+        return Err(no_store());
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = inventory(store, principal.tenant(), &declaration).await?;
+
+    if inventory.count() == 0 {
+        return Err(refuse(
+            StatusCode::NOT_FOUND,
+            format!("this tenant holds no connection to `{}`", provider.id),
+            json!({ "connector": provider.id }),
+        ));
+    }
+    if supplied.is_none() && inventory.count() > 1 {
+        return Err(refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "this tenant holds {} connections to `{}`; choose a connection label rather than letting this host choose an account",
+                inventory.count(), provider.id
+            ),
+            json!({ "connector": provider.id, "code": "ambiguous_connection" }),
+        ));
+    }
+
+    let entries = registry
+        .entries(principal.tenant(), provider.id)
+        .map_err(|refusal| registry_refused(&refusal))?;
+    let selected = match supplied {
+        Some(supplied) => {
+            let label = ConnectionLabel::new(supplied.to_owned())
+                .map_err(|refusal| registry_refused(&refusal))?;
+            entries
+                .iter()
+                .find(|entry| entry.label == label)
+                .ok_or_else(|| unknown_label(provider, &label))?
+        }
+        None => {
+            let held = if inventory.legacy.is_empty() {
+                inventory.instances.keys().next()
+            } else {
+                None
+            };
+            let mut matching = entries.iter().filter(|entry| {
+                held.map_or(!inventory.legacy.is_empty(), |instance| {
+                    entry.instance == *instance
+                })
+            });
+            let Some(selected) = matching.next() else {
+                return Err(refuse(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "the sole `{}` connection has no stable operator label; label it before binding a channel",
+                        provider.id
+                    ),
+                    json!({ "connector": provider.id, "code": "connection_needs_label" }),
+                ));
+            };
+            if matching.next().is_some() {
+                return Err(refuse(
+                    StatusCode::CONFLICT,
+                    "the connection registry does not identify one sole connection",
+                    json!({ "connector": provider.id }),
+                ));
+            }
+            selected
+        }
+    };
+
+    if inventory.holds(&selected.instance)
+        || (inventory.count() == 1
+            && !inventory.legacy.is_empty()
+            && names_only_legacy(
+                registry,
+                principal.tenant(),
+                provider.id,
+                &selected.instance,
+            )
+            .map_err(|response| *response)?)
+    {
+        Ok(selected.instance.clone())
+    } else {
+        Err(unknown_label(provider, &selected.label))
+    }
+}
+
+/// Project an immutable channel binding back to its current operator label.
+pub(super) fn channel_label(
+    state: &AppState,
+    tenant: &Tenant,
+    connector: &str,
+    instance: &InstanceId,
+) -> Result<String, Box<Response>> {
+    let Some(registry) = state.connection_registry() else {
+        return Err(Box::new(no_registry()));
+    };
+    let entries = registry
+        .entries(tenant, connector)
+        .map_err(|refusal| Box::new(registry_refused(&refusal)))?;
+    entries
+        .into_iter()
+        .find(|entry| entry.instance == *instance)
+        .map(|entry| entry.label.to_string())
+        .ok_or_else(|| {
+            Box::new(refuse(
+                StatusCode::CONFLICT,
+                format!(
+                    "channel connection for `{connector}` has no current operator label; refusing rather than exposing or guessing its UUID"
+                ),
+                json!({ "connector": connector, "code": "channel_connection_unlabelled" }),
+            ))
+        })
+}
+
+fn names_only_legacy(
+    registry: &Arc<dyn exchange_host::ConnectionRegistry>,
+    tenant: &Tenant,
+    connector: &str,
+    instance: &InstanceId,
+) -> Result<bool, Box<Response>> {
+    let entries = registry
+        .entries(tenant, connector)
+        .map_err(|refusal| Box::new(registry_refused(&refusal)))?;
+    Ok(matches!(entries.as_slice(), [entry] if entry.instance == *instance))
+}
+
+fn mint_instance() -> Result<InstanceId, Box<Response>> {
+    let mut bytes = crate::entropy::bytes::<16>().map_err(|error| {
+        error!(%error, source = crate::entropy::SOURCE, "connection UUID entropy unavailable");
+        Box::new(refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this host could not mint a connection identifier; nothing was written. Retrying may work",
+            json!({}),
+        ))
+    })?;
+    // RFC 4122 version 4 and variant bits. The remaining 122 bits come directly from the one OS
+    // entropy source this binary uses for every unguessable value.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let text = format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    );
+    InstanceId::parse(&text).map_err(|reason| {
+        error!(%reason, "the host minted a UUID the address vocabulary refused");
+        Box::new(refuse(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "this host minted an unusable connection identifier; nothing was written",
+            json!({}),
+        ))
+    })
+}
+
+fn instance_reference(
+    reference: &CredentialRef,
+    instance: &InstanceId,
+) -> Result<CredentialRef, Box<Response>> {
+    CredentialRef::for_instance(
+        reference.tenant(),
+        reference.authority(),
+        instance.as_str(),
+        reference.service(),
+        reference.credential(),
+    )
+    .map_err(|reason| {
+        Box::new(refuse(
+            StatusCode::CONFLICT,
+            format!("the derived connection address is unusable: {reason}"),
+            json!({}),
+        ))
+    })
+}
+
+fn legacy_reference(reference: &CredentialRef) -> Result<CredentialRef, Box<Response>> {
+    CredentialRef::new(
+        reference.tenant(),
+        reference.authority(),
+        reference.service(),
+        reference.credential(),
+    )
+    .map_err(|reason| {
+        Box::new(refuse(
+            StatusCode::CONFLICT,
+            format!("the derived legacy connection address is unusable: {reason}"),
+            json!({}),
+        ))
+    })
+}
+
+async fn label_legacy(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(connector): Path<String>,
+    Json(body): Json<LabelBody>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let label = match ConnectionLabel::new(body.label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    if inventory.count() != 1 || inventory.legacy.is_empty() {
+        return refuse(
+            StatusCode::CONFLICT,
+            "only one unlabelled legacy connection can be labelled through this route",
+            json!({ "connector": provider.id }),
+        );
+    }
+    let existing = match registry.entries(principal.tenant(), provider.id) {
+        Ok(existing) => existing,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    if !existing.is_empty() {
+        return refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connector `{}`'s sole connection already has a label",
+                provider.id
+            ),
+            json!({ "connector": provider.id }),
+        );
+    }
+    let instance = match mint_instance() {
+        Ok(instance) => instance,
+        Err(response) => return *response,
+    };
+    if let Err(refusal) = registry.assign(principal.tenant(), provider.id, &label, &instance) {
+        return registry_refused(&refusal);
+    }
+    Json(json!({ "connector": provider.id, "label": label.as_str() })).into_response()
+}
+
+async fn create_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label)): Path<(String, String)>,
+    Query(query): Query<AcquisitionQuery>,
+    Json(body): Json<NewConnection>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let label = match ConnectionLabel::new(label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let NewConnection {
+        credentials,
+        acquisition,
+    } = body;
+    let password_acquisition = if query.acquire.as_deref() == Some("password") {
+        if !credentials.is_empty() {
+            return acquisition_shape_refused(
+                provider,
+                "password acquisition cannot also carry pasted credentials",
+            );
+        }
+        let Some(acquisition) = acquisition else {
+            return acquisition_shape_refused(
+                provider,
+                "password acquisition requires `acquisition.username` and `acquisition.password`",
+            );
+        };
+        Some(acquisition)
+    } else if query.acquire.is_some() {
+        return acquisition_shape_refused(provider, "unknown credential acquisition mode");
+    } else {
+        if acquisition.is_some() {
+            return acquisition_shape_refused(
+                provider,
+                "an acquisition body requires `?acquire=password`",
+            );
+        }
+        None
+    };
+    if password_acquisition.is_none() && credentials.is_empty() {
+        return refuse(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "a connection to `{}` carries at least one credential value",
+                provider.id
+            ),
+            json!({ "connector": provider.id }),
+        );
+    }
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    let entries = match registry.entries(principal.tenant(), provider.id) {
+        Ok(entries) => entries,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+
+    let existing_requested = entries
+        .iter()
+        .find(|entry| entry.label == label)
+        .map(|entry| entry.instance.clone());
+    let requested_names_sole_legacy = existing_requested.is_some()
+        && !inventory.legacy.is_empty()
+        && entries.iter().all(|entry| entry.label == label);
+    if existing_requested
+        .as_ref()
+        .is_some_and(|instance| inventory.holds(instance))
+        || requested_names_sole_legacy
+    {
+        return registry_refused(&RegistryRefusal::LabelAlreadyExists {
+            connector: provider.id.to_owned(),
+            label: label.to_string(),
+        });
+    }
+    let mut pending_label = None;
+    let instance = match existing_requested {
+        Some(stale) => stale,
+        None => {
+            let instance = match mint_instance() {
+                Ok(instance) => instance,
+                Err(response) => return *response,
+            };
+            if let Err(refusal) =
+                registry.assign(principal.tenant(), provider.id, &label, &instance)
+            {
+                return registry_refused(&refusal);
+            }
+            pending_label = Some(PendingLabel::new(
+                registry.as_ref(),
+                principal.tenant(),
+                provider.id,
+                &label,
+            ));
+            instance
+        }
+    };
+
+    let mut held_ids = inventory.ids();
+    if !inventory.legacy.is_empty() {
+        let mut legacy_ids = entries
+            .iter()
+            .filter(|entry| entry.label != label)
+            .map(|entry| entry.instance.clone());
+        let Some(first) = legacy_ids.next() else {
+            return refuse(
+                StatusCode::CONFLICT,
+                format!(
+                    "label the sole `{}` connection with PUT /api/connections/{}/label before creating a second",
+                    provider.id, provider.id
+                ),
+                json!({ "connector": provider.id }),
+            );
+        };
+        if legacy_ids.next().is_some() {
+            return refuse(
+                StatusCode::CONFLICT,
+                "the sole legacy connection has more than one naming record; refusing migration",
+                json!({ "connector": provider.id }),
+            );
+        }
+        held_ids.push(first);
+    }
+    held_ids.push(instance.clone());
+    held_ids.sort();
+
+    let instances = TenantInstances::held(&held_ids, Some(&instance));
+    let mut acquisition_companion_writes = Vec::new();
+    let writes = if let Some(acquisition) = password_acquisition {
+        let Some(binding) = state.acquisitions().get(provider.id) else {
+            return acquisition_shape_refused(
+                provider,
+                "this connector has no released credential-acquisition declaration bound",
+            );
+        };
+        if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+            return auth_posture_refused(&refusal);
+        }
+        let reference =
+            match declaration.address_of_for(principal.tenant(), binding.credential(), instances) {
+                Ok(reference) => reference,
+                Err(refusal) => return connection_refused(&refusal),
+            };
+        let username = Secret::new(&acquisition.username);
+        let password = Secret::new(&acquisition.password);
+        let acquired = match binding
+            .performer()
+            .redeem_password(PasswordRedemption::new(&username, &password))
+            .await
+        {
+            Ok(acquired) => acquired,
+            Err(refusal) => return acquisition_refused(refusal),
+        };
+        drop(password);
+        drop(username);
+        let (access, refresh, expires_at) = acquired.into_parts();
+        if let Err(response) = admit_acquired_value(provider, binding.credential(), &access) {
+            return *response;
+        }
+        let companions = match acquisition_companions(&reference) {
+            Ok(companions) => companions,
+            Err(response) => return *response,
+        };
+        if let Some(refresh) = refresh {
+            if let Err(response) = admit_acquired_value(provider, "refresh_token", &refresh) {
+                return *response;
+            }
+            acquisition_companion_writes.push((companions.refresh, refresh));
+        }
+        if let Some(expires_at) = expires_at {
+            acquisition_companion_writes
+                .push((companions.expiry, Secret::new(expires_at.to_string())));
+        }
+        acquisition_companion_writes.push((companions.managed, Secret::new(MANAGED_VALUE)));
+        vec![(reference, access)]
+    } else {
+        match declaration.writes_for(principal.tenant(), instances, &credentials) {
+            Ok(writes) => writes,
+            Err(refusal) => return connection_refused(&refusal),
+        }
+    };
+    let adding: usize = writes
+        .iter()
+        .chain(acquisition_companion_writes.iter())
+        .map(|(_, secret)| stored_bytes(secret))
+        .sum();
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) = admit_tenant_occupancy(held_bytes, adding) {
+        return connection_refused(&refusal);
+    }
+
+    let Some(authority) = declaration.authority else {
+        return connection_refused(&ConnectionRefusal::UndeclaredAuthority {
+            connector: provider.id.to_owned(),
+        });
+    };
+    let scope = match CredentialScope::new(principal.tenant().as_str(), authority) {
+        Ok(scope) => scope,
+        Err(reason) => {
+            return refuse(
+                StatusCode::CONFLICT,
+                reason,
+                json!({ "connector": provider.id }),
+            )
+        }
+    };
+    let mut batch = SecretBatch::new(scope);
+    if !inventory.legacy.is_empty() {
+        let first = held_ids
+            .iter()
+            .find(|candidate| **candidate != instance)
+            .expect("a labelled legacy id was required above");
+        for source in &inventory.legacy {
+            let destination = match instance_reference(source, first) {
+                Ok(destination) => destination,
+                Err(response) => return *response,
+            };
+            if let Err(response) =
+                append_acquisition_companion_moves(store, source, &destination, &mut batch).await
+            {
+                return *response;
+            }
+            if let Err(reason) = batch.move_secret(source.clone(), destination) {
+                return refuse(StatusCode::CONFLICT, reason, json!({}));
+            }
+        }
+    }
+    for (reference, secret) in &writes {
+        if let Err(reason) = batch.put(reference.clone(), secret.clone()) {
+            return refuse(StatusCode::CONFLICT, reason, json!({}));
+        }
+    }
+    for (reference, secret) in &acquisition_companion_writes {
+        if let Err(reason) = batch.put(reference.clone(), secret.clone()) {
+            return acquisition_batch_refused(reason);
+        }
+    }
+    let migrating_first = (!inventory.legacy.is_empty()).then(|| {
+        held_ids
+            .iter()
+            .find(|candidate| **candidate != instance)
+            .expect("a labelled legacy id was required above")
+            .clone()
+    });
+    if let (Some(settings), Some(first)) = (state.settings(), migrating_first.as_ref()) {
+        if let Err(refusal) = settings.qualify_instance(principal.tenant(), provider.id, first) {
+            return settings_refused(&refusal);
+        }
+    }
+    if let Err(error) = store.apply(&batch).await {
+        if let (Some(settings), Some(first)) = (state.settings(), migrating_first.as_ref()) {
+            if let Err(refusal) =
+                settings.collapse_instances(principal.tenant(), provider.id, &instance, first)
+            {
+                error!(%refusal, "connection-settings migration rollback failed after credential batch refusal");
+            }
+        }
+        return store_failed(&error);
+    }
+    if let Some(pending) = pending_label.as_mut() {
+        pending.commit();
+    }
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "connector": provider.id,
+            "label": label.as_str(),
+            "credentials": writes.iter().map(|(reference, _)| address_path(reference)).collect::<Vec<_>>(),
+        })),
+    )
+        .into_response()
+}
+
+/// A new registry row is preparation for credential creation, not a connection by itself.
+///
+/// The UUID is deliberately retained when a stale row predates this request (retry resumes it),
+/// while a row this request just assigned is removed on every early return. This keeps the
+/// existing handler's cross-store failure honest without trying to roll back a credential that did
+/// commit.
+struct PendingLabel<'a> {
+    registry: &'a dyn ConnectionRegistry,
+    tenant: &'a Tenant,
+    connector: &'a str,
+    label: &'a ConnectionLabel,
+    committed: bool,
+}
+
+impl<'a> PendingLabel<'a> {
+    fn new(
+        registry: &'a dyn ConnectionRegistry,
+        tenant: &'a Tenant,
+        connector: &'a str,
+        label: &'a ConnectionLabel,
+    ) -> Self {
+        Self {
+            registry,
+            tenant,
+            connector,
+            label,
+            committed: false,
+        }
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingLabel<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(refusal) = self
+                .registry
+                .remove(self.tenant, self.connector, self.label)
+            {
+                error!(
+                    %refusal,
+                    connector = self.connector,
+                    label = self.label.as_str(),
+                    "a refused connection create could not remove its uncommitted label"
+                );
+            }
+        }
+    }
+}
+
+async fn show_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label)): Path<(String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let label = match ConnectionLabel::new(label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let instance = match registry.resolve(principal.tenant(), provider.id, &label) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return unknown_label(provider, &label),
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    let references = if inventory.holds(&instance) {
+        inventory
+            .instances
+            .get(&instance)
+            .cloned()
+            .unwrap_or_default()
+    } else if inventory.count() == 1
+        && !inventory.legacy.is_empty()
+        && match names_only_legacy(registry, principal.tenant(), provider.id, &instance) {
+            Ok(sole) => sole,
+            Err(response) => return *response,
+        }
+    {
+        inventory.legacy
+    } else {
+        return unknown_label(provider, &label);
+    };
+    Json(json!({
+        "connector": provider.id,
+        "label": label.as_str(),
+        "credentials": references.iter().map(address_path).collect::<Vec<_>>(),
+    }))
+    .into_response()
+}
+
+async fn rename_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, from)): Path<(String, String)>,
+    Json(body): Json<LabelBody>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let from = match ConnectionLabel::new(from) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let to = match ConnectionLabel::new(body.label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    if let Err(response) =
+        invocation_instance(&state, &principal, provider, Some(from.as_str())).await
+    {
+        return response;
+    }
+    match registry.rename(principal.tenant(), provider.id, &from, &to) {
+        Ok(_) => Json(json!({ "connector": provider.id, "label": to.as_str() })).into_response(),
+        Err(refusal) => registry_refused(&refusal),
+    }
+}
+
+async fn remove_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label)): Path<(String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(registry) = state.connection_registry() else {
+        return no_registry();
+    };
+    let label = match ConnectionLabel::new(label) {
+        Ok(label) => label,
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let instance = match registry.resolve(principal.tenant(), provider.id, &label) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return unknown_label(provider, &label),
+        Err(refusal) => return registry_refused(&refusal),
+    };
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    if state.channels().is_some_and(|channels| {
+        channels
+            .store()
+            .held(principal.tenant())
+            .iter()
+            .any(|record| record.connector() == provider.id && record.connection() == &instance)
+    }) {
+        return refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connection `{}` cannot be deleted while a durable channel binds it; remove or rebind the channel first",
+                label.as_str()
+            ),
+            json!({
+                "connector": provider.id,
+                "label": label.as_str(),
+                "code": "connection_in_use_by_channel",
+            }),
+        );
+    }
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    let selected = if inventory.holds(&instance) {
+        inventory
+            .instances
+            .get(&instance)
+            .cloned()
+            .unwrap_or_default()
+    } else if inventory.count() == 1
+        && !inventory.legacy.is_empty()
+        && match names_only_legacy(registry, principal.tenant(), provider.id, &instance) {
+            Ok(sole) => sole,
+            Err(response) => return *response,
+        }
+    {
+        inventory.legacy.clone()
+    } else {
+        return unknown_label(provider, &label);
+    };
+    let Some(authority) = declaration.authority else {
+        return connection_refused(&ConnectionRefusal::UndeclaredAuthority {
+            connector: provider.id.to_owned(),
+        });
+    };
+    let scope = match CredentialScope::new(principal.tenant().as_str(), authority) {
+        Ok(scope) => scope,
+        Err(reason) => return refuse(StatusCode::CONFLICT, reason, json!({})),
+    };
+    let mut selected_with_companions = Vec::new();
+    for reference in selected {
+        let companions = match acquisition_companions(&reference) {
+            Ok(companions) => companions,
+            Err(response) => return *response,
+        };
+        let mut companion_held = false;
+        for companion in [&companions.refresh, &companions.expiry, &companions.managed] {
+            match store.get(companion).await {
+                Ok(_) => companion_held = true,
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return store_failed(&error),
+            }
+        }
+        if companion_held {
+            selected_with_companions.extend([
+                companions.refresh,
+                companions.expiry,
+                companions.managed,
+            ]);
+        }
+        selected_with_companions.push(reference);
+    }
+    let mut batch = SecretBatch::new(scope);
+    for reference in selected_with_companions {
+        if let Err(reason) = batch.delete(reference) {
+            return refuse(StatusCode::CONFLICT, reason, json!({}));
+        }
+    }
+    if inventory.instances.len() == 2 && inventory.legacy.is_empty() {
+        let remaining = inventory
+            .instances
+            .iter()
+            .find(|(candidate, _)| **candidate != instance)
+            .map(|(_, references)| references)
+            .expect("two instances include one remaining");
+        for source in remaining {
+            let destination = match legacy_reference(source) {
+                Ok(destination) => destination,
+                Err(response) => return *response,
+            };
+            if let Err(response) =
+                append_acquisition_companion_moves(store, source, &destination, &mut batch).await
+            {
+                return *response;
+            }
+            if let Err(reason) = batch.move_secret(source.clone(), destination) {
+                return refuse(StatusCode::CONFLICT, reason, json!({}));
+            }
+        }
+    }
+    if let Err(error) = store.apply(&batch).await {
+        return store_failed(&error);
+    }
+    if let Some(settings) = state.settings() {
+        let transition = if inventory.instances.len() == 2 && inventory.legacy.is_empty() {
+            let remaining = inventory
+                .instances
+                .keys()
+                .find(|candidate| **candidate != instance)
+                .expect("two instances include one remaining");
+            settings.collapse_instances(principal.tenant(), provider.id, &instance, remaining)
+        } else if inventory.holds(&instance) {
+            settings.discard_instance(principal.tenant(), provider.id, &instance)
+        } else {
+            Ok(())
+        };
+        if let Err(refusal) = transition {
+            // The credential batch is already durable. Refusing before removing the selected label
+            // would leave it able to alias the survivor's now-legacy address. Finish the deletion
+            // and leave the survivor's settings absent (a fail-closed invocation refusal), while
+            // making the operator-visible repair failure loud.
+            error!(%refusal, "connection settings could not follow a completed credential migration");
+        }
+    }
+    if let Err(refusal) = registry.remove(principal.tenant(), provider.id, &label) {
+        return registry_refused(&refusal);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Replace one credential's value, at the address the connection already uses.
@@ -777,7 +2880,9 @@ async fn rollback(
 async fn rotate(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Extension(request_id): Extension<RequestId>,
     Path((connector, credential)): Path<(String, String)>,
+    Query(query): Query<AcquisitionQuery>,
     Json(body): Json<RotatedCredential>,
 ) -> Response {
     let Some(provider) = catalogued(&connector) else {
@@ -785,6 +2890,40 @@ async fn rotate(
     };
     let Some(store) = state.credentials() else {
         return no_store();
+    };
+
+    if query.acquire.as_deref() == Some("refresh") {
+        if body.value.is_some() {
+            return acquisition_shape_refused(
+                provider,
+                "refresh acquisition cannot also carry a pasted credential",
+            );
+        }
+        let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
+            return change_in_flight(provider);
+        };
+        return refresh_acquired_connection(
+            RefreshAcquisition {
+                state: &state,
+                store,
+                principal: &principal,
+                request_id: &request_id,
+            },
+            provider,
+            &credential,
+            TenantInstances::sole(),
+            AuditTarget::Credential {
+                connector: provider.id.to_owned(),
+                credential: credential.clone(),
+            },
+        )
+        .await;
+    }
+    if query.acquire.is_some() {
+        return acquisition_shape_refused(provider, "unknown credential acquisition mode");
+    }
+    let Some(value) = body.value.as_deref() else {
+        return acquisition_shape_refused(provider, "credential rotation requires `value`");
     };
 
     let declared = declared_credentials(provider);
@@ -799,16 +2938,18 @@ async fn rotate(
     // is not a check this handler remembers to make and the name in the path is refused here if
     // the connector does not declare it. It is also what keeps `{credential}` from reaching the
     // address — the address is composed from the *declared* leaf this lookup returns.
-    let (reference, secret) =
-        match declaration.write_of(principal.tenant(), &credential, &body.value) {
-            Ok(write) => write,
-            Err(refusal) => return connection_refused(&refusal),
-        };
+    let (reference, secret) = match declaration.write_of(principal.tenant(), &credential, value) {
+        Ok(write) => write,
+        Err(refusal) => return connection_refused(&refusal),
+    };
+    if let Some(refusal) = managed_rotation_refusal(store, provider, &reference).await {
+        return refusal;
+    }
 
     // The claim `create` and `remove` take, for the same reason and against the same neighbours: a
     // rotation deciding against a value a `DELETE` is in the middle of destroying would put a
     // fresh credential back at an address an operator has just revoked.
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
 
@@ -870,6 +3011,111 @@ async fn rotate(
     Json(view(provider, &addresses, &held_now)).into_response()
 }
 
+async fn rotate_instance(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(request_id): Extension<RequestId>,
+    Path((connector, label, credential)): Path<(String, String, String)>,
+    Query(query): Query<AcquisitionQuery>,
+    Json(body): Json<RotatedCredential>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.credentials() else {
+        return no_store();
+    };
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
+        return change_in_flight(provider);
+    };
+    let selected = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(selected) => selected,
+        Err(response) => return response,
+    };
+    let declared = declared_credentials(provider);
+    let declaration = declaration(provider, &declared);
+    let inventory = match inventory(store, principal.tenant(), &declaration).await {
+        Ok(inventory) => inventory,
+        Err(response) => return response,
+    };
+    let ids = inventory.ids();
+    let instances = match selected.as_ref() {
+        Some(instance) => TenantInstances::held(&ids, Some(instance)),
+        None => TenantInstances::sole(),
+    };
+    if query.acquire.as_deref() == Some("refresh") {
+        if body.value.is_some() {
+            return acquisition_shape_refused(
+                provider,
+                "refresh acquisition cannot also carry a pasted credential",
+            );
+        }
+        return refresh_acquired_connection(
+            RefreshAcquisition {
+                state: &state,
+                store,
+                principal: &principal,
+                request_id: &request_id,
+            },
+            provider,
+            &credential,
+            instances,
+            AuditTarget::InstanceCredential {
+                connector: provider.id.to_owned(),
+                label: label.clone(),
+                credential: credential.clone(),
+            },
+        )
+        .await;
+    }
+    if query.acquire.is_some() {
+        return acquisition_shape_refused(provider, "unknown credential acquisition mode");
+    }
+    let Some(value) = body.value.as_deref() else {
+        return acquisition_shape_refused(provider, "credential rotation requires `value`");
+    };
+    let (reference, secret) =
+        match declaration.write_of_for(principal.tenant(), &credential, value, instances) {
+            Ok(write) => write,
+            Err(refusal) => return connection_refused(&refusal),
+        };
+    if let Some(refusal) = managed_rotation_refusal(store, provider, &reference).await {
+        return refusal;
+    }
+    let replacing = match store.get(&reference).await {
+        Ok(current) => stored_bytes(&current),
+        Err(error) if error.is_not_found() => {
+            return nothing_to_rotate(provider, &credential, &reference)
+        }
+        Err(error) => return store_failed(&error),
+    };
+    let Some(_allowance) = state.connections().claim_tenant(principal.tenant()) else {
+        return allowance_change_in_flight(provider);
+    };
+    let held_bytes = match occupied(store, principal.tenant()).await {
+        Ok(bytes) => bytes,
+        Err(error) => return store_failed(&error),
+    };
+    if let Err(refusal) =
+        admit_tenant_occupancy(held_bytes.saturating_sub(replacing), stored_bytes(&secret))
+    {
+        return connection_refused(&refusal);
+    }
+    if let Err(error) = store.put(&reference, &secret).await {
+        return rotation_failed(provider, &credential, &reference, &error);
+    }
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
+    Json(json!({
+        "connector": provider.id,
+        "label": label,
+        "credential": credential,
+        "address": address_path(&reference),
+    }))
+    .into_response()
+}
+
 /// Disconnect, destroying every credential the connection holds.
 async fn remove(
     State(state): State<AppState>,
@@ -893,9 +3139,33 @@ async fn remove(
     // The same claim `create` takes, for the same reason and against the same neighbour: a delete
     // that decided against a value another request is in the middle of writing would destroy half
     // of it.
-    let Some(_claim) = state.connections().claim(principal.tenant(), provider.id) else {
+    let Some(_claim) = state.claim_connection(principal.tenant(), provider.id) else {
         return change_in_flight(provider);
     };
+
+    // The legacy route can address only the sole unqualified connection. A durable channel holds
+    // that connection's future UUID even while the address elides it, so any record for this
+    // tenant/connector blocks deletion. Refusing is the only atomic answer across independent
+    // channel and credential stores.
+    if state.channels().is_some_and(|channels| {
+        channels
+            .store()
+            .held(principal.tenant())
+            .iter()
+            .any(|record| record.connector() == provider.id)
+    }) {
+        return refuse(
+            StatusCode::CONFLICT,
+            format!(
+                "connection to `{}` cannot be deleted while a durable channel binds it; remove or rebind the channel first",
+                provider.id
+            ),
+            json!({
+                "connector": provider.id,
+                "code": "connection_in_use_by_channel",
+            }),
+        );
+    }
 
     let held_before = match held(store, &addresses).await {
         Err(error) => return store_failed(&error),
@@ -922,12 +3192,40 @@ async fn remove(
     let mut left_behind = Vec::new();
     let mut failure = None;
 
-    for (declared, reference) in &addresses {
+    let mut delete_targets: Vec<(CredentialRef, bool)> = addresses
+        .iter()
+        .map(|(declared, reference)| {
+            (
+                reference.clone(),
+                held_before.iter().any(|name| name == declared.name),
+            )
+        })
+        .collect();
+    for (_, reference) in &addresses {
+        let companions = match acquisition_companions(reference) {
+            Ok(companions) => companions,
+            Err(response) => return *response,
+        };
+        let mut held_companions = Vec::new();
+        for companion in [companions.refresh, companions.expiry, companions.managed] {
+            let held = match store.get(&companion).await {
+                Ok(_) => true,
+                Err(error) if error.is_not_found() => false,
+                Err(error) => return store_failed(&error),
+            };
+            held_companions.push((companion, held));
+        }
+        if held_companions.iter().any(|(_, held)| *held) {
+            delete_targets.extend(held_companions);
+        }
+    }
+
+    for (reference, was_held) in &delete_targets {
         match store.delete(reference).await {
             // Only what the probe saw a value at is reported destroyed. Deleting an address that
             // held nothing is a no-op, and calling it "destroyed" would overstate what happened to
             // an operator counting which of their secrets are now revoked.
-            Ok(()) if held_before.iter().any(|name| name == declared.name) => {
+            Ok(()) if *was_held => {
                 destroyed.push(address_path(reference));
             }
             Ok(()) => {}
@@ -981,8 +3279,10 @@ struct SuppliedSetting {
 /// `endpoint.subdomain` because its operations' Flux says so. See
 /// `exchange_host::declared_settings` for why a `base_url` scan is not the same answer.
 ///
-/// **No values.** A `set` boolean per field, so an operator can see what is left to supply without
-/// this host handing back a customer's account identifiers.
+/// **No tenant values.** A `set` boolean per field, so an operator can see what is left to supply
+/// without this host handing back a customer's account identifiers. A [`HostPinning::ChosenFrom`]
+/// field also publishes its catalogue-declared choices: they are the permitted input vocabulary,
+/// not anything read from this tenant's store.
 async fn list_settings(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -1015,6 +3315,10 @@ async fn list_settings(
                 "set": store.is_set(principal.tenant(), provider.id, setting),
                 "suppliable": pinning.tenant_may_supply(),
             });
+
+            if let HostPinning::ChosenFrom(choices) = &pinning {
+                view["choices"] = json!(choices);
+            }
 
             if let HostPinning::WholeAuthority(template) = &pinning {
                 view["reason"] = json!(format!(
@@ -1073,6 +3377,9 @@ async fn set_setting(
     let Some(setting) = DeclaredSetting::parse(&service, &field) else {
         return unreadable_field(provider, &service, &field);
     };
+    if store.is_custom_origin(provider.id, &setting) {
+        return custom_origin_plan_required(provider, &setting);
+    }
 
     // **Every decision is the store's, and there is deliberately no second copy of one here.**
     //
@@ -1128,12 +3435,181 @@ async fn clear_setting(
         Err(refusal) => settings_refused(&refusal),
         Ok(false) => nothing_to_clear(provider, &setting),
         Ok(true) => {
-            if let Some(channels) = state.channels() {
+            if store.is_custom_origin(provider.id, &setting) {
+                if let Some(channels) = state.channels() {
+                    if channels
+                        .replace_authority(principal.tenant(), provider.id)
+                        .await
+                        .is_err()
+                    {
+                        return authority_clear_partial(provider, None, &setting);
+                    }
+                }
+            } else if let Some(channels) = state.channels() {
                 channels.restart(principal.tenant(), provider.id);
             }
             StatusCode::NO_CONTENT.into_response()
         }
     }
+}
+
+async fn list_instance_settings(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label)): Path<(String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+    let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(instance) => instance,
+        Err(response) => return response,
+    };
+    let declared = match declared_settings(provider) {
+        Ok(declared) => declared,
+        Err(refusal) => return settings_refused(&refusal),
+    };
+    let settings: Vec<Value> = declared
+        .iter()
+        .map(|setting| {
+            let pinning = host_pinning(provider, setting);
+            let mut view = json!({
+                "service": setting.service,
+                "field": setting.binds(),
+                "set": store.is_set_for_instance(
+                    principal.tenant(),
+                    provider.id,
+                    instance.as_ref(),
+                    setting,
+                ),
+                "suppliable": pinning.tenant_may_supply(),
+            });
+            if let HostPinning::ChosenFrom(choices) = &pinning {
+                view["choices"] = json!(choices);
+            }
+            view
+        })
+        .collect();
+    Json(json!({
+        "connector": provider.id,
+        "label": label,
+        "configurable": declared.iter().all(|setting| host_pinning(provider, setting).tenant_may_supply()),
+        "settings": settings,
+    }))
+    .into_response()
+}
+
+async fn set_instance_setting(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label, service, field)): Path<(String, String, String, String)>,
+    Json(body): Json<SuppliedSetting>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+    let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(instance) => instance,
+        Err(response) => return response,
+    };
+    let Some(setting) = DeclaredSetting::parse(&service, &field) else {
+        return unreadable_field(provider, &service, &field);
+    };
+    if store.is_custom_origin(provider.id, &setting) {
+        return custom_origin_plan_required(provider, &setting);
+    }
+    if let Err(refusal) = store.set_for_instance(
+        principal.tenant(),
+        provider.id,
+        instance.as_ref(),
+        &setting,
+        &body.value,
+    ) {
+        return settings_refused(&refusal);
+    }
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
+    Json(setting_view(provider, &setting, true)).into_response()
+}
+
+async fn clear_instance_setting(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((connector, label, service, field)): Path<(String, String, String, String)>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return unknown_connector(&connector);
+    };
+    let Some(store) = state.settings() else {
+        return no_settings_store();
+    };
+    let instance = match invocation_instance(&state, &principal, provider, Some(&label)).await {
+        Ok(instance) => instance,
+        Err(response) => return response,
+    };
+    let Some(setting) = DeclaredSetting::parse(&service, &field) else {
+        return unreadable_field(provider, &service, &field);
+    };
+    match store.clear_for_instance(principal.tenant(), provider.id, instance.as_ref(), &setting) {
+        Err(refusal) => settings_refused(&refusal),
+        Ok(false) => nothing_to_clear(provider, &setting),
+        Ok(true) => {
+            if store.is_custom_origin(provider.id, &setting) {
+                if let Some(channels) = state.channels() {
+                    if channels
+                        .replace_authority(principal.tenant(), provider.id)
+                        .await
+                        .is_err()
+                    {
+                        return authority_clear_partial(provider, Some(&label), &setting);
+                    }
+                }
+            } else if let Some(channels) = state.channels() {
+                channels.restart(principal.tenant(), provider.id);
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+    }
+}
+
+fn custom_origin_plan_required(provider: &'static Provider, setting: &DeclaredSetting) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        "operator-approved origins may only be proposed through the revision-checked connection plan",
+        json!({
+            "connector": provider.id,
+            "service": setting.service,
+            "field": setting.binds(),
+            "code": "connection_plan_required",
+        }),
+    )
+}
+
+fn authority_clear_partial(
+    provider: &'static Provider,
+    label: Option<&str>,
+    setting: &DeclaredSetting,
+) -> Response {
+    (
+        StatusCode::MULTI_STATUS,
+        Json(json!({
+            "connector": provider.id,
+            "label": label,
+            "service": setting.service,
+            "field": setting.binds(),
+            "action": "cleared",
+            "outcome": "partial",
+            "may_have_happened": true,
+        })),
+    )
+        .into_response()
 }
 
 /// One setting as a caller sees it: where it belongs and whether it is supplied. Never its value.
@@ -1219,6 +3695,71 @@ fn nothing_to_clear(provider: &'static Provider, setting: &DeclaredSetting) -> R
 /// value.
 fn settings_refused(refusal: &SettingsRefusal) -> Response {
     let (status, extra) = match refusal {
+        SettingsRefusal::AuthorityUnsupported { connector, setting } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector, "field": setting }),
+        ),
+        SettingsRefusal::AuthorityRevisionRequired {
+            connector,
+            setting,
+            current,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "current": current.to_string(),
+            }),
+        ),
+        SettingsRefusal::AuthorityUnset { connector, setting } => (
+            StatusCode::CONFLICT,
+            json!({ "connector": connector, "field": setting }),
+        ),
+        SettingsRefusal::AuthorityRevisionConflict {
+            connector,
+            setting,
+            expected,
+            current,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "expected": expected.to_string(),
+                "current": current.to_string(),
+            }),
+        ),
+        SettingsRefusal::AuthorityStateConflict {
+            connector,
+            setting,
+            revision,
+            current,
+            transition,
+        } => (
+            StatusCode::CONFLICT,
+            json!({
+                "connector": connector,
+                "field": setting,
+                "revision": revision.to_string(),
+                "state": format!("{current:?}").to_ascii_lowercase(),
+                "action": transition,
+            }),
+        ),
+        SettingsRefusal::OriginSchemeUnsupported { connector, setting }
+        | SettingsRefusal::MalformedOrigin { connector, setting } => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({ "connector": connector, "field": setting }),
+        ),
+        SettingsRefusal::InstanceUnsupported {
+            connector,
+            instance,
+        } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({ "connector": connector, "instance": instance }),
+        ),
+        SettingsRefusal::InstanceTransition { connector, .. } => {
+            (StatusCode::CONFLICT, json!({ "connector": connector }))
+        }
         SettingsRefusal::NothingDeclared { connector } => (
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({ "connector": connector }),
@@ -1416,20 +3957,24 @@ async fn held(
 /// closed. That claim is single-process, exactly as the per-connection one is.
 async fn occupied(store: &Arc<dyn SecretStore>, tenant: &Tenant) -> Result<usize, StoreError> {
     let mut total = 0usize;
+    let mut seen = std::collections::BTreeSet::new();
 
     for provider in connector_catalog::providers() {
-        let declared = declared_credentials(provider);
-        let declaration = declaration(provider, &declared);
-
-        // A connector with no address cannot hold anything for this tenant, so it contributes
-        // nothing. Refusing the whole create because some unrelated connector is unaddressable
-        // would be the listing bug in another place.
-        let Ok(addresses) = declaration.addresses(tenant) else {
+        let Some(authority) = provider.authority else {
             continue;
         };
-
-        for (_, reference) in &addresses {
-            match store.get(reference).await {
+        let scope = CredentialScope::new(tenant.as_str(), authority)
+            .map_err(|reason| StoreError::Layout { reason })?;
+        let references = match store.references(&scope).await {
+            Ok(references) => references,
+            Err(StoreError::Unsupported { .. }) => return occupied_legacy(store, tenant).await,
+            Err(error) => return Err(error),
+        };
+        for reference in references {
+            if !seen.insert(reference.clone()) {
+                continue;
+            }
+            match store.get(&reference).await {
                 Ok(secret) => total = total.saturating_add(stored_bytes(&secret)),
                 Err(error) if error.is_not_found() => {}
                 Err(error) => return Err(error),
@@ -1437,6 +3982,38 @@ async fn occupied(store: &Arc<dyn SecretStore>, tenant: &Tenant) -> Result<usize
         }
     }
 
+    Ok(total)
+}
+
+/// The pre-v0.18 occupancy walk for stores that support point operations but not scoped inventory.
+///
+/// Such a store cannot admit multiple instances, so every address it can hold through this host is
+/// still one of the catalogue-derived legacy addresses. Falling back here preserves that supported
+/// sole-connection surface without treating an unsupported inventory as an empty inventory.
+async fn occupied_legacy(
+    store: &Arc<dyn SecretStore>,
+    tenant: &Tenant,
+) -> Result<usize, StoreError> {
+    let mut total = 0usize;
+    for provider in connector_catalog::providers() {
+        let declared = declared_credentials(provider);
+        let declaration = declaration(provider, &declared);
+        if declaration.authority.is_none() || declaration.credentials.is_empty() {
+            continue;
+        }
+        let addresses = declaration
+            .addresses(tenant)
+            .map_err(|refusal| StoreError::Layout {
+                reason: refusal.to_string(),
+            })?;
+        for (_, reference) in addresses {
+            match store.get(&reference).await {
+                Ok(secret) => total = total.saturating_add(stored_bytes(&secret)),
+                Err(error) if error.is_not_found() => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
     Ok(total)
 }
 
@@ -1613,16 +4190,11 @@ fn connection_refused(refusal: &ConnectionRefusal) -> Response {
     refuse(status, refusal.to_string(), extra)
 }
 
-/// **The X-14 placeholder.** A second connection to a connector this tenant already has.
+/// A create through the source-compatible sole-connection resource found an existing connection.
 ///
-/// The address this host *derives* has no level at which two instances of one connector differ, so
-/// accepting this would overwrite the first connection, answer `201`, and send every later call to
-/// the wrong account while looking healthy. The refusal names the level that will replace it:
-/// `@instances/<uuid>`, which landed in flux-connectors (C-406) and is published and pinned here
-/// since X-11 — `connector_address::CredentialRef::for_instance` spells it. What is still missing
-/// is this host's half: resolving a name the operator chooses to that uuid, and moving the
-/// already-stored credential to the address it gains. That is X-14, and until it lands this refuses
-/// rather than deriving an address the store was never written at.
+/// This route deliberately remains create-only; accepting it as an upsert would still silently
+/// replace the sole connection. X-14 added the explicit label-scoped plural resource instead, so
+/// the refusal points a human at the two deliberate management steps.
 fn already_connected(
     provider: &'static Provider,
     addresses: &[(DeclaredCredential<'_>, CredentialRef)],
@@ -1630,20 +4202,19 @@ fn already_connected(
     refuse(
         StatusCode::CONFLICT,
         format!(
-            "this tenant already has a connection to connector `{}`, and the credential address \
-             has no instance dimension to tell two of them apart — a second one would overwrite \
-             the first rather than sit beside it",
+            "this tenant already has a connection to connector `{}`; this legacy resource is \
+             create-only and will not replace it",
             provider.id,
         ),
         json!({
             "connector": provider.id,
             "addresses": addresses_of(addresses),
-            "would_have_worked":
-                "an instance level on the address — \
-                 `tenants/<tenant>/<authority>/@instances/<uuid>/<credential>` — which landed in \
-                 flux-connectors (C-406) and is published; this host does not yet resolve a name \
-                 you choose to that uuid, which is X-14. Until then, delete the existing \
-                 connection before creating another",
+            "create_another_at": format!(
+                "/api/connections/{}/instances/<label>", provider.id
+            ),
+            "label_existing_at": format!(
+                "/api/connections/{}/label", provider.id
+            ),
         }),
     )
 }
@@ -1753,6 +4324,56 @@ fn no_store() -> Response {
     )
 }
 
+fn no_registry() -> Response {
+    #[cfg(unix)]
+    let setting = exchange_host::CONNECTION_REGISTRY_SETTING;
+    #[cfg(not(unix))]
+    let setting = "FLUX_EXCHANGE_CONNECTIONS";
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(crate::protocol::ErrorBody::new(format!(
+            "no connection registry is configured. Set `{setting}` to a durable path before using labels or multiple connector instances"
+        ))),
+    )
+        .into_response()
+}
+
+fn unknown_label(provider: &'static Provider, label: &ConnectionLabel) -> Response {
+    refuse(
+        StatusCode::NOT_FOUND,
+        format!(
+            "connector `{}` has no held connection named `{}` for this tenant",
+            provider.id, label
+        ),
+        json!({ "connector": provider.id, "label": label.as_str() }),
+    )
+}
+
+fn registry_refused(refusal: &RegistryRefusal) -> Response {
+    let status = match refusal {
+        RegistryRefusal::InvalidLabel { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+        RegistryRefusal::LabelAlreadyExists { .. }
+        | RegistryRefusal::InstanceAlreadyNamed { .. } => StatusCode::CONFLICT,
+        RegistryRefusal::UnknownLabel { .. } => StatusCode::NOT_FOUND,
+        RegistryRefusal::Unavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    if matches!(refusal, RegistryRefusal::Unavailable { .. }) {
+        error!(%refusal, "the connection registry failed");
+        return (
+            status,
+            Json(crate::protocol::ErrorBody::new(
+                "the connection registry could not be read or written; nothing was repaired. Retrying may work",
+            )),
+        )
+            .into_response();
+    }
+    (
+        status,
+        Json(crate::protocol::ErrorBody::new(refusal.to_string())),
+    )
+        .into_response()
+}
+
 /// The store failed, and *how* it failed survives out to the caller.
 ///
 /// Never a `404`, whatever the variant: "we cannot say" reported as "you have not connected that
@@ -1780,7 +4401,13 @@ fn store_failed(error: &StoreError) -> Response {
 
     error!(%error, "the credential store failed");
 
-    refuse(status, format!("{happened}. {advice}"), json!({}))
+    (
+        status,
+        Json(crate::protocol::ErrorBody::new(format!(
+            "{happened}. {advice}"
+        ))),
+    )
+        .into_response()
 }
 
 /// How a store failure is answered: its status, what happened, and what an operator is to do.
@@ -1822,6 +4449,16 @@ fn store_failure(error: &StoreError) -> (StatusCode, &'static str, &'static str)
             "the credential store answered with something this host cannot interpret",
             "Retrying will not help; this is a defect in the store or in how it is configured",
         ),
+        StoreError::Conflict { .. } => (
+            StatusCode::CONFLICT,
+            "the credential store refused an atomic mutation because its checked state changed",
+            "Nothing was partially applied; refresh the connection inventory before retrying",
+        ),
+        StoreError::Unsupported { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the configured credential store cannot provide the operation this connection change requires",
+            "Retrying will not help; an operator must bind a store that supports scoped inventory and atomic batches",
+        ),
     }
 }
 
@@ -1859,7 +4496,10 @@ fn escalation(error: &StoreError) -> Escalation {
         // and warns about it. Ranked lowest so it can never win a comparison and hide a real one.
         StoreError::NotFound { .. } | StoreError::Unreachable { .. } => Escalation::Transient,
         StoreError::Denied { .. } => Escalation::RestoreAccess,
-        StoreError::Backend { .. } | StoreError::Layout { .. } => Escalation::RepairTheStore,
+        StoreError::Backend { .. }
+        | StoreError::Layout { .. }
+        | StoreError::Conflict { .. }
+        | StoreError::Unsupported { .. } => Escalation::RepairTheStore,
     }
 }
 
@@ -2032,9 +4672,11 @@ mod tests {
     use axum::http::{Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        async_trait, ConnectionSettings as _, MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES,
-        TENANTS_ROOT,
+        async_trait, ConnectionSettings as _, Layout as _, TenantLayout,
+        MAX_CREDENTIAL_VALUE_BYTES, MAX_TENANT_STORE_BYTES, TENANTS_ROOT,
     };
+    #[cfg(unix)]
+    use exchange_host::{AcquiredCredential, AuthHazard, AuthPosture, CredentialAcquirer};
     use tower::Service;
 
     use crate::dev_identity::DevIdentity;
@@ -2045,7 +4687,7 @@ mod tests {
     /// because a kind gate cannot be tested against a roster with only one kind in it: every
     /// assertion that an agent is refused is worth nothing unless a caller of another kind reaches
     /// the same address and is admitted.
-    const ROSTER: &str = "user:alice@acme,user:bob@globex,agent:triage-bot@acme";
+    const ROSTER: &str = "user:alice@acme,user:bob@globex,service_account:triage-bot@acme";
 
     /// The value a test stores. Never a real secret, and asserted absent from every answer a
     /// different tenant receives — and from every refusal anyone receives.
@@ -2336,6 +4978,30 @@ mod tests {
                 .remove(&address_path(reference));
             Ok(())
         }
+
+        async fn references(
+            &self,
+            scope: &CredentialScope,
+        ) -> Result<Vec<CredentialRef>, StoreError> {
+            if let Some(failure) = *self.fails.lock().expect("no test poisons this") {
+                return Err(failure.at(format!(
+                    "tenants/{}/{}",
+                    scope.tenant(),
+                    scope.authority()
+                )));
+            }
+            let mut references = Vec::new();
+            for path in self.held.lock().expect("no test poisons this").keys() {
+                let reference = TenantLayout
+                    .parse(path)
+                    .map_err(|reason| StoreError::Layout { reason })?;
+                if scope.contains(&reference) {
+                    references.push(reference);
+                }
+            }
+            references.sort();
+            Ok(references)
+        }
     }
 
     /// An app with both tenants armed and a store bound, plus the store to assert against.
@@ -2349,6 +5015,143 @@ mod tests {
         );
 
         (app, store)
+    }
+
+    #[tokio::test]
+    async fn a_bound_channel_blocks_instance_deletion_and_survives_label_rename() {
+        use std::collections::BTreeSet;
+
+        use crate::channel::{
+            ChannelDeclarations, ChannelEventSink, ChannelPlacement, ChannelPlacementResolver,
+            ChannelRunError, ChannelRunner, ChannelSupervisor,
+        };
+        use exchange_host::{
+            ChannelId, ChannelRecord, Channels, ConnectionRegistry, MemoryChannels, PrincipalKind,
+        };
+        use tokio_util::sync::CancellationToken;
+
+        struct NoDeclarations;
+        impl ChannelDeclarations for NoDeclarations {
+            fn events(&self, _: &str, _: &str) -> Option<BTreeSet<String>> {
+                None
+            }
+        }
+        struct NoPlacement;
+        impl ChannelPlacementResolver for NoPlacement {
+            fn resolve(&self, _: &ChannelRecord) -> Result<ChannelPlacement, ChannelRunError> {
+                Err(ChannelRunError::NoPlacement)
+            }
+        }
+        struct NeverRuns;
+        #[async_trait]
+        impl ChannelRunner for NeverRuns {
+            async fn run(
+                &self,
+                _: ChannelRecord,
+                _: ChannelPlacement,
+                _: Arc<dyn ChannelEventSink>,
+                _: CancellationToken,
+            ) -> Result<(), ChannelRunError> {
+                unreachable!("the deletion check does not start a channel")
+            }
+        }
+
+        let tenant = Tenant::new("acme").expect("tenant");
+        let instance = InstanceId::parse("11111111-1111-4111-8111-111111111111").expect("instance");
+        let credential = CredentialRef::for_instance(
+            tenant.as_str(),
+            "com.zendesk.api",
+            instance.as_str(),
+            "default",
+            "api_token",
+        )
+        .expect("reference");
+        let store = Arc::new(TestStore::default());
+        store.place(address_path(&credential), 16);
+        let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+        let label = ConnectionLabel::new("primary").expect("label");
+        ConnectionRegistry::assign(registry.as_ref(), &tenant, "zendesk", &label, &instance)
+            .expect("registry row");
+        let records = Arc::new(MemoryChannels::default());
+        records
+            .set(
+                ChannelRecord::new(
+                    ChannelId::new("ch_primary").expect("channel id"),
+                    tenant.clone(),
+                    "zendesk",
+                    instance.clone(),
+                    "events",
+                    ["changed".to_owned()].into_iter().collect(),
+                )
+                .expect("channel record"),
+            )
+            .expect("persist channel");
+        let supervisor = ChannelSupervisor::new(
+            records.clone(),
+            Arc::new(NoDeclarations),
+            Arc::new(NoPlacement),
+            Arc::new(NeverRuns),
+        );
+        let state = AppState::without_identity()
+            .with_credentials(store.clone())
+            .with_connection_registry(registry.clone())
+            .with_channels(supervisor);
+        let principal = Principal::new(PrincipalKind::User, "operator", tenant.clone());
+
+        let response = remove_instance(
+            State(state.clone()),
+            Extension(principal.clone()),
+            Path(("zendesk".to_owned(), label.to_string())),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(store.at(&address_path(&credential)).is_some());
+        assert_eq!(store.deletes(), 0);
+        assert_eq!(
+            ConnectionRegistry::resolve(registry.as_ref(), &tenant, "zendesk", &label)
+                .expect("registry")
+                .as_ref(),
+            Some(&instance)
+        );
+
+        let renamed = ConnectionLabel::new("renamed").expect("label");
+        let response = rename_instance(
+            State(state.clone()),
+            Extension(principal),
+            Path(("zendesk".to_owned(), label.to_string())),
+            Json(LabelBody {
+                label: renamed.to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            records
+                .get(&tenant, &ChannelId::new("ch_primary").expect("channel id"))
+                .expect("channel remains durable")
+                .connection(),
+            &instance
+        );
+        assert_eq!(
+            channel_label(&state, &tenant, "zendesk", &instance).expect("current label"),
+            renamed.to_string()
+        );
+        assert!(store.at(&address_path(&credential)).is_some());
+    }
+
+    /// A connection surface backed by a caller-supplied store and durable evidence journal.
+    fn audited_app(store: Arc<TestStore>, journal: Arc<crate::audit::AuditJournal>) -> Router {
+        super::super::app(
+            AppState::with_development_identity(Arc::new(
+                DevIdentity::from_roster(
+                    "user:alice@acme,user:carol@acme,user:bob@globex,service_account:triage-bot@acme",
+                )
+                .expect("a well-formed roster"),
+            ))
+            .with_credentials(store)
+            .with_audit(journal),
+        )
     }
 
     /// An app with both tenants armed, a credential store **and** a settings store bound.
@@ -2396,7 +5199,8 @@ mod tests {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed),
             ));
-            std::fs::create_dir_all(&path).expect("a scratch directory");
+            exchange_host::ensure_private_state_directory(&path)
+                .expect("an owner-only scratch directory");
             Self(path.canonicalize().expect("a resolvable scratch directory"))
         }
 
@@ -2476,13 +5280,17 @@ mod tests {
     /// Every kind-refusal this host logged while a test ran.
     ///
     /// Hand-rolled rather than pulled in, for [`Scratch`]'s reason: a capturing layer is thirty
-    /// lines and a test dependency is forever. It records `WARN` and above only, which is the level
-    /// the guard refuses at, and it records the event's **fields** — so what a test asserts is the
-    /// line an operator would actually read, including which principal it names.
+    /// lines and a test dependency is forever. It records every event's **fields** — so credential
+    /// tests cover debug output too, while authorization tests can select the warning line an
+    /// operator would actually read, including which principal it names.
     #[derive(Clone, Default)]
     struct Warnings(Arc<Mutex<Vec<String>>>);
 
     impl Warnings {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().expect("no test poisons this").clone()
+        }
+
         /// The recorded lines that are the guard's kind-refusal, in the order they were emitted.
         fn kind_refusals(&self) -> Vec<String> {
             self.0
@@ -2501,10 +5309,6 @@ mod tests {
             event: &tracing::Event<'_>,
             _: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            if *event.metadata().level() > tracing::Level::WARN {
-                return;
-            }
-
             let mut line = String::new();
             event.record(&mut FieldsAsText(&mut line));
             self.0.lock().expect("no test poisons this").push(line);
@@ -2635,6 +5439,134 @@ mod tests {
         );
     }
 
+    /// **X-60's failing-first test.** Evidence attributes each held credential, but is never the
+    /// source of truth for whether the connection exists.
+    #[tokio::test]
+    async fn deleting_supplier_evidence_leaves_the_connection_held_usable_and_unknown() {
+        let scratch = Scratch::new();
+        let audit_path = scratch.join("audit").join("events.sqlite3");
+        let store = Arc::new(TestStore::default());
+        let journal = Arc::new(
+            crate::audit::AuditJournal::bind(&audit_path).expect("a durable evidence journal"),
+        );
+        let app = audited_app(store.clone(), journal.clone());
+
+        let (status, created) = connect_zendesk(&app, "alice").await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let (status, created) = connect_zendesk(&app, "bob").await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let (status, attributed) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::OK, "{attributed}");
+        assert_eq!(
+            attributed["credentials"][0]["last_supplied"]["status"], "known",
+            "successful creation evidence attributes the credential: {attributed}",
+        );
+        assert_eq!(
+            attributed["credentials"][0]["last_supplied"]["principal"],
+            json!({ "kind": "user", "id": "alice" }),
+        );
+        assert!(
+            attributed["credentials"][0]["last_supplied"]["at"]
+                .as_str()
+                .is_some(),
+            "attribution names when the principal supplied it: {attributed}",
+        );
+        assert!(
+            !attributed.to_string().contains(SENTINEL),
+            "supplier evidence is principal-and-time only, never credential-derived: {attributed}",
+        );
+        let (_, globex) = call(&app, "bob", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(
+            globex["credentials"][0]["last_supplied"]["principal"],
+            json!({ "kind": "user", "id": "bob" }),
+            "a target shared by two tenants must be filtered by tenant in the evidence query: {globex}",
+        );
+        assert!(!globex.to_string().contains("alice"));
+
+        // Delete the entire evidence source while preserving the credential store. Rebinding an
+        // empty journal models loss or retention of the record without giving the route a test-only
+        // deletion API.
+        drop(app);
+        drop(journal);
+        std::fs::remove_file(&audit_path).expect("the closed evidence journal can be deleted");
+        let replacement = Arc::new(
+            crate::audit::AuditJournal::bind(&audit_path).expect("a new empty evidence journal"),
+        );
+        let app = audited_app(store.clone(), replacement);
+
+        let (status, unattributed) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::OK, "{unattributed}");
+        assert_eq!(unattributed["credentials"][0]["held"], true);
+        assert_eq!(
+            unattributed["credentials"][0]["last_supplied"],
+            json!({ "status": "unknown" }),
+            "missing evidence must not become evidence that nobody supplied the credential: {unattributed}",
+        );
+
+        // It is usable management state, not a ghost listing: a different human can rotate it,
+        // and that successful write becomes the new current attribution.
+        let (status, rotated) = call(
+            &app,
+            "carol",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": "ROTATED-AFTER-EVIDENCE-LOSS" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{rotated}");
+        assert_eq!(
+            store
+                .at("tenants/acme/com.zendesk.api/api_token")
+                .as_deref(),
+            Some("ROTATED-AFTER-EVIDENCE-LOSS"),
+        );
+        let (_, reattributed) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(
+            reattributed["credentials"][0]["last_supplied"]["principal"],
+            json!({ "kind": "user", "id": "carol" }),
+            "the latest successful supplier, rather than the original creator, is current: {reattributed}",
+        );
+        assert!(!reattributed
+            .to_string()
+            .contains("ROTATED-AFTER-EVIDENCE-LOSS"));
+
+        // A refused later attempt is evidence of a refusal, not evidence of a supplier.
+        let (status, refused) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/zendesk/credentials/zendesk.api_token",
+            Some(json!({ "value": "x".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1) })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{refused}");
+        let (_, still_carol) =
+            call(&app, "alice", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(
+            still_carol["credentials"][0]["last_supplied"]["principal"],
+            json!({ "kind": "user", "id": "carol" }),
+            "only successful writes can become current supplier evidence: {still_carol}",
+        );
+
+        // The same connector in another tenant reveals neither the principal nor the timestamp.
+        let (status, other_tenant) =
+            call(&app, "bob", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::OK, "{other_tenant}");
+        assert_eq!(
+            other_tenant["credentials"][0]["last_supplied"],
+            json!({ "status": "unknown" }),
+        );
+        assert!(!other_tenant.to_string().contains("carol"));
+
+        let (status, anonymous) =
+            call(&app, "", Method::GET, "/api/connections/zendesk", None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{anonymous}");
+        assert!(!anonymous.to_string().contains("carol"));
+    }
+
     /// **The Acceptance's failing-first test.** An authenticated principal of one tenant cannot
     /// read, use or delete another tenant's connection — and the refusal names **its own** address,
     /// never the other tenant's value.
@@ -2715,10 +5647,7 @@ mod tests {
         );
     }
 
-    /// **The X-14 placeholder, asserted.** A second connection to one connector is refused rather
-    /// than silently overwriting the first, and the refusal names the level that would have worked.
-    ///
-    /// Delete this test in the change that lands the `@instances/<uuid>` level.
+    /// The legacy resource remains create-only after X-14; plurality must be explicit and labelled.
     #[tokio::test]
     async fn a_second_connection_to_one_connector_is_refused_rather_than_overwriting() {
         let (app, store) = connected_app();
@@ -2738,16 +5667,14 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::CONFLICT,
-            "a second connection to one connector collides on one address, so it must refuse \
-             rather than overwrite: {body}",
+            "a second legacy create must refuse rather than become an upsert: {body}",
         );
 
         let rendered = body.to_string();
         assert!(
-            rendered.contains("@instances/<uuid>"),
-            "the refusal must name the level that would have worked: {rendered}",
+            rendered.contains("/api/connections/zendesk/instances/<label>"),
+            "the refusal must name the explicit plural resource: {rendered}",
         );
-        assert!(rendered.contains("X-14"), "{rendered}");
         assert!(
             rendered.contains("tenants/acme/com.zendesk.api/api_token"),
             "the refusal must name the address it collides at: {rendered}",
@@ -3022,7 +5949,7 @@ mod tests {
             );
         }
 
-        // And the create refusal is the one X-10 wrote, unchanged — asserted here as well as in
+        // And the legacy create refusal remains create-only — asserted here as well as in
         // `a_second_connection_to_one_connector_is_refused_rather_than_overwriting`, because this
         // is the test that would notice rotation having been wired into `POST`.
         let (status, refusal) = call(
@@ -3035,7 +5962,9 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
         assert!(
-            refusal.to_string().contains("@instances/<uuid>"),
+            refusal
+                .to_string()
+                .contains("/api/connections/zendesk/instances/<label>"),
             "{refusal}"
         );
     }
@@ -5145,6 +8074,37 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn direct_setting_write_cannot_bypass_revisioned_origin_proposal() {
+        let (app, _credentials, settings, _scratch) = configurable_app();
+        let declared =
+            DeclaredSetting::parse("default", "endpoint.origin").expect("released GitLab origin");
+
+        let (status, refused) = call(
+            &app,
+            "alice",
+            Method::PUT,
+            "/api/connections/gitlab/settings/default/endpoint.origin",
+            Some(json!({ "value": "https://gitlab.internal.example" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+        assert_eq!(refused["code"], "connection_plan_required");
+        assert!(!refused.to_string().contains("gitlab.internal.example"));
+        assert_eq!(
+            settings
+                .authority_status_for_instance(
+                    &Tenant::new("acme").expect("tenant"),
+                    "gitlab",
+                    None,
+                    &declared,
+                )
+                .expect("authority status")
+                .state,
+            exchange_host::AuthorityState::Unset,
+        );
+    }
+
     /// **The exfiltration path, refused at the surface a caller can actually reach.**
     ///
     /// `connection_settings.rs::a_setting_cannot_become_the_destination_authority` proves the store
@@ -5294,6 +8254,71 @@ mod tests {
         )
         .await;
         assert_eq!(listed["configurable"], true, "{listed}");
+    }
+
+    /// **X-80's failing-first test.** A client learns a closed setting's choices from one successful
+    /// read, without deliberately offering a bad value to make the write route quote them back.
+    ///
+    /// This asserts the served response rather than consulting `connector_catalog` itself: the
+    /// regression was never that the catalogue lacked the choices, but that this surface threw
+    /// them away after [`host_pinning`] had already recovered them.
+    #[tokio::test]
+    async fn one_settings_get_publishes_the_permitted_value_list() {
+        let (app, _store, _settings, _scratch) = configurable_app();
+
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/intercom/settings",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let row = body["settings"]
+            .as_array()
+            .expect("the response carries settings")
+            .iter()
+            .find(|row| row["service"] == "default" && row["field"] == "endpoint.host")
+            .expect("intercom's declared region setting is present");
+        assert_eq!(
+            row["choices"],
+            json!([
+                "api.intercom.io",
+                "api.eu.intercom.io",
+                "api.au.intercom.io"
+            ]),
+            "a client must be able to build the permitted-value control from this one GET: {body}",
+        );
+    }
+
+    /// The absence half of X-80's response contract: an unrestricted field has no `choices` key.
+    /// An empty array would be ambiguous with a declared empty set and could make a client render a
+    /// control in which nothing can be selected; omission means the ordinary field rules apply.
+    #[tokio::test]
+    async fn a_setting_without_a_closed_set_publishes_no_choices() {
+        let (app, _store, _settings, _scratch) = configurable_app();
+
+        let (status, body) = call(
+            &app,
+            "alice",
+            Method::GET,
+            "/api/connections/zendesk/settings",
+            None,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for row in body["settings"]
+            .as_array()
+            .expect("the response carries settings")
+        {
+            assert!(
+                row.get("choices").is_none(),
+                "a non-closed field must omit `choices` rather than publish an empty list: {row}",
+            );
+        }
     }
 
     /// A tenant sitting on its settings allowance can still replace a value with one the same size.
@@ -5572,8 +8597,8 @@ mod tests {
             assert!(
                 answered["error"]
                     .as_str()
-                    .is_some_and(|error| error.contains("user")),
-                "the refusal must name the kind that would have worked: {answered}",
+                    .is_some_and(|error| error.contains(crate::operator::OPERATOR_SUBJECTS_ENV)),
+                "the refusal must name the operator policy to fix: {answered}",
             );
             assert!(
                 !answered.to_string().contains("attacker-controlled"),
@@ -5688,8 +8713,8 @@ mod tests {
         assert!(
             answered["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("user")),
-            "the refusal must name the kind that would have worked: {answered}",
+                .is_some_and(|error| error.contains(crate::operator::OPERATOR_SUBJECTS_ENV)),
+            "the refusal must name the operator policy to fix: {answered}",
         );
         assert!(
             !answered.to_string().contains(SUBSTITUTED),
@@ -5725,8 +8750,8 @@ mod tests {
         assert!(
             answered["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("user")),
-            "the refusal must name the kind that would have worked: {answered}",
+                .is_some_and(|error| error.contains(crate::operator::OPERATOR_SUBJECTS_ENV)),
+            "the refusal must name the operator policy to fix: {answered}",
         );
         assert!(
             !answered.to_string().contains(SUBSTITUTED),
@@ -5792,7 +8817,7 @@ mod tests {
     ///   of the token that did it. Whether an agent should reach a destructive route at all is the
     ///   grant-shaped question, which is X-13's.
     #[tokio::test]
-    async fn an_agent_may_still_read_a_connection_and_disconnect_one() {
+    async fn an_agent_cannot_read_or_disconnect_operator_owned_connections() {
         let (app, store) = connected_app();
 
         let (status, created) = connect_zendesk(&app, "alice").await;
@@ -5802,8 +8827,8 @@ mod tests {
             let (status, read) = call(&app, "triage-bot", Method::GET, path, None).await;
             assert_eq!(
                 status,
-                StatusCode::OK,
-                "an agent must be able to see whether its tenant is connected: {read}",
+                StatusCode::FORBIDDEN,
+                "connection inventory is operator state under X-91: {read}",
             );
             assert!(
                 !read.to_string().contains(SENTINEL),
@@ -5821,9 +8846,20 @@ mod tests {
         .await;
         assert_eq!(
             status,
-            StatusCode::NO_CONTENT,
-            "destroying a connection is the grant-shaped question (X-13), not the kind-shaped one",
+            StatusCode::FORBIDDEN,
+            "destroying credential-bearing state requires operator authority",
         );
+        assert!(!store.addresses().is_empty(), "{:?}", store.addresses());
+
+        let (status, _) = call(
+            &app,
+            "alice",
+            Method::DELETE,
+            "/api/connections/zendesk",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
         assert!(store.addresses().is_empty(), "{:?}", store.addresses());
     }
 
@@ -5985,8 +9021,9 @@ mod tests {
     /// which drives address-shaped and traversing values straight at the route.
     #[test]
     fn no_route_here_accepts_an_address() {
-        /// What a path here may name, each because the catalogue is what resolves it.
-        const KEYS: &[&str] = &["connector", "credential", "service", "field"];
+        /// What a path here may name. `label` is resolved only through the principal tenant's
+        /// naming overlay; every other entry is resolved through the catalogue.
+        const KEYS: &[&str] = &["connector", "credential", "service", "field", "label"];
 
         for route in MODULE.routes {
             for parameter in route
@@ -6107,8 +9144,8 @@ mod tests {
         );
     }
 
-    /// Every route requires a principal, and the ones that require a particular **kind** are named
-    /// here beside the constant each is declared with.
+    /// **X-91/X-125.** Every connection mutation is administrative; the value-free plan read is
+    /// deliberately available to any authenticated human at the route-table boundary.
     ///
     /// Asserted here as well as in the surface-wide enumeration, because that one compares against a
     /// list somebody edits and this one cannot be satisfied by editing a list: [`Access::Anonymous`]
@@ -6126,37 +9163,24 @@ mod tests {
     /// [`tests::an_agent_may_still_read_a_connection_and_disconnect_one`] is the behavioural half of
     /// that, since this test alone cannot tell a path gated for one verb from one gated whole.
     #[test]
-    fn every_route_here_requires_a_principal_and_the_kind_gated_ones_are_named() {
-        let gated: Vec<(&str, &[PrincipalKind])> = MODULE
-            .routes
-            .iter()
-            .filter_map(|route| match route.access {
-                Access::Principal => None,
-                Access::PrincipalOfKind(kinds) => Some((route.path, kinds)),
-                Access::Anonymous => panic!(
-                    "a connection is tenant data and answers no caller this host cannot identify: \
-                     {}",
-                    route.path,
-                ),
-            })
-            .collect();
-
+    fn every_connection_route_declares_operator_authority() {
+        let mut human_reads = Vec::new();
+        for route in MODULE.routes {
+            if route.access == Access::User {
+                human_reads.push(route.path);
+            } else {
+                assert_eq!(
+                    route.access,
+                    Access::Operator,
+                    "{} must remain operator-only",
+                    route.path
+                );
+            }
+        }
         assert_eq!(
-            gated,
-            vec![
-                ("/api/connections/{connector}", MAY_SUPPLY_A_CREDENTIAL),
-                (
-                    "/api/connections/{connector}/credentials/{credential}",
-                    MAY_SUPPLY_A_CREDENTIAL,
-                ),
-                (
-                    "/api/connections/{connector}/settings/{service}/{field}",
-                    MAY_CONFIGURE,
-                ),
-            ],
-            "who may reach a tenant's connections changed; every entry is a decision that belongs \
-             beside the constant it names rather than only in a route table, and these are what \
-             are gated: {gated:?}",
+            human_reads,
+            vec!["/api/connections/{connector}/plan"],
+            "only the value-free connection-plan read is human-visible"
         );
     }
 
@@ -6230,9 +9254,11 @@ mod tests {
         use super::*;
 
         use std::path::PathBuf;
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
         use exchange_host::CredentialStore;
+
+        use crate::credential_acquisition::{AcquisitionBinding, AcquisitionBindings};
 
         /// A scratch directory under the system temporary directory, removed on drop.
         ///
@@ -6271,6 +9297,1298 @@ mod tests {
                 ))
                 .with_credentials(store.secrets()),
             )
+        }
+
+        struct RecordingAcquirer {
+            password_calls: Arc<AtomicU64>,
+            refresh_calls: Arc<AtomicU64>,
+            refusal: Option<AcquisitionRefusal>,
+        }
+
+        #[async_trait]
+        impl CredentialAcquirer for RecordingAcquirer {
+            async fn redeem_password(
+                &self,
+                _: PasswordRedemption<'_>,
+            ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+                self.password_calls.fetch_add(1, Ordering::Relaxed);
+                if let Some(refusal) = self.refusal {
+                    return Err(refusal);
+                }
+                Ok(AcquiredCredential::new(
+                    Secret::new("access-one"),
+                    Some(Secret::new("refresh-one")),
+                    Some(1_900_000_000),
+                ))
+            }
+
+            async fn redeem_refresh(
+                &self,
+                _: RefreshRedemption<'_>,
+            ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+                self.refresh_calls.fetch_add(1, Ordering::Relaxed);
+                if let Some(refusal) = self.refusal {
+                    return Err(refusal);
+                }
+                Ok(AcquiredCredential::new(
+                    Secret::new("access-two"),
+                    Some(Secret::new("refresh-two")),
+                    Some(1_900_003_600),
+                ))
+            }
+        }
+
+        fn acquisition_app(
+            store: &CredentialStore,
+            posture: AuthPosture,
+            refusal: Option<AcquisitionRefusal>,
+            audit: Option<Arc<crate::audit::AuditJournal>>,
+        ) -> (Router, Arc<AtomicU64>, Arc<AtomicU64>) {
+            let password_calls = Arc::new(AtomicU64::new(0));
+            let refresh_calls = Arc::new(AtomicU64::new(0));
+            let performer = Arc::new(RecordingAcquirer {
+                password_calls: Arc::clone(&password_calls),
+                refresh_calls: Arc::clone(&refresh_calls),
+                refusal,
+            });
+            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
+                "babelforce",
+                "babelforce.access_token",
+                AuthHazard::ResourceOwnerSecretShared,
+                performer,
+            )])
+            .expect("one acquisition binding");
+            let mut state = AppState::with_development_identity(Arc::new(
+                DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+            ))
+            .with_credentials(store.secrets())
+            .with_credential_acquisition(posture, Arc::new(bindings));
+            if let Some(audit) = audit {
+                state = state.with_audit(audit);
+            }
+            let app = super::super::super::app(state);
+            (app, password_calls, refresh_calls)
+        }
+
+        #[tokio::test]
+        async fn fail_closed_posture_refuses_before_the_performer_is_called() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let (app, calls, _) = acquisition_app(&store, AuthPosture::fail_closed(), None, None);
+
+            let (status, refusal) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": {
+                        "username": "alice@example.test",
+                        "password": "never-persist-this"
+                    }
+                })),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+            assert_eq!(calls.load(Ordering::Relaxed), 0);
+            assert!(!refusal.to_string().contains("never-persist-this"));
+            let scope = CredentialScope::new("acme", "com.babelforce.api")
+                .expect("babelforce credential scope");
+            assert!(
+                store
+                    .secrets()
+                    .references(&scope)
+                    .await
+                    .expect("empty store inventory")
+                    .is_empty(),
+                "posture refusal must not write acquisition state"
+            );
+        }
+
+        #[tokio::test]
+        async fn password_acquisition_persists_only_tokens_and_refresh_rotates_the_pair() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (app, password_calls, refresh_calls) = acquisition_app(&store, posture, None, None);
+
+            let (status, created) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": {
+                        "username": "alice@example.test",
+                        "password": "never-persist-this"
+                    }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+            assert_eq!(password_calls.load(Ordering::Relaxed), 1);
+            assert!(!created.to_string().contains("never-persist-this"));
+
+            let access =
+                CredentialRef::new("acme", "com.babelforce.api", "default", "access_token")
+                    .expect("ordinary access-token address");
+            let refresh = CredentialRef::new(
+                "acme",
+                "com.babelforce.api",
+                ACQUISITION_SERVICE,
+                REFRESH_TOKEN_LEAF,
+            )
+            .expect("refresh companion address");
+            let expiry = CredentialRef::new(
+                "acme",
+                "com.babelforce.api",
+                ACQUISITION_SERVICE,
+                EXPIRES_AT_LEAF,
+            )
+            .expect("expiry companion address");
+            let managed = CredentialRef::new(
+                "acme",
+                "com.babelforce.api",
+                ACQUISITION_SERVICE,
+                MANAGED_LEAF,
+            )
+            .expect("managed companion address");
+            let secrets = store.secrets();
+            assert_eq!(
+                secrets
+                    .get(&access)
+                    .await
+                    .expect("stored access")
+                    .expose_secret(),
+                "access-one"
+            );
+            assert_eq!(
+                secrets
+                    .get(&refresh)
+                    .await
+                    .expect("stored refresh")
+                    .expose_secret(),
+                "refresh-one"
+            );
+            assert_eq!(
+                secrets
+                    .get(&expiry)
+                    .await
+                    .expect("stored expiry")
+                    .expose_secret(),
+                "1900000000"
+            );
+            assert_eq!(
+                secrets
+                    .get(&managed)
+                    .await
+                    .expect("managed marker")
+                    .expose_secret(),
+                MANAGED_VALUE,
+            );
+            let on_disk = std::fs::read_to_string(store.path()).expect("credential store file");
+            assert!(!on_disk.contains("never-persist-this"));
+            assert!(!on_disk.contains("alice@example.test"));
+
+            let (status, refused) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token",
+                Some(json!({ "value": "pasted-over-managed-token" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "acquired_credential_requires_refresh");
+            assert_eq!(
+                secrets
+                    .get(&access)
+                    .await
+                    .expect("unchanged managed access")
+                    .expose_secret(),
+                "access-one",
+            );
+
+            let (status, refreshed) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token?acquire=refresh",
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{refreshed}");
+            assert_eq!(refresh_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                secrets
+                    .get(&access)
+                    .await
+                    .expect("rotated access")
+                    .expose_secret(),
+                "access-two"
+            );
+            assert_eq!(
+                secrets
+                    .get(&refresh)
+                    .await
+                    .expect("rotated refresh")
+                    .expose_secret(),
+                "refresh-two"
+            );
+            assert_eq!(
+                secrets
+                    .get(&expiry)
+                    .await
+                    .expect("rotated expiry")
+                    .expose_secret(),
+                "1900003600"
+            );
+
+            drop(app);
+            let restarted = file_backed_app(&store);
+            let (status, refused) = call(
+                &restarted,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token",
+                Some(json!({ "value": "restart-must-not-orphan-managed-state" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "acquired_credential_requires_refresh");
+
+            let (status, removed) = call(
+                &restarted,
+                "alice",
+                Method::DELETE,
+                "/api/connections/babelforce",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{removed}");
+            let scope = CredentialScope::new("acme", "com.babelforce.api")
+                .expect("babelforce credential scope");
+            assert!(
+                secrets
+                    .references(&scope)
+                    .await
+                    .expect("post-removal inventory")
+                    .is_empty(),
+                "disconnect must remove the access, refresh, and expiry records together",
+            );
+        }
+
+        #[tokio::test]
+        async fn mfa_and_wrong_password_are_distinct_value_free_refusals() {
+            for (refusal, expected_status, expected_code) in [
+                (
+                    AcquisitionRefusal::MfaRequired,
+                    StatusCode::CONFLICT,
+                    "mfa_required",
+                ),
+                (
+                    AcquisitionRefusal::CredentialsRejected,
+                    StatusCode::UNAUTHORIZED,
+                    "credentials_rejected",
+                ),
+            ] {
+                let scratch = Scratch::new();
+                let store = scratch.store();
+                let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+                let (app, _, _) = acquisition_app(&store, posture, Some(refusal), None);
+                let (status, answer) = call(
+                    &app,
+                    "alice",
+                    Method::POST,
+                    "/api/connections/babelforce?acquire=password",
+                    Some(json!({
+                        "acquisition": {
+                            "username": "alice@example.test",
+                            "password": "rejected-password"
+                        }
+                    })),
+                )
+                .await;
+                assert_eq!(status, expected_status, "{answer}");
+                assert_eq!(answer["code"], expected_code);
+                assert!(!answer.to_string().contains("rejected-password"));
+            }
+        }
+
+        #[tokio::test]
+        async fn acquisition_refusal_and_every_captured_log_field_exclude_presented_credentials() {
+            use tracing_subscriber::layer::SubscriberExt as _;
+
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (app, _, _) = acquisition_app(
+                &store,
+                posture,
+                Some(AcquisitionRefusal::CredentialsRejected),
+                None,
+            );
+            let events = Warnings::default();
+            let _capture = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(events.clone()),
+            );
+            let username = "log-secret-user@example.test";
+            let password = "log-secret-password";
+            let (status, answer) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": { "username": username, "password": password }
+                })),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{answer}");
+            for rendered in std::iter::once(answer.to_string()).chain(events.lines()) {
+                assert!(
+                    !rendered.contains(username),
+                    "credential leaked: {rendered}"
+                );
+                assert!(
+                    !rendered.contains(password),
+                    "credential leaked: {rendered}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn acquired_credentials_are_initiated_by_a_human_but_not_supplied_by_one() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let scratch = Scratch::new();
+            std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only audit scratch directory");
+            let store = scratch.store();
+            let journal = Arc::new(
+                crate::audit::AuditJournal::bind(scratch.0.join("audit.sqlite3"))
+                    .expect("fixture audit journal"),
+            );
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (app, _, _) = acquisition_app(&store, posture, None, Some(Arc::clone(&journal)));
+
+            let (status, created) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": {
+                        "username": "alice@example.test",
+                        "password": "not-a-supplier-value"
+                    }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{created}");
+
+            let (status, shown) = call(
+                &app,
+                "alice",
+                Method::GET,
+                "/api/connections/babelforce",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{shown}");
+            let provenance = &shown["credentials"][0]["last_supplied"];
+            assert_eq!(provenance["status"], "acquired");
+            assert_eq!(
+                provenance["initiated_by"],
+                json!({ "kind": "user", "id": "alice" }),
+            );
+            assert!(provenance.get("principal").is_none());
+            assert!(provenance["at"].as_str().is_some());
+            let records = journal
+                .by_target("connection", "babelforce", 20)
+                .expect("acquisition evidence");
+            assert!(records.iter().any(|record| {
+                record.action == crate::audit::Action::CredentialAcquired
+                    && record.outcome == crate::audit::Outcome::Succeeded
+            }));
+        }
+
+        #[tokio::test]
+        async fn a_managed_marker_survives_without_refresh_or_expiry_and_blocks_static_overwrite() {
+            struct AccessOnly;
+
+            #[async_trait]
+            impl CredentialAcquirer for AccessOnly {
+                async fn redeem_password(
+                    &self,
+                    _: PasswordRedemption<'_>,
+                ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+                    Ok(AcquiredCredential::new(
+                        Secret::new("access-only"),
+                        None,
+                        None,
+                    ))
+                }
+
+                async fn redeem_refresh(
+                    &self,
+                    _: RefreshRedemption<'_>,
+                ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+                    Err(AcquisitionRefusal::CredentialsRejected)
+                }
+            }
+
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
+                "babelforce",
+                "babelforce.access_token",
+                AuthHazard::ResourceOwnerSecretShared,
+                Arc::new(AccessOnly),
+            )])
+            .expect("one acquisition binding");
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(store.secrets())
+                .with_credential_acquisition(
+                    AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]),
+                    Arc::new(bindings),
+                ),
+            );
+            let (status, answer) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": { "username": "alice", "password": "one-use" }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+            drop(app);
+
+            let restarted = file_backed_app(&store);
+            let (status, refused) = call(
+                &restarted,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token",
+                Some(json!({ "value": "must-not-overwrite" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(refused["code"], "acquired_credential_requires_refresh");
+
+            let scope =
+                CredentialScope::new("acme", "com.babelforce.api").expect("babelforce scope");
+            let references = store
+                .secrets()
+                .references(&scope)
+                .await
+                .expect("managed inventory");
+            assert_eq!(
+                references.len(),
+                2,
+                "access plus the managed marker: {references:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_post_refresh_store_failure_is_audited_as_non_retryable_credential_loss() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            struct FailCommitAfterProbe {
+                inner: Arc<dyn SecretStore>,
+                applies: AtomicU64,
+            }
+
+            #[async_trait]
+            impl SecretStore for FailCommitAfterProbe {
+                async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+                    self.inner.get(reference).await
+                }
+
+                async fn put(
+                    &self,
+                    reference: &CredentialRef,
+                    secret: &Secret,
+                ) -> Result<(), StoreError> {
+                    self.inner.put(reference, secret).await
+                }
+
+                async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+                    self.inner.delete(reference).await
+                }
+
+                async fn references(
+                    &self,
+                    scope: &CredentialScope,
+                ) -> Result<Vec<CredentialRef>, StoreError> {
+                    self.inner.references(scope).await
+                }
+
+                async fn apply(&self, batch: &SecretBatch) -> Result<(), StoreError> {
+                    if self.applies.fetch_add(1, Ordering::Relaxed) == 0 {
+                        return self.inner.apply(batch).await;
+                    }
+                    Err(StoreError::Unreachable {
+                        path: "test refresh commit".to_owned(),
+                        reason: "the post-vendor commit fails deliberately".to_owned(),
+                    })
+                }
+            }
+
+            let scratch = Scratch::new();
+            std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o700))
+                .expect("owner-only audit scratch directory");
+            let store = scratch.store();
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (create_app, _, _) = acquisition_app(&store, posture.clone(), None, None);
+            let (status, answer) = call(
+                &create_app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": { "username": "alice", "password": "one-use" }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+            drop(create_app);
+
+            let performer = Arc::new(RecordingAcquirer {
+                password_calls: Arc::new(AtomicU64::new(0)),
+                refresh_calls: Arc::new(AtomicU64::new(0)),
+                refusal: None,
+            });
+            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
+                "babelforce",
+                "babelforce.access_token",
+                AuthHazard::ResourceOwnerSecretShared,
+                performer,
+            )])
+            .expect("one acquisition binding");
+            let journal = Arc::new(
+                crate::audit::AuditJournal::bind(scratch.0.join("refresh-audit.sqlite3"))
+                    .expect("fixture audit journal"),
+            );
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(Arc::new(FailCommitAfterProbe {
+                    inner: store.secrets(),
+                    applies: AtomicU64::new(0),
+                }))
+                .with_credential_acquisition(posture, Arc::new(bindings))
+                .with_audit(Arc::clone(&journal)),
+            );
+            let (status, lost) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token?acquire=refresh",
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{lost}");
+            assert_eq!(lost["code"], "refresh_commit_lost");
+            assert_eq!(lost["retryable"], false);
+            assert_eq!(lost["credential_state"], "uncertain");
+            let records = journal
+                .by_target("credential", "babelforce/babelforce.access_token", 20)
+                .expect("refresh audit evidence");
+            assert!(records.iter().any(|record| {
+                record.action == crate::audit::Action::CredentialRefreshCommitLost
+                    && record.outcome == crate::audit::Outcome::Refused
+            }));
+        }
+
+        #[tokio::test]
+        async fn refresh_reserves_the_largest_valid_rotation_before_the_vendor_call() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let posture = AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]);
+            let (app, _, refresh_calls) = acquisition_app(&store, posture, None, None);
+            let (status, answer) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce?acquire=password",
+                Some(json!({
+                    "acquisition": { "username": "alice", "password": "one-use" }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+
+            let secrets = store.secrets();
+            for index in 0..6 {
+                let reference = CredentialRef::new(
+                    "acme",
+                    "com.zendesk.api",
+                    &format!("filler-{index}"),
+                    "token",
+                )
+                .expect("filler credential address");
+                secrets
+                    .put(
+                        &reference,
+                        &Secret::new("x".repeat(MAX_CREDENTIAL_VALUE_BYTES)),
+                    )
+                    .await
+                    .expect("filler credential");
+            }
+
+            let (status, refused) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/babelforce/credentials/babelforce.access_token?acquire=refresh",
+                Some(json!({})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert_eq!(
+                refresh_calls.load(Ordering::Relaxed),
+                0,
+                "local quota refusal must precede vendor-side refresh rotation",
+            );
+        }
+
+        #[tokio::test]
+        async fn instance_migrations_move_and_remove_acquisition_companions_with_the_access_token()
+        {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let performer = Arc::new(RecordingAcquirer {
+                password_calls: Arc::new(AtomicU64::new(0)),
+                refresh_calls: Arc::new(AtomicU64::new(0)),
+                refusal: None,
+            });
+            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
+                "babelforce",
+                "babelforce.access_token",
+                AuthHazard::ResourceOwnerSecretShared,
+                performer,
+            )])
+            .expect("one acquisition binding");
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(store.secrets())
+                .with_connection_registry(registry.clone())
+                .with_credential_acquisition(
+                    AuthPosture::allowing([AuthHazard::ResourceOwnerSecretShared]),
+                    Arc::new(bindings),
+                ),
+            );
+            let body = || {
+                Some(json!({
+                    "acquisition": {
+                        "username": "alice@example.test",
+                        "password": "migration-password"
+                    }
+                }))
+            };
+
+            let (status, answer) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce/instances/prod?acquire=password",
+                body(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+            drop(app);
+
+            // No acquisition binding after restart. The stored marker/address convention must be
+            // sufficient to migrate the first connection's companions while a static second
+            // connection is added.
+            let restarted = instance_app(&store, registry);
+            let (status, answer) = call(
+                &restarted,
+                "alice",
+                Method::POST,
+                "/api/connections/babelforce/instances/sandbox",
+                Some(json!({
+                    "credentials": { "babelforce.access_token": "static-second" }
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{answer}");
+
+            let scope = CredentialScope::new("acme", "com.babelforce.api")
+                .expect("babelforce credential scope");
+            let secrets = store.secrets();
+            let references = secrets
+                .references(&scope)
+                .await
+                .expect("two-instance acquisition inventory");
+            assert_eq!(references.len(), 5, "{references:?}");
+            assert!(references
+                .iter()
+                .all(|reference| reference.instance().is_some()));
+
+            let (status, removed) = call(
+                &restarted,
+                "alice",
+                Method::DELETE,
+                "/api/connections/babelforce/instances/sandbox",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{removed}");
+            let references = secrets
+                .references(&scope)
+                .await
+                .expect("collapsed acquisition inventory");
+            assert_eq!(references.len(), 4, "{references:?}");
+            assert!(references
+                .iter()
+                .all(|reference| reference.instance().is_none()));
+
+            let (status, removed) = call(
+                &restarted,
+                "alice",
+                Method::DELETE,
+                "/api/connections/babelforce/instances/prod",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{removed}");
+            assert!(secrets
+                .references(&scope)
+                .await
+                .expect("removed acquisition inventory")
+                .is_empty());
+        }
+
+        fn instance_app(
+            store: &CredentialStore,
+            registry: Arc<exchange_host::MemoryConnectionRegistry>,
+        ) -> Router {
+            super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(store.secrets())
+                .with_connection_registry(registry),
+            )
+        }
+
+        fn configurable_instance_app(
+            credentials: &CredentialStore,
+            registry: Arc<exchange_host::MemoryConnectionRegistry>,
+            settings: Arc<exchange_host::SettingsStore>,
+        ) -> Router {
+            super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(credentials.secrets())
+                .with_connection_registry(registry)
+                .with_settings(settings),
+            )
+        }
+
+        struct NoAtomicBatch(Arc<dyn SecretStore>);
+
+        #[async_trait]
+        impl SecretStore for NoAtomicBatch {
+            async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+                self.0.get(reference).await
+            }
+
+            async fn put(
+                &self,
+                reference: &CredentialRef,
+                secret: &Secret,
+            ) -> Result<(), StoreError> {
+                self.0.put(reference, secret).await
+            }
+
+            async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+                self.0.delete(reference).await
+            }
+
+            async fn references(
+                &self,
+                scope: &CredentialScope,
+            ) -> Result<Vec<CredentialRef>, StoreError> {
+                self.0.references(scope).await
+            }
+
+            async fn apply(&self, _: &SecretBatch) -> Result<(), StoreError> {
+                Err(StoreError::Unsupported {
+                    operation: "atomic batch".to_owned(),
+                    reason: "this test binding deliberately cannot guarantee one".to_owned(),
+                })
+            }
+        }
+
+        /// A Vault-shaped port for compatibility: point operations work, while the default
+        /// `references` and `apply` methods refuse because the backend cannot prove those policies.
+        struct PointOnly(Arc<dyn SecretStore>);
+
+        #[async_trait]
+        impl SecretStore for PointOnly {
+            async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+                self.0.get(reference).await
+            }
+
+            async fn put(
+                &self,
+                reference: &CredentialRef,
+                secret: &Secret,
+            ) -> Result<(), StoreError> {
+                self.0.put(reference, secret).await
+            }
+
+            async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+                self.0.delete(reference).await
+            }
+        }
+
+        struct FailFirstBatch {
+            inner: Arc<dyn SecretStore>,
+            failed: AtomicBool,
+        }
+
+        #[async_trait]
+        impl SecretStore for FailFirstBatch {
+            async fn get(&self, reference: &CredentialRef) -> Result<Secret, StoreError> {
+                self.inner.get(reference).await
+            }
+
+            async fn put(
+                &self,
+                reference: &CredentialRef,
+                secret: &Secret,
+            ) -> Result<(), StoreError> {
+                self.inner.put(reference, secret).await
+            }
+
+            async fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+                self.inner.delete(reference).await
+            }
+
+            async fn references(
+                &self,
+                scope: &CredentialScope,
+            ) -> Result<Vec<CredentialRef>, StoreError> {
+                self.inner.references(scope).await
+            }
+
+            async fn apply(&self, batch: &SecretBatch) -> Result<(), StoreError> {
+                if !self.failed.swap(true, Ordering::Relaxed) {
+                    return Err(StoreError::Unreachable {
+                        path: "test atomic batch".to_owned(),
+                        reason: "the first attempt fails deliberately".to_owned(),
+                    });
+                }
+                self.inner.apply(batch).await
+            }
+        }
+
+        /// **X-14's motivating failing-first test at the real store boundary.** The second create
+        /// migrates the first value and writes the second in one checked batch; neither overwrites
+        /// the other. Deleting one atomically unqualifies the survivor without changing its bytes.
+        #[tokio::test]
+        async fn a_second_instance_does_not_overwrite_the_first_in_the_store() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = instance_app(&store, registry);
+
+            let (status, first) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/prod",
+                Some(json!({ "credentials": { "zendesk.api_token": SENTINEL } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{first}");
+            assert_eq!(
+                first["credentials"][0],
+                "tenants/acme/com.zendesk.api/api_token"
+            );
+
+            let second_value = "SECOND-SENTINEL-NOT-A-REAL-SECRET";
+            let (status, second) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": second_value } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{second}");
+
+            let (status, prod) = call(
+                &app,
+                "alice",
+                Method::GET,
+                "/api/connections/zendesk/instances/prod",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{prod}");
+            let prod_path = prod["credentials"][0].as_str().expect("prod address");
+            let sandbox_path = second["credentials"][0].as_str().expect("sandbox address");
+            assert_ne!(prod_path, sandbox_path);
+
+            let prod_id = prod_path.split('/').nth(4).expect("instance segment");
+            let sandbox_id = sandbox_path.split('/').nth(4).expect("instance segment");
+            let prod_ref = CredentialRef::for_instance(
+                "acme",
+                "com.zendesk.api",
+                prod_id,
+                "default",
+                "api_token",
+            )
+            .expect("prod reference");
+            let sandbox_ref = CredentialRef::for_instance(
+                "acme",
+                "com.zendesk.api",
+                sandbox_id,
+                "default",
+                "api_token",
+            )
+            .expect("sandbox reference");
+            assert_eq!(
+                store
+                    .secrets()
+                    .get(&prod_ref)
+                    .await
+                    .expect("first survives")
+                    .expose_secret(),
+                SENTINEL,
+            );
+            assert_eq!(
+                store
+                    .secrets()
+                    .get(&sandbox_ref)
+                    .await
+                    .expect("second lands separately")
+                    .expose_secret(),
+                second_value,
+            );
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::DELETE,
+                "/api/connections/zendesk/instances/sandbox",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            let legacy = CredentialRef::new("acme", "com.zendesk.api", "default", "api_token")
+                .expect("legacy reference");
+            assert_eq!(
+                store
+                    .secrets()
+                    .get(&legacy)
+                    .await
+                    .expect("survivor is unqualified")
+                    .expose_secret(),
+                SENTINEL,
+            );
+            assert!(store
+                .secrets()
+                .get(&sandbox_ref)
+                .await
+                .unwrap_err()
+                .is_not_found());
+        }
+
+        /// X-14 widens the file-store surface; it does not revoke the sole-connection contract of a
+        /// point-only backend. Without a registry, create and listing use the legacy address walk.
+        #[tokio::test]
+        async fn a_point_only_store_keeps_sole_legacy_connections_working() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(Arc::new(PointOnly(store.secrets()))),
+            );
+
+            let (status, body) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let (status, body) = call(&app, "alice", Method::GET, "/api/connections", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["connections"].as_array().map(Vec::len), Some(1));
+            assert_eq!(body["connections"][0]["label"], Value::Null);
+            assert_eq!(body["connections"][0]["instance"], Value::Null);
+        }
+
+        /// An unsupported batch refuses the migration and leaves the first credential byte-for-byte
+        /// at its legacy address. Point writes are not a fallback.
+        #[tokio::test]
+        async fn a_failed_or_unsupported_batch_leaves_the_first_connection_untouched() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(Arc::new(NoAtomicBatch(store.secrets())))
+                .with_connection_registry(registry),
+            );
+            let (status, body) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/zendesk/label",
+                Some(json!({ "label": "prod" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            let legacy = CredentialRef::new("acme", "com.zendesk.api", "default", "api_token")
+                .expect("legacy reference");
+            assert_eq!(
+                store
+                    .secrets()
+                    .get(&legacy)
+                    .await
+                    .expect("the first stayed put")
+                    .expose_secret(),
+                SENTINEL,
+            );
+            let scope = CredentialScope::new("acme", "com.zendesk.api").expect("scope");
+            let references = store.secrets().references(&scope).await.expect("inventory");
+            assert_eq!(references, vec![legacy]);
+        }
+
+        /// A registry row prepared for a credential batch is not yet a connection. A transient
+        /// refusal removes it, so retry is a fresh create rather than a duplicate-label conflict
+        /// or an inert connection visible to another caller.
+        #[tokio::test]
+        async fn a_failed_atomic_migration_rolls_back_its_label_and_can_be_retried() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = super::super::super::app(
+                AppState::with_development_identity(Arc::new(
+                    DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+                ))
+                .with_credentials(Arc::new(FailFirstBatch {
+                    inner: store.secrets(),
+                    failed: AtomicBool::new(false),
+                }))
+                .with_connection_registry(registry.clone()),
+            );
+            let (status, body) = connect_zendesk(&app, "alice").await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::PUT,
+                "/api/connections/zendesk/label",
+                Some(json!({ "label": "prod" })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+
+            let tenant = Tenant::new("acme").expect("plain tenant");
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+            let after_refusal =
+                exchange_host::ConnectionRegistry::entries(registry.as_ref(), &tenant, "zendesk")
+                    .expect("registry rows");
+            assert_eq!(
+                after_refusal.len(),
+                1,
+                "only the established label survives"
+            );
+            assert_eq!(after_refusal[0].label.as_str(), "prod");
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::POST,
+                "/api/connections/zendesk/instances/sandbox",
+                Some(json!({ "credentials": { "zendesk.api_token": "SECOND" } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let after_retry =
+                exchange_host::ConnectionRegistry::entries(registry.as_ref(), &tenant, "zendesk")
+                    .expect("registry rows");
+            assert_eq!(after_retry.len(), 2);
+            assert!(after_retry
+                .iter()
+                .any(|entry| entry.label.as_str() == "sandbox"));
+        }
+
+        /// Deleting the naming overlay cannot hide connections: existence and UUIDs come back from
+        /// the credential inventory, while labels render `null`.
+        #[tokio::test]
+        async fn deleting_every_label_still_lists_every_held_uuid_unnamed() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = instance_app(&store, registry.clone());
+            for (label, value) in [("prod", SENTINEL), ("sandbox", "SECOND-SENTINEL")] {
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::POST,
+                    &format!("/api/connections/zendesk/instances/{label}"),
+                    Some(json!({ "credentials": { "zendesk.api_token": value } })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "{body}");
+            }
+
+            let tenant = Tenant::new("acme").expect("plain tenant");
+            for label in ["prod", "sandbox"] {
+                let label = ConnectionLabel::new(label).expect("valid label");
+                exchange_host::ConnectionRegistry::remove(
+                    registry.as_ref(),
+                    &tenant,
+                    "zendesk",
+                    &label,
+                )
+                .expect("delete naming row only");
+            }
+
+            let (status, body) = call(&app, "alice", Method::GET, "/api/connections", None).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let listed = body["connections"].as_array().expect("connections array");
+            assert_eq!(listed.len(), 2, "{body}");
+            for connection in listed {
+                assert!(connection["label"].is_null(), "{connection}");
+                assert!(connection["instance"].as_str().is_some(), "{connection}");
+            }
+        }
+
+        /// A label lookup is scoped by the principal tenant before the held UUID is checked.
+        #[tokio::test]
+        async fn tenant_a_cannot_reach_tenant_bs_instance_by_its_label() {
+            let scratch = Scratch::new();
+            let store = scratch.store();
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = instance_app(&store, registry);
+            let (status, body) = call(
+                &app,
+                "bob",
+                Method::POST,
+                "/api/connections/zendesk/instances/foreign",
+                Some(json!({ "credentials": { "zendesk.api_token": SENTINEL } })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+
+            let (status, body) = call(
+                &app,
+                "alice",
+                Method::GET,
+                "/api/connections/zendesk/instances/foreign",
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert!(!body.to_string().contains("globex"), "{body}");
+        }
+
+        /// The non-secret connection settings move with the first UUID and remain isolated from
+        /// the second; otherwise two Zendesk credentials would still target one subdomain.
+        #[tokio::test]
+        async fn two_instances_keep_distinct_connection_settings() {
+            let scratch = Scratch::new();
+            let credentials = scratch.store();
+            let settings = Arc::new(
+                exchange_host::SettingsStore::bind(scratch.0.join("state").join("settings"))
+                    .expect("settings store"),
+            );
+            let registry = Arc::new(exchange_host::MemoryConnectionRegistry::default());
+            let app = configurable_instance_app(&credentials, registry, settings.clone());
+
+            for label in ["prod", "sandbox"] {
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::POST,
+                    &format!("/api/connections/zendesk/instances/{label}"),
+                    Some(
+                        json!({ "credentials": { "zendesk.api_token": format!("{label}-token") } }),
+                    ),
+                )
+                .await;
+                assert_eq!(status, StatusCode::CREATED, "{body}");
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::PUT,
+                    &format!(
+                        "/api/connections/zendesk/instances/{label}/settings/default/endpoint.subdomain"
+                    ),
+                    Some(json!({ "value": label })),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+            }
+
+            for label in ["prod", "sandbox"] {
+                let (status, body) = call(
+                    &app,
+                    "alice",
+                    Method::GET,
+                    &format!("/api/connections/zendesk/instances/{label}"),
+                    None,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                let path = body["credentials"][0].as_str().expect("address");
+                let id = InstanceId::parse(path.split('/').nth(4).expect("instance"))
+                    .expect("instance id");
+                assert_eq!(
+                    exchange_host::ConfigStore::get_for_instance(
+                        settings.as_ref(),
+                        "acme",
+                        "zendesk",
+                        Some(&id),
+                        "default",
+                        exchange_host::Field::Endpoint("subdomain"),
+                    )
+                    .as_deref(),
+                    Some(label),
+                );
+            }
         }
 
         /// Create, list, read and delete, all the way down to a file on disk — and the credential

@@ -1,7 +1,7 @@
 ---
 id: X-59
 title: "A deployment can hold one tenant and stop asking which"
-status: ready
+status: done
 priority: 2
 epic: local-identity
 design: docs/designs/local-identity.md
@@ -44,7 +44,11 @@ So: one tenant, **named once at startup**, and every principal is of it. The add
       principal, establishes an HttpOnly session cookie and returns to the console; it never prints
       the handle or puts the token in a readable body. Explicit rosters keep the bearer exchange.
       → `tests::dev_signin_is_a_real_browser_action_and_not_an_instruction_page`.
-- [ ] A deployment declares one tenant at startup and every principal it resolves is of that tenant.
+- [x] A deployment declares one tenant at startup and every principal it resolves is of that tenant.
+      → `FLUX_EXCHANGE_TENANT`, `tenancy::Tenancy`,
+      `tests::one_tenant_is_selected_independently_from_authentication` and
+      `routes::tests::single_tenant_policy_refuses_a_valid_credential_from_another_tenant` pin the
+      provider-independent runtime choice and exact-match identity boundary.
 - [x] **The credential address is byte-identical** to what a multi-tenant deployment renders for the
       same tenant. Assert it literally, the way `tests/engine_line.rs` asserts the rendered address —
       this is the property that keeps the door open.
@@ -85,3 +89,9 @@ So: one tenant, **named once at startup**, and every principal is of it. The add
 - **2026-08-03 — status reconciled.** No implementation is currently in flight. The delivered
   `--dev` slice remains released, while the unchecked provider-independent startup declaration is a
   concrete ready follow-up rather than a permanently active lane.
+- **2026-08-03 — provider-independent declaration delivered for Wave #1.**
+  `FLUX_EXCHANGE_TENANT` selects `Deployment::SingleTenant` with OIDC, verified local users or an
+  explicit development roster. A provider or Service Account principal from another tenant is
+  refused rather than rewritten. The automatic, loopback-only `--dev` user is its sole operator;
+  every reachable and multi-user composition remains fail-closed without the explicit operator
+  policy.

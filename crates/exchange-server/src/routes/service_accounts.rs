@@ -105,37 +105,24 @@
 //!   the page. The remedy is the revocation route on this same resource.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, MethodRouter};
+use axum::routing::{delete, get, MethodRouter};
 use axum::{Extension, Json};
-use exchange_host::{Principal, PrincipalKind};
+use exchange_host::Principal;
 use serde::Deserialize;
 use serde_json::json;
 use tracing::error;
 
-use super::{refuse_kind, Access, Module, Route};
+use super::{refuse_operator, Access, Module, Route};
 use crate::service_account::{Expiry, ServiceAccountError, SERVICE_ACCOUNT_STORE_SETTING};
 use crate::session;
 use crate::state::AppState;
 
-/// The kinds of principal that may create a principal: a **signed-in human, and nothing else**.
-///
-/// This is X-40, and it is the narrowest list this host publishes. The argument is in the module
-/// documentation above; what follows is why it is a `const` beside the route rather than a check
-/// inside [`mint`].
-///
-/// It is read in two places, and they are not redundant:
-///
-/// - [`MODULE`] declares it, so the guard enforces it before this module runs and
-///   `super::tests::the_kind_gated_surface_is_only_what_was_declared` can see it by walking the
-///   published surface. That is what a caller meets.
-/// - `crate::service_account::ServiceAccountStore::mint` enforces it again against the principal it is handed, so the
-///   rule survives a future handler that reaches the store without declaring an access. That is
-///   what makes it true.
-pub(super) const MAY_MINT: &[PrincipalKind] = &[PrincipalKind::User];
-
 /// This module's contribution to the surface.
+///
+/// The route boundary requires deployment operator authority. The store retains its defensive
+/// human-kind check, so a future internal caller cannot bypass the narrower domain invariant.
 pub(super) const MODULE: Module = Module {
     name: "service-accounts",
     routes: &[
@@ -144,7 +131,7 @@ pub(super) const MODULE: Module = Module {
             // proxies `/api` to this host, so anything outside that prefix is answered by the SPA
             // fallback instead.
             //
-            // A collection path with **no parameter**. There is nothing about *which* agent a mint
+            // A collection path with **no parameter**. There is nothing about *which* Service Account a mint
             // could take, and in particular nothing a tenant could be spelled into —
             // `super::tests::no_published_route_takes_a_tenant_in_its_path` walks the whole surface,
             // and this route gives it nothing to find.
@@ -152,18 +139,13 @@ pub(super) const MODULE: Module = Module {
             // **Only a `User`.** Minting is not an operation against a connection, it is the creation
             // of a principal in this tenant — so the question this route asks is which *kind* of caller
             // may do that, and [`MAY_MINT`] is the answer.
-            access: Access::PrincipalOfKind(MAY_MINT),
+            access: Access::Operator,
             method_router: collection,
         },
         Route {
             path: "/api/service-accounts/{id}",
-            access: Access::PrincipalOfKind(MAY_MINT),
+            access: Access::Operator,
             method_router: item,
-        },
-        Route {
-            path: "/api/agents",
-            access: Access::PrincipalOfKind(MAY_MINT),
-            method_router: legacy_collection,
         },
     ],
 };
@@ -176,23 +158,17 @@ fn item() -> MethodRouter<AppState> {
     delete(revoke)
 }
 
-fn legacy_collection() -> MethodRouter<AppState> {
-    post(mint_legacy)
-}
-
 /// What a caller supplies when it mints a Service Account.
 ///
-/// Unknown fields are **not** denied, following
-/// [`NewConnection`](super::connections) — a body carrying `tenant` is not refused, it is ignored,
-/// and [`tests::a_tenant_in_a_body_field_does_not_influence_the_tenant_minted_for`] asserts the
-/// stronger property that the principal still comes back in the resolved tenant. Refusing the field
-/// would be the weaker claim: it would say this host noticed, rather than that it could not have
-/// been influenced.
+/// This is the sole remaining JSON mint surface and its non-secret shape is exact. Unknown fields
+/// refuse before the store is reached, so no future alias can quietly become a credential-bearing
+/// path alongside the one-way FXSA response.
 ///
 /// **No `Debug`.** Nothing here is a credential today, but this is the body type of the one route
 /// that mints one, and a derived `Debug` is one `debug!(?body)` away from being the place a future
 /// field gets logged.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewServiceAccount {
     /// What to call the Service Account within this tenant.
     id: String,
@@ -231,34 +207,32 @@ async fn mint(
     };
 
     match service_accounts.mint(&principal, &body.id, expiry) {
-        Ok(minted) => {
-            (
-                StatusCode::CREATED,
-                Json(json!({
-                    "principal": minted.principal,
-                    "expires_at": minted.expires_at,
-                    // The one disclosure, and the whole point of the route. It is not recoverable from
-                    // this host afterwards: `crate::service_account`'s module documentation says what the store
-                    // holds instead, and `an_attacker_who_reads_the_store_obtains_no_usable_token`
-                    // pins it.
-                    "token": minted.token.as_str(),
-                    "shown": "once",
-                })),
-            )
-                .into_response()
-        }
+        Ok(minted) => match crate::local_management::service_account_handoff::encode(
+            minted.token.as_str().as_bytes(),
+        ) {
+            Some(frame) => {
+                let mut response = (StatusCode::CREATED, frame).into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(
+                        "application/vnd.flux-exchange.service-account-handoff-v1",
+                    ),
+                );
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                response
+            }
+            None => {
+                error!("minted Service Account token exceeds the closed FXSA handoff bound");
+                refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cannot hand off the Service Account token".to_owned(),
+                )
+            }
+        },
         Err(error) => refuse_mint(error),
     }
-}
-
-/// The v0.16 create alias. It produces the canonical principal and advertises its replacement on
-/// every response, including refusals.
-async fn mint_legacy(
-    state: State<AppState>,
-    principal: Extension<Principal>,
-    body: Json<NewServiceAccount>,
-) -> Response {
-    deprecated(mint(state, principal, body).await)
 }
 
 async fn list(
@@ -274,7 +248,7 @@ async fn list(
             Json(json!({ "service_accounts": accounts })),
         )
             .into_response(),
-        Err(ServiceAccountError::MayNotManage { .. }) => refuse_kind(MAY_MINT),
+        Err(ServiceAccountError::MayNotManage { .. }) => refuse_operator(),
         Err(error) => refuse_management(error),
     }
 }
@@ -289,7 +263,7 @@ async fn revoke(
     };
     match accounts.revoke(&principal, &id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(ServiceAccountError::MayNotManage { .. }) => refuse_kind(MAY_MINT),
+        Err(ServiceAccountError::MayNotManage { .. }) => refuse_operator(),
         Err(ServiceAccountError::NotFound { .. }) => {
             refuse(StatusCode::NOT_FOUND, "no such Service Account".to_owned())
         }
@@ -328,24 +302,6 @@ fn refuse_management(error: ServiceAccountError) -> Response {
     }
 }
 
-fn deprecated(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        HeaderName::from_static("deprecation"),
-        HeaderValue::from_static("true"),
-    );
-    response.headers_mut().insert(
-        HeaderName::from_static("link"),
-        HeaderValue::from_static("</api/service-accounts>; rel=\"successor-version\""),
-    );
-    response.headers_mut().insert(
-        HeaderName::from_static("warning"),
-        HeaderValue::from_static(
-            "299 flux-exchange \"/api/agents is deprecated and will be removed in v0.17\"",
-        ),
-    );
-    response
-}
-
 /// A refusal as the caller sees it, per kind of failure.
 ///
 /// The split is the repository's usual one: what the caller can act on comes back, and what names
@@ -366,11 +322,10 @@ fn refuse_mint(error: ServiceAccountError) -> Response {
             refuse(StatusCode::CONFLICT, error.to_string())
         }
         ServiceAccountError::MayNotMint { .. } => {
-            // Unreachable through the published route — `Access::PrincipalOfKind(MAY_MINT)` refuses
-            // before this module runs — and answered anyway, in the guard's own terms rather than
-            // in a second phrase that could drift from it. `error.to_string()` is deliberately not
-            // used: it names the caller's kind, which belongs in a log line and not in an answer.
-            refuse_kind(MAY_MINT)
+            // Unreachable through the published operator route, and answered anyway in the
+            // guard's terms. `error.to_string()` names the caller's kind, which belongs in a log
+            // line and not in an answer.
+            refuse_operator()
         }
         ServiceAccountError::MayNotManage { .. } | ServiceAccountError::NotFound { .. } => {
             error!(%error, "unexpected Service Account mint refusal");
@@ -422,6 +377,7 @@ mod tests {
     use axum::http::{HeaderMap, Method, Request as HttpRequest};
     use axum::routing::get;
     use axum::Router;
+    use exchange_host::PrincipalKind;
     use serde_json::Value;
     use tower::Service;
 
@@ -440,7 +396,8 @@ mod tests {
     ///
     /// The development roster can produce every kind without needing separate credential fixtures,
     /// so this is what lets the human-only lifecycle rule be asserted over the wire.
-    const EVERY_KIND_ROSTER: &str = "user:alice@acme,agent:incumbent@acme,service:ingest@acme";
+    const EVERY_KIND_ROSTER: &str =
+        "user:alice@acme,service_account:incumbent@acme,service:ingest@acme";
 
     /// What a hostile caller claims, down every vector. It is never a tenant that exists.
     const CLAIMED: &str = "attacker";
@@ -514,11 +471,29 @@ mod tests {
             .await
             .expect("a response body");
 
-        (
-            status,
-            headers,
-            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
-        )
+        let body = if headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            == Some("application/vnd.flux-exchange.service-account-handoff-v1")
+        {
+            assert_eq!(
+                headers
+                    .get("cache-control")
+                    .and_then(|value| value.to_str().ok()),
+                Some("no-store")
+            );
+            assert!(bytes.len() >= 13, "FXSA carries a nonempty token");
+            assert_eq!(&bytes[..8], &[b'F', b'X', b'S', b'A', 1, 1, 0, 0]);
+            let declared =
+                u32::from_be_bytes(bytes[8..12].try_into().expect("FXSA length")) as usize;
+            assert_eq!(bytes.len(), 12 + declared, "FXSA is exactly one frame");
+            let token = std::str::from_utf8(&bytes[12..]).expect("current token is UTF-8");
+            json!({ "token": token })
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+
+        (status, headers, body)
     }
 
     /// A `POST /api/service-accounts` carrying `alice`'s development credential and `body`.
@@ -542,6 +517,31 @@ mod tests {
         session::now() + 30 * 24 * 60 * 60
     }
 
+    fn assert_minted_for_resolved_tenant(scratch: &Scratch) {
+        let actor = Principal::new(
+            PrincipalKind::User,
+            "alice",
+            exchange_host::Tenant::new(RESOLVED).expect("resolved tenant"),
+        );
+        let accounts = scratch
+            .store()
+            .list(&actor, session::now())
+            .expect("the resolved operator lists its tenant");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "triage-bot");
+
+        let claimed = Principal::new(
+            PrincipalKind::User,
+            "mallory",
+            exchange_host::Tenant::new(CLAIMED).expect("claimed tenant"),
+        );
+        assert!(scratch
+            .store()
+            .list(&claimed, session::now())
+            .expect("the claimed tenant is independently listable")
+            .is_empty());
+    }
+
     /// **X-40's headline.** Only a `User` mints — asserted for all three kinds in one run.
     ///
     /// The three legs are one test on purpose. A refusal for a Service Account proves nothing on its own:
@@ -551,7 +551,7 @@ mod tests {
     /// other two from passing vacuously.
     ///
     /// **Asserted against the store, not only the status.** A `403` that had already written the
-    /// agent would be the whole defect wearing the right status code, and the store is the thing
+    /// Service Account would be the whole defect wearing the right status code, and the store is the thing
     /// `resolve` reads — so what is on disk is what decides whether a successor exists.
     #[tokio::test]
     async fn only_a_user_mints_and_no_other_kind_creates_a_successor() {
@@ -576,13 +576,13 @@ mod tests {
             "a user must still mint, or the refusals below pass by having broken minting for \
              everyone: {minted}",
         );
-        assert_eq!(minted["principal"]["id"], MINTED_BY_A_USER);
+        assert!(minted["token"].is_string(), "the handoff carries one token");
 
         // Legs two and three: neither of the non-human kinds creates a principal.
         //
         // The Service Account is the story's case — a leaked token minting successors is what makes
         // revocation (X-38) an incomplete remedy, invisibly, because a successor is an ordinary
-        // agent with no recorded relationship to the one that was revoked.
+        // Service Account with no recorded relationship to the one that was revoked.
         //
         // The service is the same question one level up, and it is decided rather than omitted:
         // see this module's documentation for why refusing is the answer.
@@ -674,9 +674,6 @@ mod tests {
         assert_eq!(token.len(), 69, "fxsa_ plus 256 bits, hex encoded");
         assert!(token.starts_with("fxsa_"));
         assert!(token[5..].bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(body["principal"]["kind"], "service_account");
-        assert_eq!(body["principal"]["id"], "triage-bot");
-        assert_eq!(body["principal"]["tenant"], RESOLVED);
 
         let on_disk = std::fs::read_to_string(store.path()).expect("minting writes the store");
         assert!(
@@ -699,7 +696,6 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(created["principal"]["kind"], "service_account");
         let token = created["token"].as_str().expect("one-time token");
 
         let (status, _, session) = call(
@@ -811,7 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_legacy_create_alias_is_visibly_deprecated_and_mints_the_canonical_kind() {
+    async fn the_retired_create_alias_is_not_a_route() {
         let scratch = Scratch::new("legacy-alias");
         let (status, headers, body) = call(
             armed(&scratch),
@@ -827,14 +823,8 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::CREATED, "{body}");
-        assert_eq!(body["principal"]["kind"], "service_account");
-        assert_eq!(headers.get("deprecation").unwrap(), "true");
-        assert!(headers["link"]
-            .to_str()
-            .unwrap()
-            .contains("/api/service-accounts"));
-        assert!(headers["warning"].to_str().unwrap().contains("v0.17"));
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(headers.get("deprecation").is_none());
     }
 
     // ---------------------------------------------------------------------------------------
@@ -921,8 +911,7 @@ mod tests {
     /// Vector 2 — a **body field**.
     ///
     /// The likeliest of the three by far: this route takes a body, so `tenant` is the field a
-    /// caller would reach for. It is not refused — it is ignored, and the principal still comes
-    /// back in `acme`.
+    /// caller would reach for. The closed non-secret mint object refuses it before mutation.
     #[tokio::test]
     async fn a_tenant_in_a_body_field_does_not_influence_the_tenant_minted_for() {
         let scratch = Scratch::new("body-vector");
@@ -939,15 +928,17 @@ mod tests {
         )
         .await;
 
-        assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(
-            body["principal"]["tenant"], RESOLVED,
-            "the tenant must come from the resolved principal, not from the body field",
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let actor = Principal::new(
+            PrincipalKind::User,
+            "alice",
+            exchange_host::Tenant::new(RESOLVED).expect("resolved tenant"),
         );
-        assert_eq!(
-            body["principal"]["kind"], "service_account",
-            "and the kind is this host's, not the body's",
-        );
+        assert!(scratch
+            .store()
+            .list(&actor, session::now())
+            .expect("the refused body did not mutate the store")
+            .is_empty());
         assert!(
             !body.to_string().contains(CLAIMED),
             "nothing the body claimed may survive into the answer: {body}",
@@ -980,10 +971,7 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::CREATED);
-        assert_eq!(
-            body["principal"]["tenant"], RESOLVED,
-            "the tenant must come from the resolved principal, not from a header",
-        );
+        assert_minted_for_resolved_tenant(&scratch);
         assert!(
             !body.to_string().contains(CLAIMED),
             "nothing a header claimed may survive into the answer: {body}",
@@ -1084,7 +1072,7 @@ mod tests {
     /// the host says it cannot hold the record — and a token it could not record is one nobody
     /// could revoke.
     #[tokio::test]
-    async fn a_composition_with_no_agent_store_refuses_and_names_the_setting() {
+    async fn a_composition_with_no_service_account_store_refuses_and_names_the_setting() {
         let app = app(AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         )));

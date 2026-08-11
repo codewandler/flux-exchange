@@ -43,7 +43,26 @@ flux-spec.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Platform owner and no-follow filesystem inspection for Exchange's non-credential durable stores.
+# It is an OS ABI wrapper with no transport or network IO.
+rustix.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Native ownership and DACL inspection/creation only. This is the OS ABI vocabulary for the
+# owner-only local-state boundary; it contains no transport and performs no network IO.
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Memory",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
 
 # Not checked by the allow-list, and that is the point of the split: a dev-dependency is absent from
 # a published crate's requirements, so nothing here reaches a consumer's graph. `flux-web` stays

@@ -1,7 +1,7 @@
 ---
 id: X-58
 title: "An operator can define users in a config file and sign in on their own network"
-status: ready
+status: done
 priority: 1
 epic: local-identity
 design: docs/designs/local-identity.md
@@ -49,17 +49,17 @@ a shipped subcommand: less friendly, far less to get wrong.
 Decide it in the design before writing code, and write down which and why.
 
 ## Acceptance
-- [ ] **Failing-first test** — a user defined in the file can sign in and is resolved to the principal
+- [x] **Failing-first test** — a user defined in the file can sign in and is resolved to the principal
       and tenant the file names.
-- [ ] **Failing-first test** — a wrong secret is refused, and the refusal does not distinguish "no
+- [x] **Failing-first test** — a wrong secret is refused, and the refusal does not distinguish "no
       such user" from "wrong secret".
-- [ ] This binding may listen on a reachable address, and `bind.rs` says so **as its own state** —
+- [x] This binding may listen on a reachable address, and `bind.rs` says so **as its own state** —
       neither `Development` nor OIDC-`Bound`. A test pins that `Development` is still refused there.
-- [ ] A file with a mode wider than the host accepts is refused, the way the credential store's is.
-- [ ] No plaintext secret is stored, logged, or returned. Assert it adversarially, the way
+- [x] A file with a mode wider than the host accepts is refused, the way the credential store's is.
+- [x] No plaintext secret is stored, logged, or returned. Assert it adversarially, the way
       `NewConnection`'s missing `Debug` does — make the wrong thing fail to compile where you can.
-- [ ] Malformed file → the process refuses to start and names the entry.
-- [ ] The console can sign a user in through it end to end. [[X-57]] must land first.
+- [x] Malformed file → the process refuses to start and names the entry.
+- [x] The console can sign a user in through it end to end. [[X-57]] must land first.
 
 ## Notes
 - Depends on [[X-57]], **but not for the reason this story originally gave.** It said "without it the

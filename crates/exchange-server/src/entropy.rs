@@ -10,19 +10,54 @@
 //! anyone can guess, and a host that quietly downgraded to one would look exactly like a host that
 //! had not.
 
-use std::fs::File;
-use std::io::Read;
-
 /// Where every unguessable value in this binary comes from.
 ///
-/// Named rather than inlined so a refusal can tell an operator which file to look at.
+/// Named rather than inlined so a refusal can tell an operator which native source failed.
+#[cfg(unix)]
 pub const SOURCE: &str = "/dev/urandom";
 
+/// Windows' process-independent system-preferred CNG random source.
+#[cfg(windows)]
+pub const SOURCE: &str = "Windows BCrypt system-preferred random source";
+
 /// `N` bytes from [`SOURCE`], or the reason they could not be read.
+#[cfg(unix)]
 pub fn bytes<const N: usize>() -> Result<[u8; N], std::io::Error> {
+    use std::io::Read as _;
+
     let mut bytes = [0_u8; N];
 
-    File::open(SOURCE).and_then(|mut source| source.read_exact(&mut bytes))?;
+    std::fs::File::open(SOURCE).and_then(|mut source| source.read_exact(&mut bytes))?;
+
+    Ok(bytes)
+}
+
+/// `N` bytes from the native Windows system-preferred random provider.
+#[cfg(windows)]
+pub fn bytes<const N: usize>() -> Result<[u8; N], std::io::Error> {
+    use windows_sys::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+
+    let length = u32::try_from(N)
+        .map_err(|_| std::io::Error::other("entropy request exceeds the Windows API bound"))?;
+    let mut bytes = [0_u8; N];
+    // SAFETY: the output buffer is live for exactly `length` bytes. A null algorithm handle is the
+    // documented spelling when BCRYPT_USE_SYSTEM_PREFERRED_RNG selects the operating-system RNG.
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            length,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::other(format!(
+            "BCryptGenRandom refused with NTSTATUS 0x{:08x}",
+            status as u32
+        )));
+    }
 
     Ok(bytes)
 }

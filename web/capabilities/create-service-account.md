@@ -24,8 +24,5 @@ Creating or authenticating a Service Account grants nothing. Tenant grants still
 operation and inbound-channel metadata; explicit deny wins. A Service Account cannot manage
 connections, settings or grants, create a successor principal, or obtain a credential value.
 
-## v0.16 compatibility
-
-`POST /api/agents` remains a visibly deprecated create alias for v0.16 and always returns the
-canonical `service_account` kind. It is removed in v0.17. Existing unprefixed tokens remain valid
-through their original tenant and expiry without rewriting stored credential-shaped material.
+The canonical management collection is `/api/service-accounts`; `Agent` is reserved for a model,
+authored loop and bounded capabilities rather than used as another name for an API principal.

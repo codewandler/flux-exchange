@@ -1,0 +1,69 @@
+# Daily proof that the credential-bearing production volume still meets the declared RPO. Failure
+# opens one private repository issue without including volume or snapshot identifiers; success closes
+# an existing alert. The app-scoped token is held only by the protected production environment.
+name: snapshot watch
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: production-snapshot-watch
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+      FLY_APP: flux-exchange
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master 2026-08-03
+
+      - name: Verify encryption, retention and newest recovery point
+        id: snapshot
+        continue-on-error: true
+        run: ./scripts/verify-fly-snapshot.sh >snapshot-evidence.json
+
+      - name: Alert once when recovery is absent or stale
+        if: steps.snapshot.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          title='production snapshot is absent, stale, or misconfigured'
+          existing="$(gh issue list --state open --search "$title in:title" --json number --jq '.[0].number // empty')"
+          if [ -z "$existing" ]; then
+            gh issue create --title "$title" --body "The daily recovery check failed at ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. No volume or snapshot identifier is included here; inspect the protected run."
+          fi
+          exit 1
+
+      - name: Close a recovered snapshot alert
+        if: steps.snapshot.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='production snapshot is absent, stale, or misconfigured'
+          gh issue list --state open --search "$title in:title" --json number --jq '.[].number' |
+            while read -r issue; do
+              gh issue close "$issue" --comment "The daily recovery check is healthy again in run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}."
+            done
+
+      - name: Upload identifier-free snapshot evidence
+        if: steps.snapshot.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: snapshot-${{ github.run_id }}
+          retention-days: 90
+          if-no-files-found: error
+          path: snapshot-evidence.json

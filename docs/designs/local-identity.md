@@ -17,7 +17,7 @@ operators.
 
 Not where it looks. A development identity **already exists** and works: `DevIdentity`
 (`crates/exchange-server/src/dev_identity.rs`) mints principals from a roster an operator writes at
-startup, `FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,agent:triage-bot@acme`. It is armed explicitly,
+startup, `FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,service_account:triage-bot@acme`. It is armed explicitly,
 refuses to start on a malformed roster rather than silently dropping an entry, and fixes each
 principal's tenant at startup so no request field can reach it. It is good work and it is not the
 problem.
@@ -150,6 +150,24 @@ host keeps a verifier for an agent token and cannot show the token again. A user
 plaintext passwords would be the one place in this repository where a secret is stored to be compared
 rather than to be presented, and it would be readable by anything that can read a config file.
 
+#### The settled credential is an opaque generated secret, not a password
+
+X-58 takes the pre-computed-verifier branch. The shipped `local-user-secret` subcommand draws a
+256-bit opaque secret, shows it once, and emits the SHA-256 verifier an operator puts in the users
+file. The running service reads only that verifier. It neither accepts a password while generating
+the entry nor has enough information to recover the generated secret later.
+
+A bare digest is appropriate only because this is not a human-chosen password: exhaustive search of
+256 random bits is not a useful attack. Calling the input a password would make the same storage
+shape dangerously misleading. Supporting memorable passwords would mean adding a password KDF,
+chosen work parameters, migration of those parameters, and rehash-on-login. This service deliberately
+does not own that discipline. An operator who needs a human-managed password uses an identity
+provider; the static provider is the small self-hosted path with a generated bearer-quality secret.
+
+The file is JSON so malformed input can name an entry by its stable array index. Each entry carries
+`user`, `tenant`, and a lowercase 64-hex-character `verifier`. It carries no plaintext credential,
+and the generator's one-time output keeps the secret and the ready-to-paste entry visibly separate.
+
 **Because it has a real secret, it may bind a reachable address.** That is the whole difference from
 `DevIdentity`, and it is why this is a new thing rather than a config-file front-end to the existing
 one. `IdentityBinding` gains a state that is neither `Development` nor OIDC-`Bound`.
@@ -197,6 +215,24 @@ not inferred from a roster having one entry: an explicit development roster keep
 exchange even when it happens to contain one principal, so a browser form can never choose between
 rostered identities. The automatic action remains behind the development identity's loopback-only
 bind rule.
+
+#### Provider-independent single-tenant startup
+
+`FLUX_EXCHANGE_TENANT=<tenant>` selects `Deployment::SingleTenant` independently from the identity
+provider. OIDC, verifier-backed local users and an explicit development roster can therefore each
+be composed as either shared or single-tenant deployments. Unset keeps the ordinary multi-tenant
+runtime policy; `--dev` remains the shorthand for the one tenant `dev`, and a contradictory global
+setting refuses startup instead of redefining the flag.
+
+The provider still authenticates a principal carrying its own startup-bound tenant. The deployment
+policy requires that tenant to equal `FLUX_EXCHANGE_TENANT` before any route sees the principal. A
+disagreement is the same generic credential refusal on the wire and is identified only in operator
+logs. It is never repaired by replacing the tenant: doing that would let a Service Account or human
+session minted for tenant A become authority for tenant B after a configuration change.
+
+This check does not change the address vocabulary. A principal admitted for `acme` still reaches
+`tenants/acme/<authority>/<credential>`, byte for byte the same address as the multi-tenant
+composition. Removing the setting later changes runtime admission, not where existing state lives.
 
 ## Alternatives considered
 

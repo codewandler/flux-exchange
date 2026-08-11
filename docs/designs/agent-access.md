@@ -5,6 +5,24 @@ status: accepted
 
 # Design: the primary caller can authenticate
 
+> **Delivered vocabulary and tracking, 2026-08-03.** This design was accepted when the durable
+> non-human bearer principal was called an **Agent**. X-107 reserved Agent for model + authored loop
+> + bounded capabilities and gave this resource its canonical name, **Service Account**, without
+> changing a tenant or invalidating a token. The current resource contract is
+> [`service-accounts.md`](service-accounts.md). The three delivery slices are X-36 (mint), X-37
+> (authenticate) and X-38 (list/revoke), with X-40 inserted before authentication so revocation
+> remains a complete remedy. X-37 and X-38 were implemented and tested in X-107 but their story
+> files were omitted; their retrospective records repair that tracking gap.
+>
+> The delivered authentication composition preserves this design's single-boundary intent while
+> keeping the credential carrier visible: `require_principal` consults the configured human
+> `Identity` and, only for an `Authorization` bearer, the Service Account verifier. It admits exactly
+> one answer and refuses ambiguity. This is one guard shared by every authenticated route, not a
+> parallel Service Account authentication surface. Below, “agent token”, `AgentStore` and
+> `/api/agents` record the vocabulary in which the design decision was originally made; the
+> canonical present-day names are Service Account token, `ServiceAccountStore` and
+> `/api/service-accounts`.
+
 `docs/vision.md` opens with a claim this service does not yet honour:
 
 > **Its primary caller is an agent, not a human.** People sign in to wire things up and to see what

@@ -793,11 +793,13 @@ async fn a_planted_whole_authority_value_is_refused_on_the_way_out() {
         planted[TENANT]["newrelic"][&declared.service][declared.binds()] = json!(value);
     }
 
-    fs::create_dir_all(path.parent().expect("the store path has a parent"))
-        .expect("a scratch directory");
-    fs::write(
+    exchange_host::ensure_private_state_directory(
+        path.parent().expect("the store path has a parent"),
+    )
+    .expect("an owner-only scratch directory");
+    exchange_host::write_private_state_file(
         &path,
-        serde_json::to_vec_pretty(&planted).expect("a serialisable store"),
+        &serde_json::to_vec_pretty(&planted).expect("a serialisable store"),
     )
     .expect("a planted store file");
     let on_disk = fs::read(&path).expect("the planted file is readable");
@@ -931,15 +933,18 @@ fn no_shipped_connector_lets_a_tenant_supply_its_whole_authority() {
     }
 
     // Pinned exactly, so that a catalogue change in either direction is a failing test rather than
-    // a silent hole: a fifth connector arriving unpinned, or one of these four gaining a suffix
-    // upstream and staying refused for no reason. It has already fired once for real — `intercom`
-    // arrived here when catalogue 0.10 moved its host, and this assertion is how anybody found out.
+    // a silent hole: another connector arriving unpinned, or one of these gaining a suffix upstream
+    // and staying refused for no reason. GitLab remains in this ordinary-tenant census even though
+    // X-125 gives its typed declaration a separate operator-reviewed authority lifecycle. It has
+    // already fired once for real — `intercom` arrived here when catalogue 0.10 moved its host, and
+    // this assertion is how anybody found out.
     assert_eq!(
         refused,
         vec![
             "asterisk/endpoint.host ({host}:8089)".to_owned(),
             "docusign/endpoint.account_host ({account_host})".to_owned(),
             "freshdesk/endpoint.domain ({domain})".to_owned(),
+            "gitlab/endpoint.origin ({origin})".to_owned(),
             "okta/endpoint.domain ({domain})".to_owned(),
         ],
         "the set of connectors a tenant may not configure has changed",
@@ -1186,11 +1191,13 @@ fn a_planted_value_is_admitted_only_when_it_is_a_declared_choice() {
 
         let mut file = json!({ TENANT: { "intercom": {} } });
         file[TENANT]["intercom"][&host.service][host.binds()] = json!(planted);
-        fs::create_dir_all(path.parent().expect("the store path has a parent"))
-            .expect("a scratch directory");
-        fs::write(
+        exchange_host::ensure_private_state_directory(
+            path.parent().expect("the store path has a parent"),
+        )
+        .expect("an owner-only scratch directory");
+        exchange_host::write_private_state_file(
             &path,
-            serde_json::to_vec_pretty(&file).expect("a serialisable store"),
+            &serde_json::to_vec_pretty(&file).expect("a serialisable store"),
         )
         .expect("a planted store file");
         let on_disk = fs::read(&path).expect("the planted file is readable");

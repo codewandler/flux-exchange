@@ -22,11 +22,8 @@
 // claim is the stronger one, that it has nowhere to put one.
 //
 // **This screen takes what it renders as props and emits what it wants done**, which is `App.vue`'s
-// ordinary arrangement and *not* `Agents.mts`'s. That exception exists because a minted token must
-// not reach the root, which outlives every screen — a grant is a policy, carries no secret, and is
-// meant to be read back, so borrowing the exception would be copying a security workaround into a
-// place with no secret in it. What it buys is that every claim below can be driven from fixtures
-// with no transport at all.
+// ordinary arrangement. A grant is a policy, carries no secret and is meant to be read back. What
+// the boundary buys is that every claim below can be driven from fixtures with no transport at all.
 //
 // A render function rather than a single-file component, following `Agents.mts` and `Connect.mts`:
 // the claims are only worth anything if a test drives them, and a render function mounts under a

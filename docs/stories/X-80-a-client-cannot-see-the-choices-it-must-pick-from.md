@@ -1,10 +1,11 @@
 ---
 id: X-80
 title: "A client learns a connector's permitted values only by being refused"
-status: backlog
+status: done
+priority: 0
 epic: connections
 areas: [exchange-server, console]
-note: "found by X-70 and confirmed by its review, 2026-08-02: GET .../settings reports suppliable: true for a ChosenFrom field without publishing the choices, so the console cannot render a region dropdown without provoking a 422 first — the same shape as X-46, where the console read a connector's declarations out of a deliberate refusal"
+note: "Decision 0002 prerequisite to X-125: publish closed choices before one generated browser/CLI connection form can render them"
 ---
 
 # A client learns a connector's permitted values only by being refused
@@ -29,16 +30,30 @@ provoking a refusal to learn a fact the server already knows is the same thing a
 surface that just shipped.
 
 ## Acceptance
-- [ ] The settings surface publishes the declared choices for a `ChosenFrom` field.
-- [ ] **Failing-first test** — a client can build the permitted-value list from one `GET`, with no
+- [x] The settings surface publishes the declared choices for a `ChosenFrom` field.
+- [x] **Failing-first test** — a client can build the permitted-value list from one `GET`, with no
       refused request. Assert it against the response, not against the catalogue.
-- [ ] The console renders a choice control rather than a free-text box for such a field, or a story
+- [x] The console renders a choice control rather than a free-text box for such a field, or a story
       says why it does not yet.
-- [ ] A field that is not `ChosenFrom` publishes no choices — absence must mean *free within the
+- [x] A field that is not `ChosenFrom` publishes no choices — absence must mean *free within the
       other rules*, not *no data*.
+
+## Progress
+
+- 2026-08-03: The successful settings read now publishes a `choices` array only for
+  `HostPinning::ChosenFrom`, on both sole and labelled-instance paths. The route test builds
+  Intercom's region list from that response alone; a companion test holds unrestricted Zendesk
+  fields to omitting the property.
+- 2026-08-03: [[X-125]] owns the console half. The current console has no settings form, and X-125's
+  complete labelled plan must provide field identity, instance selection and submission target
+  before a dropdown can actually write the chosen value. Its Progress records why a partial picker
+  here would still leave the first-run connection incomplete.
 
 ## Notes
 - X-70 named this and deferred it as C-87-shaped; its independent review confirmed it independently.
   Filing it so the deferral is a story rather than a paragraph in a closed story's Progress.
+- **Decision 0002 scheduling, 2026-08-03:** promoted to priority-zero ready work and made an explicit
+  prerequisite of [[X-125]]. X-125 consumes this response contract; it does not replace or weaken
+  any acceptance item here.
 - Related: [[X-46]] (declarations published rather than provoked), [[X-50]] (a connector that declares
   nothing).

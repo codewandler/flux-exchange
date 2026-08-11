@@ -1,0 +1,3 @@
+# target\trunner\tarchive-format\texecutable
+aarch64-unknown-linux-gnu	ubuntu-24.04-arm	tar.zst	flux-exchange
+x86_64-unknown-linux-gnu	ubuntu-24.04	tar.zst	flux-exchange

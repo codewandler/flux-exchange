@@ -9,8 +9,9 @@ The platform layer of the [flux](https://github.com/codewandler/flux) family: **
 credentials, terminates channels, runs operations for many callers, and records what happened.**
 
 [flux-connectors](https://github.com/codewandler/flux-connectors) describes what vendors can do.
-flux runs it. Neither holds a credential on anyone's behalf, and neither should — that is a third
-job, and this is it.
+Flux supplies the language, agent loop and guarded runtime substrate. Exchange executes every
+official external integration while holding the tenant's credential; neither Flux nor the connector
+declaration holds one on anyone's behalf.
 
 ### The test that decides what belongs here
 
@@ -33,16 +34,18 @@ documentation itself.
 
 Every official integration is therefore a connector, including Docker, Kubernetes, SQL,
 observability, secret stores, and other protocol-rich systems. flux-connectors owns the declaration
-and any vendor-specific runtime artifact; Flux owns generic guarded mechanisms and local execution.
-Exchange is the optional hosted placement for the same connector address, not an HTTP-only class of
-integration: it owns tenant authority, runtime admission, isolation, streams, and leases.
+and any vendor-specific runtime artifact; Flux owns generic guarded mechanisms but is not a second
+official-integration execution placement. Exchange executes the connector address: it owns tenant
+authority, runtime admission and execution, isolation, streams, leases and audit. If Exchange is
+unavailable, the official external tool is unavailable; there is no local vendor/plugin fallback.
 
 ## Who it is for
 
 **Its primary caller is non-human, not a human.** People sign in to wire things up and to see what
 happened; Service Accounts and hosted Managed Agents call operations all day. A **Service Account**
 is the non-human bearer principal; an **Agent** remains model + authored loop + bounded capabilities.
-The deprecated v0.16 `/api/agents` create alias is compatibility surface, not a second definition.
+The v0.16 `/api/agents` create alias was compatibility surface, not a second definition, and is
+removed in v0.17.
 This inverts the usual assumption for a
 credential-holding web service and it shapes everything: the API is the product and the console is
 the admin surface, not the other way round.
@@ -128,9 +131,9 @@ about one can never be misread as a sentence about the other.
 
 ## Non-goals
 
-- **Being required.** flux must never *need* flux-exchange. A `.flux` program loading a connector
-  module on a laptop is a complete path and stays one. Trading plugin-binary distribution pain for
-  service lock-in would be a bad trade made twice.
+- **Being required for the language or core tools.** Flux remains useful without Exchange for the
+  language, agent loop and core tools. Official external integrations do require Exchange: the
+  embedded binding has no helper executable, installed pack or local vendor/plugin fallback.
 - **A second request path.** See principle 6.
 - **Holding credentials an operator did not choose to give it.** A tenant's credentials are reachable
   only by that tenant's own authenticated principals.

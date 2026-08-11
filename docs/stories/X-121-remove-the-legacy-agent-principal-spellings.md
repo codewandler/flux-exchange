@@ -1,12 +1,12 @@
 ---
 id: X-121
 title: "Remove the legacy Agent principal spellings"
-status: ready
+status: done
 priority: 3
 epic: apps
 areas: [exchange-host, exchange-server, console, docs]
 design: docs/designs/service-accounts.md
-note: "v0.17 compatibility checkpoint; do not invalidate existing bearer tokens"
+note: "v0.17 compatibility checkpoint; existing verifier-keyed bearer tokens remain valid"
 ---
 
 # Remove the legacy Agent principal spellings
@@ -19,15 +19,23 @@ expiry or revocation.
 
 ## Acceptance
 
-- [ ] The workspace version is at least v0.17 and `POST /api/agents` no longer exists.
-- [ ] `FLUX_EXCHANGE_AGENTS` is no longer accepted; startup diagnostics name only
+- [x] The workspace version is at least v0.17 and `POST /api/agents` no longer exists.
+- [x] `FLUX_EXCHANGE_AGENTS` is no longer accepted; startup diagnostics name only
       `FLUX_EXCHANGE_SERVICE_ACCOUNTS`.
-- [ ] The serialized principal kind accepts only `service_account` after checking that no committed
+- [x] The serialized principal kind accepts only `service_account` after checking that no committed
       durable data still requires the `agent` alias.
-- [ ] The console redirect, compatibility documentation and deprecation response tests are removed.
-- [ ] Removing the spelling does not invalidate an existing unprefixed token in the unchanged
+- [x] The console redirect, compatibility documentation and deprecation response tests are removed.
+- [x] Removing the spelling does not invalidate an existing unprefixed token in the unchanged
       verifier-keyed store.
 
 ## Notes
 
 - This story removes names, not authority or credentials. It must not rewrite stored tokens.
+
+## Progress
+
+- 2026-08-03 — failing-first tests proved all four v0.16 aliases were still live. The API route,
+  environment setting, serialized principal alias and console redirect are now removed; the
+  canonical route/store spelling remains, and the existing reopen fixture proves an unprefixed
+  verifier-keyed token still resolves as a Service Account. The v0.17 workspace version, complete
+  Rust gate, 130-test console suite and production console build now pass.

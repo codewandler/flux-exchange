@@ -283,6 +283,68 @@ impl Invoker {
         &self.grants
     }
 
+    /// **The credential port this invoker will actually execute against.**
+    ///
+    /// Effective discovery intersects grants with connection existence. Returning this exact port
+    /// keeps discovery and invocation on one source of truth instead of letting a composition
+    /// advertise from one store and execute against another. It remains an address-only
+    /// [`SecretStore`] port; no credential value is resolved or exposed by this method.
+    pub fn credentials(&self) -> &Arc<dyn SecretStore> {
+        &self.credentials
+    }
+
+    /// **The non-secret configuration port this invoker will actually execute against.**
+    ///
+    /// Effective discovery checks only whether each declared setting is present, discards the
+    /// returned value immediately, and never serialises it. Returning this exact port keeps a
+    /// composition from advertising an operation whose execution is bound to a different store.
+    pub fn settings(&self) -> &Arc<dyn ConfigStore> {
+        &self.settings
+    }
+
+    /// Decide whether this principal may invoke one catalogue operation before any credential is
+    /// resolved.
+    ///
+    /// The authenticated effective catalogue uses this admission prefix. It runs the same
+    /// catalogue, deployment and tenant-grant gates, in the same order, as
+    /// [`invoke`](Self::invoke), and stops before constructing either tenant-bound port. Execution
+    /// keeps its gate chain inline because `tests/runtime_gate.rs` structurally enforces its order;
+    /// the effective-catalogue wire tests hold the two projections to the same outcomes.
+    ///
+    /// # Errors
+    ///
+    /// [`InvokeRefusal::UnknownOperation`], [`InvokeRefusal::Runtime`] or
+    /// [`InvokeRefusal::NotGranted`]. No later refusal is reachable because this method performs no
+    /// projection or dispatch.
+    pub fn admit_operation(
+        &self,
+        principal: &Principal,
+        operation: &str,
+    ) -> Result<(), InvokeRefusal> {
+        let entry = connector_catalog::operation(connector_catalog::OperationKey::id(operation))
+            .ok_or_else(|| InvokeRefusal::UnknownOperation {
+                operation: operation.to_owned(),
+            })?;
+        let provider =
+            connector_catalog::provider(connector_catalog::ProviderKey::id(entry.provider))
+                .ok_or_else(|| InvokeRefusal::UnknownOperation {
+                    operation: operation.to_owned(),
+                })?;
+        let admitted = admit_runtime(self.deployment, &ConnectorSurface::of(provider))?;
+        admit_grant(
+            admitted,
+            principal,
+            provider.id,
+            &OperationFacts::of(entry),
+            &self.grants.held(principal.tenant()),
+        )
+        .map(|_| ())
+        .map_err(|refusal| InvokeRefusal::NotGranted {
+            refusal,
+            operation: entry.id.to_owned(),
+        })
+    }
+
     /// **Run one catalogue operation for `principal`'s tenant.**
     ///
     /// `params` is the operation's own declared parameter object, verbatim — there is no envelope,
@@ -308,6 +370,34 @@ impl Invoker {
         &self,
         principal: &Principal,
         operation: &str,
+        params: Value,
+    ) -> Result<Invocation, InvokeRefusal> {
+        self.invoke_selected(principal, operation, None, params)
+            .await
+    }
+
+    /// Run one catalogue operation against a connection UUID the host already resolved.
+    ///
+    /// The mutable operator label never reaches this boundary. A composition resolves it inside
+    /// the principal's tenant and passes the validated immutable UUID, so no caller can name a
+    /// host, authority, credential, or raw address component here.
+    pub async fn invoke_for_instance(
+        &self,
+        principal: &Principal,
+        operation: &str,
+        instance: &crate::InstanceId,
+        params: Value,
+    ) -> Result<Invocation, InvokeRefusal> {
+        self.invoke_selected(principal, operation, Some(instance), params)
+            .await
+    }
+
+    /// The single execution path both sole and explicitly selected invocations pass through.
+    async fn invoke_selected(
+        &self,
+        principal: &Principal,
+        operation: &str,
+        instance: Option<&crate::InstanceId>,
         params: Value,
     ) -> Result<Invocation, InvokeRefusal> {
         // 1. The catalogue. A global lookup by the id the catalogue itself spells, so the connector
@@ -353,10 +443,16 @@ impl Invoker {
         // 4. One tenant, one expression, two ports. The tenant is read off the resolved principal
         //    and from nothing a caller controls.
         let tenant = principal.tenant().as_str();
-        let (credentials, settings) = (
-            Credentials::new(self.credentials.clone(), tenant),
-            Configuration::new(self.settings.clone(), tenant),
-        );
+        let (credentials, settings) = match instance {
+            Some(instance) => (
+                Credentials::for_instance(self.credentials.clone(), tenant, instance.as_str()),
+                Configuration::for_instance(self.settings.clone(), tenant, instance.as_str()),
+            ),
+            None => (
+                Credentials::new(self.credentials.clone(), tenant),
+                Configuration::new(self.settings.clone(), tenant),
+            ),
+        };
         let credentials = credentials.map_err(|error| InvokeRefusal::refused(entry.id, &error))?;
         let settings = settings.map_err(|error| InvokeRefusal::refused(entry.id, &error))?;
 
@@ -624,6 +720,7 @@ impl FlowSink for SilentSink {}
 
 /// A redacted result from one immutable workflow version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowInvocation {
     /// Virtual operation id.
     pub operation: String,
@@ -662,7 +759,8 @@ pub enum WorkflowInvokeRefusal {
 /// Whatever `http.request` returned, redacted and otherwise **whole**. A vendor's `404` is an
 /// *answer*, and flattening it into a host error would destroy the distinction between "the vendor
 /// said no" and "we could not ask".
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Invocation {
     /// The operation that ran, as the catalogue spells it.
     pub operation: String,
@@ -679,7 +777,7 @@ pub struct Invocation {
 ///
 /// The question an agent actually needs and the one the HTTP status space cannot express — a `502`
 /// says nothing about whether the effect happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Sent {
     /// The refusal **provably precedes dispatch**. Nothing left this process.

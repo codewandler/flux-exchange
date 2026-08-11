@@ -41,18 +41,14 @@ credential and are refused rather than ordered. This makes service-account token
 existing invoke and channel admission boundaries without teaching those routes a second identity
 mechanism.
 
-## Compatibility window
+## Completed compatibility window
 
-`/api/agents` is a compatibility alias for the canonical create route in v0.16 only. Its response is
-still `service_account`; it cannot mint a legacy kind. Every alias response carries `Deprecation`, a
-`Link` to `/api/service-accounts`, and a warning naming removal in v0.17. X-121 owns deletion at that
-release.
+v0.16 accepted `/api/agents`, `FLUX_EXCHANGE_AGENTS`, the serialized `agent` principal kind and the
+`#/agents` console fragment for one minor release. X-121 removes all four in v0.17: the API and
+console expose only the canonical Service Account spelling, startup reads only
+`FLUX_EXCHANGE_SERVICE_ACCOUNTS`, and `PrincipalKind` deserialization refuses `agent`.
 
-`FLUX_EXCHANGE_SERVICE_ACCOUNTS` is canonical. `FLUX_EXCHANGE_AGENTS` is accepted through v0.16; if
-both are set they must resolve to the same trimmed path or startup refuses. Documentation and startup
-diagnostics lead with the canonical name.
-
-`PrincipalKind` serializes `service_account`. Deserialization accepts `agent` only for committed
-legacy data/descriptor compatibility through v0.16. The anonymous descriptor moves to vocabulary
-version 2 and names the canonical resource and live bearer-auth capability. The console route is
-`#/service-accounts`; `#/agents` redirects without preserving the retired noun.
+The durable store never serialized a principal kind; it retains tenant, id, expiry and a verifier.
+Consequently the removal rewrites no durable record and existing unprefixed bearer tokens continue
+to resolve as `service_account` until expiry or revocation. The anonymous descriptor remains at
+vocabulary version 2 and names only the canonical resource and live bearer-auth capability.

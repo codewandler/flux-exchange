@@ -369,7 +369,7 @@ impl HttpTokenExchange {
             subject: claims.sub,
             nonce: claims.nonce,
             expires_at: claims.exp,
-            email: claims.email,
+            hosted_domain: claims.hd,
         })
     }
 }
@@ -441,7 +441,7 @@ struct IdTokenClaims {
     #[serde(default)]
     nonce: Option<String>,
     #[serde(default)]
-    email: Option<String>,
+    hd: Option<String>,
 }
 
 /// `aud` is a string **or** a list of strings in the wire format.
@@ -773,8 +773,9 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
 
     /// The claims every token in these tests carries.
     ///
-    /// `aud` is the **list** spelling and `email` is absent: both are the shapes a host that only
-    /// modelled the common case gets wrong, and the happy path asserts they survive the round trip.
+    /// `aud` is the **list** spelling and `hd` is present so the happy path proves the signed
+    /// organization claim survives the verified-claims seam. `email` is deliberately hostile and
+    /// unmodelled: requesting its provider-required scope does not make it an identity input.
     fn claims() -> serde_json::Value {
         json!({
             "iss": ISSUER,
@@ -782,6 +783,8 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
             "sub": "the-operator",
             "exp": EXPIRES_AT,
             "nonce": "the-bound-nonce",
+            "hd": "example.com",
+            "email": "outsider@hostile.example",
         })
     }
 
@@ -948,7 +951,7 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
     /// signature verifies against the published key, and every claim this host carries forward
     /// arrives intact.
     ///
-    /// `aud` is a list and `email` is absent deliberately: those are the two shapes a provider is
+    /// `aud` is a list and `hd` is absent deliberately: those are the two shapes a provider is
     /// free to send and a host is tempted not to model.
     #[tokio::test]
     async fn a_correctly_signed_id_token_is_redeemed() {
@@ -967,7 +970,7 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
                 subject: "the-operator".to_string(),
                 nonce: Some("the-bound-nonce".to_string()),
                 expires_at: EXPIRES_AT,
-                email: None,
+                hosted_domain: Some("example.com".to_string()),
             },
         );
     }

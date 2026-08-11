@@ -29,17 +29,19 @@ cd flux-exchange
 # a name anybody can guess is worse than no authentication, because the surface in front of it
 # believes every caller. It is a refusal and not a warning: no flag relaxes it.
 #
-# What each tenant may run, and what operations run with. Two paths, both outside every
-# checkout — a grant file that arrives with a clone is an authorisation policy nobody decided,
-# and this host refuses such a path rather than writing there. It creates what it needs, with
-# the modes it wants; neither holds anything until you put something in it.
-export FLUX_EXCHANGE_GRANTS=<a path outside every checkout>
-export FLUX_EXCHANGE_CREDENTIALS=<a second path outside every checkout>
-
 # Cargo forwards everything after its `--` to the binary. This declares one tenant, `dev`, and
-# one human from the startup environment: user:${USER}@dev.
+# one human from the startup environment: user:${USER}@dev. It also binds the complete development
+# store set below the per-user state root; no store variable is required for this mode.
 cargo run -- --dev
 ```
+
+Development defaults are persistent rather than an in-memory fallback. An explicitly configured
+store still wins, and an empty or unsafe override refuses instead of silently dropping that store.
+For example, a path directly below a shared temporary directory is unsafe; placing it below a newly
+created owner-only directory preserves the shared ancestor and is accepted. Every development store
+left unset continues to use its default. If an explicit development roster is also present, it may
+replace the implied identity, but the actual `--dev` process argument still selects this complete
+development store composition.
 
 The resulting bearer handle is the value of `$USER`. If local work needs a deliberately named tenant,
 several principals, or several tenants, leave off `--dev` and arm the existing roster explicitly:
@@ -50,6 +52,11 @@ several principals, or several tenants, leave off `--dev` and arm the existing r
 export FLUX_EXCHANGE_DEV_IDENTITY="<kind:id@tenant>"
 cargo run
 ```
+
+That second command is configured non-development startup, not another spelling of `--dev`. Its
+persistent store set is all-or-nothing: an incomplete explicit set refuses and names every missing
+sibling. This prevents a stale environment override from producing a process with only some of its
+state bound.
 
 One entry is `kind:id@tenant`: `user`, `agent` or `service`; an id you choose; and the tenant that
 principal is of, fixed at startup where no request field can reach it. Paste the placeholder as it
@@ -64,7 +71,9 @@ Then read the startup log once. It is the operator's channel, and it is more cur
 - a warning, at `warn` deliberately, that a development identity is armed and that any caller
   presenting one of those handles becomes that principal;
 - every route it publishes, and whether that route needs a principal and of which kind;
-- every store that is **not** bound and what will refuse because of it. Nothing falls back to memory.
+- every store that is **not** bound and what will refuse because of it. Under `--dev` the complete
+  default set is bound; in configured non-development startup, a partial set refuses before this
+  log. Nothing falls back to memory.
 
 ## Sign in
 

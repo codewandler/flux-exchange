@@ -2,25 +2,35 @@
 
 use std::sync::Arc;
 
+use exchange_host::GrantTransactions;
 use exchange_host::{
-    ConnectionSettings, Identity, Invoker, PureEditorTools, SecretStore, WorkflowStore,
+    AuthPosture, ConnectionRegistry, ConnectionSettings, Identity, Invoker, Principal,
+    PureEditorTools, SecretStore, WorkflowStore,
 };
 
 use crate::audit::AuditJournal;
 use crate::bind::IdentityBinding;
 use crate::channel::ChannelSupervisor;
-use crate::connection_guard::ConnectionGuard;
+use crate::connection_guard::{Claim, ConnectionGuard};
+use crate::credential_acquisition::AcquisitionBindings;
+use crate::credential_head::CredentialHeadStore;
 use crate::dev_identity::DevIdentity;
+use crate::local_identity::LocalUsers;
+use crate::local_management::TransactionCoordinator;
+use crate::managed_apps::ManagedAppSupervisor;
 use crate::oidc::Oidc;
+use crate::operator::OperatorPolicy;
 use crate::service_account::ServiceAccountStore;
-use crate::traffic::{InvocationClaim, Traffic, TrafficRefusal};
+use crate::tenancy::Tenancy;
+use crate::traffic::{HostedClaim, InvocationClaim, Traffic, TrafficRefusal};
 use crate::workflow_runs::WorkflowRunStore;
 
 /// The state the router hands to every route.
 ///
-/// It carries the *ports* a composition bound, never a credential and never a tenant. A tenant is
-/// read from a resolved principal and from nothing else — there is deliberately nothing here that
-/// a route could reach for instead.
+/// It carries the *ports* and deployment policy a composition bound, never a credential. A route
+/// still reads its tenant from the resolved principal and from nothing else. The optional
+/// single-tenant policy can only check that principal against the startup declaration; it offers no
+/// tenant value for a route to substitute.
 #[derive(Clone)]
 pub struct AppState {
     /// Durable non-secret evidence, when this composition bound it.
@@ -29,12 +39,23 @@ pub struct AppState {
     sign_in: SignIn,
     /// Where credentials are kept, as the **port** rather than as the concrete store.
     ///
-    /// `exchange_host::CredentialStore` is one binding of this and is `#[cfg(unix)]`, because only
-    /// the file store is; holding the port keeps the surface off that gate and keeps a deployment
-    /// that binds Vault instead able to do so. `None` is a composition that bound none, and every
+    /// `exchange_host::CredentialStore` is the portable local binding; holding the port keeps a
+    /// deployment that binds Vault instead able to do so. `None` is a composition that bound none, and every
     /// route that would reach for one refuses rather than pretending — see
     /// [`crate::routes::connections`].
     credentials: Option<Arc<dyn SecretStore>>,
+    /// The one recovered prepared-transaction coordinator shared by native and hosted management.
+    coordinator: Option<Arc<TransactionCoordinator>>,
+    /// Durable opaque heads for labelled credential partitions.
+    credential_heads: Option<Arc<CredentialHeadStore>>,
+    /// The startup-validated byte-exact origin admitted by the hosted management transport.
+    hosted_origin: Option<Arc<str>>,
+    /// The revisioned whole-set grant port retained from the same store invocation reads.
+    grant_transactions: Option<Arc<dyn GrantTransactions>>,
+    /// Startup-selected policy over connector-declared credential-acquisition hazards.
+    auth_posture: AuthPosture,
+    /// Explicit server bindings for released connector acquisition declarations.
+    acquisitions: Arc<AcquisitionBindings>,
     /// Where a tenant's **non-secret** connection values are kept, as the port.
     ///
     /// A separate binding from [`credentials`](Self::credentials) and a separate store behind it,
@@ -54,6 +75,12 @@ pub struct AppState {
     /// not an `Option` — a guard with no store behind it costs nothing and guards nothing, and
     /// making it absent would give the routes a second thing to branch on.
     connections: Arc<ConnectionGuard>,
+    /// The durable tenant-scoped label-to-UUID overlay, when this composition bound one.
+    ///
+    /// Credentials remain authoritative for existence; routes intersect these rows with
+    /// `SecretStore::references` before displaying or resolving them. `None` therefore preserves
+    /// sole legacy connections and refuses every operation that requires a label.
+    connection_registry: Option<Arc<dyn ConnectionRegistry>>,
     /// The Service Accounts this host has minted tokens for, if this composition bound a store.
     ///
     /// A separate binding from [`credentials`](Self::credentials) and deliberately so: an agent
@@ -70,6 +97,8 @@ pub struct AppState {
     /// composition that runs nothing, and `POST /api/operations/{operation}/invoke` refuses rather
     /// than pretending — see [`crate::routes::invoke`].
     invoker: Option<Arc<Invoker>>,
+    /// Installed App packages, tenant bindings and Flux runtime supervision.
+    apps: Option<Arc<ManagedAppSupervisor>>,
     /// Tenant-scoped mutable drafts and immutable workflow versions.
     workflows: Option<Arc<WorkflowStore>>,
     /// The validated pure cognition registry shared by validation and execution.
@@ -80,17 +109,22 @@ pub struct AppState {
     channels: Option<Arc<ChannelSupervisor>>,
     /// Process-wide bounds around anonymous sign-in allocation and operation execution.
     traffic: Traffic,
+    /// Deployment-owned administrative authority, keyed independently from principal kind.
+    operators: OperatorPolicy,
+    /// Startup tenancy policy. In the single-tenant shape this rejects disagreement; it never
+    /// rewrites a resolved principal into another tenant.
+    tenancy: Tenancy,
 }
 
 /// What this composition can offer a human who wants to sign in.
 ///
-/// Four states rather than an `Option`, because they are answered differently at `/api/signin`:
+/// Explicit states rather than an `Option`, because they are answered differently at `/api/signin`:
 /// "not configured" and "configured but unable to finish" are different mistakes with different
 /// fixes, and a caller shown one message for both gets sent to the wrong place. All of them are
 /// answered there rather than at the callback: the failure X-04's story names is a login that looks
 /// fine and dies at the last step.
 ///
-/// **These four states are the operator's, not the caller's.** What crosses the wire is
+/// **These states are the operator's, not the caller's.** What crosses the wire is
 /// [`available`](Self::available) — one boolean — and the argument for that collapse is on it.
 #[derive(Clone)]
 pub enum SignIn {
@@ -127,6 +161,10 @@ pub enum SignIn {
         automatic: bool,
     },
 
+    /// An owner-only verifier file is bound, so this host can authenticate a local human through
+    /// its own form without disclosing which provider kind backs the anonymous availability bit.
+    LocalUsers,
+
     /// A provider is bound and the flow can complete.
     Oidc(Arc<Oidc>),
 }
@@ -135,13 +173,13 @@ impl SignIn {
     /// Whether **this deployment can turn a caller into a principal**.
     ///
     /// That sentence is the whole of X-57. It used to read "is OIDC configured", which was the same
-    /// answer for three of the four states and the wrong one for the fourth: arming the development
+    /// answer for the original states and the wrong one for development: arming the development
     /// identity binds a port that mints principals from a roster and a `POST /api/session` that
     /// exchanges one for a session, and this reported that nobody could sign in. The console reads
     /// this field to decide whether to offer signing in at all, so the host most likely to be
     /// somebody's first run of this software was the one it declined to offer a way into.
     ///
-    /// # Four states collapse to one boolean, and the collapse is the point
+    /// # Provider states collapse to one boolean, and the collapse is the point
     ///
     /// The four are what an **operator** needs, because "not configured", "configured but unable to
     /// finish" and "signed in locally" have different remedies and different instructions —
@@ -169,7 +207,7 @@ impl SignIn {
     /// [`IdentityBinding::Development`]: crate::bind::IdentityBinding::Development
     pub fn available(&self) -> bool {
         match self {
-            SignIn::Oidc(_) | SignIn::Development { .. } => true,
+            SignIn::Oidc(_) | SignIn::Development { .. } | SignIn::LocalUsers => true,
             SignIn::Unconfigured | SignIn::NoTokenExchange => false,
         }
     }
@@ -192,6 +230,20 @@ enum BoundIdentity {
     Real(Arc<dyn Identity>),
     /// The development identity, which is loopback-only for as long as it is armed.
     Development(Arc<DevIdentity>),
+    /// Verifier-backed local humans, safe for a reachable bind and kept distinct from both OIDC
+    /// and the secret-free development roster.
+    LocalUsers(Arc<LocalUsers>),
+}
+
+fn initial_operator_policy() -> OperatorPolicy {
+    #[cfg(test)]
+    {
+        OperatorPolicy::all_users_for_test()
+    }
+    #[cfg(not(test))]
+    {
+        OperatorPolicy::default()
+    }
 }
 
 impl AppState {
@@ -205,15 +257,25 @@ impl AppState {
             identity: BoundIdentity::None,
             sign_in: SignIn::Unconfigured,
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -232,15 +294,25 @@ impl AppState {
             identity: BoundIdentity::Real(identity),
             sign_in: SignIn::Unconfigured,
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -256,15 +328,25 @@ impl AppState {
             identity: BoundIdentity::Development(identity),
             sign_in: SignIn::Development { automatic: false },
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -273,6 +355,35 @@ impl AppState {
         let mut state = Self::with_development_identity(identity);
         state.sign_in = SignIn::Development { automatic: true };
         state
+    }
+
+    /// A composition with verifier-backed local human sign-in.
+    pub fn with_local_users(identity: Arc<LocalUsers>) -> Self {
+        Self {
+            audit: None,
+            identity: BoundIdentity::LocalUsers(identity),
+            sign_in: SignIn::LocalUsers,
+            credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
+            settings: None,
+            connections: Arc::default(),
+            connection_registry: None,
+            service_accounts: None,
+            invoker: None,
+            apps: None,
+            workflows: None,
+            pure_editor_tools: None,
+            workflow_runs: None,
+            channels: None,
+            traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
+        }
     }
 
     /// A composition that federates sign-in to an OIDC provider.
@@ -290,15 +401,25 @@ impl AppState {
             identity: BoundIdentity::Real(oidc.clone()),
             sign_in: SignIn::Oidc(oidc),
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -314,15 +435,25 @@ impl AppState {
             identity: BoundIdentity::None,
             sign_in: SignIn::NoTokenExchange,
             credentials: None,
+            coordinator: None,
+            credential_heads: None,
+            hosted_origin: None,
+            grant_transactions: None,
+            auth_posture: AuthPosture::fail_closed(),
+            acquisitions: Arc::default(),
             settings: None,
             connections: Arc::default(),
+            connection_registry: None,
             service_accounts: None,
             invoker: None,
+            apps: None,
             workflows: None,
             pure_editor_tools: None,
             workflow_runs: None,
             channels: None,
             traffic: Traffic::default(),
+            operators: initial_operator_policy(),
+            tenancy: Tenancy::default(),
         }
     }
 
@@ -330,6 +461,33 @@ impl AppState {
     pub fn with_audit(mut self, audit: Arc<AuditJournal>) -> Self {
         self.audit = Some(audit);
         self
+    }
+
+    /// Bind the deployment-owned operator policy.
+    pub fn with_operator_policy(mut self, operators: OperatorPolicy) -> Self {
+        self.operators = operators;
+        self
+    }
+
+    /// Select one startup tenant for this composition.
+    ///
+    /// This does not supply a tenant to handlers. It is a second check at the identity boundary:
+    /// the authenticated principal must already carry the configured tenant or authentication is
+    /// refused. That distinction prevents a token for one tenant becoming authority for another
+    /// after a deployment setting changes.
+    pub fn with_tenancy(mut self, tenancy: Tenancy) -> Self {
+        self.tenancy = tenancy;
+        self
+    }
+
+    /// Whether a provider-resolved principal agrees with the startup tenancy declaration.
+    pub fn admits_principal_tenant(&self, principal: &Principal) -> bool {
+        self.tenancy.admits(principal)
+    }
+
+    /// Whether this resolved principal may administer the deployment.
+    pub fn is_operator(&self, principal: &exchange_host::Principal) -> bool {
+        self.operators.admits(principal)
     }
 
     /// The durable application audit journal, if this composition bound one.
@@ -360,6 +518,108 @@ impl AppState {
     /// caller supplied.
     pub fn credentials(&self) -> Option<&Arc<dyn SecretStore>> {
         self.credentials.as_ref()
+    }
+
+    /// Bind the one recovered coordinator used by every local-management transport.
+    pub fn with_transaction_coordinator(
+        mut self,
+        coordinator: Arc<TransactionCoordinator>,
+    ) -> Self {
+        self.coordinator = Some(coordinator);
+        self
+    }
+
+    /// The recovered transaction coordinator, if this composition bound one.
+    pub fn transaction_coordinator(&self) -> Option<&Arc<TransactionCoordinator>> {
+        self.coordinator.as_ref()
+    }
+
+    /// Whether a provider-committed connection image is still being published for this key.
+    pub(crate) fn connection_publication_pending(
+        &self,
+        tenant: &exchange_host::Tenant,
+        connector: &str,
+    ) -> Result<bool, ()> {
+        self.coordinator
+            .as_ref()
+            .map(|coordinator| {
+                coordinator
+                    .publication_pending_for(tenant.as_str(), connector)
+                    .map_err(|_| ())
+            })
+            .unwrap_or(Ok(false))
+    }
+
+    /// Claim a mutation only when no durable post-decision publication owns the same key.
+    pub(crate) fn claim_connection(
+        &self,
+        tenant: &exchange_host::Tenant,
+        connector: &str,
+    ) -> Option<Claim> {
+        matches!(
+            self.connection_publication_pending(tenant, connector),
+            Ok(false)
+        )
+        .then(|| self.connections.claim(tenant, connector))
+        .flatten()
+    }
+
+    /// Bind the one owner-root credential-head store shared by plans and ceremonies.
+    pub(crate) fn with_credential_heads(mut self, heads: Arc<CredentialHeadStore>) -> Self {
+        self.credential_heads = Some(heads);
+        self
+    }
+
+    /// The durable value-free credential-head store, when startup migration completed.
+    pub(crate) fn credential_heads(&self) -> Option<&Arc<CredentialHeadStore>> {
+        self.credential_heads.as_ref()
+    }
+
+    /// Bind the canonical origin admitted by hosted local management.
+    pub fn with_hosted_origin(mut self, origin: impl Into<Arc<str>>) -> Self {
+        self.hosted_origin = Some(origin.into());
+        self
+    }
+
+    /// The byte-exact hosted origin selected before route service begins.
+    pub fn hosted_origin(&self) -> Option<&str> {
+        self.hosted_origin.as_deref()
+    }
+
+    /// Bind the local-management grant transaction port retained from the invocation store.
+    pub fn with_grant_transactions(mut self, grants: Arc<dyn GrantTransactions>) -> Self {
+        self.grant_transactions = Some(grants);
+        self
+    }
+
+    /// The revisioned grant transaction port, when this composition bound one.
+    pub fn grant_transactions(&self) -> Option<&Arc<dyn GrantTransactions>> {
+        self.grant_transactions.as_ref()
+    }
+
+    /// Bind deployment policy and explicit connector acquisition performers together.
+    ///
+    /// The production registry remains empty until released connector metadata supplies the
+    /// declaration. Tests use this seam to exercise the complete orchestration without pretending
+    /// unreleased C-440 metadata is present in the catalogue.
+    pub fn with_credential_acquisition(
+        mut self,
+        posture: AuthPosture,
+        acquisitions: Arc<AcquisitionBindings>,
+    ) -> Self {
+        self.auth_posture = posture;
+        self.acquisitions = acquisitions;
+        self
+    }
+
+    /// The startup-selected acquisition posture.
+    pub fn auth_posture(&self) -> &AuthPosture {
+        &self.auth_posture
+    }
+
+    /// Explicit connector acquisition bindings available to this composition.
+    pub fn acquisitions(&self) -> &Arc<AcquisitionBindings> {
+        &self.acquisitions
     }
 
     /// Bind the connection-settings store this composition holds.
@@ -432,6 +692,17 @@ impl AppState {
         self.invoker.as_ref()
     }
 
+    /// Bind installed App storage and Flux runtime supervision.
+    pub fn with_apps(mut self, apps: Arc<ManagedAppSupervisor>) -> Self {
+        self.apps = Some(apps);
+        self
+    }
+
+    /// Installed App supervisor, when this composition bound one.
+    pub fn apps(&self) -> Option<&Arc<ManagedAppSupervisor>> {
+        self.apps.as_ref()
+    }
+
     /// Bind workflow definitions and the only built-in registry the editor admits.
     pub fn with_workflows(
         mut self,
@@ -480,6 +751,17 @@ impl AppState {
         &self.connections
     }
 
+    /// Bind the durable connection-label overlay.
+    pub fn with_connection_registry(mut self, registry: Arc<dyn ConnectionRegistry>) -> Self {
+        self.connection_registry = Some(registry);
+        self
+    }
+
+    /// The connection-label overlay, if this composition bound one.
+    pub fn connection_registry(&self) -> Option<&Arc<dyn ConnectionRegistry>> {
+        self.connection_registry.as_ref()
+    }
+
     /// Whether a request could become a principal, and whether that is safe to expose.
     ///
     /// This is what [`admit_bind`](crate::bind::admit_bind) decides on.
@@ -489,6 +771,7 @@ impl AppState {
             (BoundIdentity::None, None) => IdentityBinding::Unbound,
             (BoundIdentity::Real(_), _) => IdentityBinding::Bound,
             (BoundIdentity::Development(_), _) => IdentityBinding::Development,
+            (BoundIdentity::LocalUsers(_), _) => IdentityBinding::LocalUsers,
         }
     }
 
@@ -501,6 +784,7 @@ impl AppState {
             BoundIdentity::None => None,
             BoundIdentity::Real(identity) => Some(identity.clone()),
             BoundIdentity::Development(identity) => Some(identity.clone()),
+            BoundIdentity::LocalUsers(identity) => Some(identity.clone()),
         }
     }
 
@@ -512,6 +796,14 @@ impl AppState {
     pub fn development_identity(&self) -> Option<&Arc<DevIdentity>> {
         match &self.identity {
             BoundIdentity::Development(identity) => Some(identity),
+            _ => None,
+        }
+    }
+
+    /// The concrete local-users identity, for verifying a form credential and opening its session.
+    pub fn local_users(&self) -> Option<&Arc<LocalUsers>> {
+        match &self.identity {
+            BoundIdentity::LocalUsers(identity) => Some(identity),
             _ => None,
         }
     }
@@ -530,6 +822,11 @@ impl AppState {
                 }
             }
             SignIn::Oidc(oidc) => oidc.close_session(presented),
+            SignIn::LocalUsers => {
+                if let BoundIdentity::LocalUsers(identity) = &self.identity {
+                    identity.close_session(presented);
+                }
+            }
             SignIn::Unconfigured | SignIn::NoTokenExchange => {}
         }
     }
@@ -540,8 +837,24 @@ impl AppState {
     }
 
     /// Claim one bounded invocation slot and one request from the rolling window.
-    pub(crate) fn begin_invocation(&self) -> Result<InvocationClaim, TrafficRefusal> {
-        self.traffic.begin_invocation()
+    pub(crate) fn begin_invocation(
+        &self,
+        principal: &Principal,
+    ) -> Result<InvocationClaim, TrafficRefusal> {
+        self.traffic.begin_invocation(principal)
+    }
+
+    /// Claim one exact hosted local-management ceremony slot.
+    pub(crate) fn begin_local_management(
+        &self,
+        principal: &Principal,
+    ) -> Result<HostedClaim, TrafficRefusal> {
+        self.traffic.begin_local_management(principal)
+    }
+
+    /// Fixed-cardinality process traffic measurements.
+    pub(crate) fn traffic_snapshot(&self) -> crate::traffic::TrafficSnapshot {
+        self.traffic.snapshot()
     }
 
     #[cfg(test)]
@@ -567,6 +880,15 @@ mod tests {
         Arc::new(DevIdentity::from_roster("user:alice@acme").expect("a well-formed roster"))
     }
 
+    fn local_users() -> Arc<LocalUsers> {
+        let (_, entry) =
+            crate::local_identity::generate("alice", "acme").expect("the OS supplies entropy");
+        Arc::new(
+            LocalUsers::from_json(&serde_json::to_string(&vec![entry]).expect("an entry document"))
+                .expect("valid local users"),
+        )
+    }
+
     /// A federated composition.
     ///
     /// The exchange is never called — deciding a binding redeems nothing — but `with_oidc` needs
@@ -590,6 +912,32 @@ mod tests {
 
     fn addr(raw: &str) -> SocketAddr {
         raw.parse().expect("a literal socket address")
+    }
+
+    /// X-59's state seam: the startup declaration checks the tenant a provider already resolved;
+    /// it neither invents one for a request nor translates authority between tenants.
+    #[test]
+    fn a_single_tenant_composition_refuses_disagreeing_provider_authority() {
+        let state = AppState::with_identity(dev())
+            .with_tenancy(Tenancy::single("acme").expect("a literal startup tenant"));
+        let acme = Principal::new(
+            exchange_host::PrincipalKind::User,
+            "alice",
+            exchange_host::Tenant::new("acme").expect("a literal tenant"),
+        );
+        let beta = Principal::new(
+            exchange_host::PrincipalKind::User,
+            "alice",
+            exchange_host::Tenant::new("beta").expect("a literal tenant"),
+        );
+
+        assert!(state.admits_principal_tenant(&acme));
+        assert!(!state.admits_principal_tenant(&beta));
+        assert_eq!(
+            beta.tenant().as_str(),
+            "beta",
+            "authority is never rewritten"
+        );
     }
 
     /// The seam `main` actually runs through, end to end: compose the state, ask it for its
@@ -635,6 +983,11 @@ mod tests {
             AppState::with_development_identity(dev()).identity_binding(),
             IdentityBinding::Development,
             "the development port must never report itself as a real binding",
+        );
+        assert_eq!(
+            AppState::with_local_users(local_users()).identity_binding(),
+            IdentityBinding::LocalUsers,
+            "a verifier-backed local identity must keep its own reachable-safe binding state",
         );
         assert_eq!(
             AppState::with_oidc(oidc()).identity_binding(),

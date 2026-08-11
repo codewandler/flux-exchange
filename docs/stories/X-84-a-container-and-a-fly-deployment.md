@@ -5,7 +5,7 @@ status: blocked
 epic: remote-deployment
 design: docs/designs/remote-deployment.md
 areas: [ci, exchange-server]
-note: "BLOCKED on a human Google OIDC sign-in and public connect → grant → invoke walkthrough; deployment and storage artifacts are already live"
+note: "Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof"
 ---
 
 # A container, one machine, and the operator's first five minutes
@@ -45,9 +45,10 @@ that is worth a separate story once a deploy has been done by hand more than onc
   `fly secrets set`, on the same rule that governs `CARGO_REGISTRY_TOKEN`.
 
 ## The environment, in full
-`FLUX_EXCHANGE_BIND=0.0.0.0:8080` · `FLUX_EXCHANGE_CREDENTIALS` · `FLUX_EXCHANGE_AGENTS` ·
-`FLUX_EXCHANGE_SETTINGS` · `FLUX_EXCHANGE_GRANTS` (all four on the volume) · the seven
-`FLUX_EXCHANGE_OIDC_*` variables, with `..._REDIRECT_URI=https://<app>.fly.dev/api/signin/callback`.
+`FLUX_EXCHANGE_BIND=0.0.0.0:8080` · `FLUX_EXCHANGE_CREDENTIALS` · `FLUX_EXCHANGE_SERVICE_ACCOUNTS` ·
+`FLUX_EXCHANGE_SETTINGS` · `FLUX_EXCHANGE_GRANTS` (all four on the volume) · the seven required
+non-secret `FLUX_EXCHANGE_OIDC_*` settings, the optional Google hosted-domain setting and the OIDC
+client secret, with `..._REDIRECT_URI=https://<app>.fly.dev/api/signin/callback`.
 `FLUX_EXCHANGE_DEV_IDENTITY` must be **unset** — armed, it forces `admit_bind` to refuse.
 
 ## The first five minutes, which is the half most likely to be skipped
@@ -66,18 +67,20 @@ belongs in that walkthrough.
 - [x] `fly deploy` produces a running machine that answers `/health` and serves the console at `/`.
       → deployed at `https://flux-exchange.fly.dev` and re-verified after X-85's v0.12.0 rollout:
       Fly release v2 passes its machine check, `/health` names v0.12.0 and `/` serves the console.
-- [ ] A browser at the public URL signs in through the configured provider and reaches an authenticated
+- [x] A browser at the public URL signs in through the configured provider and reaches an authenticated
       screen.
+      → verified by the owner on 2026-08-03 after the v0.16.2 `openid email` correction; the audit
+      journal recorded successful authentication and session creation for the immutable OIDC subject.
 - [ ] **Verified by walking it**, the way [[X-69]] verified its page rather than intending it: sign in →
       connect → grant → invoke → result, on the deployed URL, from a machine with no checkout.
 - [x] The credential store's files are `0600` in a `0700` directory on the volume.
       → verified in the built image on a mounted volume: `drwx------ /data/credentials` holding
       `-rw------- store.json`. **This is where the measurement changed the design** — see Progress.
-- [ ] A redeploy preserves credentials, agents, settings and grants, and **signs everyone out** —
+- [ ] A redeploy preserves credentials, Service Accounts, settings and grants, and **signs everyone out** —
       sessions are in memory (`session.rs:173`). Stated in the runbook so it does not read as a bug.
 - [x] No secret appears in any committed file.
-      → `fly.toml` carries the six non-secret OIDC values as placeholders and names the seventh only to
-      say it belongs in `fly secrets set`. No workflow was touched.
+      → `fly.toml` carries only non-secret OIDC settings and names the client secret only to say it
+      belongs in `fly secrets set`. No workflow was touched.
 - [x] `FLUX_EXCHANGE_DEV_IDENTITY` is provably unset — the one variable whose presence turns the whole
       bind rule off.
       → absent from `fly.toml` and the image, with the reason written where somebody would think to add
@@ -101,25 +104,26 @@ belongs in that walkthrough.
   touched. All four store paths are nested for that reason, and `fly.toml` carries the quoted refusal
   beside them: flattening them back to `/data/*.json` looks like tidying and is a deployment that will
   not start.
-- **A second finding from the same run:** the agent store makes the same complaint about `0755` as a
-  *warning* rather than a refusal — it discloses which agents exist and when their tokens expire, and no
-  token — so it would have started and quietly disclosed that. Nesting silences it too.
+- **A second finding from the same run:** the Service Account store makes the same complaint about
+  `0755` as a *warning* rather than a refusal — it discloses which accounts exist and when their
+  tokens expire, and no token — so it would have started and quietly disclosed that. Nesting silences
+  it too.
 - **The bind rule was verified inside the container**, which had to be true before the rest was worth
   writing: `FLUX_EXCHANGE_BIND=0.0.0.0:8080` with no identity exits and quotes the refusal, so a
   misconfigured machine crash-loops with the reason in its log rather than serving anonymously.
 - **`ca-certificates` is in the runtime image deliberately.** Without it the OIDC token exchange fails
   on the certificate chain and reads as *the provider refused us* — the confusion X-17 exists to split
   apart, reintroduced by a missing package.
-- **OIDC is registered and the service is deployed.** `/api/signin` redirects to Google with PKCE,
-  but the authenticated browser and sign-in → connect → grant → invoke walkthrough remain unverified;
-  those require completing the provider interaction as a real account, not another code change.
-- **2026-08-03 — status reconciled.** The same external verification remains: a human must complete
-  Google OIDC and walk the public flow, then redeploy and confirm persistence/session invalidation.
-  No repository implementation is active while that evidence is unavailable, so this is blocked
-  rather than in progress.
+- **OIDC is registered and the service is deployed.** `/api/signin` redirects to Google with PKCE;
+  on 2026-08-03 the owner completed that interaction and reached an authenticated session after the
+  v0.16.2 `openid email` correction. The remaining walkthrough starts at connect → grant → invoke.
+- **2026-08-03 — status reconciled.** External verification now means walking the public operation
+  flow, then redeploying and confirming persistence/session invalidation. No repository
+  implementation is active while that evidence is unavailable, so this is blocked rather than in
+  progress.
 
 ## Notes
-- Blocked on [[X-83]]: nothing to serve at `/` until it lands.
+- [[X-83]] is delivered and supplies the same-origin console included in the image.
 - **This is the family's first deployment.** `flux-connectors/providers/fly.toml` is the fly.io
   *connector manifest* and not a deploy config, so there is nothing to copy — and whatever this story
   writes is what `flux` and `flux-connectors` will copy later. Worth the extra hour on the comments.

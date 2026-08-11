@@ -80,6 +80,11 @@ pub const REDIRECT_URI_ENV: &str = "FLUX_EXCHANGE_OIDC_REDIRECT_URI";
 /// The tenant every principal this provider authenticates belongs to. See [`OidcConfig::tenant`].
 pub const TENANT_ENV: &str = "FLUX_EXCHANGE_OIDC_TENANT";
 
+/// The signed hosted-domain claim required for admission, when this provider represents a Google
+/// Workspace organization. The same value is sent as Google's `hd` account-selection hint, but
+/// admission is decided only from the signature-verified id-token claim.
+pub const HOSTED_DOMAIN_ENV: &str = "FLUX_EXCHANGE_OIDC_HOSTED_DOMAIN";
+
 /// Every variable naming a URL this host will not accept in cleartext, in the order the read
 /// visits them.
 ///
@@ -162,12 +167,11 @@ fn recorded() -> Reader<impl Fn(&str) -> Option<String>> {
 
 /// The scopes this host asks for, and the whole of what it asks for.
 ///
-/// **Signing in is not connecting.** `openid` identifies the human, `email` and `profile` are what
-/// a console needs to show who is signed in. Nothing here grants access to anything at the
-/// provider, and no vendor scope belongs in this list — connecting a provider is a different flow
-/// with a different consent screen, and a user who agreed to "sign in" has not agreed to that.
-/// Widening this constant would silently turn one consent into the other.
-pub const SCOPES: &str = "openid email profile";
+/// **Signing in is not connecting.** `openid` identifies the human; `email` is the minimum
+/// additional scope Google's production flow requires for this client, not an authorization input.
+/// The email claim is neither parsed nor carried across the verified-claims seam. No vendor scope
+/// belongs here — connecting a provider is a different flow with a different consent screen.
+pub const SCOPES: &str = "openid email";
 
 /// This host's client secret at the provider.
 ///
@@ -219,6 +223,7 @@ pub struct OidcConfig {
     client_secret: ClientSecret,
     redirect_uri: String,
     tenant: Tenant,
+    hosted_domain: Option<String>,
 }
 
 impl OidcConfig {
@@ -255,6 +260,7 @@ impl OidcConfig {
             client_secret,
             redirect_uri,
             tenant,
+            hosted_domain,
         } = Supplied::read(&mut reader);
 
         if !reader.unset.is_empty() {
@@ -301,6 +307,7 @@ impl OidcConfig {
             client_secret,
             redirect_uri,
             tenant,
+            hosted_domain,
         })
     }
 
@@ -330,7 +337,15 @@ impl OidcConfig {
             client_secret: ClientSecret("a-test-secret".to_string()),
             redirect_uri: "https://exchange.example.com/api/signin/callback".to_string(),
             tenant: Tenant::new(tenant).expect("a literal tenant"),
+            hosted_domain: None,
         }
+    }
+
+    /// Require a signed hosted-domain claim in tests.
+    #[cfg(test)]
+    pub fn with_hosted_domain_for_test(mut self, hosted_domain: &str) -> Self {
+        self.hosted_domain = Some(hosted_domain.to_string());
+        self
     }
 
     /// As [`OidcConfig::for_test`], with the back-channel endpoints pointed at a local stub.
@@ -396,6 +411,11 @@ impl OidcConfig {
     pub fn tenant(&self) -> &Tenant {
         &self.tenant
     }
+
+    /// The exact signed hosted-domain value required for admission, if one was configured.
+    pub fn hosted_domain(&self) -> Option<&str> {
+        self.hosted_domain.as_deref()
+    }
 }
 
 /// Every variable this module reads, each in its own named field.
@@ -418,6 +438,7 @@ struct Supplied {
     client_secret: ClientSecret,
     redirect_uri: String,
     tenant: String,
+    hosted_domain: Option<String>,
 }
 
 impl Supplied {
@@ -445,6 +466,7 @@ impl Supplied {
             client_secret: ClientSecret(reader.value(CLIENT_SECRET_ENV)),
             redirect_uri: reader.channel(REDIRECT_URI_ENV),
             tenant: reader.value(TENANT_ENV),
+            hosted_domain: reader.optional(HOSTED_DOMAIN_ENV),
         }
     }
 }
@@ -500,6 +522,11 @@ impl<L: Fn(&str) -> Option<String>> Reader<L> {
                 String::new()
             }
         }
+    }
+
+    /// An optional, non-secret deployment value. Empty is the same as absent: no domain gate.
+    fn optional(&mut self, name: &'static str) -> Option<String> {
+        (self.lookup)(name).filter(|value| !value.trim().is_empty())
     }
 
     /// A variable naming a URL this host will put an OIDC value on.
@@ -1404,14 +1431,13 @@ mod tests {
         }
     }
 
-    /// Sign-in is not connecting. This host asks to learn who the human is and nothing else — any
-    /// vendor scope here would turn one consent screen into a different one without anybody
-    /// deciding to.
+    /// Sign-in is not connecting. This exact minimal pair satisfies Google's provider protocol;
+    /// neither scope grants vendor authority and the email claim is not an identity input.
     #[test]
     fn the_requested_scopes_identify_the_human_and_grant_nothing() {
         let scopes: Vec<&str> = SCOPES.split_whitespace().collect();
 
-        assert_eq!(scopes, ["openid", "email", "profile"]);
+        assert_eq!(scopes, ["openid", "email"]);
         assert!(
             scopes.contains(&"openid"),
             "without `openid` this is not OIDC and there is no id token to bind a nonce to",

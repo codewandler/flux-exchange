@@ -1,27 +1,32 @@
 //! The connector catalogue, served.
 //!
-//! `GET /api/catalogue/connectors` lists what this binary was compiled with,
+//! `GET /api/catalogue/effective` returns the connected-and-granted operation bindings for one
+//! authenticated principal, `GET /api/catalogue/connectors` lists what this binary was compiled with,
 //! `GET /api/catalogue/connectors/{id}/operations` returns one connector's operations with the
 //! `risk`, `effects` and `idempotency` a [`Selector`](exchange_host::Selector) is written over, and
 //! `GET /api/catalogue/connectors/{id}/credentials` returns what that connector **declares** it
 //! needs in order to be connected.
 //!
-//! # Three things this answers, and two it does not
+//! # Two catalogues with different questions
 //!
-//! It answers **what exists**, **what each operation declares** and **what each connector
-//! declares**. It does *not* answer what the caller may run: every operation carries
-//! `admitted: null`, and nothing is ever filtered out for want of a grant
+//! The public routes answer **what exists**, **what each operation declares** and **what each
+//! connector declares**. They do *not* answer what the caller may run: every operation carries
+//! `admitted: null`, and nothing is filtered out for want of a grant
 //! ([`view::OperationView::admitted`] has the argument). Nor does it answer whether anyone *holds*
 //! a declared credential — that is per-tenant state, it lives on `GET /api/connections`, and
 //! [`view::ConnectorCredentials`] is where the line is drawn.
 //!
-//! [`view`] holds the whole response contract as pure data, so the shape is tested without a
-//! transport. The handlers below are a thin projection of it, and have only a status code to get
-//! right.
+//! The effective route asks the opposite question for one resolved principal. It intersects the
+//! exact credential and grant ports invocation uses, emits only complete operation/connection
+//! bindings, and seals the result with a stable content generation. It has no tenant or credential
+//! input and is [`Access::Principal`].
 //!
-//! # Why these routes are anonymous
+//! [`view`] holds both response contracts as pure data, so their shapes and generation identity are
+//! testable without another transport representation.
 //!
-//! All three are [`Access::Anonymous`], which made them the first routes besides `/health` that
+//! # Why the public routes are anonymous
+//!
+//! The four declaration routes are [`Access::Anonymous`], which made them the first routes besides `/health` that
 //! answer a caller this host has not identified. That is a decision, not an oversight, so here is
 //! the argument — and `super::tests::the_anonymous_surface_is_only_what_was_declared_anonymous` is
 //! what holds anyone to it.
@@ -41,25 +46,36 @@
 //! bind until X-03) would not be a stricter catalogue; it would be no catalogue at all, and the
 //! console being written against this contract would have nothing to read.
 //!
-//! The routes that must *not* be anonymous are the ones this one is deliberately unlike:
-//! connections, leases and invocation are per tenant and reach credentials. This one is a
-//! directory.
+//! The effective route is deliberately unlike that directory: it reads per-tenant connection and
+//! grant state and therefore sits behind the same resolved-principal boundary as invocation.
 
-use axum::extract::Path;
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
-use axum::Json;
+use axum::{Extension, Json};
+use connector_catalog::CredentialRequirement;
+use exchange_host::Principal;
+use serde::Deserialize;
 
 use super::{Access, Module, Route};
 use crate::state::AppState;
 
-mod view;
+pub(crate) mod view;
+
+#[cfg(test)]
+mod effective_tests;
 
 /// This module's contribution to the surface.
 pub(super) const MODULE: Module = Module {
     name: "catalogue",
     routes: &[
+        Route {
+            path: "/api/catalogue/effective",
+            access: Access::Principal,
+            method_router: effective_route,
+        },
         Route {
             path: "/api/catalogue/connectors",
             access: Access::Anonymous,
@@ -83,6 +99,10 @@ pub(super) const MODULE: Module = Module {
     ],
 };
 
+fn effective_route() -> MethodRouter<AppState> {
+    get(effective)
+}
+
 fn connectors_route() -> MethodRouter<AppState> {
     get(connectors)
 }
@@ -97,6 +117,134 @@ fn credentials_route() -> MethodRouter<AppState> {
 
 fn channels_route() -> MethodRouter<AppState> {
     get(channels)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectiveQuery {}
+
+/// The operation/connection bindings this resolved principal can actually discover.
+async fn effective(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    query: Result<Query<EffectiveQuery>, QueryRejection>,
+) -> Response {
+    if query.is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(crate::protocol::ErrorBody::new(
+                "malformed effective-catalogue query",
+            )),
+        )
+            .into_response();
+    }
+    let Some(invoker) = state.invoker() else {
+        return super::invoke::no_invoker();
+    };
+    let mut operations = Vec::new();
+
+    for provider in connector_catalog::providers() {
+        let connections = match super::connections::effective_connections(
+            &state,
+            &principal,
+            provider,
+            invoker.credentials(),
+        )
+        .await
+        {
+            Ok(connections) => connections,
+            Err(response) => return response,
+        };
+        if connections.is_empty() {
+            continue;
+        }
+
+        for operation in provider.operations {
+            if invoker.admit_operation(&principal, operation.id).is_err() {
+                continue;
+            }
+            for connection in &connections {
+                if !operation_is_connected(operation, connection)
+                    || !operation_is_configured(
+                        invoker, &principal, provider, operation, connection,
+                    )
+                {
+                    continue;
+                }
+                match view::effective_operation(operation, connection.label.clone()) {
+                    Ok(operation) => operations.push(operation),
+                    Err(error) => {
+                        tracing::error!(%error, operation = operation.id, "the effective catalogue could not be projected");
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "error": "effective catalogue projection failed",
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
+    }
+
+    match view::EffectiveCatalogue::new(operations) {
+        Ok(catalogue) => Json(catalogue).into_response(),
+        Err(error) => {
+            tracing::error!(%error, "the effective catalogue generation could not be sealed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "effective catalogue projection failed",
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+fn operation_is_configured(
+    invoker: &exchange_host::Invoker,
+    principal: &Principal,
+    provider: &'static connector_catalog::Provider,
+    operation: &'static connector_catalog::Operation,
+    connection: &super::connections::EffectiveConnection,
+) -> bool {
+    let Ok(required) = exchange_host::operation_settings(provider, operation) else {
+        // Invocation will refuse the same unreadable declaration. Omitting it is the fail-closed
+        // discovery answer; the public declaration catalogue remains the operator diagnostic.
+        return false;
+    };
+    required.iter().all(|setting| {
+        invoker
+            .settings()
+            .get_for_instance(
+                principal.tenant().as_str(),
+                provider.id,
+                connection.instance.as_ref(),
+                &setting.service,
+                setting.field(),
+            )
+            .is_some()
+    })
+}
+
+fn operation_is_connected(
+    operation: &connector_catalog::Operation,
+    connection: &super::connections::EffectiveConnection,
+) -> bool {
+    match operation.credential_requirement {
+        CredentialRequirement::Declared => operation.credentials.iter().any(|mechanism| {
+            mechanism.iter().all(|required| {
+                connection
+                    .held_credentials
+                    .iter()
+                    .any(|held| held == required)
+            })
+        }),
+        CredentialRequirement::NoneRequired => true,
+        CredentialRequirement::Withheld => false,
+    }
 }
 
 /// Every connector this binary carries.

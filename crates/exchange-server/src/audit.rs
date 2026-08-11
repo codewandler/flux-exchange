@@ -4,11 +4,9 @@
 //! credential values and setting values cannot be represented by this module's record vocabulary;
 //! route adapters can supply only a resolved actor and one of the closed target variants below.
 
-use std::fs::{self, DirBuilder, OpenOptions};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use exchange_host::Principal;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension as _};
@@ -61,11 +59,18 @@ pub enum Action {
     SessionClosed,
     ServiceAccountMinted,
     ServiceAccountRevoked,
+    ConnectionLabeled,
     ConnectionCreated,
+    CredentialAcquired,
     CredentialRotated,
+    CredentialRefreshed,
+    CredentialRefreshCommitLost,
     ConnectionRemoved,
     SettingSet,
     SettingCleared,
+    SettingAuthorityProposed,
+    SettingAuthorityApproved,
+    SettingAuthorityRevoked,
     GrantsReplaced,
     Invocation,
     AlertRaised,
@@ -80,11 +85,18 @@ impl Action {
             Self::SessionClosed => "session_closed",
             Self::ServiceAccountMinted => "service_account_minted",
             Self::ServiceAccountRevoked => "service_account_revoked",
+            Self::ConnectionLabeled => "connection_labeled",
             Self::ConnectionCreated => "connection_created",
+            Self::CredentialAcquired => "credential_acquired",
             Self::CredentialRotated => "credential_rotated",
+            Self::CredentialRefreshed => "credential_refreshed",
+            Self::CredentialRefreshCommitLost => "credential_refresh_commit_lost",
             Self::ConnectionRemoved => "connection_removed",
             Self::SettingSet => "setting_set",
             Self::SettingCleared => "setting_cleared",
+            Self::SettingAuthorityProposed => "setting_authority_proposed",
+            Self::SettingAuthorityApproved => "setting_authority_approved",
+            Self::SettingAuthorityRevoked => "setting_authority_revoked",
             Self::GrantsReplaced => "grants_replaced",
             Self::Invocation => "invocation",
             Self::AlertRaised => "alert_raised",
@@ -145,14 +157,35 @@ pub enum Target {
     Connection {
         connector: String,
     },
+    ConnectionInstance {
+        connector: String,
+        label: String,
+    },
     Credential {
         connector: String,
+        credential: String,
+    },
+    InstanceCredential {
+        connector: String,
+        label: String,
         credential: String,
     },
     Setting {
         connector: String,
         service: String,
         field: String,
+    },
+    InstanceSetting {
+        connector: String,
+        label: String,
+        service: String,
+        field: String,
+    },
+    SettingAuthority {
+        connector: String,
+        service: String,
+        field: String,
+        revision: String,
     },
     Grants {
         tenant: String,
@@ -175,15 +208,44 @@ impl Target {
             Self::ServiceAccounts => ("service_accounts", "service_accounts".to_owned()),
             Self::ServiceAccount { id } => ("service_account", id.clone()),
             Self::Connection { connector } => ("connection", connector.clone()),
+            Self::ConnectionInstance { connector, label } => {
+                ("connection_instance", format!("{connector}/{label}"))
+            }
             Self::Credential {
                 connector,
                 credential,
             } => ("credential", format!("{connector}/{credential}")),
+            Self::InstanceCredential {
+                connector,
+                label,
+                credential,
+            } => (
+                "instance_credential",
+                format!("{connector}/{label}/{credential}"),
+            ),
             Self::Setting {
                 connector,
                 service,
                 field,
             } => ("setting", format!("{connector}/{service}/{field}")),
+            Self::InstanceSetting {
+                connector,
+                label,
+                service,
+                field,
+            } => (
+                "instance_setting",
+                format!("{connector}/{label}/{service}/{field}"),
+            ),
+            Self::SettingAuthority {
+                connector,
+                service,
+                field,
+                revision,
+            } => (
+                "setting_authority",
+                format!("{connector}/{service}/{field}/{revision}"),
+            ),
             Self::Grants { tenant } => ("grants", tenant.clone()),
             Self::Invocation { operation } => ("invocation", operation.clone()),
             Self::Alert {
@@ -308,11 +370,18 @@ impl AuditJournal {
         })?;
         ensure_directory(parent)?;
         ensure_database_file(path)?;
+        ensure_database_file(&sqlite_journal_path(path))?;
 
         let connection = Connection::open(path).map_err(|source| AuditError::Database {
             path: path.to_path_buf(),
             source,
         })?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|source| AuditError::Database {
+                path: path.to_path_buf(),
+                source,
+            })?;
         initialise(&connection, path)?;
         let now = fixed_now.unwrap_or_else(now_unix);
         connection
@@ -352,6 +421,94 @@ impl AuditJournal {
         self.insert(&record)?;
         self.evaluate_alerts(&record)?;
         Ok(record)
+    }
+
+    /// Durably append one terminal event under a server-owned stable identifier.
+    ///
+    /// Receipt recovery reaches this method through a later request, so request identity and time
+    /// belong to the first canonical record rather than the replay key. The authority tuple does
+    /// remain closed: reusing an event identifier for another actor, action, outcome or target is
+    /// an invariant refusal and never edits the retained evidence.
+    pub fn record_terminal_once(
+        &self,
+        event_id: &str,
+        request_id: &RequestId,
+        action: Action,
+        outcome: Outcome,
+        actor: Option<&Principal>,
+        target: Target,
+    ) -> Result<Record, AuditError> {
+        if outcome == Outcome::Attempted {
+            return Err(AuditError::StableEventNotTerminal);
+        }
+        let candidate = Record {
+            schema_version: SCHEMA_VERSION,
+            event_id: event_id.to_owned(),
+            request_id: request_id.as_str().to_owned(),
+            timestamp: timestamp(self.now())?,
+            action,
+            outcome,
+            actor: actor.map(Actor::from),
+            target,
+            count: None,
+            window_seconds: None,
+        };
+        let rendered = serde_json::to_string(&candidate).map_err(AuditError::Json)?;
+        let (target_kind, target_value) = candidate.target.query_parts();
+        let mut state = self.inner.lock().map_err(|_| AuditError::Poisoned)?;
+        self.retain_if_due(&mut state)?;
+        let inserted = state
+            .connection
+            .execute(
+                "INSERT OR IGNORE INTO audit_records (event_id, request_id, timestamp, timestamp_unix, action, outcome, actor_tenant, actor_kind, actor_id, target_kind, target_value, record_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    candidate.event_id,
+                    candidate.request_id,
+                    candidate.timestamp,
+                    parse_timestamp(&candidate.timestamp)?,
+                    candidate.action.spelling(),
+                    candidate.outcome.spelling(),
+                    candidate.actor.as_ref().map(|actor| actor.tenant.as_str()),
+                    candidate.actor.as_ref().map(|actor| actor.kind.as_str()),
+                    candidate.actor.as_ref().map(|actor| actor.id.as_str()),
+                    target_kind,
+                    target_value,
+                    rendered,
+                ],
+            )
+            .map_err(|source| self.database_error(source))?
+            == 1;
+        let canonical = if inserted {
+            candidate.clone()
+        } else {
+            let json = state
+                .connection
+                .query_row(
+                    "SELECT record_json FROM audit_records WHERE event_id = ?1",
+                    params![event_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|source| self.database_error(source))?;
+            serde_json::from_str(&json).map_err(AuditError::Json)?
+        };
+        drop(state);
+
+        if canonical.schema_version != candidate.schema_version
+            || canonical.event_id != candidate.event_id
+            || canonical.action != candidate.action
+            || canonical.outcome != candidate.outcome
+            || canonical.actor != candidate.actor
+            || canonical.target != candidate.target
+            || canonical.count != candidate.count
+            || canonical.window_seconds != candidate.window_seconds
+        {
+            return Err(AuditError::StableEventConflict(event_id.to_owned()));
+        }
+        if inserted {
+            emit(&canonical);
+            self.evaluate_alerts(&canonical)?;
+        }
+        Ok(canonical)
     }
 
     /// Insert `attempted` before a state-changing store or runtime is touched.
@@ -410,6 +567,54 @@ impl AuditJournal {
             "SELECT record_json FROM audit_records WHERE target_kind = ?1 AND target_value = ?2 ORDER BY timestamp_unix DESC, event_id DESC LIMIT ?3",
             params![kind, value, i64::from(limit)],
         )
+    }
+
+    /// The latest retained successful write that established one credential for a connection.
+    ///
+    /// The tenant predicate is part of the query rather than a filter over its result: target
+    /// values deliberately omit tenant identifiers, so taking a global latest row first could
+    /// disclose another tenant's actor or hide the caller's own evidence behind it. A connection
+    /// static creation supplies every credential the request wrote; acquisition and refresh
+    /// instead record who initiated vendor minting, and a later write of either kind wins.
+    /// Absence is `Ok(None)` because the credential store, not this journal, decides whether the
+    /// connection exists.
+    pub fn latest_credential_supplier(
+        &self,
+        tenant: &str,
+        connector: &str,
+        credential: &str,
+        instance_label: Option<&str>,
+    ) -> Result<Option<Record>, AuditError> {
+        let (created_kind, created_value, rotated_kind, rotated_value) = match instance_label {
+            Some(label) => (
+                "connection_instance",
+                format!("{connector}/{label}"),
+                "instance_credential",
+                format!("{connector}/{label}/{credential}"),
+            ),
+            None => (
+                "connection",
+                connector.to_owned(),
+                "credential",
+                format!("{connector}/{credential}"),
+            ),
+        };
+        let records = self.query(
+            "SELECT record_json FROM audit_records
+             WHERE actor_tenant = ?1 AND outcome = 'succeeded' AND (
+                 (action IN ('connection_created', 'credential_acquired') AND target_kind = ?2 AND target_value = ?3) OR
+                 (action IN ('credential_rotated', 'credential_refreshed') AND target_kind = ?4 AND target_value = ?5)
+             )
+             ORDER BY timestamp_unix DESC, rowid DESC LIMIT 1",
+            params![
+                tenant,
+                created_kind,
+                created_value,
+                rotated_kind,
+                rotated_value
+            ],
+        )?;
+        Ok(records.into_iter().next())
     }
 
     fn query<P: rusqlite::Params>(&self, sql: &str, params: P) -> Result<Vec<Record>, AuditError> {
@@ -533,7 +738,14 @@ impl AuditJournal {
                 )
             }),
             (
-                Action::ConnectionCreated | Action::CredentialRotated | Action::ConnectionRemoved,
+                Action::ConnectionCreated
+                | Action::CredentialAcquired
+                | Action::CredentialRotated
+                | Action::CredentialRefreshed
+                | Action::ConnectionRemoved
+                | Action::SettingAuthorityProposed
+                | Action::SettingAuthorityApproved
+                | Action::SettingAuthorityRevoked,
                 Outcome::Succeeded,
             ) => Some((
                 AlertPolicy::CredentialChanged,
@@ -716,139 +928,39 @@ fn new_record_at(
 }
 
 fn ensure_directory(path: &Path) -> Result<(), AuditError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if !metadata.is_dir() {
-                return Err(AuditError::Path {
-                    path: path.to_path_buf(),
-                    reason: "it is not a directory".to_owned(),
-                });
-            }
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode != 0o700 {
-                return Err(AuditError::Mode {
-                    path: path.to_path_buf(),
-                    actual: mode,
-                    required: 0o700,
-                });
-            }
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            let parent = path.parent().ok_or_else(|| AuditError::Path {
-                path: path.to_path_buf(),
-                reason: "its parent does not exist".to_owned(),
-            })?;
-            if !parent.is_dir() {
-                return Err(AuditError::Path {
-                    path: path.to_path_buf(),
-                    reason: "its parent does not exist".to_owned(),
-                });
-            }
-            DirBuilder::new()
-                .mode(0o700)
-                .create(path)
-                .map_err(|source| AuditError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-        }
-        Err(source) => {
-            return Err(AuditError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        }
-    }
-    Ok(())
+    exchange_host::ensure_private_state_directory(path).map_err(|error| AuditError::Path {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })
 }
 
 fn verify_directory(path: &Path) -> Result<(), AuditError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| AuditError::Io {
+    // The same operation verifies existing state and creates only when absent; the read-only caller
+    // rejects absence at the database-file boundary immediately afterwards.
+    exchange_host::ensure_private_state_directory(path).map_err(|error| AuditError::Path {
         path: path.to_path_buf(),
-        source,
-    })?;
-    if !metadata.is_dir() {
-        return Err(AuditError::Path {
-            path: path.to_path_buf(),
-            reason: "it is not a directory".to_owned(),
-        });
-    }
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode != 0o700 {
-        return Err(AuditError::Mode {
-            path: path.to_path_buf(),
-            actual: mode,
-            required: 0o700,
-        });
-    }
-    Ok(())
+        reason: error.to_string(),
+    })
 }
 
 fn ensure_database_file(path: &Path) -> Result<(), AuditError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if !metadata.is_file() {
-                return Err(AuditError::Path {
-                    path: path.to_path_buf(),
-                    reason: "it is not a regular file".to_owned(),
-                });
-            }
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode != 0o600 {
-                return Err(AuditError::Mode {
-                    path: path.to_path_buf(),
-                    actual: mode,
-                    required: 0o600,
-                });
-            }
-        }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(|source| AuditError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                })?;
-        }
-        Err(source) => {
-            return Err(AuditError::Io {
-                path: path.to_path_buf(),
-                source,
-            })
-        }
-    }
-    Ok(())
+    exchange_host::ensure_private_state_file(path).map_err(|error| AuditError::Path {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })
 }
 
 fn verify_database_file(path: &Path) -> Result<(), AuditError> {
-    let metadata = fs::symlink_metadata(path).map_err(|source| AuditError::Io {
+    exchange_host::verify_private_state_file(path).map_err(|error| AuditError::Path {
         path: path.to_path_buf(),
-        source,
-    })?;
-    if !metadata.is_file() {
-        return Err(AuditError::Path {
-            path: path.to_path_buf(),
-            reason: "it is not a regular file".to_owned(),
-        });
-    }
-    let mode = metadata.permissions().mode() & 0o777;
-    if mode != 0o600 {
-        return Err(AuditError::Mode {
-            path: path.to_path_buf(),
-            actual: mode,
-            required: 0o600,
-        });
-    }
-    Ok(())
+        reason: error.to_string(),
+    })
 }
 
 fn initialise(connection: &Connection, path: &Path) -> Result<(), AuditError> {
     connection
         .execute_batch(
-            "PRAGMA journal_mode = WAL;
+            "PRAGMA journal_mode = PERSIST;
              PRAGMA synchronous = FULL;
              CREATE TABLE IF NOT EXISTS audit_records (
                  event_id TEXT PRIMARY KEY,
@@ -878,6 +990,14 @@ fn initialise(connection: &Connection, path: &Path) -> Result<(), AuditError> {
             path: path.to_path_buf(),
             source,
         })
+}
+
+fn sqlite_journal_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!("{file_name}-journal"))
 }
 
 fn now_unix() -> i64 {
@@ -944,14 +1064,20 @@ pub enum AuditError {
     MissingAttempt(String),
     #[error("audit event `{0}` was already final")]
     AlreadyFinal(String),
+    #[error("audit event `{0}` was already retained for a different terminal authority tuple")]
+    StableEventConflict(String),
+    #[error("a stable audit event must have a terminal outcome")]
+    StableEventNotTerminal,
     #[error("the audit journal lock is poisoned")]
     Poisoned,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
+    use std::fs::{self, OpenOptions};
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
     use std::sync::Arc;
 
     use axum::body::Body;
@@ -1008,6 +1134,148 @@ mod tests {
             .expect("rows")
             .map(|row| serde_json::from_str(&row.expect("row")).expect("record JSON"))
             .collect()
+    }
+
+    #[test]
+    fn stable_terminal_event_replay_survives_restart_without_a_second_row() {
+        let root = scratch("stable-terminal-restart");
+        let path = root.join("audit").join("events.sqlite3");
+        let target = Target::ConnectionInstance {
+            connector: "github".to_owned(),
+            label: "primary".to_owned(),
+        };
+        let first = {
+            let journal = AuditJournal::bind_for_test(&path, 2_000_000_000).expect("a journal");
+            journal
+                .record_terminal_once(
+                    "transaction-audit-event-1",
+                    &RequestId::for_test("request-before-response-loss"),
+                    Action::ConnectionCreated,
+                    Outcome::Succeeded,
+                    Some(&alice()),
+                    target.clone(),
+                )
+                .expect("first durable append")
+        };
+
+        let reopened = AuditJournal::bind_for_test(&path, 2_000_000_001).expect("reopened");
+        let replay = reopened
+            .record_terminal_once(
+                "transaction-audit-event-1",
+                &RequestId::for_test("request-after-restart"),
+                Action::ConnectionCreated,
+                Outcome::Succeeded,
+                Some(&alice()),
+                target,
+            )
+            .expect("same terminal tuple replays");
+
+        assert_eq!(replay, first);
+        assert_eq!(replay.request_id, "request-before-response-loss");
+        assert_eq!(
+            reopened
+                .by_event_id("transaction-audit-event-1")
+                .expect("event query"),
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn stable_terminal_event_refuses_conflicting_reuse_and_attempted_outcome() {
+        let root = scratch("stable-terminal-conflict");
+        let path = root.join("audit").join("events.sqlite3");
+        let journal = AuditJournal::bind_for_test(&path, 2_000_000_000).expect("a journal");
+        let target = Target::Connection {
+            connector: "github".to_owned(),
+        };
+        let original = journal
+            .record_terminal_once(
+                "transaction-audit-event-2",
+                &RequestId::for_test("request-1"),
+                Action::ConnectionCreated,
+                Outcome::Succeeded,
+                Some(&alice()),
+                target.clone(),
+            )
+            .expect("first durable append");
+
+        let conflict = journal
+            .record_terminal_once(
+                "transaction-audit-event-2",
+                &RequestId::for_test("request-2"),
+                Action::ConnectionRemoved,
+                Outcome::Succeeded,
+                Some(&alice()),
+                target.clone(),
+            )
+            .expect_err("changed tuple must refuse");
+        assert!(
+            matches!(conflict, AuditError::StableEventConflict(id) if id == "transaction-audit-event-2")
+        );
+        assert_eq!(
+            journal
+                .by_event_id("transaction-audit-event-2")
+                .expect("event query"),
+            vec![original]
+        );
+
+        let attempted = journal
+            .record_terminal_once(
+                "transaction-audit-event-3",
+                &RequestId::for_test("request-3"),
+                Action::ConnectionCreated,
+                Outcome::Attempted,
+                Some(&alice()),
+                target,
+            )
+            .expect_err("stable append is terminal only");
+        assert!(matches!(attempted, AuditError::StableEventNotTerminal));
+        assert!(journal
+            .by_event_id("transaction-audit-event-3")
+            .expect("event query")
+            .is_empty());
+    }
+
+    #[test]
+    fn stable_terminal_event_is_concurrent_across_independent_bindings() {
+        let root = scratch("stable-terminal-concurrent");
+        let path = root.join("audit").join("events.sqlite3");
+        let first = AuditJournal::bind_for_test(&path, 2_000_000_000).expect("first binding");
+        let second = AuditJournal::bind_for_test(&path, 2_000_000_001).expect("second binding");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let workers = [
+            (first, "concurrent-request-a"),
+            (second, "concurrent-request-b"),
+        ]
+        .map(|(journal, request_id)| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                journal.record_terminal_once(
+                    "transaction-audit-event-4",
+                    &RequestId::for_test(request_id),
+                    Action::CredentialRotated,
+                    Outcome::Succeeded,
+                    Some(&alice()),
+                    Target::Credential {
+                        connector: "github".to_owned(),
+                        credential: "token".to_owned(),
+                    },
+                )
+            })
+        });
+        let [left, right] = workers.map(|worker| worker.join().expect("worker"));
+        assert_eq!(left.expect("first result"), right.expect("second result"));
+
+        let reopened = AuditJournal::bind_for_test(&path, 2_000_000_002).expect("reopened");
+        assert_eq!(
+            reopened
+                .by_event_id("transaction-audit-event-4")
+                .expect("event query")
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1108,7 +1376,8 @@ mod tests {
         let refusal = AuditJournal::bind(&path)
             .err()
             .expect("wide directory must refuse");
-        assert!(matches!(refusal, AuditError::Mode { actual: 0o755, .. }));
+        assert!(matches!(refusal, AuditError::Path { .. }));
+        assert!(refusal.to_string().contains("wider than 0700"), "{refusal}");
         assert_eq!(
             fs::metadata(&directory)
                 .expect("metadata")
@@ -1128,7 +1397,8 @@ mod tests {
         let refusal = AuditJournal::bind(&path)
             .err()
             .expect("wide file must refuse");
-        assert!(matches!(refusal, AuditError::Mode { actual: 0o644, .. }));
+        assert!(matches!(refusal, AuditError::Path { .. }));
+        assert!(refusal.to_string().contains("wider than 0600"), "{refusal}");
         assert_eq!(
             fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
             0o644
@@ -1176,6 +1446,26 @@ mod tests {
                 },
             )
             .expect("credential change evidence");
+        for (request, action) in [
+            ("origin-proposed", Action::SettingAuthorityProposed),
+            ("origin-approved", Action::SettingAuthorityApproved),
+            ("origin-revoked", Action::SettingAuthorityRevoked),
+        ] {
+            journal
+                .record(
+                    &RequestId::for_test(request),
+                    action,
+                    Outcome::Succeeded,
+                    Some(&alice()),
+                    Target::InstanceSetting {
+                        connector: "generic".to_owned(),
+                        label: "production".to_owned(),
+                        service: "default".to_owned(),
+                        field: "endpoint.custom_origin".to_owned(),
+                    },
+                )
+                .expect("origin authority change evidence");
+        }
         journal
             .record(
                 &RequestId::for_test("grant-change"),
@@ -1201,7 +1491,7 @@ mod tests {
                     |row| row.get(0),
                 )
                 .expect("count");
-            assert_eq!(count, 4);
+            assert_eq!(count, 7);
         }
         drop(journal);
 
@@ -1226,7 +1516,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("count");
-        assert_eq!(count, 5, "the flood policy re-arms after its window");
+        assert_eq!(count, 8, "the flood policy re-arms after its window");
     }
 
     #[test]

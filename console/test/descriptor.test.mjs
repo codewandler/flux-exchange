@@ -279,6 +279,39 @@ test('the_descriptor_is_derived_and_not_a_coincidence', () => {
   }
 })
 
+test('the_public_surface_capabilities_are_each_derived_from_their_own_backing_fact', () => {
+  const document = JSON.parse(descriptorJson(SURFACES))
+  const capability = (from, id) => {
+    const found = from.capabilities.find((entry) => entry.id === id)
+    assert.ok(found, `the descriptor does not publish the public \`${id}\` capability (X-65)`)
+    return found
+  }
+
+  for (const [surface, id] of [['connections', 'connections'], ['grants', 'grants'], ['workflows', 'workflows'], ['managed-agents', 'agents']]) {
+    assert.equal(capability(document, id).live, true, `the served \`${id}\` surface is withheld`)
+    const withdrawn = JSON.parse(
+      descriptorJson(asIf(surface, { served: false, absent: `hypothetical ${id} withdrawal` }))
+    )
+    assert.equal(
+      capability(withdrawn, id).live,
+      false,
+      `marking the \`${id}\` surface unserved does not withdraw its public status`
+    )
+    assert.equal(capability(withdrawn, id).call, null)
+    assert.equal(capability(withdrawn, id).withheld, `hypothetical ${id} withdrawal`)
+  }
+
+  assert.equal(capability(document, 'agents').live, true)
+  assert.equal(capability(document, 'agents').call.endpoint, '/api/apps/{app}/chat')
+
+  for (const [id, story] of [['leases', 'X-118']]) {
+    const planned = capability(document, id)
+    assert.equal(planned.live, false)
+    assert.equal(planned.call, null)
+    assert.match(planned.withheld, new RegExp(`\\b${story}\\b`))
+  }
+})
+
 // ---------------------------------------------------------------------------------------------
 // It is published to strangers, so it holds nothing that belongs to anyone.
 // ---------------------------------------------------------------------------------------------
@@ -294,7 +327,9 @@ test('the_descriptor_names_nothing_a_tenant_could_occupy', () => {
   //
   // The server states the same rule over the served copy, and adds the half this side cannot: that
   // every endpoint named is a route it actually publishes.
-  const CATALOGUE_KEYS = ['operation']
+  // `app` is an opaque installed-resource key. The descriptor publishes its slot, never a value;
+  // the route still derives the tenant from the principal and cannot cross that boundary.
+  const CATALOGUE_KEYS = ['operation', 'app']
   const endpoints = [
     document.endpoint,
     ...document.capabilities.filter((entry) => entry.call).map((entry) => entry.call.endpoint),

@@ -25,7 +25,8 @@ import { fragmentPath, useRoute } from './routing'
 import {
   CONNECTORS_ENDPOINT,
   SIGNIN_ENDPOINT,
-  connect,
+  channelConnectionLabels,
+  applyConnectionPlan,
   createChannel,
   cancelWorkflowRun,
   createWorkflow,
@@ -34,38 +35,53 @@ import {
   loadChannels,
   loadConnections,
   loadActivity,
+  loadApps,
+  loadAppActivity,
   loadEditorCatalog,
-  loadDeclaration,
+  loadConnectionPlan,
   loadGrants,
   loadSession,
+  loadSignInAvailability,
   loadWorkflows,
+  installApp,
+  inspectConnectionAuthority,
   publishWorkflow,
   previewGrant,
   replaceGrants,
   removeChannel,
-  rotateCredential,
   saveWorkflow,
   saveWorkflowGraph,
   signOut,
+  transitionConnectionAuthority,
+  sendAppMessage,
   startWorkflowRun,
   validateWorkflowEdit,
   validateWorkflowGraph,
   updateChannel,
   type ActivityState,
+  type AppActivity,
+  type AppMutation,
+  type AppsState,
+  type InstallAppChoice,
   type CatalogueState,
   type ChannelDeclarationsState,
   type ChannelMutation,
   type ChannelsState,
   type ConnectionsState,
-  type ConnectOutcome,
-  type DeclarationState,
+  type ConnectionPlanOutcome,
+  type ConnectionPlanState,
+  type ConnectionPlanSubmission,
+  type ConnectionAuthorityOutcome,
+  type ConnectionAuthorityInspectionOutcome,
+  type ConnectionAuthorityInspectionRequest,
+  type ConnectionAuthorityTransition,
   type EditorCatalogState,
   type GrantOutcome,
   type GrantsState,
   type PreviewState,
   type ProposedGrant,
-  type RotationOutcome,
   type SessionState,
+  type SignInAvailabilityState,
   type WorkflowDraft,
   type WorkflowMutation,
   type WorkflowsState,
@@ -73,11 +89,13 @@ import {
 import { ONBOARDING_PATH } from './onboarding.mts'
 import { SERVICE_ACCOUNTS_PATH } from './minting.mts'
 import { mayGrant } from './granting.mts'
+import { LatestConnectionRequest } from './connection-plan-state.mts'
 import { surfaceOfRoute } from './surfaces.mts'
 import { isDark, toggleTheme } from './theme'
 
 import AgentOnboarding from './AgentOnboarding.mts'
 import Activity from './Activity.vue'
+import Apps from './Apps.vue'
 import Agents from './Agents.mts'
 import CatalogueFinder from './CatalogueFinder.mts'
 import CatalogueFailure from './CatalogueFailure.mts'
@@ -95,10 +113,15 @@ import Workflows from './Workflows.vue'
 // every operation in a catalogue deeply reactive would buy nothing and cost a walk of the document.
 const catalogue = shallowRef<CatalogueState>({ status: 'loading' })
 const session = shallowRef<SessionState>({ status: 'loading' })
+const signInAvailability = shallowRef<SignInAvailabilityState>({ status: 'loading' })
 const connections = shallowRef<ConnectionsState>({ status: 'loading' })
 const workflows = shallowRef<WorkflowsState>({ status: 'loading' })
 const editorCatalog = shallowRef<EditorCatalogState>({ status: 'loading' })
 const activity = shallowRef<ActivityState>({ status: 'loading' })
+const apps = shallowRef<AppsState>({ status: 'loading' })
+const appActivity = shallowRef<AppActivity[]>([])
+const appOutcome = shallowRef<AppMutation | null>(null)
+const appBusy = shallowRef(false)
 const channels = shallowRef<ChannelsState>({ status: 'loading' })
 const channelDeclarations = shallowRef<ChannelDeclarationsState>({ status: 'loading' })
 const channelOutcome = shallowRef<ChannelMutation | null>(null)
@@ -111,6 +134,7 @@ const route = useRoute()
 /** Whether a principal is resolved. `null` while the session is still unknown either way. */
 const principal = computed(() => (session.value.status === 'ready' ? session.value.principal : null))
 const signedIn = computed(() => principal.value !== null)
+const channelConnections = computed(() => channelConnectionLabels(connections.value))
 
 async function reloadCatalogue() {
   catalogue.value = { status: 'loading' }
@@ -120,6 +144,11 @@ async function reloadCatalogue() {
 async function reloadSession() {
   session.value = { status: 'loading' }
   session.value = await loadSession()
+}
+
+async function reloadSignInAvailability() {
+  signInAvailability.value = { status: 'loading' }
+  signInAvailability.value = await loadSignInAvailability()
 }
 
 async function reloadConnections() {
@@ -142,6 +171,34 @@ async function reloadActivity() {
   activity.value = await loadActivity()
 }
 
+async function reloadApps() {
+  apps.value = { status: 'loading' }
+  apps.value = await loadApps()
+}
+
+async function inspectApp(app: string) {
+  appActivity.value = app ? await loadAppActivity(app) : []
+}
+
+async function installManagedApp(choice: InstallAppChoice) {
+  if (appBusy.value) return
+  appBusy.value = true
+  appOutcome.value = await installApp(choice)
+  appBusy.value = false
+  if (appOutcome.value.status === 'installed') {
+    await reloadApps()
+    await inspectApp(choice.id)
+  }
+}
+
+async function chatWithApp(app: string, message: string, session: string | null) {
+  if (appBusy.value) return
+  appBusy.value = true
+  appOutcome.value = await sendAppMessage(app, message, session)
+  appBusy.value = false
+  await inspectApp(app)
+}
+
 async function reloadChannels() {
   channels.value = { status: 'loading' }
   channels.value = await loadChannels()
@@ -162,7 +219,7 @@ onMounted(async () => {
   // Both at once. The catalogue is anonymous and the session is not, so neither waits on the other
   // — and a slow identity provider must not delay the one view that never needed a principal.
   void reloadCatalogue()
-  await reloadSession()
+  await Promise.all([reloadSession(), reloadSignInAvailability()])
 })
 
 // Connections are tenant data and `/api/connections` requires a principal, so this is not asked
@@ -171,7 +228,7 @@ onMounted(async () => {
 watch(signedIn, async (resolved) => {
   if (resolved) {
     await reloadConnections()
-    if (principal.value?.kind === 'user') await Promise.all([reloadWorkflowSurface(), reloadChannels()])
+    if (principal.value?.kind === 'user') await Promise.all([reloadWorkflowSurface(), reloadChannels(), reloadApps()])
   }
 })
 
@@ -179,18 +236,18 @@ watch(() => catalogue.value.status, async (status) => {
   if (status === 'ready') await reloadChannelDeclarations()
 })
 
-async function createHeldChannel(connector: string, binding: string, events: string[]) {
+async function createHeldChannel(connector: string, connection: string, binding: string, events: string[]) {
   if (channelBusy.value) return
   channelBusy.value = true
-  channelOutcome.value = await createChannel(connector, binding, events)
+  channelOutcome.value = await createChannel(connector, connection, binding, events)
   channelBusy.value = false
   if (channelOutcome.value.status === 'saved') await reloadChannels()
 }
 
-async function updateHeldChannel(channel: Parameters<typeof updateChannel>[0], events: string[]) {
+async function updateHeldChannel(channel: Parameters<typeof updateChannel>[0], connection: string, events: string[]) {
   if (channelBusy.value) return
   channelBusy.value = true
-  channelOutcome.value = await updateChannel(channel, events)
+  channelOutcome.value = await updateChannel(channel, connection, events)
   channelBusy.value = false
   if (channelOutcome.value.status === 'saved') await reloadChannels()
 }
@@ -278,65 +335,201 @@ onUnmounted(() => window.clearInterval(activityPoll))
 // ---------------------------------------------------------------------------------------------
 // Wiring a connector up. The console's other job, and until X-44 the one it could not do.
 //
-// Three pieces of state and no fourth: which connector is being connected, what the service says it
-// declares, and what the last attempt did. **What the operator typed is not among them.** A value
+// The selected connector and label, the value-free plan, and the last value-free result are all
+// safe to retain. The one deliberate exception is the exact normalized origin returned by the
+// configured-operator review route: it is held only for that plan revision and cleared before any
+// transition, retry or navigation. **What the operator typed is not among them.** A value
 // lives in the input element it was typed into and in the request body, and this component holds
 // none of it — see `Connect.mts`, which is where that is enforced rather than merely intended.
 // ---------------------------------------------------------------------------------------------
 
 const chosen = shallowRef<string | null>(null)
-const declaration = shallowRef<DeclarationState | null>(null)
-const outcome = shallowRef<ConnectOutcome | null>(null)
+const selectedConnectionLabel = shallowRef<string | null>(null)
+const connectionPlan = shallowRef<ConnectionPlanState | null>(null)
+const outcome = shallowRef<ConnectionPlanOutcome | null>(null)
+const authorityOutcome = shallowRef<ConnectionAuthorityOutcome | null>(null)
+const authorityBusy = shallowRef('')
+const authorityInspection = shallowRef<ConnectionAuthorityInspectionOutcome | null>(null)
+const authorityInspecting = shallowRef('')
 const connecting = shallowRef(false)
+const connectionPlanRequests = new LatestConnectionRequest()
+const connectionApplyRequests = new LatestConnectionRequest()
+const authorityRequests = new LatestConnectionRequest()
+const authorityInspectionRequests = new LatestConnectionRequest()
 
-/** A connector was chosen: ask the service what it declares, and forget the last attempt. */
+function invalidateAuthority(): void {
+  authorityRequests.invalidate()
+  authorityInspectionRequests.invalidate()
+  authorityBusy.value = ''
+  authorityInspecting.value = ''
+  authorityOutcome.value = null
+  authorityInspection.value = null
+}
+
+watch(
+  () => route.value.name,
+  (next, previous) => {
+    // App.vue outlives every screen. The operator-only normalized origin does not: leaving the
+    // connection surface clears both the rendered value and any in-flight inspection answer.
+    if (previous === 'connections' && next !== 'connections') invalidateAuthority()
+  },
+)
+
+/** A connector was chosen: ask for its complete plan, and forget the last attempt. */
 async function chooseConnector(connector: string) {
+  if (connecting.value) return
   const id = connector || null
+  connectionApplyRequests.invalidate()
+  invalidateAuthority()
   chosen.value = id
+  selectedConnectionLabel.value = null
   outcome.value = null
 
   if (id === null) {
-    declaration.value = null
+    connectionPlanRequests.invalidate()
+    connectionPlan.value = null
     return
   }
 
-  declaration.value = { status: 'loading' }
-  const state = await loadDeclaration(id)
-  // The reader may have moved on while that was in flight; a declaration for a connector nobody is
+  const ticket = connectionPlanRequests.begin(id, null)
+  connectionPlan.value = { status: 'loading' }
+  const state = await loadConnectionPlan(id, null)
+  // The reader may have moved on while that was in flight; a plan for a connector nobody is
   // looking at any more would render under the wrong heading.
-  if (chosen.value === id) declaration.value = state
+  if (connectionPlanRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) {
+    connectionPlan.value = state
+  }
 }
 
-/** Connect, then re-read the listing — which is where the result is shown, as addresses. */
-async function connectChosen(values: Record<string, string>) {
+/** Select only an operator-owned label; no field value has a URL representation. */
+async function selectConnectionLabel(label: string) {
+  if (connecting.value) return
   const connector = chosen.value
-  if (connector === null || connecting.value) return
+  if (connector === null) return
+  const selection = label || null
+  const ticket = connectionPlanRequests.begin(connector, selection)
+  connectionApplyRequests.invalidate()
+  invalidateAuthority()
+  selectedConnectionLabel.value = selection
+  outcome.value = null
+  connectionPlan.value = { status: 'loading' }
+  const state = await loadConnectionPlan(connector, selection)
+  if (connectionPlanRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) {
+    connectionPlan.value = state
+  }
+}
+
+async function retryConnectionPlan() {
+  const connector = chosen.value
+  if (connector === null) return
+  invalidateAuthority()
+  const selection = selectedConnectionLabel.value
+  const ticket = connectionPlanRequests.begin(connector, selection)
+  connectionPlan.value = { status: 'loading' }
+  const state = await loadConnectionPlan(connector, selection)
+  if (connectionPlanRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) {
+    connectionPlan.value = state
+  }
+}
+
+/** Run the hosted FXLM ceremony, then read a fresh value-free projection. */
+async function connectChosen(
+  connector: string,
+  selection: string | null,
+  submission: ConnectionPlanSubmission
+) {
+  if (chosen.value !== connector || selectedConnectionLabel.value !== selection || connecting.value) return
+  const ticket = connectionApplyRequests.begin(connector, selection)
+  invalidateAuthority()
 
   connecting.value = true
-  outcome.value = await connect(connector, values)
+  const answered = await applyConnectionPlan(connector, submission)
+  if (!connectionApplyRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) return
+  outcome.value = answered
   connecting.value = false
 
-  if (outcome.value.status === 'connected') await reloadConnections()
+  if (outcome.value.status === 'answered') {
+    const label = outcome.value.result.label
+    selectedConnectionLabel.value = label
+    const planTicket = connectionPlanRequests.begin(connector, label)
+    connectionPlan.value = { status: 'loading' }
+    const state = await loadConnectionPlan(connector, label)
+    if (connectionPlanRequests.admits(planTicket, chosen.value, selectedConnectionLabel.value)) {
+      connectionPlan.value = state
+    }
+    await reloadConnections()
+  }
 }
 
-const rotating = shallowRef('')
-const rotationOutcome = shallowRef<RotationOutcome | null>(null)
+/** Change only the exact value-free revision and action the current plan advertised. */
+async function changeConnectionAuthority(identity: string, transition: ConnectionAuthorityTransition) {
+  if (connecting.value || authorityBusy.value !== '') return
+  const current = connectionPlan.value
+  if (current?.status !== 'ready' || current.plan.connector !== chosen.value ||
+      current.plan.selection !== selectedConnectionLabel.value || transition.connector !== chosen.value ||
+      transition.label !== selectedConnectionLabel.value) return
 
-async function rotateHeld(connector: string, credential: string, value: string) {
-  if (rotating.value) return
-  rotating.value = `${connector}/${credential}`
-  rotationOutcome.value = await rotateCredential(connector, credential, value)
-  rotating.value = ''
-  if (rotationOutcome.value.status === 'rotated') await reloadConnections()
+  const field = current.plan.fields.find((candidate) => candidate.identity === identity)
+  const authority = field?.authority
+  if (field?.service === null || field?.service !== transition.service || field.binds !== transition.field ||
+      authority?.revision !== transition.revision || !authority.actions.includes(transition.action)) return
+  if (transition.action === 'approve') {
+    const reviewed = authorityInspection.value
+    if (reviewed?.status !== 'answered' || reviewed.result.connector !== transition.connector ||
+        reviewed.result.label !== transition.label || reviewed.result.service !== transition.service ||
+        reviewed.result.field !== transition.field || reviewed.result.authority.state !== 'proposed' ||
+        reviewed.result.authority.revision !== transition.revision) return
+  }
+
+  authorityInspectionRequests.invalidate()
+  authorityInspecting.value = ''
+  authorityInspection.value = null
+  const ticket = authorityRequests.begin(transition.connector, transition.label)
+  authorityBusy.value = identity
+  authorityOutcome.value = null
+  const answered = await transitionConnectionAuthority(transition)
+  if (!authorityRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) return
+  authorityBusy.value = ''
+  authorityOutcome.value = answered
+
+  if (answered.status === 'answered') {
+    const planTicket = connectionPlanRequests.begin(transition.connector, transition.label)
+    connectionPlan.value = { status: 'loading' }
+    const state = await loadConnectionPlan(transition.connector, transition.label)
+    if (connectionPlanRequests.admits(planTicket, chosen.value, selectedConnectionLabel.value)) {
+      connectionPlan.value = state
+    }
+  }
+}
+
+/** Read the exact normalized proposal only through the configured-operator authority surface. */
+async function inspectAuthority(identity: string, request: ConnectionAuthorityInspectionRequest) {
+  if (connecting.value || authorityBusy.value !== '' || authorityInspecting.value !== '') return
+  const current = connectionPlan.value
+  if (current?.status !== 'ready' || current.plan.connector !== chosen.value ||
+      current.plan.selection !== selectedConnectionLabel.value || request.connector !== chosen.value ||
+      request.label !== selectedConnectionLabel.value) return
+
+  const field = current.plan.fields.find((candidate) => candidate.identity === identity)
+  const authority = field?.authority
+  if (field?.service === null || field?.service !== request.service || field.binds !== request.field ||
+      authority?.state !== request.state || authority.revision !== request.revision ||
+      authority.state !== 'proposed' || !authority.actions.includes('approve')) return
+
+  const ticket = authorityInspectionRequests.begin(request.connector, request.label)
+  authorityInspecting.value = identity
+  authorityInspection.value = null
+  const answered = await inspectConnectionAuthority(request)
+  if (!authorityInspectionRequests.admits(ticket, chosen.value, selectedConnectionLabel.value)) return
+  authorityInspecting.value = ''
+  authorityInspection.value = answered
 }
 
 // ---------------------------------------------------------------------------------------------
 // Grants: what this tenant may run. The half of X-62 the service already had.
 //
-// Read here and passed down, which is this file's ordinary arrangement — and deliberately *not*
-// `Agents.mts`'s exception. That one exists because a minted token must not reach this component,
-// which is the root and outlives every screen. A grant is a policy: it carries no secret, it is
-// meant to be read back, and holding it here costs nothing.
+// Read here and passed down, which is this file's ordinary arrangement. A grant is a policy: it
+// carries no secret, is meant to be read back, and costs nothing to retain at the root.
 //
 // Four pieces of state. The draft is **not** among them: it lives in `Grants.mts`, which emits a
 // proposal when it changes and a whole set when it is saved.
@@ -449,8 +642,8 @@ const active = computed(() => surfaceOfRoute(route.value.name))
 </script>
 
 <template>
-  <div class="console" :class="{ 'console--wide': route.name === 'workflows' || route.name === 'activity' || route.name === 'channels' }">
-    <ConsoleShell :session="session" :active="active" @sign-out="endSession" @retry-session="reloadSession">
+  <div class="console" :class="{ 'console--wide': route.name === 'workflows' || route.name === 'activity' || route.name === 'channels' || route.name === 'apps' }">
+    <ConsoleShell :session="session" :sign-in-availability="signInAvailability" :active="active" @sign-out="endSession" @retry-session="reloadSession">
       <template #theme>
         <button type="button" :aria-pressed="isDark" @click="toggleTheme()">
           {{ isDark ? 'Light' : 'Dark' }}
@@ -475,16 +668,9 @@ const active = computed(() => surfaceOfRoute(route.value.name))
       </template>
 
       <!--
-        Where an operator mints one, and the one screen in this console that renders a credential
-        value.
-
-        It is passed the session and nothing else, and it reads `/api/service-accounts` for itself rather than
-        being handed a result — deliberately, and against this file's usual arrangement. This
-        component is the root, so it outlives every screen; anything it were handed would still be
-        in memory after the reader had navigated away, and what the mint answers with is the one
-        value on this host that cannot be shown a second time. Holding it here would make that a
-        claim about `App.vue` instead of a property of the view. `Agents.mts` sets out the whole of
-        it.
+        Service Account metadata and owner-local creation guidance. This view may list and revoke
+        value-free records, but it never initiates creation: the one-shot FXSA response belongs to
+        the verified native helper and must never enter this browser or its JSON client.
       -->
       <template v-else-if="route.name === 'service-accounts'">
         <Agents :session="session" />
@@ -513,22 +699,26 @@ const active = computed(() => surfaceOfRoute(route.value.name))
           <Journey :connections="readyConnections" :grants="readyGrants" active="connect" />
           <Connections
             :state="connections"
-            :rotating="rotating"
-            :rotation-outcome="rotationOutcome"
             @retry="reloadConnections"
-            @rotate="rotateHeld"
           />
           <Connect
             :connectors="connectors"
             :catalog-connectors="catalogConnectors"
             :connected="connected"
             :chosen="chosen"
-            :declaration="declaration"
+            :plan="connectionPlan"
             :outcome="outcome"
+            :authority-outcome="authorityOutcome"
+            :authority-busy="authorityBusy"
+            :authority-inspection="authorityInspection"
+            :authority-inspecting="authorityInspecting"
             :busy="connecting"
             @choose="chooseConnector"
+            @select-label="selectConnectionLabel"
             @submit="connectChosen"
-            @retry="chooseConnector(chosen ?? '')"
+            @retry="retryConnectionPlan"
+            @authority="changeConnectionAuthority"
+            @inspect-authority="inspectAuthority"
           />
         </template>
 
@@ -646,6 +836,7 @@ const active = computed(() => surfaceOfRoute(route.value.name))
           v-if="principal?.kind === 'user'"
           :state="channels"
           :declarations="channelDeclarations"
+          :connections="channelConnections"
           :busy="channelBusy"
           :outcome="channelOutcome"
           @retry="reloadChannels"
@@ -656,6 +847,26 @@ const active = computed(() => surfaceOfRoute(route.value.name))
         <section v-else class="gate">
           <h1>Sign in as a user to manage channels</h1>
           <p>Persistent channels belong to the tenant on the resolved user principal.</p>
+          <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
+        </section>
+      </template>
+
+      <template v-else-if="route.name === 'apps'">
+        <Apps
+          v-if="principal?.kind === 'user'"
+          :state="apps"
+          :connections="readyConnections"
+          :activity="appActivity"
+          :outcome="appOutcome"
+          :busy="appBusy"
+          @retry="reloadApps"
+          @install="installManagedApp"
+          @chat="chatWithApp"
+          @inspect="inspectApp"
+        />
+        <section v-else class="gate">
+          <h1>Sign in as a user to install Apps</h1>
+          <p>App bindings and Managed Agent runs belong to the tenant on the resolved principal.</p>
           <p><a class="shell__signin" :href="SIGNIN_ENDPOINT">Sign in</a></p>
         </section>
       </template>

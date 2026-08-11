@@ -82,9 +82,7 @@ pub enum PrincipalKind {
     /// A signed-in human. Manages connections, credentials and grants; may call operations
     /// interactively.
     User,
-    /// A non-human caller holding its own minted token. The legacy wire spelling `agent` remains a
-    /// deserialization alias through v0.16; serialization is always canonical.
-    #[serde(alias = "agent")]
+    /// A non-human caller holding its own minted token.
     ServiceAccount,
     /// Another backend acting on behalf of one of its own accounts and actors.
     Service,
@@ -204,13 +202,10 @@ mod tests {
     }
 
     #[test]
-    fn the_legacy_agent_kind_deserialises_only_as_a_service_account() {
-        let legacy: PrincipalKind = serde_json::from_str("\"agent\"").expect("legacy alias");
-        assert_eq!(legacy, PrincipalKind::ServiceAccount);
-        assert_eq!(
-            serde_json::to_string(&legacy).expect("canonical serialization"),
-            "\"service_account\""
-        );
+    fn the_retired_agent_kind_is_not_a_service_account_spelling() {
+        let refusal = serde_json::from_str::<PrincipalKind>("\"agent\"")
+            .expect_err("the v0.16 alias must be gone at the v0.17 checkpoint");
+        assert!(refusal.to_string().contains("unknown variant"), "{refusal}");
     }
 
     /// A principal renders its tenant, because an audit line that omits it cannot be read twice.

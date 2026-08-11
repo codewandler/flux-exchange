@@ -2,6 +2,13 @@
 
 Guidance for coding agents (and humans) working in this repository.
 
+## Cross-repository scheduling authority
+
+For work named by `../flux-roadmap/programs/`, `../flux-roadmap` is the cross-repository scheduling
+authority. Run its checks and follow its active tranche before selecting local backlog work. This
+repository's story Goal and Acceptance still define done; if they conflict with a cross-repository
+decision, amend or supersede the story before implementation.
+
 <!-- BEGIN track:agents -->
 ## Start here (every session) — track backlog
 
@@ -35,15 +42,24 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.16.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
+**v0.17.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
 authentication, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
 `GET /api/onboarding`, an anonymous machine-readable descriptor of what this build can and cannot
-do. Since X-98 it also stores tenant workflow drafts, publishes immutable versions, runs them
-through Flux with dual grant gates, and records value-free node activity. Since X-101 it persists
+do. Since X-113 an authenticated `GET /api/catalogue/effective` returns the connected-and-granted
+operation bindings for the resolved Service Account with a stable content generation, beside the
+existing one-shot invoke contract. Since X-125 an authenticated human also receives and applies one
+complete declaration-driven labelled connection plan, including GitLab's revisioned
+operator-approved custom origin. Since X-98 it also stores tenant workflow drafts, publishes
+immutable versions, runs them through Flux with dual grant gates, and records value-free node
+activity. Since X-101 it persists
 and supervises generated connector WebSocket channels, gates closed declared event sets, and fans
-them out through authenticated `/api/subscribe`.** `cargo run` binds loopback and refuses to start
+them out through authenticated `/api/subscribe`. Since X-14 a tenant may hold several labelled
+connections to one connector; invocation selects one explicitly and the first-to-second credential
+migration is atomic. Since X-127 the complete local composition persists owner-only on all five Flux
+targets, and since X-128/X-129 its supervised readiness and four delivered HTTP contracts have exact
+provider-owned v1 identities and conformance fixtures.** `cargo run` binds loopback and refuses to start
 on a reachable address with no identity provider configured.
 
 **Signing in without an identity provider works on loopback** (X-57, v0.9.0+). Arm
@@ -51,9 +67,10 @@ on a reachable address with no identity provider configured.
 handle as a bearer token, `POST /api/session` exchanges it for a cookie. `sign_in_available` now means
 *this deployment can turn a caller into a principal*, not *OIDC is configured*.
 
-**X-59's delivered local slice removes even that roster setup:** `cargo run -- --dev` implies
-`user:${USER}@dev`, keeps the identity loopback-only, and selects `Deployment::SingleTenant` for the
-invoker while preserving the ordinary `tenants/dev/...` address layout. An explicit
+**X-59's local identity slice removes even that roster setup, and X-127 makes its state complete:**
+`cargo run -- --dev` implies `user:${USER}@dev`, keeps the identity loopback-only, selects
+`Deployment::SingleTenant` for the invoker, and binds every durable store below the conventional
+per-user state root while preserving the ordinary `tenants/dev/...` address layout. An explicit
 `FLUX_EXCHANGE_DEV_IDENTITY` roster still takes precedence and remains the multi-tenant development
 path. X-59 stays in progress for selecting one tenant independently of the authentication provider.
 
@@ -74,6 +91,15 @@ into it. Expect `503` with no store bound,
 `403 not_granted` with one bound and the tenant empty. The [README](README.md) carries the
 itemized inventory of what is *not* built, and keeping it accurate is part of the job — a page that
 implies a working service costs more than an honest gap.
+
+⚠ **Hazardous credential acquisition is fail-closed** (X-74). Unset,
+`FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` permits no declared hazard; an unknown entry refuses startup and
+names it. `resource_owner_secret_shared` is the only recognised opt-in. X-75's injectable server seam
+exists, but no released connector declares the acquisition until upstream C-440 lands, so the
+production registry remains empty and the current path is fixture-tested rather than vendor-live.
+Once a released declaration activates it, omitting the opt-in will look like a connection outage:
+the host answers its own `403` refusal naming the connector and hazard before any vendor request,
+distinct from the vendor rejecting credentials.
 
 ## Build / test / run
 
@@ -147,13 +173,13 @@ separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
-**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.17 and
+**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.19 and
 `connector-pack` links here. What is left is one rule, and it is the one that bites:
 
 - **The flux engine line is `0.54`, and it is written down once** — in `[workspace.dependencies]`
   in the root `Cargo.toml`, under the `ENGINE_LINE` marker. Every `codewandler-flux-*` pin carries
   that value, and no member manifest pins one at all.
-- **It is set by what `connector-pack` requires, never by what is newest.** `connector-pack` 0.17.0
+- **It is set by what `connector-pack` requires, never by what is newest.** `connector-pack` 0.19.0
   requires `codewandler-flux-runtime ^0.54`, and that is the whole reason 0.54 is allowed now — the
   exchange stayed on 0.52 until the compatible connector release was published.
   `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, and two engine versions
@@ -216,8 +242,8 @@ Each is stated in `docs/vision.md` and several are already enforced by tests in
   this from the manifest. Do not add an override.
 - **Grants select by declared metadata, not by name**, and an explicit `deny` beats an explicit
   `allow`.
-- **A Service Account token grants access to an operation, never to a credential.** The current
-  `/api/agents` name is legacy migration debt; **Agent** is reserved for Flux's model + loop + bounded
+- **A Service Account token grants access to an operation, never to a credential.** The v0.16
+  `/api/agents` migration alias is gone; **Agent** is reserved for Flux's model + loop + bounded
   capabilities and becomes a Managed Agent when Exchange hosts it.
 - **Refuse; never repair.** A missing credential, a widened file mode, an unbound config value: each
   refuses and names the address, never the value. A store that falls back to memory, or a mode that

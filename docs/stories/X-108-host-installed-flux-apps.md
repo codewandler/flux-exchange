@@ -1,12 +1,12 @@
 ---
 id: X-108
 title: "Host installed Flux Apps and Managed Agents"
-status: ready
+status: done
 priority: 4
 epic: apps
 areas: [exchange-host, exchange-server, console, docs]
-design: docs/designs/released-domain-audit.md
-note: "Flux App/channel contracts are published on the connector-compatible line; design Exchange-owned package installation and tenant bindings before implementation"
+design: docs/designs/installed-apps.md
+note: "Immutable packages, atomic frozen authority, durable deliveries, Flux-event projections and the Slack-bot-style console path are live"
 ---
 
 # Host installed Flux Apps and Managed Agents
@@ -20,22 +20,25 @@ profile and triggers. Exchange then supervises its Managed Agents for chat and e
 
 ## Acceptance
 
-- [ ] An immutable, versioned App Package carries a Flux Program plus integrity/provenance and
+- [x] An immutable, versioned App Package carries a Flux Program plus integrity/provenance and
       declares required connector capabilities without carrying tenant values or credentials.
-- [ ] Failing first, installation refuses a missing required Connection, Model Profile, Operation
+- [x] Failing first, installation refuses a missing required Connection, Model Profile, Operation
       or Datasource and writes no partial binding.
-- [ ] Installation resolves metadata selectors to a frozen reviewed operation/datasource set;
+- [x] Installation resolves metadata selectors to a frozen reviewed operation/datasource set;
       package upgrades that widen authority require a new review.
-- [ ] A Managed Agent receives only its installed App's frozen capabilities. Its runtime token can
+- [x] A Managed Agent receives only its installed App's frozen capabilities. Its runtime token can
       invoke authority but cannot read or address a credential.
-- [ ] Triggers bind declared Event Types to an installed Journey or Managed Agent through durable
+- [x] Triggers bind declared Event Types to an installed Journey or Managed Agent through durable
       Event Deliveries, with retry only where effects make retry safe.
-- [ ] Sessions, Runs and Activity are projected from durable Flux events and remain tenant-scoped.
-- [ ] The console can install a Slack-bot-style template, choose its Slack Connection and optional
+- [x] Sessions, Runs and Activity are projected from durable Flux events and remain tenant-scoped.
+- [x] The console can install a Slack-bot-style template, choose its Slack Connection and optional
       access layers, configure its model/risk/scope, talk to it and inspect its activation state.
 
 ## Progress
 
+- 2026-08-03: Delivered immutable curated packages, atomic tenant installation with frozen reviewed
+  authority, opaque runtime capabilities, durable safe-retry deliveries, real Flux App supervision
+  and event-derived projections, plus the operator Apps surface and tenant-isolation route proof.
 - 2026-08-03: Flux 0.54 publishes `flux-app` and `flux-channels`, connector-pack 0.17 publishes the
   channel planner on that engine line, and X-101 binds the runnable channel seam. The upstream
   publication blocker is gone; the next work is an Exchange design for immutable packages,

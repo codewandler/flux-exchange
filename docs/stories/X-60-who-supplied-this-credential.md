@@ -1,7 +1,7 @@
 ---
 id: X-60
 title: "An operator can find out who supplied a credential"
-status: ready
+status: done
 priority: 2
 epic: connections
 areas: [exchange-server, exchange-host]
@@ -50,17 +50,22 @@ The test that proves it is the same one: delete the whole record and assert ever
 listed and still usable, merely unattributed.
 
 ## Acceptance
-- [ ] A connection reports who last supplied or rotated each credential, and when.
-- [ ] **Failing-first test** — deleting the entire record leaves every connection listed and usable,
+- [x] A connection reports who last supplied or rotated each credential, and when.
+- [x] **Failing-first test** — deleting the entire record leaves every connection listed and usable,
       attribution reading "unknown" rather than the connection vanishing.
-- [ ] It records a **principal**, not a value, and never anything derived from the credential itself.
-- [ ] Nothing tenant-specific leaks to an anonymous surface, and the attribution is visible only
+- [x] It records a **principal**, not a value, and never anything derived from the credential itself.
+- [x] Nothing tenant-specific leaks to an anonymous surface, and the attribution is visible only
       within the tenant it belongs to.
-- [ ] `docs/designs/connections.md`'s "no second source of truth" claim is amended in place to say
+- [x] `docs/designs/connections.md`'s "no second source of truth" claim is amended in place to say
       what the record is authoritative for and what it is not — the way §4 of
       `connection-settings.md` carries its own correction.
 
 ## Notes
+- 2026-08-03 — Delivered from X-95's journal: connection reads project the latest retained
+  successful creation or rotation as `{status, principal, at}` for each held credential, with the
+  tenant predicate inside the SQL query. No journal or no matching retained row yields
+  `{status: "unknown"}` and never changes store-derived existence. Instance rename audit evidence
+  is now `connection_labeled`, not a false `connection_created` supplier event.
 - 2026-08-03 — X-95's durable audit journal now retains connection creation and credential rotation
   with the resolved actor, timestamp and non-secret address. This supplies the evidence source but
   does not close this story: the connection projection still cannot answer the current supplier,

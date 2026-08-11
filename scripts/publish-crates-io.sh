@@ -36,6 +36,9 @@ esac
 
 cd "$(dirname "$0")/.."
 
+# Repeat the offline tagged-tree boundary before Cargo metadata or the crates.io API can run.
+./scripts/check-publication-readiness.sh || exit 1
+
 # The one crate this workspace publishes. If a second ever joins it, take ../flux-connectors'
 # derived-order script rather than hand-listing them here — a list goes stale, a sort cannot.
 CRATE="codewandler-flux-exchange-host"

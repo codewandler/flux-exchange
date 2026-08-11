@@ -11,15 +11,60 @@ authors.workspace = true
 # Not published. The library (`codewandler-flux-exchange-host`) is the reusable artifact; this
 # binary is one composition of it, and a product embedding the host writes its own.
 publish = false
+build = "build.rs"
+
+[features]
+# Process-only acceptance seam. Default/release binaries do not recognize a wedge control input.
+supervisor-test-wedge = []
+# Process-only acceptance seam. The fixture supplies an already occupied address so the production
+# listener path receives a real OS bind refusal after all stores and safety checks have opened.
+supervisor-test-bind-refusal = []
+# Process-only acceptance seam. It reports the production account-derived root without creating
+# it, so native runners can poison inherited home variables and inspect the real binary decision.
+native-root-test-seam = []
+# Native CI only: run each production deadline transport with a paused monotonic clock from one
+# dedicated integration-test executable. Released binaries do not recognize these commands.
+native-deadline-test-seam = ["tokio/test-util", "dep:tokio-tungstenite"]
+# Native helper process evidence only: shorten the otherwise fixed 335-second outer result cap.
+# Released binaries do not consult the test environment variable guarded by this feature.
+native-helper-deadline-test-seam = []
+# Release-native selection compiles one exact verdict from a historical multi-test target. Default
+# builds retain every test; `--all-features` does too through `native-evidence-all`.
+native-evidence-select = []
+native-evidence-all = []
+native-evidence-x128-expiry-unix = []
+native-evidence-x128-unix-abi-alias = []
+native-evidence-x128-unix-abi-missing = []
+native-evidence-x128-unix-abi-shape = []
+native-evidence-x128-unix-death-normal = []
+native-evidence-x128-unix-death-sigkill = []
+native-evidence-x128-unix-death-sigkill-wedged = []
+native-evidence-x128-unix-death-wedged = []
+native-evidence-x134-root-account = []
+native-evidence-x134-unix-owner-bootstrap = []
+native-evidence-x134-unix-peer-refusal = []
+native-evidence-x134-unix-root-symlink = []
+native-evidence-x134-unix-root-writable = []
 
 [[bin]]
 name = "flux-exchange"
 path = "src/main.rs"
 
+[[test]]
+name = "local_management_hosted_deadline"
+path = "tests/local_management_hosted_deadline.rs"
+required-features = ["native-deadline-test-seam"]
+
+[[test]]
+name = "local_management_unix_deadline"
+path = "tests/local_management_unix_deadline.rs"
+required-features = ["native-deadline-test-seam"]
+
 [dependencies]
 exchange-host.workspace = true
 
 anyhow.workspace = true
+async-trait.workspace = true
 axum.workspace = true
 connector-catalog.workspace = true
 # **The transport, and the only crate that holds one** (X-12, lock 1). `flux_web::http::
@@ -31,16 +76,26 @@ connector-catalog.workspace = true
 # name the pack, and the crate that names the pack cannot build a request. A test asserts it.
 flux-app.workspace = true
 flux-channels.workspace = true
+flux-core.workspace = true
+flux-events.workspace = true
+flux-lang.workspace = true
+flux-provider.workspace = true
+flux-runtime.workspace = true
+flux-secret.workspace = true
+flux-spec.workspace = true
 flux-system.workspace = true
 flux-tools.workspace = true
 flux-web.workspace = true
+futures-util.workspace = true
 jsonwebtoken.workspace = true
+libc.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-tungstenite = { workspace = true, optional = true }
 tokio-util.workspace = true
 thiserror.workspace = true
 tower.workspace = true
@@ -50,5 +105,6 @@ tracing-subscriber.workspace = true
 time.workspace = true
 
 [dev-dependencies]
-futures-util.workspace = true
+flux-exchange-release = { path = "../exchange-release" }
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true

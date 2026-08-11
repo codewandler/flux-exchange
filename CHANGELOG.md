@@ -6,7 +6,220 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **The published native inventory now pins the retained provider recovery, replay and lease
+  evidence** (X-138). `NativeEvidenceAuthority::validate` refuses a substituted or dropped
+  `real_server_retains_the_c515_lease_through_recovery_and_readiness` or
+  `unix_connect_crashes_recover_before_readiness_and_replay_one_receipt` binding, a recovery/lease
+  obligation that does not cover both supported Linux targets, an inherited C-515 release-evidence
+  set that is not the five applicable published tests, and any Exchange process binding whose class
+  the retained-lease assertion join does not select. The upstream 0.20.0 checksum, released commit
+  and portable provider evidence are unchanged, and `native-evidence-v1.json` itself stays X-139's
+  to finalize.
+
+- **Hosted and owner-native local management now share one non-resetting decision deadline**
+  (X-135). Admission owns the 300-second pre-decision budget, durable decision starts one fixed
+  30-second receipt-bearing roll-forward budget, and cancellation can abort only before that
+  boundary. Hosted WebSocket, Unix socket and Windows named-pipe transports reserve their mandatory
+  close or EOF inside a separate bounded terminal operation, including backpressure and replay.
+
+- **Verified local Exchange release machinery now covers the complete pre-production contract**
+  (X-126, implementation slice). CI builds the exact five native targets, runs compatibility and
+  named supervisor/ABI process evidence on each applicable runner, packages bounded deterministic
+  archives, signs canonical trust/channel/manifest metadata through delegated roles, and verifies
+  the immutable public bytes before advancing the stable head. The provider fixture set executes
+  161 explicit conformance cases and binds nine native cases to exact tests; immutable version,
+  trust-version and channel-generation evidence is append-only. Production publication remains
+  intentionally blocked on reviewed external trust/signing inputs, Decision 0007's X-134 schema
+  revalidation, and the first authorized public five-target verifier run.
+
+- **Local Exchange state is durable and owner-only on every supported Flux target** (X-127).
+  The complete `--dev` composition binds credentials, settings, grants, labelled connections,
+  channels, workflows, audit evidence and Service Accounts below one conventional per-user root.
+  Unix modes and Windows SID/protected-DACL checks refuse unsafe existing objects without repair;
+  the native gate connects, grants and invokes through a labelled connection, restarts the real
+  process over the same root, and invokes again with the retained Service Account.
+
+- **A Flux supervisor receives one exact readiness proof from the child it owns** (X-128).
+  The machine-only launch ABI uses fixed Unix pipes or an exact two-handle Windows inheritance list,
+  binds only an OS-selected `127.0.0.1`/`::1` port, and emits one bounded canonical record containing
+  release, executable, protocol and native process-start identity. A strict provider verifier
+  refuses malformed or foreign evidence before ownership, while a native liveness thread prevents
+  responsive or Tokio-wedged children surviving supervisor death.
+
+- **The four delivered Exchange HTTP v1 identities are bound to production wire types and routes**
+  (X-129). Service Account authentication, effective catalogue discovery, raw invocation requests,
+  success responses and every reachable bounded refusal now have checked provider fixtures and one
+  SHA-256 inventory. Compatibility/readiness use the same typed protocol constants rather than a
+  package-version inference.
+
+- **One complete declaration-driven labelled connection plan now serves browser and CLI consumers**
+  (X-125). Authenticated humans receive the exact `exchange.connection-plan.v1` contract for name,
+  credentials, settings, choices and aliases; composite writes report ordered complete, incomplete,
+  refused or partial outcomes, and the console consumes the same committed adversarial fixture.
+  Connector 0.19 also activates GitLab's typed custom HTTPS origin through value-free revisioned
+  proposal, operator inspection, approval, replacement and revocation. Persisted authority is
+  revalidated through the real connector pack, direct setting writes cannot bypass the lifecycle,
+  and long-lived channel replacement waits for old projections to terminate.
+
+- **Connection setting reads publish catalogue-declared closed choices** (X-80). A client can build
+  Intercom's region picker from one successful `GET` instead of provoking a refused write; fields
+  without a closed set omit `choices`, and stored tenant values remain unreadable. The same response
+  contract covers sole and labelled connection instances.
+
+- **Tenant-installed Flux Apps now supervise Managed Agents through frozen authority** (X-108).
+  Immutable curated App Packages carry exact Program bytes, integrity and provenance without
+  tenant values. Atomic installation resolves labelled Connections, metadata-selected operations,
+  Datasources and Model Profiles into one reviewed revision; widening upgrades require a new
+  fingerprint. Chat and declared Event Types enter a durable inbox before Flux execution, opaque
+  runtime tokens can spend only frozen operations through the existing Invoker, unsafe retry is
+  marked indeterminate, and Sessions/Runs/value-free Activity are projected from per-tenant/App
+  Flux event logs. The console installs and drives the Slack-bot-style template end to end.
+
+- **Service Accounts can now discover their exact remote connector surface** (X-113).
+  Authenticated `GET /api/catalogue/effective` intersects the invoker's credential and non-secret
+  settings ports with the resolved principal's tenant grants, returns only usable
+  operation/connection bindings, and carries a stable content generation for Flux to refresh
+  between turns. The existing one-shot
+  invoke path remains the execution contract; disconnected connections now have their own bounded
+  refusal instead of collapsing into a missing-credential projection failure.
+
+### Fixed
+
+- **Linux native helper evidence now preserves the complete admitted setup window** (X-137 repair).
+  The exact private-terminal binding models runner scheduling before observing `/dev/tty` and gives
+  the test-only outer result clock its fixed five-second pre-ceremony allowance plus the bounded
+  private-input expiry window. The production 335-second result deadline is unchanged.
+
+- **Verified vendor helpers now stay inside one absolute setup/result envelope** (X-136). Unix and
+  Windows revalidate the complete value-free v2 plan before mutation, preserve old-head replay for
+  the server, and share one five-second setup cap plus one non-resetting 335-second result cap across
+  private input, terminal framing and capability closure. Exact Linux and native Windows process
+  evidence pins the fixed-descriptor/handle-list ABI; MinGW remains compile-only evidence.
+
 ### Changed
+
+- **Exchange runtime and binary releases now have one exact Linux product boundary** (X-137).
+  Release selection, packaging, download policy, workflows and interim native fixtures close over
+  `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, each as a deterministic `tar.zst`
+  containing `flux-exchange`. The server refuses non-Linux targets during its build script, and its
+  production owner endpoint, helper capabilities and supervision use only the Linux account,
+  `SO_PEERCRED`, fixed-FD, `SCM_RIGHTS` and proc-start contracts. Publication remains fail-closed
+  until X-138 recovery evidence and X-139's final native authority are done.
+
+- **The datasource vocabulary now follows cross-repository Decision 0006** (X-130). The concepts
+  table's last ambiguous owner cell is resolved: vendor-data Datasource Definitions belong to the
+  connector package, Flux keeps the wire vocabulary and the consuming seam, and a tenant Datasource
+  is a published connector datasource member bound to a connection label with optional
+  entity/filter scoping, frozen at App install. Exchange serves schema/list/get through the
+  existing admission gate and owns tenant authorization and connection resolution, never retrieval
+  semantics. The released-domain audit's upstream gap now points at chartered connector work, the
+  installed-apps design records that `Datasource.kind` becomes a published member reference in
+  `oip` form, and X-131–X-133 file the upstream-gated validation, read-seam and
+  effective-catalogue work.
+
+- **The rich-runtime program now has one official integration execution placement** (X-124).
+  Exchange owns authenticated effective Service Account discovery, invocation, rich runtime
+  execution and lifecycle; Flux contributes its guarded substrate and embedded client without a
+  local vendor/plugin fallback. Milestone 1 is now the effective catalogue plus existing one-shot
+  HTTP invoke, while streams, cancellation and terminal outcomes remain X-117, leases remain X-118,
+  and hosted multi-tenant isolation remains X-116. A failing-first repository contract prevents the
+  corrected epic, design and child stories from drifting back.
+
+## [0.17.0] - 2026-08-03
+
+### Added
+
+- **Credential acquisition has one fail-closed host seam ahead of its first released declaration**
+  (X-75). The reusable host defines acquisition without a transport; the server performs password
+  redemption and refresh through the existing HTTP composition, registers supplied secrets before
+  fallible work, and atomically stores only access/refresh/expiry records. The deployment posture
+  refuses the path before a request unless its declared hazard is opted in. No released connector
+  activates this path yet, so X-75 remains open for upstream metadata and live vendor proof.
+
+- **Generated channels now bind to one immutable connection instance** (X-122). Operators choose a
+  tenant-local connection label when creating or rebinding a channel; Exchange resolves and stores
+  the host-minted UUID. Renaming a connection changes only its management label, deletion refuses
+  while a channel still binds the instance, and restored channels select the same credential and
+  configuration addresses instead of silently choosing the first account.
+
+- **The public site covers the intended Exchange surface and explains its credential boundary**
+  (X-65, X-66). Live and planned capability status remains derived from the agent descriptor, while
+  the boundary page now explains principal-derived tenancy, declared execution, grants, runtime
+  placement, supplier evidence, and the distinction between Service Accounts and Managed Agents.
+
+### Removed
+
+- **The v0.16 Agent-named Service Account compatibility spellings are gone** (X-121).
+  `POST /api/agents`, `FLUX_EXCHANGE_AGENTS`, the serialized `agent` principal kind, and the
+  `#/agents` console fragment are no longer accepted. Existing unprefixed bearer tokens continue to
+  resolve from the unchanged verifier-keyed store until expiry or revocation.
+
+### Changed
+
+- **The historical Agent-access backlog is reconciled to the canonical Service Account resource**
+  (X-35, X-37, X-38). The delivered bearer authentication, listing, revocation, tenant isolation,
+  and grant boundary are now recorded as completed work; Agent remains reserved for Flux's model,
+  authored loop, and bounded capabilities.
+
+### Operations
+
+- **Production refuses an absent operator policy before it builds an image** (X-123). The workflow
+  checks Fly's value-free secret metadata before build and again after rollout, requiring exactly
+  one deployed `FLUX_EXCHANGE_OPERATOR_SUBJECTS` entry. Retained evidence records only that the
+  policy was deployed, never its digest or the identity-provider subjects it contains.
+
+- **The first protected-main v0.16.1 release and its recovery point are verified** (X-93, X-94).
+  The retained 90-day artifact ties one reviewed source commit to the scan-clean static image, SBOM,
+  Fly release and live machine verification; the post-release encrypted snapshot remains inside the
+  declared 24-hour RPO after the isolated 597-second recovery drill.
+
+## [0.16.2] - 2026-08-03
+
+### Fixed
+
+- **Google production sign-in requests the provider's minimal accepted OIDC scopes** (X-90).
+  Live evidence showed Google refusing the bare `openid` request, so authorization now requests
+  `openid email`. The email scope is a provider-protocol requirement only: the email claim remains
+  unparsed and unused, identity remains keyed by immutable `sub`, and Workspace admission still
+  requires exact equality with the signature-verified `hd` claim.
+
+## [0.16.1] - 2026-08-03
+
+Wave #1 closes the first ten security, deployment and self-hosting stories selected from the ready
+board: X-58, X-59, X-60, X-68, X-74, X-90, X-91, X-93, X-94 and X-96.
+
+### Fixed
+
+- **Sign-in callback diagnostics now match their documented provider boundary** (X-68). An explicit
+  federated-provider refusal remains a credential failure while a development host has no provider
+  answer to reject; tests pin that intentional distinction and prove neither path issues a session
+  or reflects the provider's error. The anonymous development sign-in page's withholding guard now
+  explicitly covers the development identity roster variable.
+
+### Changed
+
+- **Authentication no longer decides either the deployment tenant or operator authority** (X-59,
+  X-91). `FLUX_EXCHANGE_TENANT` selects a provider-independent single tenant and refuses a
+  principal from any other tenant without rewriting it. Administrative routes independently
+  require an immutable id in `FLUX_EXCHANGE_OPERATOR_SUBJECTS`; an absent or malformed policy
+  fails closed, while ordinary members retain session, catalogue and grant-gated invocation.
+
+- **Google Workspace admission is checked from the signed token** (X-90).
+  `FLUX_EXCHANGE_OIDC_HOSTED_DOMAIN` is an authorization-request hint and, separately, an exact
+  requirement on the verified `hd` claim. Email and email suffixes grant nothing, identity remains
+  the immutable `sub`, and the requested scope is now only `openid`.
+
+- **Connection reads carry value-free supplier evidence** (X-60). The latest successful durable
+  credential-supply audit event projects its principal and timestamp; missing or aged-out evidence
+  says `unknown` without making a held connection unusable or inventing an owner. Instance renames
+  no longer masquerade as credential creation.
+
+- **Hazardous credential acquisition is fail-closed before a connector can expose it** (X-74).
+  The published host owns a typed `AuthPosture`; the server reads
+  `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS`, rejects unknown values at startup, and otherwise refuses a
+  declared shared-resource-owner-secret acquisition unless explicitly opted in.
 
 - **The roadmap now makes Exchange the hosted runtime for every connector kind** (X-111, X-112).
   HTTP invocation and generated socket channels are delivered slices; filed follow-ups cover the
@@ -15,6 +228,25 @@ All notable changes to this project are documented in this file. The format is b
   adapters remain owned by flux-connectors rather than becoming a second Exchange catalogue.
 
 ### Added
+
+- **Verifier-backed local users can safely sign in on a reachable self-hosted deployment** (X-58).
+  `flux-exchange local-user-secret <user> <tenant>` generates a one-time 256-bit opaque secret and
+  verifier-only JSON entry for the owner-only file named by `FLUX_EXCHANGE_LOCAL_USERS`. Wrong and
+  unknown credentials are indistinguishable; the same-origin form issues only the ordinary secure
+  HttpOnly session cookie, and the console now withholds sign-in when no provider is usable.
+
+- **Traffic admission is fair, observable and still bounded** (X-96). Each resolved
+  `(tenant, kind, id)` has its own rolling invocation budget beneath the unchanged process-wide
+  rate/concurrency ceilings. Fly Proxy supplies the anonymous occupancy bound; `/metrics` exposes
+  fixed-cardinality admission, refusal and active-work series; sustained saturation warns without
+  tokens, bodies or identity labels. Forwarding headers select no bucket.
+
+- **Production is an attributable, digest-pinned workflow and persistent state has a tested
+  recovery contract** (X-93, X-94). The protected production environment accepts a full commit from
+  protected `main`, reruns the gate, builds locked digest-pinned layers, produces an SPDX SBOM,
+  scans before push, deploys the immutable image digest and records identifier-safe provenance with
+  rollback. Daily snapshot verification enforces encrypted scheduled recovery points, 14-day
+  retention and a 24-hour RPO; the runbook defines a timed isolated restore drill and 60-minute RTO.
 
 - **Authority evidence now survives the process in an owner-only SQLite audit journal** (X-95).
   Authentication, authorization, Service Account lifecycle, connection/credential/settings and
@@ -28,6 +260,20 @@ All notable changes to this project are documented in this file. The format is b
   Authentication floods, repeated per-actor authorization failures, and credential/grant changes
   append identifier-and-count-only alerts and emit warning notifications. The Fly composition puts
   the journal on its encrypted volume; the runbook names read and early-deletion powers.
+
+- **A tenant can hold several labelled connections to one connector** (X-14). Exchange persists a
+  tenant-scoped label-to-host-minted-UUID overlay while deriving connection existence from scoped
+  credential addresses. Label-scoped management includes settings and atomic rotation; invocation
+  selects with `?connection=<label>` while preserving the operation's raw JSON body, and refuses an
+  omitted selector when several connections exist.
+
+  Creating the second connection migrates the first and writes the second in one checked
+  `SecretBatch`; deleting one of two returns the survivor to the legacy address atomically. Stores
+  without proven inventory and batch support retain sole legacy connections and refuse plural
+  management rather than falling back to point writes. `FLUX_EXCHANGE_CONNECTIONS` names the
+  durable non-secret label registry. Label-scoped mutations retain label-specific, value-free audit
+  targets. Generated channels remain sole-connection-only until X-122 gives their durable records a
+  rename-safe instance binding.
 
 - **Service Accounts are now a complete non-human identity resource** (X-107). Signed-in humans can
   create, list and revoke them at `/api/service-accounts`; creation returns a new `fxsa_…` token

@@ -318,7 +318,8 @@ mod tests {
             id.clone(),
             tenant,
             "asterisk",
-            "asterisk",
+            exchange_host::InstanceId::parse("11111111-1111-4111-8111-111111111111")
+                .expect("instance"),
             "ari-events",
             ["channel-created".to_owned()].into_iter().collect(),
         )
@@ -351,7 +352,7 @@ mod tests {
             .expect("invoker"),
         );
         let state = AppState::with_development_identity(Arc::new(
-            DevIdentity::from_roster("agent:bot@acme").expect("development identity"),
+            DevIdentity::from_roster("service_account:bot@acme").expect("development identity"),
         ))
         .with_invoker(invoker)
         .with_channels(supervisor.clone());

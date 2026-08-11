@@ -17,8 +17,8 @@ hero:
       link: /surface
 
 features:
-  - title: Its primary caller is an agent
-    details: People sign in to wire things up and to see what happened. Agents are what call operations all day, so the API is the product and the console is the admin surface.
+  - title: Its primary caller is non-human
+    details: Service Accounts call the API today; hosted Managed Agents are the target architecture. People sign in to wire things up and inspect outcomes, so the API is the product and the console is the admin surface.
   - title: A caller names an operation, never a secret
     details: Not a host, not a credential, not a tenant. Each is derived rather than accepted, which is what makes a stolen Service Account token bounded.
   - title: What a build can do is a question you can ask it

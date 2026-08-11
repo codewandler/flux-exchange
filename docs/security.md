@@ -38,8 +38,8 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   the seams where they are handled. The authentication argument is in
   [`oidc-signin.md`](designs/oidc-signin.md) and the local session rules are in
   [`identity-and-session.md`](designs/identity-and-session.md).
-- **Enforced in code.** Tenant assignments, grants, settings and agent verifier records are kept in
-  stores separate from credential material. Invocation reads a tenant once from the resolved
+- **Enforced in code.** Tenant assignments, connection labels, grants, settings and Service Account
+  verifier records are kept in stores separate from credential material. Invocation reads a tenant once from the resolved
   principal and binds both credential and setting ports from that value in one expression; see
   [`invoke.rs`](../crates/exchange-host/src/invoke.rs).
 - **Enforced in code.** Operational audit records are a separate, durable, typed journal and are
@@ -62,6 +62,15 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   builds no request of its own, and the server composition that owns an HTTP client may not name
   `connector_pack`; the three enforcement mechanisms and their blind spots are in
   [`invoke.md`](designs/invoke.md).
+- **Enforced in code.** The supervised single-user composition has a separate native management
+  boundary authenticated to the launching operating-system account. Its local operator mapping
+  exists only inside that dispatcher; it is not an HTTP identity provider and is unavailable to
+  `--dev`, hosted traffic and another account. The verified Exchange helper reads requested input
+  directly from `/dev/tty` or the Windows console and sends it only over that owner-authenticated
+  connection, while Flux receives a value-free result capability. Service Account handoff uses a
+  distinct one-way writer, so neither vendor values nor the one-time credential enter ordinary
+  JSON, argv, environment, standard streams or supervisor state. The provider contract is in
+  [`local-release-v1.md`](designs/local-release-v1.md).
 - **Deployment-dependent.** The filesystem, Fly volume, snapshots, logs, GitHub repository and CI
   runners are trusted operator/platform boundaries. A process running as `root`, a platform
   administrator, a readable backup or a compromised workflow can bypass application-level
@@ -82,10 +91,12 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   targeting loopback, private, link-local or cloud-metadata addresses. This server composition sets
   the Flux private-network policy to deny all of them in
   [`execution.rs`](../crates/exchange-server/src/execution.rs).
-- **Known limitation.** Every Google Workspace member currently admitted by the provider becomes a
-  `User` with the same administrative power as every other `User`. The software does not yet model
-  “organization member” separately from “operator”; [X-91](stories/X-91-signing-in-does-not-make-every-member-an-operator.md)
-  closes that gap.
+- **Enforced in code.** Authentication and operator authority are separate axes. A signed-in member
+  may use the catalogue, session and grant-gated invocation surfaces, but management routes require
+  an exact immutable user subject in deployment-owned `FLUX_EXCHANGE_OPERATOR_SUBJECTS`. An absent
+  or malformed policy admits nobody; Service Accounts do not become operators even if an id happens
+  to match. Operator refusals and successful administrative actions are audited without recording
+  the policy contents or session.
 - **Known limitation.** A host or platform administrator is outside the application threat model.
   File modes, non-root execution and volume encryption reduce accidental exposure; none protects a
   credential from a party controlling the running machine or deployment account.
@@ -108,19 +119,17 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   ID token that established it, and logout removes the presented session server-side as well as
   clearing the browser cookie; see [`session.rs`](../crates/exchange-server/src/session.rs) and
   [`public-service-hardening.md`](designs/public-service-hardening.md).
-- **Enforced in code.** Reachable binds require a real identity provider. No identity and the
+- **Enforced in code.** Reachable binds require federation or the distinct verifier-backed local
+  users binding. Its owner-only file stores generated-secret verifiers, never plaintext; malformed
+  entries and widened modes refuse startup. No identity and the
   secretless development roster both refuse every non-loopback bind in
   [`bind.rs`](../crates/exchange-server/src/bind.rs).
-- **Deployment-dependent.** The current Google OAuth application is configured as organization
-  internal. Organization-wide sign-in is intentional; Google, not this process, presently enforces
-  that audience setting.
-- **Known limitation.** The application does not require Google's signed `hd` claim. A provider
-  configuration accidentally widened to external would therefore widen sign-in here too. Google
-  says a Workspace restriction must verify `hd` and must not infer organization from `email`;
-  [X-90](stories/X-90-verify-the-google-organization-in-the-signed-token.md) adds the fail-closed
-  check. See [Google's OIDC reference](https://developers.google.com/identity/openid-connect/reference).
-- **Known limitation.** The sign-in asks for `email` and `profile`, but identity uses immutable
-  `sub` and consumes neither scope. X-90 removes them unless a real consumer is identified.
+- **Enforced when configured.** `FLUX_EXCHANGE_OIDC_HOSTED_DOMAIN` requires byte-for-byte equality
+  with Google's signature-verified `hd` claim. The authorization request carries the same value
+  only as an account-selection hint; a missing or mismatched signed claim refuses before a session
+  is opened. Membership is never inferred from email, and identity is the immutable `sub`.
+  Sign-in requests `openid email` only because live Google interoperability requires that minimal
+  pair; the email claim is not parsed, carried into `SignedClaims` or used for authorization.
 - **Known limitation.** Sessions have no durable inventory, per-principal revocation or global
   revocation endpoint. A process restart invalidates all sessions; normal logout invalidates only
   the session presented to it.
@@ -135,33 +144,43 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   declaration. Tests enumerate the anonymous and principal-kind-gated surfaces so a handler cannot
   become public merely by forgetting a check; see
   [`routes/mod.rs`](../crates/exchange-server/src/routes/mod.rs).
-- **Enforced in code.** Credential supply and rotation, settings mutation, grant editing and Service
-  Account lifecycle routes admit `User` principals only. A Service Account cannot use a stolen
-  token to create a successor principal or replace the credential behind its authority.
+- **Enforced in code.** Connection and credential management, settings mutation, grant editing,
+  Service Account lifecycle, workflows and channels require operator authority. A Service Account
+  cannot use a stolen token to create a successor principal or replace the credential behind its
+  authority, and an ordinary authenticated member cannot administer the tenant.
 - **Enforced in code.** Invocation is fail-closed. Without a grant store the invoker is not built;
   without an admitting tenant grant the operation is refused before a credential is read. Selectors
   decide from catalogue-declared risk, effects and idempotency, with explicit operation exceptions;
   an explicit deny wins over an explicit allow. See
   [`grant.rs`](../crates/exchange-host/src/grant.rs) and [`invoke.md`](designs/invoke.md).
 - **Known limitation.** Grants belong to a tenant, not to one principal. Every resolved principal
-  in that tenant is evaluated against the same grant set. X-91 adds operator authorization for
-  administrative routes; it does not silently turn tenant grants into per-user grants.
+  in that tenant is evaluated against the same grant set. Operator authorization narrows
+  administrative routes; it does not silently turn tenant invocation grants into per-user grants.
 - **Enforced in code.** Service Account tokens resolve through the same principal boundary as human
   identity, remain tenant-bound, and can be listed and revoked only by a signed-in human. A token
   authenticates; grants independently decide what that tenant may invoke or subscribe to. The
-  former Agent spelling is a v0.16 compatibility alias, not a second principal kind.
+  former Agent spelling was a v0.16 compatibility alias and is no longer accepted in v0.17; Agent
+  names the hosted model-and-loop runtime, not a bearer principal.
 
 ## Credentials and persistent state
 
-- **Enforced in code.** The file credential store creates a `0700` parent and `0600` file, re-checks
-  both modes on open, refuses a widened mode rather than repairing it, resolves symlinks and `..`,
-  and refuses a path inside a Git working tree. It never falls back to an in-memory store when a
-  configured path is missing or unusable; see
+- **Enforced in code.** Production discovers its native state root from the effective uid's account
+  record on Linux/macOS or the current account's Local AppData known folder on Windows, never from
+  inherited `HOME`, `XDG_STATE_HOME`, `USERPROFILE` or `LOCALAPPDATA`. Path traversal refuses
+  symlinks/reparse points, foreign ownership, untrusted-writable ancestors and widened owner-only
+  metadata rather than repairing any of them. The file credential store creates an owner-only
+  parent and file, re-checks their metadata on open and refuses a path inside a Git working tree. It
+  never falls back to an in-memory store when a configured path is missing or unusable; see
   [`credentials.rs`](../crates/exchange-host/src/credentials.rs).
 - **Enforced in code.** Writes use a sibling temporary, `fsync` and rename so a crash does not leave
   a truncated store. Delete rewrites immediately, and connection rotation replaces a credential
   without a deliberate absent window. Partial multi-value deletion reports what was removed and
   what may remain.
+- **Enforced in code.** Multiple connections use a host-minted UUID in the credential address and a
+  separate tenant-scoped operator label. Existence comes from scoped credential inventory, not the
+  naming overlay. First-to-second and two-to-one transitions are checked atomic batches; a backend
+  that cannot prove inventory and atomic mutation retains the sole legacy surface and refuses the
+  plural operation.
 - **Enforced in code.** One credential value is limited to 8 KiB and one tenant's credentials to
   64 KiB. Non-secret settings have separate 1 KiB-per-value and 16 KiB-per-tenant bounds. These
   limits bound both storage and the cost of whole-file rewrites; their reasons live beside the
@@ -247,9 +266,11 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
 ## Availability and resource bounds
 
 - **Enforced in code.** One process admits at most 30 OIDC authorization starts per rolling minute,
-  120 invocation attempts per rolling minute and 16 concurrently executing invocations. Saturation
-  refuses immediately with `429` and `Retry-After`; it does not create an unbounded queue, and
-  health/session/administration routes do not consume invocation slots. See
+  120 invocation attempts per rolling minute, 30 invocations for each resolved principal per
+  rolling minute and 16 concurrently executing invocations. Per-principal keys are derived only
+  from resolved tenant/kind/id. Saturation refuses immediately with `429` and `Retry-After`; it does
+  not create an unbounded queue, and health/session/administration routes do not consume invocation
+  slots. Fixed-cardinality metrics and warnings expose saturation without identity labels. See
   [`traffic.rs`](../crates/exchange-server/src/traffic.rs).
 - **Enforced in code.** Pending sign-ins, live sessions, tenant identifiers, credential material
   and settings have explicit memory or size bounds. Expired state is removed rather than merely
@@ -259,10 +280,10 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   machine. [`remote-deployment.md`](designs/remote-deployment.md) and
   [`deploying.md`](deploying.md#why-one-machine-and-do-not-change-it) explain why horizontal scaling
   would silently create divergent state.
-- **Known limitation.** Process-wide rate limits are backstops, not fair caller budgets and not edge
-  denial-of-service protection. They intentionally ignore caller-controlled forwarding headers.
-  [X-96](stories/X-96-traffic-controls-are-fair-as-well-as-bounded.md) adds trusted-edge controls,
-  per-principal budgets and saturation metrics.
+- **Deployment-dependent.** Fly Proxy request concurrency bounds anonymous occupancy before it
+  reaches the process. The application does not read forwarding headers because it has no
+  authenticated proxy-to-application address identity contract; Fly and another deployment must
+  supply equivalent trusted-edge flood controls.
 
 ## Audit and incident evidence
 
@@ -285,10 +306,11 @@ under [“Where the locks stop”](designs/invoke.md#where-the-locks-stop).
   can read the journal; that uid or a Fly organization administrator able to replace/destroy the
   volume can delete it early. Tenant HTTP callers have no audit-enumeration route. The runbook names
   these powers and the read-only query command.
-- **Known limitation.** Credential creation and rotation events now retain who changed which
-  non-secret credential address and when, but `GET /api/connections` cannot yet answer the current
-  supplier after later writes or missing evidence. [X-60](stories/X-60-who-supplied-this-credential.md)
-  owns that attribution projection and its “unknown, never absent” semantics.
+- **Enforced in code.** `GET /api/connections` projects the latest retained successful creation or
+  rotation onto each held credential as its principal and timestamp, scoped in SQL to the resolved
+  tenant. Missing evidence reads `unknown`: the credential store alone remains authoritative for
+  existence and use, and evidence beside an empty address never makes a credential appear held.
+  [X-60](stories/X-60-who-supplied-this-credential.md) carries the boundary.
 
 ## Supply chain and deployment provenance
 

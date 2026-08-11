@@ -25,12 +25,29 @@ import {
   CONNECTIONS_ENDPOINT,
   CONNECTORS_ENDPOINT,
   SESSION_ENDPOINT,
+  SIGNIN_AVAILABILITY_ENDPOINT,
   failureMessage,
   loadCatalogue,
+  loadSignInAvailability,
   operationsEndpoint,
 } from '../src/service.mts'
 import CatalogueFailure from '../src/CatalogueFailure.mts'
 import CatalogueOperation from '../src/CatalogueOperation.mts'
+
+test('sign_in_availability_is_read_as_the_service_publishes_it', async () => {
+  const asked = []
+  const state = await loadSignInAvailability({
+    fetch: async (url) => {
+      asked.push(url)
+      return new Response(JSON.stringify({ sign_in_available: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    },
+  })
+  assert.deepEqual(asked, [SIGNIN_AVAILABILITY_ENDPOINT])
+  assert.deepEqual(state, { status: 'ready', available: false })
+})
 
 /** One served operation, in the shape the catalogue routes publish. */
 const operation = (over = {}) => ({

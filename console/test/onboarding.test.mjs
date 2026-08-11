@@ -281,14 +281,12 @@ test('today_a_service_account_can_be_created_authenticate_and_invoke_with_a_gran
   assert.equal(mint.call.method, 'POST')
   assert.equal(mint.call.endpoint, '/api/service-accounts')
   assert.ok(html.includes('/api/service-accounts'), `the page must name the route that mints an agent; got: ${html}`)
-  assert.match(
-    html,
-    /shown\s+(?:<[^>]*>)?once/i,
-    'the page must say the token is shown once — a caller who expects to fetch it again has lost it'
-  )
+  assert.match(html, /owner-local helper/i, 'the page must name the only caller allowed to receive the handoff')
+  assert.match(html, /one-shot binary FXSA handoff/i, 'the page must name the closed binary response')
+  assert.match(html, /never token JSON/i, 'the page must refuse the retired browser JSON contract')
   assert.ok(
     /signed[- ]in/i.test(html),
-    'minting is done by a signed-in human and not by the agent; the page must say whose call it is'
+    'minting is an authenticated owner action and not an arbitrary agent call; the page must say whose call it is'
   )
 })
 
@@ -369,7 +367,9 @@ test('nothing_tenant_specific_can_reach_this_page', async () => {
   //    appear is a tenant, a principal, a credential or an address, so the parameters that may
   //    appear are written out — `/api/connections/{connector}` on this page would still be a
   //    tenant's contents, because `connector` is not on this list.
-  const CATALOGUE_KEYS = ['operation']
+  // `app` names an opaque installed-resource slot. Its value is supplied only by an authenticated
+  // caller and remains resolved beneath that caller's tenant.
+  const CATALOGUE_KEYS = ['operation', 'app']
   for (const entry of STEPS) {
     if (!entry.call) continue
     assert.match(

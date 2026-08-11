@@ -35,3 +35,16 @@ credentials, and only discriminator values declared by the connector become even
 is live and at-most-once: there is no replay or cursor, and a subscriber that overruns its bounded
 queue is disconnected without stopping the vendor channel. Webhook signature verification and a
 durable delivery inbox remain separate, unbuilt slices.
+
+## Management labels do not become authority
+
+An operator chooses a connection by its tenant-local label when creating or updating a channel.
+Exchange resolves that label to the connection's immutable identity and stores the identity, not the
+label. A rename therefore changes what management views display without moving credentials,
+restarting the channel or retargeting it to another vendor account. Removing a connection is refused
+while a durable channel still binds it; the operator must remove the channel or explicitly rebind it
+first.
+
+Neither the management request nor this public description exposes the immutable id. Tenant,
+authority, host and credential addresses remain derived inside the service and cannot be supplied by
+the caller.

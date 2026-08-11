@@ -20,8 +20,9 @@ pub const BIND_ENV: &str = "FLUX_EXCHANGE_BIND";
 
 /// Whether this composition bound an [`Identity`](exchange_host::Identity) port.
 ///
-/// A two-state answer rather than the port itself: the bind decision does not care *how* a caller
-/// would be authenticated, only whether anything could.
+/// An admission state rather than the port itself: the bind decision distinguishes the
+/// secret-free development identity from bindings that prove a credential, while keeping the
+/// concrete verifier/provider out of this layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityBinding {
     /// An identity provider is configured, so a request can become a principal.
@@ -36,6 +37,9 @@ pub enum IdentityBinding {
     /// reachable bind whose authentication is a name anybody can guess is worse than no
     /// authentication, because the surface in front of it believes every caller.
     Development,
+    /// A static, owner-only verifier file is bound. This is a real secret-backed local binding,
+    /// distinct from OIDC `Bound` and from the guessable development roster.
+    LocalUsers,
 }
 
 /// Decide whether the server may listen on `bind`.
@@ -55,7 +59,7 @@ pub fn admit_bind(bind: SocketAddr, identity: IdentityBinding) -> Result<(), Sta
     }
 
     match identity {
-        IdentityBinding::Bound => Ok(()),
+        IdentityBinding::Bound | IdentityBinding::LocalUsers => Ok(()),
         IdentityBinding::Unbound => Err(StartupRefusal::ReachableBindWithoutIdentity { bind }),
         // The development identity is the one binding that can resolve a principal and still must
         // not be exposed. This is the refusal the story asks for in place of a default.
@@ -81,9 +85,50 @@ pub fn admit_audit(bind: SocketAddr, audit_bound: bool) -> Result<(), StartupRef
 /// value, and distinguish failures an operator answers differently — is met below.
 #[derive(Debug)]
 pub enum StartupRefusal {
+    /// The closed supervised launch or readiness protocol was not satisfied.
+    Supervised {
+        /// A value-free ABI, bind or readiness refusal.
+        reason: String,
+    },
+    /// The deployment's authentication-hazard policy named a value this build does not know.
+    AuthPosture {
+        /// The by-name, redaction-safe configuration refusal.
+        reason: String,
+    },
+
     /// The `--dev` shorthand could not derive its one local principal.
     DevelopmentMode {
         /// What startup input was missing or unusable. It carries no credential value.
+        reason: String,
+    },
+
+    /// The provider-independent single-tenant declaration was malformed or contradicted `--dev`.
+    Tenancy {
+        /// The redaction-safe startup refusal.
+        reason: String,
+    },
+
+    /// The verifier-backed local users file could not be safely loaded.
+    LocalUsers {
+        /// The redaction-safe file refusal.
+        reason: String,
+    },
+
+    /// The requested durable local composition was incomplete or unsafe.
+    LocalState {
+        /// The value-free path/configuration refusal.
+        reason: String,
+    },
+
+    /// The value-free prepared-transaction journal or provider recovery could not be bound.
+    TransactionCoordinator {
+        /// The redaction-safe journal or provider refusal.
+        reason: String,
+    },
+
+    /// The hosted management origin was explicitly invalid for this startup mode.
+    HostedOrigin {
+        /// The value-free canonical-origin refusal.
         reason: String,
     },
 
@@ -144,10 +189,9 @@ pub enum StartupRefusal {
 
     /// A credential store was named and could not be bound.
     ///
-    /// Carries the store's refusal already rendered rather than as a typed source, because
-    /// `CredentialStoreError` is `#[cfg(unix)]` — only the file store is — and a cfg-gated variant
-    /// would make this enum two different types depending on the platform. Nothing is lost: that
-    /// refusal names the path, the mode and what would have worked, and never a value.
+    /// Carries the store's refusal already rendered rather than as a typed source. Nothing is lost:
+    /// that refusal names the path, the native owner-only metadata and what would have worked, and
+    /// never a value.
     CredentialStore {
         /// The store's own refusal.
         reason: String,
@@ -169,9 +213,15 @@ pub enum StartupRefusal {
     /// A separate variant from the two above for their reason: an operator fixes it in a different
     /// file, and what is in *this* one is not secret — so a refusal that read like the credential
     /// store's would send somebody looking for a leak that is not there. Rendered rather than typed,
-    /// matching its siblings, because `SettingsStoreError` is `#[cfg(unix)]` too.
+    /// matching its siblings so startup failures keep one value-free representation.
     SettingsStore {
         /// The store's own refusal.
+        reason: String,
+    },
+
+    /// A connection-label registry was named and could not be bound.
+    ConnectionRegistry {
+        /// The registry's own refusal.
         reason: String,
     },
 
@@ -182,8 +232,7 @@ pub enum StartupRefusal {
     /// what each tenant may run. A refusal that read like the credential store's would send somebody
     /// looking for a leak; this one is about a policy that could not be loaded, and a host that
     /// started anyway would either run nothing or — if anybody ever "helpfully" defaulted it — run
-    /// everything. Rendered rather than typed, matching its siblings, because `GrantStoreError` is
-    /// `#[cfg(unix)]` too.
+    /// everything. Rendered rather than typed, matching its siblings.
     GrantStore {
         /// The store's own refusal.
         reason: String,
@@ -192,6 +241,12 @@ pub enum StartupRefusal {
     /// A configured workflow directory could not be bound, or its pure tool pack was invalid.
     WorkflowStore {
         /// The store or registry refusal.
+        reason: String,
+    },
+
+    /// A configured installed-App store or its durable Flux event root could not be bound.
+    AppStore {
+        /// The redaction-safe store or runtime refusal.
         reason: String,
     },
 
@@ -235,7 +290,14 @@ impl From<DevIdentityRefusal> for StartupRefusal {
 impl fmt::Display for StartupRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Supervised { reason } => write!(f, "refusing supervised startup: {reason}"),
+            Self::AuthPosture { reason } => write!(f, "{reason}"),
             Self::DevelopmentMode { reason } => write!(f, "{reason}"),
+            Self::Tenancy { reason } => write!(f, "{reason}"),
+            Self::LocalUsers { reason } => write!(f, "{reason}"),
+            Self::LocalState { reason } => write!(f, "{reason}"),
+            Self::TransactionCoordinator { reason } => write!(f, "{reason}"),
+            Self::HostedOrigin { reason } => write!(f, "{reason}"),
             // Names both things that would have worked, because the operator cannot tell from the
             // outside which half of the pair they meant to change.
             Self::ReachableBindWithoutIdentity { bind } => write!(
@@ -272,8 +334,10 @@ impl fmt::Display for StartupRefusal {
             Self::CredentialStore { reason }
             | Self::ServiceAccountStore { reason }
             | Self::SettingsStore { reason }
+            | Self::ConnectionRegistry { reason }
             | Self::GrantStore { reason }
             | Self::WorkflowStore { reason }
+            | Self::AppStore { reason }
             | Self::ChannelStore { reason }
             | Self::AuditStore { reason } => {
                 write!(f, "{reason}")
@@ -295,15 +359,24 @@ impl fmt::Display for StartupRefusal {
 impl std::error::Error for StartupRefusal {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::ReachableBindWithoutIdentity { .. }
+            Self::Supervised { .. }
+            | Self::AuthPosture { .. }
+            | Self::ReachableBindWithoutIdentity { .. }
             | Self::ReachableBindWithDevelopmentIdentity { .. }
             | Self::ReachableBindWithoutAudit { .. }
             | Self::DevelopmentMode { .. }
+            | Self::Tenancy { .. }
+            | Self::LocalUsers { .. }
+            | Self::LocalState { .. }
+            | Self::TransactionCoordinator { .. }
+            | Self::HostedOrigin { .. }
             | Self::CredentialStore { .. }
             | Self::ServiceAccountStore { .. }
             | Self::SettingsStore { .. }
+            | Self::ConnectionRegistry { .. }
             | Self::GrantStore { .. }
             | Self::WorkflowStore { .. }
+            | Self::AppStore { .. }
             | Self::ChannelStore { .. }
             | Self::AuditStore { .. }
             | Self::ChannelRuntime { .. }
@@ -377,6 +450,17 @@ mod tests {
     #[test]
     fn a_reachable_bind_is_admitted_once_an_identity_is_bound() {
         assert!(admit_bind(addr("0.0.0.0:8080"), IdentityBinding::Bound).is_ok());
+    }
+
+    /// A verifier-backed local file is neither federation nor a development roster. It is still a
+    /// real secret-backed binding, so it independently makes a reachable listener admissible.
+    #[test]
+    fn verifier_backed_local_users_admit_a_reachable_bind_as_their_own_state() {
+        assert!(admit_bind(addr("0.0.0.0:8080"), IdentityBinding::LocalUsers).is_ok());
+        assert!(matches!(
+            admit_bind(addr("0.0.0.0:8080"), IdentityBinding::Development),
+            Err(StartupRefusal::ReachableBindWithDevelopmentIdentity { .. })
+        ));
     }
 
     /// The hole X-03 must not open: arming a development identity resolves principals, so it would

@@ -12,7 +12,7 @@
 @import './shell.css';
 /* The onboarding page's, kept apart for the same reason. See `onboarding.css`. */
 @import './onboarding.css';
-/* The mint screen's, kept apart for the same reason. See `agents.css`. */
+/* The Service Account screen's, kept apart for the same reason. See `agents.css`. */
 @import './agents.css';
 /* The grants screen's, kept apart for the same reason. See `grants.css`. */
 @import './grants.css';

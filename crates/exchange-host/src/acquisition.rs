@@ -6,10 +6,10 @@
 //! credential by presenting the resource owner's own password does have to be described, because
 //! the presenting is a weakness a deployment must be able to refuse.
 //!
-//! This module is the vocabulary for that refusal, and — for now — nothing else. [`AuthHazard`] is
-//! the word the filter is written against; the filter itself, the opt-in that arms it and the
-//! acquisition that triggers it are X-74 and X-75. `docs/designs/credential-acquisition.md` is the
-//! argument, and §1 is this file.
+//! This module carries both the refusal vocabulary and the transport-free acquisition port.
+//! [`AuthHazard`] is the word the filter is written against; [`CredentialAcquirer`] is the
+//! secret-in/secret-out boundary a composition binds without giving this crate an HTTP client.
+//! `docs/designs/credential-acquisition.md` is the argument.
 //!
 //! # Why a deployment refuses a property and not a connector
 //!
@@ -19,7 +19,185 @@
 //! month by somebody who never read their policy. The alternative is a list of connector names,
 //! which is correct on the day it is written and silently wrong afterwards.
 
+use std::collections::BTreeSet;
+
+use connector_secrets::Secret;
 use serde::{Deserialize, Serialize};
+
+use crate::async_trait;
+
+/// The resource-owner credentials presented once to an acquisition performer.
+///
+/// Both values are already secret-shaped at the port boundary. This type deliberately has no
+/// serialisation implementation and its `Debug` output names only the fields, so a composition
+/// cannot accidentally turn the password back into ordinary diagnostic data.
+pub struct PasswordRedemption<'a> {
+    username: &'a Secret,
+    password: &'a Secret,
+}
+
+impl<'a> PasswordRedemption<'a> {
+    /// Construct a one-use password redemption.
+    pub const fn new(username: &'a Secret, password: &'a Secret) -> Self {
+        Self { username, password }
+    }
+
+    /// The resource-owner identifier, exposed only to the bound performer.
+    pub fn username(&self) -> &str {
+        self.username.expose_secret()
+    }
+
+    /// The resource-owner password, exposed only to the bound performer.
+    pub fn password(&self) -> &str {
+        self.password.expose_secret()
+    }
+}
+
+impl std::fmt::Debug for PasswordRedemption<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PasswordRedemption")
+            .field("username", &"[REDACTED]")
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// A refresh token presented to the same acquisition performer that minted the access token.
+pub struct RefreshRedemption<'a> {
+    refresh_token: &'a Secret,
+}
+
+impl<'a> RefreshRedemption<'a> {
+    /// Construct a one-use refresh redemption.
+    pub const fn new(refresh_token: &'a Secret) -> Self {
+        Self { refresh_token }
+    }
+
+    /// The refresh token, exposed only to the bound performer.
+    pub fn refresh_token(&self) -> &str {
+        self.refresh_token.expose_secret()
+    }
+}
+
+impl std::fmt::Debug for RefreshRedemption<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshRedemption")
+            .field("refresh_token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// The secret material returned by a credential acquisition.
+///
+/// `expires_at` is an absolute Unix timestamp reported or derived by the concrete performer. It is
+/// intentionally not a requested lifetime: this port gives the connector no generic TTL knob.
+pub struct AcquiredCredential {
+    access_token: Secret,
+    refresh_token: Option<Secret>,
+    expires_at: Option<i64>,
+}
+
+impl AcquiredCredential {
+    /// Construct the result returned by a concrete performer.
+    pub const fn new(
+        access_token: Secret,
+        refresh_token: Option<Secret>,
+        expires_at: Option<i64>,
+    ) -> Self {
+        Self {
+            access_token,
+            refresh_token,
+            expires_at,
+        }
+    }
+
+    /// Consume the result into the values a composition persists atomically.
+    pub fn into_parts(self) -> (Secret, Option<Secret>, Option<i64>) {
+        (self.access_token, self.refresh_token, self.expires_at)
+    }
+}
+
+impl std::fmt::Debug for AcquiredCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcquiredCredential")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// A server-owned performer that exchanges one secret for another.
+///
+/// The port has no endpoint, HTTP method, account identifier or requested lifetime. Those are
+/// transport and endpoint quirks owned by the composing server, never connector-independent host
+/// vocabulary.
+#[async_trait]
+pub trait CredentialAcquirer: Send + Sync {
+    /// A connector identity structurally fixed by this performer, when it has one.
+    ///
+    /// Generic product bindings may return `None`. A vendor-specific performer returns `Some` so
+    /// the composing registry can refuse attaching its quirks to a different connector.
+    fn binding_connector(&self) -> Option<&str> {
+        None
+    }
+
+    /// Redeem a resource-owner password once.
+    async fn redeem_password(
+        &self,
+        redemption: PasswordRedemption<'_>,
+    ) -> Result<AcquiredCredential, AcquisitionRefusal>;
+
+    /// Rotate an acquired credential through its refresh token.
+    async fn redeem_refresh(
+        &self,
+        redemption: RefreshRedemption<'_>,
+    ) -> Result<AcquiredCredential, AcquisitionRefusal>;
+}
+
+/// A safe, value-free reason why an admitted acquisition did not produce a credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum AcquisitionRefusal {
+    /// The vendor requires a multi-step authentication flow this acquisition cannot represent.
+    #[error("the credential endpoint requires multi-factor authentication")]
+    MfaRequired,
+    /// The vendor rejected the presented credential.
+    #[error("the credential endpoint rejected the presented credential")]
+    CredentialsRejected,
+    /// The vendor refused the request for a reason that is not safe to echo.
+    #[error("the credential endpoint rejected the acquisition")]
+    VendorRejected,
+    /// The endpoint could not be reached.
+    #[error("the credential endpoint is unreachable")]
+    Unreachable,
+    /// A successful response omitted or malformed required credential material.
+    #[error("the credential endpoint returned an invalid credential response")]
+    InvalidResponse,
+    /// A refresh endpoint answered success but did not return enough state to commit its rotation.
+    ///
+    /// The old refresh token may already be invalid at the vendor. This is deliberately distinct
+    /// from an ordinary invalid response so a composition cannot advise retrying the spent token.
+    #[error("the refresh endpoint may have rotated the credential, but returned unusable state")]
+    RefreshOutcomeUnusable,
+}
+
+impl AcquisitionRefusal {
+    /// The stable machine-readable reason returned by an HTTP composition.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::MfaRequired => "mfa_required",
+            Self::CredentialsRejected => "credentials_rejected",
+            Self::VendorRejected => "vendor_rejected",
+            Self::Unreachable => "credential_endpoint_unreachable",
+            Self::InvalidResponse => "invalid_credential_response",
+            Self::RefreshOutcomeUnusable => "refresh_outcome_unusable",
+        }
+    }
+}
 
 /// A named weakness in **how a credential is obtained**, declared by the connector.
 ///
@@ -94,4 +272,107 @@ pub enum AuthHazard {
     /// deployment to make knowingly, and the reason this type exists rather than a refusal being
     /// hard-coded.
     ResourceOwnerSecretShared,
+}
+
+impl AuthHazard {
+    /// The stable configuration spelling of this hazard.
+    ///
+    /// Matched exhaustively here rather than obtained by serialising the enum. Deployment policy
+    /// is configuration an operator audits, and changing a serde helper must not silently change
+    /// the string that grants a weaker authentication path.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ResourceOwnerSecretShared => "resource_owner_secret_shared",
+        }
+    }
+}
+
+impl std::fmt::Display for AuthHazard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A deployment's startup-selected policy over declared authentication hazards.
+///
+/// The default refuses every hazard. A composition may explicitly construct a posture from typed
+/// hazards it read at startup; there is deliberately no method that takes a request, header, body,
+/// connector id or other caller-controlled policy input. The connector id reaches only
+/// [`admit`](Self::admit), where it makes a refusal actionable and never changes the decision.
+///
+/// Admission is evaluated when an acquisition is attempted, not when a catalogue is loaded. That
+/// is what keeps the rule true after a running deployment learns a connector declaration it did
+/// not have at boot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthPosture {
+    allowed: BTreeSet<AuthHazard>,
+}
+
+impl AuthPosture {
+    /// The production default: no declared authentication hazard is allowed.
+    pub fn fail_closed() -> Self {
+        Self::default()
+    }
+
+    /// Construct the policy an operator explicitly selected at startup.
+    ///
+    /// This takes only closed, typed [`AuthHazard`] values. Parsing deployment configuration and
+    /// refusing unknown spellings belongs to the composition, before it constructs this value.
+    pub fn allowing(hazards: impl IntoIterator<Item = AuthHazard>) -> Self {
+        Self {
+            allowed: hazards.into_iter().collect(),
+        }
+    }
+
+    /// Decide one connector acquisition from the hazard the connector declares.
+    ///
+    /// `connector` is carried only into the refusal. A deployment opts in to a property once,
+    /// never to a list of connector names, so a newly catalogued connector inherits the same rule.
+    ///
+    /// # Errors
+    ///
+    /// [`AuthPostureRefusal::HazardNotAllowed`] when this deployment did not explicitly allow the
+    /// declared hazard.
+    pub fn admit(&self, connector: &str, hazard: AuthHazard) -> Result<(), AuthPostureRefusal> {
+        if self.allowed.contains(&hazard) {
+            return Ok(());
+        }
+
+        Err(AuthPostureRefusal::HazardNotAllowed {
+            connector: connector.to_owned(),
+            hazard,
+        })
+    }
+}
+
+/// Why a credential acquisition was refused by deployment policy.
+///
+/// Separate from a vendor rejection: this host made the decision before any request left the
+/// process, so telling an operator to re-enter a correct password would be the wrong remedy.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuthPostureRefusal {
+    /// The connector declared a hazard this deployment did not opt into.
+    #[error(
+        "connector `{connector}` declares authentication hazard `{hazard}`, and this deployment did \
+         not allow it; no acquisition request was sent"
+    )]
+    HazardNotAllowed {
+        /// The connector whose acquisition was attempted.
+        connector: String,
+        /// The declared hazard that was not allowed.
+        hazard: AuthHazard,
+    },
+}
+
+impl AuthPostureRefusal {
+    /// The HTTP status this refusal carries when a composition exposes acquisition over HTTP.
+    ///
+    /// Kept on the refusal so two acquisition surfaces cannot answer the same policy decision
+    /// differently. `403` says the deployment forbade a declared path. A vendor rejecting
+    /// otherwise admitted credentials is a later, separate refusal and must not use this status.
+    pub const fn status(&self) -> u16 {
+        match self {
+            Self::HazardNotAllowed { .. } => 403,
+        }
+    }
 }

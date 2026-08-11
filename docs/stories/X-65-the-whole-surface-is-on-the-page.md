@@ -1,7 +1,7 @@
 ---
 id: X-65
 title: "The whole intended surface is on the page, including what is not built"
-status: ready
+status: done
 priority: 2
 epic: public-docs-site
 design: docs/designs/public-docs-site.md
@@ -41,14 +41,14 @@ All of this is `docs/vision.md`'s and none of it is new:
   interesting rather than routine.
 
 ## Acceptance
-- [ ] A page for each of: connections and credentials, `invoke`, `subscribe` and channels, leases,
+- [x] A page for each of: connections and credentials, `invoke`, `subscribe` and channels, leases,
       grants, agents, workflows-and-where-they-live.
-- [ ] Every one carries a derived status ([[X-64]]) — **no page asserts its own liveness**.
-- [ ] The three lifetimes appear **once**, as the table, linked from anything that names one. Not
+- [x] Every one carries a derived status ([[X-64]]) — **no page asserts its own liveness**.
+- [x] The three lifetimes appear **once**, as the table, linked from anything that names one. Not
       restated per page, because restating is how two copies disagree.
-- [ ] Planned pages name the story that would build them, so a reader can follow the actual work.
-- [ ] **Failing-first test** — no page describes a trigger or schedule as something this service runs.
-- [ ] Nothing deployment-specific; nothing beyond what `GET /api/onboarding` already discloses
+- [x] Planned pages name the story that would build them, so a reader can follow the actual work.
+- [x] **Failing-first test** — no page describes a trigger or schedule as something this service runs.
+- [x] Nothing deployment-specific; nothing beyond what `GET /api/onboarding` already discloses
       publicly. X-42's reviewed field list is the ceiling.
 
 ## Notes
@@ -56,3 +56,11 @@ All of this is `docs/vision.md`'s and none of it is new:
   published, at a public URL, to readers with no way to check.
 - Prefer fewer, truer pages. Four that stay right beat twenty that rot, and the ordering of this epic
   says so.
+
+## Progress
+- 2026-08-03: Started the complete public surface from the route-held onboarding descriptor. The
+  planned Agent and Lease entries will remain derived, withheld capabilities and name X-108 and
+  X-118 respectively.
+- 2026-08-03: Completed the seven-page surface. The failing-first site test now holds the full page
+  set, the single lifetime table and trigger/schedule ownership; the existing total-site scanners
+  hold deployment facts and credential-shaped content off every rendered page.

@@ -34,3 +34,6 @@ its honest implementation gaps.
 ## Notes
 
 - Documentation-only; no failing-first behavioral test applies.
+- X-124 supersedes this story's earlier optional-hosted-placement assumption. The reconciled
+  roadmap now makes Exchange the sole executor for official integrations and splits the first HTTP
+  milestone from rich-runtime lifecycle work.

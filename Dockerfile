@@ -9,9 +9,9 @@
 # browser never attaches one cross-origin.
 
 # ─── the console ─────────────────────────────────────────────────────────────────────────────────
-# Node 22 to match `.github/workflows/pages.yml`, which pins the same major for `web/`. `npm ci`
-# rather than `npm install`, so the committed lockfile decides.
-FROM node:22-bookworm-slim AS console
+# Node 22/trixie-slim, pinned to the 2026-08-03 OCI index digest. The readable tag says what to
+# update; the digest says exactly what production builds. `npm ci` makes the lockfile authoritative.
+FROM node:22-trixie-slim@sha256:517aa41d78545cb1b8c67b13655b4c13ede1ee9df1da8aab54cd7434aefbcaf8 AS console
 WORKDIR /console
 COPY console/package.json console/package-lock.json ./
 RUN npm ci
@@ -22,8 +22,14 @@ RUN npm run build
 # 1.88 is the MSRV in `Cargo.toml`'s `rust-version`, and X-33's CI job builds against whatever that
 # says. Do not raise this to make a build pass: the number is observed, not chosen, and raising it is
 # a compatibility break for consumers of the published crate that belongs in the CHANGELOG.
-FROM rust:1.88-bookworm AS build
+# rust:1.88-alpine3.22, pinned to the 2026-08-03 OCI index digest. Building on musl makes the final
+# binary static, so production does not need to ship an operating-system userland it never invokes.
+FROM rust:1.88-alpine3.22@sha256:9dfaae478ecd298b6b5a039e1f2cc4fc040fc818a2de9aa78fa714dea036574d AS build
 WORKDIR /src
+
+# These are build inputs only. The final scratch stage receives the CA bundle, not apk or any of the
+# compilers and interpreters used to build native dependencies.
+RUN apk add --no-cache ca-certificates cmake make musl-dev perl
 
 # The manifests first, so a source-only change does not re-resolve the dependency graph. Every
 # member needs a manifest and a stub before `cargo build` will accept the workspace.
@@ -33,7 +39,7 @@ COPY crates/exchange-server/Cargo.toml crates/exchange-server/
 RUN mkdir -p crates/exchange-host/src crates/exchange-server/src \
     && echo '' > crates/exchange-host/src/lib.rs \
     && echo 'fn main() {}' > crates/exchange-server/src/main.rs \
-    && cargo build --release --bin flux-exchange \
+    && cargo build --release --locked --bin flux-exchange \
     && rm -rf crates/exchange-host/src crates/exchange-server/src
 
 COPY crates/ crates/
@@ -41,33 +47,38 @@ COPY crates/ crates/
 # to force a rebuild. Without this the image ships a binary whose `main` is empty — and it starts,
 # exits 0, and looks like a crash-looping app with no error anywhere.
 RUN touch crates/exchange-host/src/lib.rs crates/exchange-server/src/main.rs \
-    && cargo build --release --bin flux-exchange
+    && cargo build --release --locked --bin flux-exchange \
+    && mkdir -p /image-root/data /image-root/home/exchange /image-root/tmp \
+    && chown -R 10001:10001 /image-root/data /image-root/home/exchange \
+    && chmod 1777 /image-root/tmp
 
 # ─── what runs ───────────────────────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+# The runtime is intentionally scratch. A full Debian runtime carried more than a hundred known
+# vulnerabilities in packages this service never executes; waiving them would make the scan
+# ceremonial. The musl binary is static, so only its trust roots, console and writable directories
+# need to cross this boundary.
+FROM scratch AS runtime
 
-# `ca-certificates` is not optional: this host completes an OIDC token exchange over https and
-# validates the provider's chain. Without it every sign-in fails at the token endpoint, which reads
-# as "the provider refused us" — the exact confusion X-17 split apart.
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# A fixed uid, and it matters more than it looks. The credential store **refuses a file whose mode is
-# wider than it requires** rather than tightening it (X-09), and it creates its directory `0700` and
-# its file `0600` — owned by whoever ran the process. A deploy that changed uid would find a store it
-# cannot read and refuse to start, so this number is part of the deployment contract, not a detail.
-RUN useradd --system --uid 10001 --create-home --home-dir /home/exchange exchange
+# The CA bundle is not optional: this host completes OIDC and connector TLS exchanges. Without it
+# every sign-in fails at the token endpoint, which reads as "the provider refused us" — the exact
+# confusion X-17 split apart.
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 COPY --from=build /src/target/release/flux-exchange /usr/local/bin/flux-exchange
 COPY --from=console /console/dist /srv/console
 
-# The volume mount point, owned by the uid that will write into it. fly attaches the volume over this
-# path; the ownership set here is what the mounted filesystem inherits.
-RUN mkdir -p /data && chown exchange:exchange /data
+# A fixed uid matters more than a passwd entry. The credential store refuses widened modes and the
+# existing Fly volume is owned by 10001; changing the uid would make a sound store refuse startup.
+# The builder supplies empty directories with that numeric ownership without adding a shell or user
+# database to the final image.
+COPY --from=build --chown=10001:10001 /image-root/home/exchange /home/exchange
+COPY --from=build --chown=10001:10001 /image-root/data /data
+COPY --from=build --chmod=1777 /image-root/tmp /tmp
 VOLUME /data
 
-USER exchange
+USER 10001:10001
+ENV HOME=/home/exchange
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV FLUX_EXCHANGE_CONSOLE=/srv/console
 EXPOSE 8080
 

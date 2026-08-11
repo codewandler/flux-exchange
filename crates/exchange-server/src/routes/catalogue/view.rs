@@ -28,8 +28,9 @@
 //!    [`ConnectorCredentials`].
 
 use exchange_host::{operation_input_schema, InputSchemaError, OperationFacts};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 // The dependency is keyed `connector-catalog` in the workspace manifest, so Cargo links the crate
 // under *that* name and not under its own `catalog` lib name. The alias restores the vocabulary the
@@ -99,7 +100,7 @@ pub struct ChannelEventView {
 }
 
 /// One operation, with the metadata a `Selector` reads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperationView {
     /// `id`, `risk`, `idempotency` and `effects`, flattened into this object.
     ///
@@ -136,6 +137,46 @@ pub struct OperationView {
     /// an agent that cannot see an operation it lacks cannot report that it was refused — it can
     /// only report that the operation does not exist, which is false.
     pub admitted: Option<bool>,
+}
+
+/// The authenticated operation projection consumed by Flux.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveCatalogue {
+    /// Content identity of the complete effective projection.
+    ///
+    /// Content-addressed rather than incremented in memory, so an unchanged projection retains its
+    /// identity across requests and process restarts. The digest covers every declaration and
+    /// fixed connection selector below, but no tenant, credential, endpoint or runtime value.
+    pub generation: String,
+    /// Exactly the model-facing operation/connection bindings this principal can use.
+    pub operations: Vec<EffectiveOperationView>,
+}
+
+impl EffectiveCatalogue {
+    /// Seal one deterministic projection with its SHA-256 content identity.
+    pub fn new(operations: Vec<EffectiveOperationView>) -> Result<Self, serde_json::Error> {
+        let bytes = serde_json::to_vec(&operations)?;
+        let generation = format!("sha256:{}", hex(&Sha256::digest(bytes)));
+        Ok(Self {
+            generation,
+            operations,
+        })
+    }
+}
+
+/// One operation bound to one already-resolved tenant-local connection selector.
+///
+/// Multiple labelled connections produce multiple rows. A Flux tool binds the row's selector when
+/// it is registered; the model supplies only the operation's declared arguments and can never put
+/// a label, UUID, endpoint, authority or credential address into them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveOperationView {
+    /// The same declaration the anonymous catalogue publishes, now positively admitted.
+    #[serde(flatten)]
+    pub operation: OperationView,
+    /// The existing `invoke` query label, fixed by this projection. `null` means the compatible
+    /// sole legacy connection and causes the client to omit `?connection=` entirely.
+    pub connection: Option<String>,
 }
 
 /// The body of `GET /api/catalogue/connectors/{id}/credentials`.
@@ -358,6 +399,30 @@ fn view(operation: &catalog::Operation) -> Result<OperationView, InputSchemaErro
         // No identity resolves a principal in this binary yet, so the question was never asked.
         admitted: None,
     })
+}
+
+/// Project one admitted operation at one connection without adding another declaration mapping.
+pub fn effective_operation(
+    operation: &catalog::Operation,
+    connection: Option<String>,
+) -> Result<EffectiveOperationView, InputSchemaError> {
+    let mut operation = view(operation)?;
+    operation.admitted = Some(true);
+    Ok(EffectiveOperationView {
+        operation,
+        connection,
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
 }
 
 #[cfg(test)]

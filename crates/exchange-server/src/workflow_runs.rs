@@ -1,9 +1,7 @@
 //! Durable, tenant-scoped workflow activity with value-free structural events.
 
 use std::collections::HashMap;
-use std::fs;
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -62,25 +60,13 @@ impl std::fmt::Debug for WorkflowRunStore {
 impl WorkflowRunStore {
     /// Open/create the SQLite store and its schema.
     pub fn bind(path: &Path) -> Result<Self, String> {
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .open(path)
+        exchange_host::ensure_private_state_file(path).map_err(|error| error.to_string())?;
+        exchange_host::ensure_private_state_file(sqlite_journal_path(path))
             .map_err(|error| error.to_string())?;
-        if file.metadata().map_err(|error| error.to_string())?.mode() & 0o077 != 0 {
-            return Err(format!(
-                "workflow run store `{}` permissions allow group or other access",
-                path.display()
-            ));
-        }
-        drop(file);
         let connection = Connection::open(path).map_err(|error| error.to_string())?;
         connection
             .execute_batch(
-                "PRAGMA journal_mode=WAL;
+                "PRAGMA journal_mode=PERSIST;
                  PRAGMA foreign_keys=ON;
                  CREATE TABLE IF NOT EXISTS workflow_runs (
                    id TEXT PRIMARY KEY,
@@ -303,6 +289,14 @@ impl WorkflowRunStore {
     }
 }
 
+fn sqlite_journal_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!("{file_name}-journal"))
+}
+
 pub(crate) struct RunObserver {
     store: Arc<WorkflowRunStore>,
     run_id: String,
@@ -337,18 +331,26 @@ fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
     use super::*;
 
     fn path() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
+        let root = std::env::temp_dir().join(format!(
             "flux-exchange-workflow-runs-{}-{}.sqlite",
             std::process::id(),
             NEXT_RUN.fetch_add(1, Ordering::Relaxed)
-        ))
+        ));
+        exchange_host::ensure_private_state_directory(&root).expect("private scratch root");
+        root.join("runs.sqlite")
+    }
+
+    fn cleanup(path: &Path) {
+        if let Some(root) = path.parent() {
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -360,8 +362,9 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let refusal = WorkflowRunStore::bind(&path).unwrap_err();
 
-        assert!(refusal.contains("group or other access"));
-        let _ = std::fs::remove_file(path);
+        assert!(refusal.contains("wider than 0600"), "{refusal}");
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o640);
+        cleanup(&path);
     }
 
     #[test]
@@ -380,6 +383,6 @@ mod tests {
         observer.event(&event);
 
         assert!(observer.failure().is_some());
-        let _ = std::fs::remove_file(path);
+        cleanup(&path);
     }
 }

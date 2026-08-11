@@ -7,26 +7,24 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put, MethodRouter};
 use axum::{Extension, Json};
-use exchange_host::{ChannelId, ChannelRecord, Principal, PrincipalKind};
+use exchange_host::{ChannelId, ChannelRecord, Principal};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{Access, Module, Route};
 use crate::state::AppState;
 
-pub(super) const OPERATORS: &[PrincipalKind] = &[PrincipalKind::User];
-
 pub(super) const MODULE: Module = Module {
     name: "channels",
     routes: &[
         Route {
             path: "/api/channels",
-            access: Access::PrincipalOfKind(OPERATORS),
+            access: Access::Operator,
             method_router: collection,
         },
         Route {
             path: "/api/channels/{id}",
-            access: Access::PrincipalOfKind(OPERATORS),
+            access: Access::Operator,
             method_router: item,
         },
     ],
@@ -44,6 +42,7 @@ fn item() -> MethodRouter<AppState> {
 #[serde(deny_unknown_fields)]
 struct CreateChannel {
     connector: String,
+    connection: Option<String>,
     binding: String,
     events: BTreeSet<String>,
 }
@@ -51,6 +50,7 @@ struct CreateChannel {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UpdateChannel {
+    connection: Option<String>,
     events: BTreeSet<String>,
 }
 
@@ -64,15 +64,25 @@ struct ChannelView {
     status: crate::channel::ChannelStatus,
 }
 
-fn view(supervisor: &crate::channel::ChannelSupervisor, record: ChannelRecord) -> ChannelView {
-    ChannelView {
+fn view(
+    state: &AppState,
+    supervisor: &crate::channel::ChannelSupervisor,
+    record: ChannelRecord,
+) -> Result<ChannelView, Box<Response>> {
+    let connection = super::connections::channel_label(
+        state,
+        record.tenant(),
+        record.connector(),
+        record.connection(),
+    )?;
+    Ok(ChannelView {
         id: record.id().to_string(),
         connector: record.connector().to_owned(),
-        connection: record.connection().to_owned(),
+        connection,
         binding: record.binding().to_owned(),
         events: record.events().clone(),
         status: supervisor.status(record.id()),
-    }
+    })
 }
 
 async fn list(
@@ -82,15 +92,16 @@ async fn list(
     let Some(supervisor) = state.channels() else {
         return unavailable();
     };
-    Json(
-        supervisor
-            .store()
-            .held(principal.tenant())
-            .into_iter()
-            .map(|record| view(supervisor, record))
-            .collect::<Vec<_>>(),
-    )
-    .into_response()
+    let channels = supervisor
+        .store()
+        .held(principal.tenant())
+        .into_iter()
+        .map(|record| view(&state, supervisor, record))
+        .collect::<Result<Vec<_>, _>>();
+    match channels {
+        Ok(channels) => Json(channels).into_response(),
+        Err(response) => *response,
+    }
 }
 
 async fn create(
@@ -107,13 +118,36 @@ async fn create(
             "binding or selected events are not declared",
         );
     }
+    let Some(_claim) = state
+        .connections()
+        .claim(principal.tenant(), &proposed.connector)
+    else {
+        return refuse(
+            StatusCode::CONFLICT,
+            "a connection change is already in flight",
+        );
+    };
+    let Some(provider) =
+        connector_catalog::provider(connector_catalog::ProviderKey::id(&proposed.connector))
+    else {
+        return refuse(StatusCode::BAD_REQUEST, "connector is not declared");
+    };
+    let connection = match super::connections::channel_instance(
+        &state,
+        &principal,
+        provider,
+        proposed.connection.as_deref(),
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
     let record = match ChannelRecord::new(
         supervisor.mint_id(),
         principal.tenant().clone(),
         proposed.connector.clone(),
-        // The current connection model permits one connection per connector; callers cannot name
-        // a separate connection authority in this body.
-        proposed.connector,
+        connection,
         proposed.binding,
         proposed.events,
     ) {
@@ -124,7 +158,11 @@ async fn create(
         return unavailable();
     }
     supervisor.start(record.clone());
-    (StatusCode::CREATED, Json(view(supervisor, record))).into_response()
+    let projected = match view(&state, supervisor, record) {
+        Ok(projected) => projected,
+        Err(response) => return *response,
+    };
+    (StatusCode::CREATED, Json(projected)).into_response()
 }
 
 async fn update(
@@ -142,13 +180,38 @@ async fn update(
     let Some(record) = supervisor.store().get(principal.tenant(), &id) else {
         return not_found();
     };
+    let Some(_claim) = state
+        .connections()
+        .claim(principal.tenant(), record.connector())
+    else {
+        return refuse(
+            StatusCode::CONFLICT,
+            "a connection change is already in flight",
+        );
+    };
+    let Some(provider) =
+        connector_catalog::provider(connector_catalog::ProviderKey::id(record.connector()))
+    else {
+        return refuse(StatusCode::BAD_REQUEST, "connector is not declared");
+    };
+    let connection = match super::connections::channel_instance(
+        &state,
+        &principal,
+        provider,
+        proposed.connection.as_deref(),
+    )
+    .await
+    {
+        Ok(connection) => connection,
+        Err(response) => return response,
+    };
     if !supervisor.validates(record.connector(), record.binding(), &proposed.events) {
         return refuse(
             StatusCode::BAD_REQUEST,
             "selected events are not declared by this binding",
         );
     }
-    let Ok(record) = record.with_events(proposed.events) else {
+    let Ok(record) = record.with_connection_and_events(connection, proposed.events) else {
         return refuse(
             StatusCode::BAD_REQUEST,
             "channel event selection is invalid",
@@ -158,7 +221,11 @@ async fn update(
         return unavailable();
     }
     supervisor.start(record.clone());
-    Json(view(supervisor, record)).into_response()
+    let projected = match view(&state, supervisor, record) {
+        Ok(projected) => projected,
+        Err(response) => return *response,
+    };
+    Json(projected).into_response()
 }
 
 async fn remove(
@@ -202,7 +269,11 @@ fn refuse(status: StatusCode, reason: &str) -> Response {
 mod tests {
     use std::sync::Arc;
 
-    use exchange_host::{async_trait, Channels, MemoryChannels, PrincipalKind, Tenant};
+    use exchange_host::{
+        async_trait, ChannelRecord, Channels, ConnectionLabel, ConnectionRegistry, CredentialRef,
+        CredentialScope, MemoryChannels, MemoryConnectionRegistry, PrincipalKind, Secret,
+        SecretStore, StoreError, Tenant,
+    };
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -233,6 +304,29 @@ mod tests {
 
     struct NeverRuns;
 
+    struct Inventory {
+        references: Vec<CredentialRef>,
+    }
+
+    #[async_trait]
+    impl SecretStore for Inventory {
+        async fn get(&self, _: &CredentialRef) -> Result<Secret, StoreError> {
+            unreachable!("channel management enumerates addresses but reads no value")
+        }
+
+        async fn put(&self, _: &CredentialRef, _: &Secret) -> Result<(), StoreError> {
+            unreachable!("channel management writes no credential")
+        }
+
+        async fn delete(&self, _: &CredentialRef) -> Result<(), StoreError> {
+            unreachable!("channel management deletes no credential")
+        }
+
+        async fn references(&self, _: &CredentialScope) -> Result<Vec<CredentialRef>, StoreError> {
+            Ok(self.references.clone())
+        }
+    }
+
     #[async_trait]
     impl ChannelRunner for NeverRuns {
         async fn run(
@@ -246,8 +340,23 @@ mod tests {
         }
     }
 
-    fn fixture() -> (AppState, Arc<MemoryChannels>) {
+    fn fixture_with(
+        references: Vec<CredentialRef>,
+        rows: &[(&str, &str, &str)],
+    ) -> (AppState, Arc<MemoryChannels>) {
         let store = Arc::new(MemoryChannels::default());
+        let registry = Arc::new(MemoryConnectionRegistry::default());
+        for (tenant, label, instance) in rows {
+            ConnectionRegistry::assign(
+                registry.as_ref(),
+                &Tenant::new(*tenant).expect("tenant"),
+                "asterisk",
+                &ConnectionLabel::new(*label).expect("label"),
+                &exchange_host::InstanceId::parse(instance).expect("instance"),
+            )
+            .expect("registry row");
+        }
+        let credentials = Arc::new(Inventory { references });
         let supervisor = ChannelSupervisor::new(
             store.clone(),
             Arc::new(Declarations),
@@ -255,8 +364,21 @@ mod tests {
             Arc::new(NeverRuns),
         );
         (
-            AppState::without_identity().with_channels(supervisor),
+            AppState::without_identity()
+                .with_credentials(credentials)
+                .with_connection_registry(registry)
+                .with_channels(supervisor),
             store,
+        )
+    }
+
+    fn fixture() -> (AppState, Arc<MemoryChannels>) {
+        fixture_with(
+            vec![
+                CredentialRef::new("alpha", "org.asterisk.ari", "default", "password")
+                    .expect("reference"),
+            ],
+            &[("alpha", "primary", "11111111-1111-4111-8111-111111111111")],
         )
     }
 
@@ -277,6 +399,7 @@ mod tests {
             Extension(owner.clone()),
             Json(CreateChannel {
                 connector: "asterisk".into(),
+                connection: None,
                 binding: "ari-events".into(),
                 events: ["channel-created".to_owned()].into_iter().collect(),
             }),
@@ -286,13 +409,17 @@ mod tests {
         let held = store.held(owner.tenant());
         assert_eq!(held.len(), 1);
         assert_eq!(held[0].tenant(), owner.tenant());
-        assert_eq!(held[0].connection(), "asterisk");
+        assert_eq!(
+            held[0].connection().as_str(),
+            "11111111-1111-4111-8111-111111111111"
+        );
 
         let refused = create(
             State(state),
             Extension(owner.clone()),
             Json(CreateChannel {
                 connector: "asterisk".into(),
+                connection: None,
                 binding: "ari-events".into(),
                 events: ["vendor-invented".to_owned()].into_iter().collect(),
             }),
@@ -313,7 +440,8 @@ mod tests {
                     id.clone(),
                     owner.tenant().clone(),
                     "asterisk",
-                    "asterisk",
+                    exchange_host::InstanceId::parse("11111111-1111-4111-8111-111111111111")
+                        .expect("instance"),
                     "ari-events",
                     ["channel-created".to_owned()].into_iter().collect(),
                 )
@@ -321,6 +449,7 @@ mod tests {
             )
             .expect("store");
         let proposed = || UpdateChannel {
+            connection: None,
             events: ["channel-destroyed".to_owned()].into_iter().collect(),
         };
 
@@ -346,13 +475,154 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tenant_a_cannot_bind_a_channel_to_tenant_bs_label_or_uuid() {
+        let first = "11111111-1111-4111-8111-111111111111";
+        let second = "22222222-2222-4222-8222-222222222222";
+        let (state, channels) = fixture_with(
+            vec![CredentialRef::for_instance(
+                "alpha",
+                "org.asterisk.ari",
+                first,
+                "default",
+                "password",
+            )
+            .expect("reference")],
+            &[("alpha", "primary", first), ("beta", "private", second)],
+        );
+        let proposed = |connection: &str| CreateChannel {
+            connector: "asterisk".into(),
+            connection: Some(connection.to_owned()),
+            binding: "ari-events".into(),
+            events: ["channel-created".to_owned()].into_iter().collect(),
+        };
+
+        let by_label = create(
+            State(state.clone()),
+            Extension(principal("alpha")),
+            Json(proposed("private")),
+        )
+        .await;
+        let by_uuid = create(
+            State(state),
+            Extension(principal("alpha")),
+            Json(proposed(second)),
+        )
+        .await;
+
+        assert_eq!(by_label.status(), StatusCode::NOT_FOUND);
+        assert_eq!(by_uuid.status(), StatusCode::NOT_FOUND);
+        assert!(channels
+            .held(&Tenant::new("alpha").expect("tenant"))
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn omitting_a_connection_refuses_when_two_instances_are_held() {
+        let first = "11111111-1111-4111-8111-111111111111";
+        let second = "22222222-2222-4222-8222-222222222222";
+        let reference = |instance: &str| {
+            CredentialRef::for_instance(
+                "alpha",
+                "org.asterisk.ari",
+                instance,
+                "default",
+                "password",
+            )
+            .expect("reference")
+        };
+        let (state, channels) = fixture_with(
+            vec![reference(first), reference(second)],
+            &[("alpha", "primary", first), ("alpha", "secondary", second)],
+        );
+        let response = create(
+            State(state),
+            Extension(principal("alpha")),
+            Json(CreateChannel {
+                connector: "asterisk".into(),
+                connection: None,
+                binding: "ari-events".into(),
+                events: ["channel-created".to_owned()].into_iter().collect(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(channels
+            .held(&Tenant::new("alpha").expect("tenant"))
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_rebinds_by_a_label_and_persists_only_its_host_minted_uuid() {
+        let first = "11111111-1111-4111-8111-111111111111";
+        let second = "22222222-2222-4222-8222-222222222222";
+        let reference = |instance: &str| {
+            CredentialRef::for_instance(
+                "alpha",
+                "org.asterisk.ari",
+                instance,
+                "default",
+                "password",
+            )
+            .expect("reference")
+        };
+        let (state, channels) = fixture_with(
+            vec![reference(first), reference(second)],
+            &[("alpha", "primary", first), ("alpha", "secondary", second)],
+        );
+        let owner = principal("alpha");
+        let response = create(
+            State(state.clone()),
+            Extension(owner.clone()),
+            Json(CreateChannel {
+                connector: "asterisk".into(),
+                connection: Some("primary".into()),
+                binding: "ari-events".into(),
+                events: ["channel-created".to_owned()].into_iter().collect(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let record = channels
+            .held(owner.tenant())
+            .into_iter()
+            .next()
+            .expect("created channel");
+
+        let response = update(
+            State(state),
+            Extension(owner.clone()),
+            Path(record.id().to_string()),
+            Json(UpdateChannel {
+                connection: Some("secondary".into()),
+                events: ["channel-destroyed".to_owned()].into_iter().collect(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let rebound = channels
+            .get(owner.tenant(), record.id())
+            .expect("rebound channel");
+        assert_eq!(rebound.connection().as_str(), second);
+        assert_eq!(
+            rebound.events(),
+            &["channel-destroyed".to_owned()].into_iter().collect()
+        );
+    }
+
     #[test]
     fn management_bodies_cannot_name_tenant_connection_endpoint_credential_or_placement() {
         for field in [
             "tenant",
-            "connection",
+            "instance",
+            "connection_uuid",
+            "authority",
+            "host",
             "endpoint",
             "credential",
+            "credential_address",
             "placement",
         ] {
             let mut document = json!({

@@ -40,7 +40,7 @@ not much of a port.
 **Decision: one environment variable holds a roster; unset binds nothing; armed forces loopback.**
 
 ```
-FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,agent:triage-bot@globex
+FLUX_EXCHANGE_DEV_IDENTITY=user:alice@acme,service_account:triage-bot@globex
 ```
 
 Three properties, in the order they matter:

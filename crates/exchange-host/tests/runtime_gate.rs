@@ -69,7 +69,7 @@ use std::path::{Path, PathBuf};
 mod rules {
     /// The function whose body carries the ordering. Matched on its signature so a rename is a
     /// loud failure here rather than a silent pass.
-    pub const INVOKE: &str = "pub async fn invoke(";
+    pub const INVOKE: &str = "async fn invoke_selected(";
 
     /// **Where the gate appears.** Not *that* it is called — `Admitted`'s private field holds that,
     /// and holds it at compile time. This is the anchor the two orderings below are measured from,
@@ -90,7 +90,7 @@ mod rules {
 // The rule, against the real source
 // ---------------------------------------------------------------------------------------------
 
-/// **The gate appears ahead of the credential port and ahead of dispatch, in `invoke`'s text.**
+/// **The gate appears ahead of the credential port and dispatch in the shared execution path.**
 #[test]
 fn the_runtime_gate_is_ordered_ahead_of_the_credential_and_the_dispatch() {
     let source = fs::read_to_string(seam_file())
@@ -121,7 +121,7 @@ fn the_extractor_returns_one_function_and_not_the_file() {
     );
     assert!(
         body.contains("principal.tenant()"),
-        "the extracted body is not `invoke`'s: {body}",
+        "the extracted body is not `invoke_selected`'s: {body}",
     );
     assert!(
         !body.contains("pub fn admit_runtime"),

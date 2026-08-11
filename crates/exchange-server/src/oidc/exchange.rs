@@ -82,9 +82,9 @@ pub struct SignedClaims {
     pub nonce: Option<String>,
     /// The `exp` claim, as seconds since the Unix epoch.
     pub expires_at: i64,
-    /// The `email` claim, if the provider released one. Never used to identify the caller — see
-    /// [`super::Oidc::admit`].
-    pub email: Option<String>,
+    /// Google's signed `hd` claim, if present. It crosses this seam because admission may require
+    /// an exact configured organization; it is never derived from email.
+    pub hosted_domain: Option<String>,
 }
 
 /// Why an authorization code could not be redeemed.

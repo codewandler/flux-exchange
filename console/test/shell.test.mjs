@@ -48,8 +48,12 @@ const consoleRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const SERVICE_NAME = 'flux-exchange'
 
 /** Render the shell in one session state, as a browser would see it. */
-const shell = (session, active = null) =>
-  renderToString(createSSRApp(ConsoleShell, { session, active }))
+const shell = (session, active = null, signInAvailability = { status: 'ready', available: true }) =>
+  renderToString(createSSRApp(ConsoleShell, {
+    session,
+    active,
+    signInAvailability,
+  }))
 
 /** A resolved principal, in the shape `GET /api/session` publishes it. */
 const principal = (over = {}) => ({ kind: 'user', id: 'alice', tenant: 'acme', ...over })
@@ -102,7 +106,7 @@ test('the_shell_names_the_service_and_every_surface_it_has', async () => {
 test('the_shell_covers_the_surfaces_the_vision_says_this_platform_has', () => {
   // Written out here rather than derived from `SURFACES`, so dropping a surface from the model
   // fails this test instead of quietly shrinking what the console claims to be.
-  const expected = ['connections', 'grants', 'workflows', 'catalogue', 'identity', 'invoke', 'subscribe', 'activity']
+  const expected = ['connections', 'grants', 'workflows', 'catalogue', 'identity', 'invoke', 'subscribe', 'activity', 'managed-agents']
 
   assert.deepEqual(
     SURFACES.map((surface) => surface.id).sort(),
@@ -118,7 +122,7 @@ test('every_surface_is_marked_with_its_true_state', async () => {
   // carries, restated where a reader of the console will actually meet it. `grants` joined the
   // first group in X-62: the service serves `GET`/`PUT /api/grants` and this console now has a
   // screen for it, which is the pair `built` and `served` exist to keep separable.
-  const built = { connections: true, grants: true, workflows: true, catalogue: true, identity: true, invoke: true, subscribe: true, activity: true }
+  const built = { connections: true, grants: true, workflows: true, catalogue: true, identity: true, invoke: true, subscribe: true, activity: true, 'managed-agents': true }
 
   for (const surface of SURFACES) {
     assert.equal(
@@ -282,6 +286,16 @@ test('signed_out_offers_a_link_to_sign_in_and_never_a_fetch', async () => {
     new RegExp(`<a[^>]*href="${SIGNIN_ENDPOINT}"`),
     `signing in must be an anchor to ${SIGNIN_ENDPOINT}: it answers 303 to the provider, and a fetch would follow the redirect in the page instead of navigating`
   )
+})
+
+test('signed_out_does_not_offer_a_link_when_this_deployment_cannot_sign_anyone_in', async () => {
+  const html = await shell(
+    { status: 'ready', principal: null },
+    null,
+    { status: 'ready', available: false }
+  )
+  assert.doesNotMatch(html, new RegExp(`href="${SIGNIN_ENDPOINT}"`))
+  assert.match(html, /Sign-in unavailable/)
 })
 
 test('signed_in_names_who_and_offers_sign_out', async () => {

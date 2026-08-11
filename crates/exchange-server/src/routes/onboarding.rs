@@ -278,7 +278,8 @@ mod tests {
     use axum::http::{header, Method, Request as HttpRequest};
     use axum::Router;
     use exchange_host::{
-        address_path, async_trait, CredentialRef, Secret, SecretStore, StoreError,
+        address_path, async_trait, CredentialRef, CredentialScope, Layout, Secret, SecretStore,
+        StoreError, TenantLayout,
     };
     use serde_json::json;
     use tower::Service;
@@ -326,6 +327,23 @@ mod tests {
                 .expect("no test poisons this")
                 .remove(&address_path(reference));
             Ok(())
+        }
+
+        async fn references(
+            &self,
+            scope: &CredentialScope,
+        ) -> Result<Vec<CredentialRef>, StoreError> {
+            let mut references = Vec::new();
+            for path in self.0.lock().expect("no test poisons this").keys() {
+                let reference = TenantLayout
+                    .parse(path)
+                    .map_err(|reason| StoreError::Layout { reason })?;
+                if scope.contains(&reference) {
+                    references.push(reference);
+                }
+            }
+            references.sort();
+            Ok(references)
         }
     }
 
@@ -476,6 +494,10 @@ mod tests {
         // supply. The same vocabulary `/api/catalogue/connectors` already publishes anonymously,
         // so it discloses nothing this surface was keeping.
         "operation",
+        // An opaque tenant-installed resource name. The public descriptor discloses only the slot,
+        // never an occupied value; the route resolves it exclusively beneath the authenticated
+        // principal's tenant and cross-tenant disagreement is a not-found refusal.
+        "app",
     ];
 
     /// Every endpoint this document names is a route this host actually publishes, and none of them
@@ -543,10 +565,20 @@ mod tests {
         // Resolving the bearer is exercised through the session route: it is the smallest call
         // that both runs authentication and returns the principal it resolved.
         ("authenticate", Some("/api/session")),
+        (
+            "discover-effective-catalogue",
+            Some("/api/catalogue/effective"),
+        ),
+        ("connections", Some("/api/connections")),
+        ("grants", Some("/api/grants")),
         ("invoke", Some("/api/operations/{operation}/invoke")),
         ("subscribe", Some("/api/subscribe")),
+        ("workflows", Some("/api/workflows")),
         // Workflow runs are durable and tenant-scoped; the collection is the capability's entry.
         ("read-what-happened", Some("/api/workflow-runs")),
+        ("agents", Some("/api/apps/{app}/chat")),
+        // This remains part of the intended surface, but no route serves it yet.
+        ("leases", None),
     ];
 
     /// Every published route that backs **no** capability, and why it is not one.
@@ -560,6 +592,11 @@ mod tests {
         (
             "/health",
             "liveness, for an operator's monitor. Not something an agent does with this service.",
+        ),
+        (
+            "/metrics",
+            "fixed-cardinality process saturation for an operator's monitor. It describes host \
+             load and grants an agent no authority.",
         ),
         (
             "/api/catalogue/connectors/{id}/operations",
@@ -591,10 +628,13 @@ mod tests {
             "published in this document as `sign_in_available`, so it is not a capability as well.",
         ),
         (
-            "/api/connections",
-            "wiring a tenant up is the *human's* job — `docs/vision.md`: people sign in to wire \
-             things up, agents call operations all day. An agent holding a token is deliberately \
-             not told to go and manage its tenant's connections.",
+            "/api/signin/local",
+            "the verifier-backed human form target. It creates the browser session through the same sign-in capability fact and is never a call an agent makes.",
+        ),
+        (
+            "/api/onboarding/frames",
+            "the authenticated human operator's hosted local-management transport. It mutates the \
+             connections and grants capabilities but grants an agent no new authority.",
         ),
         (
             "/api/service-accounts/{id}",
@@ -602,11 +642,38 @@ mod tests {
              action, not a separate capability an Agent receives.",
         ),
         (
-            "/api/agents",
-            "the v0.16 compatibility alias for creating a Service Account. The descriptor teaches \
-             only the canonical resource and this alias is removed in v0.17.",
+            "/api/connections/{connector}",
+            "the connector item is create, inspect and delete beneath the connections capability; \
+             it is operator work rather than another public capability.",
         ),
-        ("/api/connections/{connector}", "as above."),
+        (
+            "/api/connections/{connector}/plan",
+            "the declaration-driven projection and orchestrator beneath connections; credential values are never an agent capability.",
+        ),
+        (
+            "/api/connections/{connector}/label",
+            "as above; naming the sole connection is operator metadata.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}",
+            "as above; creating, inspecting, renaming or removing a named connection remains an operator action.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}/settings",
+            "as above; it exposes only declared setting names and set state, never values.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}/settings/{service}/{field}",
+            "as above; selecting which endpoint receives this connection's credential is an operator action.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}/settings/{service}/{field}/authority",
+            "as above; exact normalized-origin review and explicit approval or revocation are operator actions.",
+        ),
+        (
+            "/api/connections/{connector}/instances/{label}/credentials/{credential}",
+            "as above, and it accepts a credential value which the agent descriptor must never invite an agent to supply.",
+        ),
         (
             "/api/connections/{connector}/credentials/{credential}",
             "as above, and it takes a credential value — the one thing this document must never \
@@ -618,30 +685,26 @@ mod tests {
             "as above.",
         ),
         (
-            "/api/grants",
-            "what a tenant may run, and where a human changes it (X-62). Not a capability, and \
-             emphatically not one an agent is invited to reach: `grants::MAY_GRANT` admits a \
-             `User` alone on both verbs, because deciding which operations run is more authority \
-             than supplying a credential, and because `exchange_host::admit_grant` deliberately \
-             withholds a tenant's policy from a refused caller so an agent cannot enumerate it. \
-             The `invoke` capability's own `warn` names this route, which is where an agent author \
-             is told to send the human who holds the tenant.",
-        ),
-        (
             "/api/grants/preview",
-            "what a proposed grant would admit, before it is saved. The same caller and the same \
-             argument as the line above; it is a console affordance for the human editing a \
-             policy, not a step in what an agent does.",
+            "what a proposed grant would admit before it is saved; it is the preview half of the \
+             grants capability rather than another capability.",
         ),
         (
-            "/api/workflows",
-            "workflow authoring is a signed-in human's job. Agents receive the published workflow \
-             as an ordinary operation and never mutate its stored program.",
+            "/api/workflows/editor-catalog",
+            "the authoring vocabulary beneath the workflows capability, not a capability of its own.",
         ),
-        ("/api/workflows/editor-catalog", "as above."),
-        ("/api/workflows/{workflow}", "as above."),
-        ("/api/workflows/{workflow}/validate", "as above."),
-        ("/api/workflows/{workflow}/publish", "as above."),
+        (
+            "/api/workflows/{workflow}",
+            "the draft item beneath the workflows capability; agents never mutate its stored Program.",
+        ),
+        (
+            "/api/workflows/{workflow}/validate",
+            "the validation action beneath the workflows capability, not a separate capability.",
+        ),
+        (
+            "/api/workflows/{workflow}/publish",
+            "the publication action beneath the workflows capability, not a separate capability.",
+        ),
         (
             "/api/workflows/{workflow}/versions",
             "immutable publication history is an authoring and inspection affordance for a \
@@ -670,6 +733,39 @@ mod tests {
         (
             "/api/channels/{id}",
             "the item half of the same operator-owned channel lifecycle, not an agent capability.",
+        ),
+        (
+            "/api/app-packages",
+            "the curated package listing beneath the Managed Agents capability; installation is operator work.",
+        ),
+        (
+            "/api/model-profiles",
+            "operator-owned model bindings beneath installed Apps, not authority handed to an agent.",
+        ),
+        (
+            "/api/datasources",
+            "operator-owned datasource bindings beneath installed Apps, not an agent capability by itself.",
+        ),
+        (
+            "/api/apps",
+            "operator-owned installation lifecycle beneath the Managed Agents capability.",
+        ),
+        ("/api/apps/{app}", "the item view of that operator-owned lifecycle."),
+        (
+            "/api/apps/{app}/events/{event}",
+            "operator delivery of a declared Event Type; chat is the capability entry agents receive.",
+        ),
+        (
+            "/api/apps/{app}/activity",
+            "the value-free inspection view beneath the Managed Agents capability.",
+        ),
+        (
+            "/api/apps/{app}/sessions",
+            "the Flux session projection beneath the Managed Agents capability.",
+        ),
+        (
+            "/api/app-deliveries/{delivery}/retry",
+            "operator recovery of a failed safe delivery, not a new agent capability.",
         ),
         (
             "/api/onboarding",
@@ -815,14 +911,11 @@ mod tests {
     /// spelling of this test drove it anonymously and the control caught it: on a guarded route the
     /// `route_layer` runs *before* the method router, so an unidentified caller gets `401` for
     /// every method and a `PATCH` this host serves nowhere is indistinguishable from the `POST` it
-    /// does. Anonymously, this test would have passed for `DELETE /api/agents` — the exact defect
-    /// it exists to catch. A rostered `user:` handle is the weakest caller that gets past both
-    /// guards on this surface (`/api/agents` is [`Access::PrincipalOfKind`]`(`[`MAY_MINT`]`)`,
-    /// which is `User` alone), and nothing is minted, stored or dispatched to get there: no agent
-    /// store and no credential store are bound, and the requests carry no body.
-    ///
-    /// [`Access::PrincipalOfKind`]: super::Access::PrincipalOfKind
-    /// [`MAY_MINT`]: super::agents::MAY_MINT
+    /// does. Anonymously, this test would have passed for a nonexistent method on the guarded
+    /// Service Account route — the exact defect it exists to catch. A rostered `user:` handle is
+    /// the weakest caller that gets past its operator guard, and nothing is minted, stored or
+    /// dispatched to get there: no Service Account store and no credential store are bound, and
+    /// the requests carry no body.
     #[tokio::test]
     async fn every_published_call_reaches_a_handler_for_the_method_it_names() {
         let document: Onboarding = serde_json::from_str(DERIVED).expect("a JSON document");

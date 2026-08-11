@@ -1,9 +1,9 @@
 //! Where this host keeps credentials, and what does not protect them.
 //!
-//! The store itself is [`connector_secrets::FileStore`] — one `0600` file in a `0700` directory,
-//! both modes set in the `open(2)`/`mkdir(2)` call rather than `chmod`-ed afterwards and re-checked
-//! every time the store is opened, and every mutation a whole-file rewrite through a sibling
-//! temporary, `fsync` and `rename(2)`. None of that is reimplemented here: this host builds a
+//! The store itself is [`connector_secrets::FileStore`]: Unix uses effective-owner checks plus
+//! `0700`/`0600`; Windows uses process-SID ownership plus a protected owner-only DACL. Metadata is
+//! set in native creation calls, checked again before every read or write, and mutations use the
+//! platform's atomic replacement primitive. None of that is reimplemented here: this host builds a
 //! *view* of an upstream model and never a second model of one, the same way
 //! [`ConnectorSurface`](crate::ConnectorSurface) is a view of a connector manifest.
 //!
@@ -19,22 +19,22 @@
 //!
 //! # What protects a value here, stated plainly
 //!
-//! A file mode, and nothing else. There is no encryption at rest, no passphrase, no OS keychain,
-//! and no protection from `root` or from a backup that copies the file. That is the right store for
-//! a single-operator deployment and the wrong one for a shared machine; `connector-secrets` ships a
-//! Vault-backed store for the second case, behind its `vault` feature.
+//! The native filesystem boundary, and nothing else. There is no encryption at rest, no passphrase,
+//! no OS keychain, and no protection from Unix root, Windows administrators or a backup that copies
+//! the file. That is the right store for a single-operator deployment and the wrong one for a shared
+//! machine; `connector-secrets` ships a Vault-backed store for the second case.
 //!
 //! # Removing a store
 //!
-//! Remove the **directory**, not the file. A write interrupted between the `fsync` and the
-//! `rename(2)` leaves a complete `0600` copy of every credential in a sibling temporary, and `rm`
-//! on the store file alone does not touch it. `FileStore` reaps those the next time it opens the
+//! Remove the **directory**, not the file. An interrupted atomic replacement can leave a complete
+//! owner-only copy of every credential in a sibling temporary, and removing only the store file
+//! does not touch it. `FileStore` reaps those the next time it opens the
 //! store — but a store being deleted is one nobody is going to open again.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use connector_secrets::{FileStore, SecretStore, StoreError};
+use connector_secrets::{FileStore, PreparedSecretStore, SecretStore, StoreError};
 
 // The two path questions this module used to answer for itself. They moved to `crate::paths` when
 // X-47 added a second file store beside this one: the walk that decides whether a store would sit
@@ -124,6 +124,26 @@ impl CredentialStore {
             });
         }
 
+        // A shared ancestor is not Exchange's object to repair. In particular, `/tmp/store` used
+        // to bubble up connector-secrets' otherwise-correct `chmod 700 /tmp` advice. Narrowing a
+        // system directory is both unsafe and usually impossible; the usable shape is a private
+        // child below it, which this refusal names without touching existing metadata.
+        #[cfg(unix)]
+        if let Some(parent) = resolved.parent() {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            if let Ok(metadata) = std::fs::symlink_metadata(parent) {
+                let mode = metadata.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    return Err(CredentialStoreError::BroadParent {
+                        path: resolved.display().to_string(),
+                        parent: parent.display().to_string(),
+                        mode,
+                    });
+                }
+            }
+        }
+
         let store =
             FileStore::open(&resolved).map_err(|source| CredentialStoreError::Unusable {
                 path: resolved.display().to_string(),
@@ -147,6 +167,15 @@ impl CredentialStore {
         self.store.clone()
     }
 
+    /// The same bound store, as the crash-recoverable prepared-transaction port.
+    ///
+    /// This clone and [`secrets`](Self::secrets) retain one concrete [`FileStore`]. In particular,
+    /// a transaction coordinator must keep this port rather than reopen the path: the concrete
+    /// store owns one exclusive writer/recovery lease for its complete lifetime.
+    pub fn prepared_secrets(&self) -> Arc<dyn PreparedSecretStore> {
+        self.store.clone()
+    }
+
     /// The line a binary prints at startup, naming the store it is actually holding.
     ///
     /// The path comes from the bound store rather than from the value that was configured, so it
@@ -154,7 +183,7 @@ impl CredentialStore {
     /// operator who reads only `credentials: /var/lib/…` will assume more than a file mode.
     pub fn banner(&self) -> String {
         format!(
-            "credentials: {} (file store, mode 0600, not encrypted)",
+            "credentials: {} (platform owner-only file store, not encrypted)",
             self.path().display()
         )
     }
@@ -196,6 +225,20 @@ pub enum CredentialStoreError {
         reason: String,
     },
 
+    /// The store was placed directly below a shared directory.
+    #[cfg(unix)]
+    #[error(
+        "refusing a credential store at `{path}`: its parent `{parent}` has mode {mode:04o}. Do not narrow a shared directory; create a private child directory (0700) below a conventional state root such as `{EXAMPLE_PATH}`, then put the store inside it. Exchange did not change the existing metadata"
+    )]
+    BroadParent {
+        /// The requested store path.
+        path: String,
+        /// The shared immediate parent.
+        parent: String,
+        /// The observed Unix mode.
+        mode: u32,
+    },
+
     /// The store itself refused to open at that path.
     ///
     /// Carries the underlying [`StoreError`] rather than flattening it, because an operator
@@ -211,7 +254,7 @@ pub enum CredentialStoreError {
     },
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::fs;
     use std::future::Future;
@@ -221,7 +264,11 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
-    use connector_secrets::{CredentialRef, Secret};
+    use connector_secrets::{
+        CredentialRef, CredentialScope, PreparedSecretError, Secret, SecretBatch,
+        SecretProposalDigest, SecretTransactionGeneration, SecretTransactionId,
+        SecretTransactionState,
+    };
 
     use super::*;
 
@@ -242,7 +289,7 @@ mod tests {
             fs::create_dir_all(&path).expect("a scratch directory");
             // Canonicalised once, here, so every expectation below is written in the spelling the
             // store will report: the system temporary directory is itself a symlink on macOS
-            // (`/var` → `/private/var`), and this module is `#[cfg(unix)]`, which includes it.
+            // (`/var` → `/private/var`) on Unix.
             let path = path.canonicalize().expect("a resolvable scratch directory");
             Self(path)
         }
@@ -305,6 +352,108 @@ mod tests {
             .expect("a valid address")
     }
 
+    /// Exhaustive on purpose: adding a provider refusal must break Exchange's consumer evidence
+    /// instead of silently entering an assumed catch-all.
+    fn prepared_result(
+        result: Result<SecretTransactionState, PreparedSecretError>,
+    ) -> Result<SecretTransactionState, &'static str> {
+        result.map_err(|error| match error {
+            PreparedSecretError::Unsupported => "unsupported",
+            PreparedSecretError::Busy => "busy",
+            PreparedSecretError::DigestMismatch => "digest_mismatch",
+            PreparedSecretError::TransactionIdReused => "transaction_id_reused",
+            PreparedSecretError::NotPrepared => "not_prepared",
+            PreparedSecretError::AlreadyCommitted => "already_committed",
+            PreparedSecretError::Retired => "retired",
+            PreparedSecretError::Capacity => "capacity",
+            PreparedSecretError::InvalidBatch => "invalid_batch",
+            PreparedSecretError::Backend => "backend",
+        })
+    }
+
+    #[test]
+    fn ordinary_and_prepared_ports_share_one_bound_file_store() {
+        let scratch = Scratch::new("shared-prepared-store");
+        let store = CredentialStore::bind(scratch.join("state").join("credentials"))
+            .expect("a fresh store");
+        let ordinary: Arc<dyn crate::SecretStore> = store.secrets();
+        let prepared: Arc<dyn crate::PreparedSecretStore> = store.prepared_secrets();
+        let reference = reference();
+        block_on(ordinary.put(&reference, &Secret::new("BEFORE-PREPARE")))
+            .expect("the ordinary write lands");
+
+        let generation = SecretTransactionGeneration::from_protocol_bytes(1_u64.to_be_bytes())
+            .expect("generation one is valid");
+        let transaction = SecretTransactionId::new(generation, [0x31; 24]);
+        let digest = SecretProposalDigest::from_protocol_bytes([0x52; 32]);
+        let mut batch = SecretBatch::new(
+            CredentialScope::new(reference.tenant(), reference.authority())
+                .expect("the reference provides a valid scope"),
+        );
+        batch
+            .put(reference.clone(), Secret::new("AFTER-COMMIT"))
+            .expect("the replacement stays inside its scope");
+
+        assert_eq!(
+            prepared_result(block_on(prepared.prepare(transaction, digest, &batch))),
+            Ok(SecretTransactionState::Prepared)
+        );
+        assert_eq!(
+            block_on(ordinary.get(&reference))
+                .expect("ordinary reads retain the committed image")
+                .expose_secret(),
+            "BEFORE-PREPARE"
+        );
+        assert_eq!(
+            prepared_result(block_on(prepared.commit(transaction))),
+            Ok(SecretTransactionState::Committed)
+        );
+        assert_eq!(
+            block_on(ordinary.get(&reference))
+                .expect("ordinary reads see the prepared port's commit")
+                .expose_secret(),
+            "AFTER-COMMIT"
+        );
+    }
+
+    #[test]
+    fn exported_ports_keep_the_exclusive_lease_until_the_last_clone_drops() {
+        let scratch = Scratch::new("prepared-store-lease");
+        let path = scratch.join("state").join("credentials");
+        let store = CredentialStore::bind(&path).expect("a fresh store");
+        let ordinary: Arc<dyn crate::SecretStore> = store.secrets();
+        let prepared: Arc<dyn crate::PreparedSecretStore> = store.prepared_secrets();
+        drop(store);
+
+        let refused = CredentialStore::bind(&path)
+            .expect_err("the ordinary and prepared ports must retain the writer lease");
+        assert!(
+            matches!(
+                refused,
+                CredentialStoreError::Unusable {
+                    source: StoreError::Conflict { .. },
+                    ..
+                }
+            ),
+            "a second opener must receive the provider's lease conflict"
+        );
+
+        drop(ordinary);
+        let refused = CredentialStore::bind(&path)
+            .expect_err("the prepared port alone must retain the writer lease");
+        assert!(matches!(
+            refused,
+            CredentialStoreError::Unusable {
+                source: StoreError::Conflict { .. },
+                ..
+            }
+        ));
+
+        drop(prepared);
+        CredentialStore::bind(&path)
+            .expect("dropping the last port releases the provider-owned kernel lease");
+    }
+
     #[test]
     fn a_fresh_store_is_created_at_0600_inside_a_0700_directory() {
         let scratch = Scratch::new("fresh");
@@ -352,16 +501,29 @@ mod tests {
         let refused = CredentialStore::bind(directory.join("credentials"))
             .expect_err("a widened directory mode must be refused");
         assert!(
-            matches!(
-                &refused,
-                CredentialStoreError::Unusable {
-                    source: StoreError::Denied { .. },
-                    ..
-                }
-            ),
+            matches!(&refused, CredentialStoreError::BroadParent { .. }),
             "expected a refusal naming the directory mode, got: {refused}"
         );
         assert_eq!(mode(&directory), 0o755);
+    }
+
+    #[test]
+    fn a_file_directly_below_a_shared_directory_names_a_private_child_not_chmod() {
+        let shared = std::env::temp_dir().canonicalize().expect("temporary root");
+        let path = shared.join(format!("flux-exchange-x127-direct-{}", std::process::id()));
+        let before = mode(&shared);
+
+        let refusal = CredentialStore::bind(&path).expect_err("the shared parent must refuse");
+        let message = refusal.to_string();
+        assert!(matches!(refusal, CredentialStoreError::BroadParent { .. }));
+        assert!(message.contains("private child directory"), "{message}");
+        assert!(!message.contains("chmod 700 /tmp"), "{message}");
+        assert_eq!(
+            mode(&shared),
+            before,
+            "refusal must not change the shared root"
+        );
+        assert!(!path.exists(), "refusal must not create the store");
     }
 
     #[test]
@@ -554,12 +716,17 @@ mod tests {
         )
         .expect("the write lands");
 
-        let left: Vec<_> = fs::read_dir(&directory)
+        let mut left: Vec<_> = fs::read_dir(&directory)
             .expect("the directory is readable")
             .filter_map(Result::ok)
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(left, vec!["credentials".to_string()]);
+        left.sort();
+        assert_eq!(
+            left,
+            vec![".credentials.lease".to_string(), "credentials".to_string()],
+            "the fixed provider lease is durable state; no atomic-write temporary may remain"
+        );
     }
 
     #[test]
@@ -572,9 +739,10 @@ mod tests {
             .expect_err("nothing is stored at that address");
         assert!(missing.is_not_found(), "{missing}");
 
-        // The store is gone from under the process: a write cannot land, and that is not the same
-        // event as "this tenant has not connected that integration".
-        fs::remove_dir_all(&directory).expect("the store is removed");
+        // The store becomes unwritable under the process: a write cannot land, and that is not the
+        // same event as "this tenant has not connected that integration".
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o500))
+            .expect("the store becomes unwritable");
         let gone = block_on(
             store
                 .secrets()
@@ -586,5 +754,7 @@ mod tests {
             "a vanished store is unreachable, not not-found: {gone}"
         );
         assert!(!gone.is_not_found());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("restore scratch cleanup access");
     }
 }

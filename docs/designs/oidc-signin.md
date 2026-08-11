@@ -16,7 +16,7 @@ for a sign-in story:
 
 ## Signing in is not connecting
 
-**Decision: sign-in asks for `openid`, `email` and `profile`, and for nothing else, ever.**
+**Decision: sign-in asks for `openid email`, and for nothing else.**
 
 This is the first decision because it is the one that would be cheapest to get wrong and most
 expensive to undo. `SCOPES` is a single constant with the argument written beside it, and
@@ -30,6 +30,12 @@ Acme" agreed to be identified. Reading their mail is a different thing to agree 
 into the sign-in scope means nobody ever agreed to it separately — the consent screen said "sign
 in", and the authority granted was something else. Connecting a provider is its own flow, with its
 own screen, and X-08's epic is where it belongs.
+
+Live Google production evidence refined why `email` is present: Google refused the bare `openid`
+request for this client flow. It is therefore a provider-protocol requirement, not an authorization
+or identity input. The verified-claims seam has no email field, the host never parses or uses the
+claim, immutable `sub` remains the principal id, and only the signature-verified `hd` claim can
+admit the configured Workspace organization. `profile` remains absent.
 
 ## Addendum, 2026-08-01 — the dependency decision was taken, and this section is superseded
 

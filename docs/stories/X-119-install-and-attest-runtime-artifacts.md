@@ -4,15 +4,16 @@ title: "Install and attest connector runtime artifacts"
 status: backlog
 epic: rich-connector-runtimes
 design: docs/designs/rich-connector-runtimes.md
-note: "operators install digest-pinned connector binaries/images; callers select operations only, and activation/rotation is audited without credential-shaped metadata"
+note: "Exchange installs digest-pinned connector artifacts from the connector/Exchange pipeline; Flux supplies substrate but distributes no official plugin artifact"
 ---
 
 # Install and attest connector runtime artifacts
 
 ## Goal
 
-Give Exchange an operator-controlled inventory of verified connector runtime artifacts shared with
-Flux's local installer, with safe activation and rotation for affected channels, streams and leases.
+Exchange installs and executes only attested connector runtime artifacts from an operator-controlled
+inventory, with safe activation and rotation for affected channels, streams and leases. Flux
+contributes guarded runtime substrate, not a second official-integration execution placement.
 
 ## Acceptance
 
@@ -26,6 +27,8 @@ Flux's local installer, with safe activation and rotation for affected channels,
       silently.
 - [ ] Tamper, downgrade, incompatible protocol and partial activation tests fail closed and retain the
       previous usable version where rollback is declared safe.
+- [ ] Connector/Exchange release machinery owns executable artifacts; no artifact becomes a Flux
+      release output, helper executable, installed pack or fallback path.
 
 ## Progress
 
@@ -33,4 +36,5 @@ Flux's local installer, with safe activation and rotation for affected channels,
 
 ## Notes
 
-- Depends on flux-connectors C-498 and Flux C-506.
+- Depends on flux-connectors C-498. Flux C-506 consumes the migration evidence to remove Flux's
+  remaining official plugin distribution infrastructure; it does not install these artifacts.
