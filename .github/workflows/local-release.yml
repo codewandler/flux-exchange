@@ -371,7 +371,7 @@ jobs:
             --root-policy .github/release-root-policy.json --now "$now"
 
       - name: Record repository and workflow provenance before exposure
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           # Trust bytes came from the external offline-root process. Attest only what this workflow
           # built or signed; root signatures remain the authority for the copied trust snapshot.
