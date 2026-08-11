@@ -17,7 +17,7 @@ exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exc
 
 async-trait = "0.1"
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 # `fs` is X-83's: the console is served by the host it talks to, because the session cookie is
