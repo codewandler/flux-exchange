@@ -195,6 +195,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-136 — Bound helper plan validation and the absolute result envelope](X-136-bound-helper-plan-and-result-envelope.md) · X-134 child — revalidate the complete v2 plan and keep every helper operation inside one 5s setup / 335s result envelope
 - [X-137 — Constrain Exchange runtime and release to Linux](X-137-constrain-exchange-runtime-and-release-to-linux.md) · X-134 child — Decision 0012 replaces the stopped Windows proof with the exact two-target Linux product boundary
 - [X-138 — Bind provider recovery, replay and Linux-native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — retain the exact portable connector-secrets 0.20 identity and prove Exchange-owned recovery on both Linux release targets
+- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->
