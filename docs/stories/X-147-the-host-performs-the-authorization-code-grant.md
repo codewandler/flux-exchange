@@ -166,6 +166,31 @@ unset — the safe default — can run this flow.
   the service segment with an allocated UUID plus a companion mapping and a read-side index. The
   derivation stays confined to one function so swapping it is one function and a migration.
 
+- 2026-08-12: **Re-review returned APPROVE WITH NITS; three closed.**
+
+  **The M5 pin was not a pin.** `no_query_string_reaches_a_request_span` exercised a `traced_path`
+  helper, so reverting the span to `request.uri()` left it green while `acquisitions.rs` claimed that
+  test "is what keeps it stopped" — the same class as B1, a claim stronger than the code, in the fix
+  for it. The test now runs real requests through `app()` under a real `tracing` subscriber and
+  asserts on the fields the span actually recorded; the helper is deleted. Verified by mutation: the
+  revert now fails with `a query string reached a span field: path=/api/acquisitions/callback?state=
+  abc123&code=SECRET-CODE-NOT-A-REAL-TOKEN`.
+
+  **`!cfg!(test)` survived at `HttpCredentialAcquirer::new`**, one screen below M4's argument against
+  exactly that construct. Now keyed to a loopback literal like `DelegatedGrant::new`, with a test
+  driving the refusal. This endpoint carries resource-owner passwords and refresh tokens in a POST
+  body, so the rule was worth having and worth being able to run.
+
+  **Nit 3 taken rather than left as a comment.** The registry and the state were two independent
+  wirings of the redirect, which is B1's own shape one level up. `AcquisitionBindings` now holds it
+  and `AppState::acquisition_redirect` reads through; `with_acquisition_redirect` is gone. A
+  consequence worth recording: the route's `NoRedirectUri` refusal is now **unreachable by
+  construction**, so its test was rewritten to pin the composition refusal that replaced it and the
+  arm is documented as an uncovered fail-closed backstop rather than claimed as tested.
+
+  Nits 4-6 (span level, tenant-wide channel restart on revoke, no guard claim on revoke) needed no
+  code change; the span's level change is now named in its doc comment.
+
 ## Notes
 
 - **Refresh already exists and is not in scope**, but this story is what makes it reachable:

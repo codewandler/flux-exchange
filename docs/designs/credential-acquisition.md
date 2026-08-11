@@ -396,7 +396,7 @@ one fixture spelled both the same. That is a control that only appears to exist,
 recording because the shape is generic: *a check on one copy of a value is not a check on the copy
 that travels.*
 
-Four things now make it true, and none is a comment:
+Five things now make it true, and none is a comment:
 
 1. **`AcquisitionRedirect` is a newtype with one constructor**, which runs the canonical check. There
    is no `String` path into a redirect field anywhere in the composition.
@@ -408,9 +408,23 @@ Four things now make it true, and none is a comment:
 4. **`AcquisitionBinding::delegating` sets the browser-facing half and the back-channel half from one
    `Arc`**, so the performer that re-presents the redirect at the token endpoint holds the same value
    the authorization URL carried, rather than a second argument that happens to match.
+5. **The registry is the only holder, and `AppState::acquisition_redirect` reads through to it.** The
+   first fix left the state with its own redirect field and its own builder, which reproduced the
+   same defect one level up: a composition could pass A to the registry and B to the state, and the
+   authorize URL would carry B while the token request re-presented A. There is now one wiring.
 
 The value the route sends is `AppState::acquisition_redirect` — the deployment's own — and it is
-never derived from a request's `Host` header, which a caller controls.
+never derived from a request's `Host` header, which a caller controls. Because a registry holding a
+grant necessarily holds a redirect, the route's "no redirect configured" refusal is now unreachable
+by construction; it is kept as a fail-closed backstop rather than an `unwrap`, and is documented as
+uncovered rather than claimed as tested.
+
+### The generalisation worth keeping
+
+Both rounds of this defect were the same shape, and it is the shape worth checking for elsewhere: **a
+validated copy and a travelling copy of the same value, kept in step by convention.** The validation
+looks rigorous, the tests pass, and the thing that reaches the outside world was never checked. The
+repair is always the same — make it one value, or make the divergence refuse at composition.
 
 ### What still waits on the 0.21 connector line
 

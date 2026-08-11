@@ -663,11 +663,17 @@ async fn compose(
         .with_tenancy(startup.tenancy().clone())
         .with_credential_acquisition(
             auth_posture,
-            Arc::new(credential_acquisition::AcquisitionBindings::default()),
+            // The redirect is passed to the registry and to nothing else: it is the value every
+            // bound grant is checked against, and `AppState::acquisition_redirect` reads through to
+            // it. Production binds no acquisitions yet, so this registry is empty and carries the
+            // configured redirect forward for the composition that will (X-146).
+            Arc::new(
+                credential_acquisition::AcquisitionBindings::new([], acquisition_redirect.as_ref())
+                    .map_err(|reason| StartupRefusal::AcquisitionRedirect {
+                        reason: reason.to_owned(),
+                    })?,
+            ),
         );
-    if let Some(redirect) = acquisition_redirect {
-        state = state.with_acquisition_redirect(redirect);
-    }
     if let Some(origin) = hosted_origin {
         state = state.with_hosted_origin(origin);
     }

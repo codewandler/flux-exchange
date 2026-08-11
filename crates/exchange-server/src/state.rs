@@ -57,14 +57,10 @@ pub struct AppState {
     /// Startup-selected policy over connector-declared credential-acquisition hazards.
     auth_posture: AuthPosture,
     /// Explicit server bindings for released connector acquisition declarations.
-    acquisitions: Arc<AcquisitionBindings>,
-    /// The startup-validated redirect URI a vendor returns a delegated authorization to.
     ///
-    /// Deployment configuration and never connector data — `crate::acquisition_redirect` carries
-    /// that argument. `None` is a composition that configured none, and
-    /// `POST /api/acquisitions/{connector}/authorize` refuses by name rather than deriving one from
-    /// a request's `Host` header, which is a value a caller controls.
-    acquisition_redirect: Option<AcquisitionRedirect>,
+    /// **This also carries the deployment's acquisition redirect URI**, which is why there is no
+    /// second field for it here — see [`acquisition_redirect`](Self::acquisition_redirect).
+    acquisitions: Arc<AcquisitionBindings>,
     /// The delegated authorizations this host has opened and not yet finished.
     ///
     /// Shared across every clone of this state, for [`connections`](Self::connections)' reason:
@@ -279,7 +275,6 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
-            acquisition_redirect: None,
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -318,7 +313,6 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
-            acquisition_redirect: None,
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -354,7 +348,6 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
-            acquisition_redirect: None,
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -392,7 +385,6 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
-            acquisition_redirect: None,
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -431,7 +423,6 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
-            acquisition_redirect: None,
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -467,7 +458,6 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
-            acquisition_redirect: None,
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -650,25 +640,19 @@ impl AppState {
         &self.acquisitions
     }
 
-    /// Bind this deployment's startup-validated acquisition redirect URI.
-    ///
-    /// A separate builder from [`with_credential_acquisition`](Self::with_credential_acquisition)
-    /// because it is a different kind of fact: the bindings say what this composition can perform,
-    /// and this says where this deployment is reachable. A composition can legitimately have one
-    /// without the other — a delegated grant bound with no redirect configured refuses by name,
-    /// which is the failure an operator can act on.
-    pub fn with_acquisition_redirect(mut self, redirect: AcquisitionRedirect) -> Self {
-        self.acquisition_redirect = Some(redirect);
-        self
-    }
-
     /// This deployment's acquisition redirect URI, exactly as configured.
+    ///
+    /// **Read through to the binding registry, which is the only holder** (X-147 re-review, nit 3).
+    /// This was briefly a second field with its own builder, and two independent wirings of one
+    /// value is the shape B1 was filed for: a composition passing A to
+    /// `AcquisitionBindings::new` and B here would answer an authorize URL carrying B while the
+    /// token request re-presented A. There is now one place to pass it and nothing to keep in step.
     ///
     /// Never derived from a request. `crate::acquisition_redirect` carries why, and refuses at
     /// startup any spelling that is not already canonical, so what a route sends to a vendor and
     /// what the token request re-presents cannot be two different strings.
     pub fn acquisition_redirect(&self) -> Option<&AcquisitionRedirect> {
-        self.acquisition_redirect.as_ref()
+        self.acquisitions.redirect()
     }
 
     /// The delegated authorizations this host has opened and not yet finished.

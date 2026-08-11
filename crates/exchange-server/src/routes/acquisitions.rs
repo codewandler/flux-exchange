@@ -244,6 +244,13 @@ async fn authorize(
     // string that never left the process. `AcquisitionBindings::new` has already refused any grant
     // whose redirect is not byte-equal to this, so the two cannot differ — and this is the one that
     // travels, so if they ever could, the vendor would be told the deployment's.
+    //
+    // The `else` is **unreachable by construction** and kept anyway: `state.acquisition_redirect()`
+    // reads through to the registry, and a registry holding a grant holds a redirect, so finding
+    // `grant` above already proves this is `Some`. No test covers this arm, because no composition
+    // can reach it. It stays because the alternative to a fail-closed refusal here is an `unwrap`,
+    // or a route that answers with a `redirect_uri` it invented — and if a later change reintroduces
+    // a second way to wire the redirect, this is what catches it.
     let Some(redirect) = state.acquisition_redirect() else {
         return delegation_refused(provider, &DelegationRefusal::NoRedirectUri);
     };
@@ -903,7 +910,6 @@ mod tests {
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         ))
         .with_credentials(store.secrets())
-        .with_acquisition_redirect(redirect())
         .with_credential_acquisition(
             AuthPosture::fail_closed(),
             Arc::new(AcquisitionBindings::new([binding], Some(&redirect())).expect("one binding")),
@@ -1214,7 +1220,6 @@ mod tests {
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         ))
-        .with_acquisition_redirect(redirect())
         .with_credential_acquisition(
             AuthPosture::fail_closed(),
             Arc::new(AcquisitionBindings::default()),
@@ -1226,19 +1231,18 @@ mod tests {
         assert_eq!(state.pending_delegations().open(), 0);
     }
 
-    /// A deployment that bound a grant and gave the state no redirect refuses by name rather than
-    /// deriving one from the request's `Host` header, which is a value a caller controls.
+    /// **A grant with no deployment redirect never becomes a registry**, so no route can be asked to
+    /// derive one from a request's `Host` header — a value a caller controls.
     ///
-    /// Since the B1 rework, `AcquisitionBindings::new` refuses a delegated grant outright when the
-    /// deployment configured none, so the only way to reach this route's guard at all is a
-    /// composition that built its registry against a redirect and then did not hand the same one to
-    /// the state. That is a narrow residual and the guard stays for it: the alternative to refusing
-    /// is a route that answers with a `redirect_uri` it made up.
-    #[tokio::test]
-    async fn an_unconfigured_redirect_refuses_rather_than_being_derived() {
+    /// This used to drive the route and assert a `503`. It cannot any more, and that is the point:
+    /// once the redirect moved onto `AcquisitionBindings` (re-review, nit 3) there is no way to
+    /// compose a state whose grant-bearing registry lacks one, so the refusal moved from *the route
+    /// answering* to *the composition not existing*. The route's guard is still there and still
+    /// fail-closed — see `authorize` — but it is unreachable by construction, and this test does not
+    /// pretend to cover it.
+    #[test]
+    fn a_grant_with_no_deployment_redirect_never_becomes_a_registry() {
         let codes = Arc::new(Mutex::new(Vec::new()));
-        let scratch = Scratch::new();
-        let store = scratch.store();
         let grant = DelegatedGrant::new(
             "http://127.0.0.1:9/oauth/authorize",
             "exchange-client",
@@ -1257,26 +1261,22 @@ mod tests {
         )
         .with_delegated_grant(grant);
 
-        // First: the composition-level refusal, which is the one that now catches this.
-        assert!(
-            AcquisitionBindings::new([binding.clone()], None).is_err(),
-            "a delegated grant with no deployment redirect must not become a registry",
+        assert_eq!(
+            AcquisitionBindings::new([binding.clone()], None)
+                .expect_err("a delegated grant with no deployment redirect must be refused"),
+            "a delegated acquisition grant is bound and this deployment configured no acquisition \
+             redirect URI",
         );
 
-        // Then the route's own guard, reached the only way that is left.
+        // And with one, the registry carries it — so `AppState::acquisition_redirect` has exactly
+        // one source and there is no second wiring to disagree with.
+        let bindings = AcquisitionBindings::new([binding], Some(&redirect())).expect("one binding");
+        assert_eq!(bindings.redirect(), Some(&redirect()));
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         ))
-        .with_credentials(store.secrets())
-        .with_credential_acquisition(
-            AuthPosture::fail_closed(),
-            Arc::new(AcquisitionBindings::new([binding], Some(&redirect())).expect("one binding")),
-        );
-
-        let (status, body, _) = authorize_as(&state, "alice").await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-        assert!(body.contains("redirect_uri_unconfigured"), "{body}");
-        assert_eq!(state.pending_delegations().open(), 0);
+        .with_credential_acquisition(AuthPosture::fail_closed(), Arc::new(bindings));
+        assert_eq!(state.acquisition_redirect(), Some(&redirect()));
     }
 
     /// **B1, end to end: the string the vendor is redirected with is the string the token request
@@ -1322,7 +1322,6 @@ mod tests {
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         ))
         .with_credentials(store.secrets())
-        .with_acquisition_redirect(redirect())
         .with_credential_acquisition(
             AuthPosture::fail_closed(),
             Arc::new(AcquisitionBindings::new([binding], Some(&redirect())).expect("one binding")),

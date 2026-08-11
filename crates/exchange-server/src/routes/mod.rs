@@ -245,8 +245,8 @@ pub fn app_with_console(state: AppState, console: Option<&Path>) -> Router {
 ///
 /// `DefaultMakeSpan` records `uri`, which is path *and* query, and X-147's review found what that
 /// means on this surface: two routes receive a bearer credential in the query — the OIDC sign-in
-/// callback's `code` and the delegated acquisition callback's `code` and `state`. At `debug` they
-/// are written to the log, which is the thing both of those routes' documentation says they never
+/// callback's `code` and the delegated acquisition callback's `code` and `state`. They were written
+/// to the log by this layer, which is the thing both of those routes' documentation says they never
 /// do, and an authorization code in a log is one whoever reads the log can spend.
 ///
 /// The fix is a class rather than a list. A query string is **caller-supplied data**; a span is for
@@ -254,23 +254,22 @@ pub fn app_with_console(state: AppState, console: Option<&Path>) -> Router {
 /// whose query is sensitive would be a list that drifts the moment somebody adds a third — and this
 /// host already has the correlation identifier `request_correlation` mints for tying a request
 /// together, which is what a query in a span was standing in for.
+///
+/// This **also raises the span's level** from `DefaultMakeSpan`'s `DEBUG` to `INFO`. That is a
+/// second change in one function and worth naming: the level is no longer what protects the query,
+/// so it is now chosen for what a request span is for. One span per request at `INFO` is what makes
+/// the correlation identifier usable in a deployment that does not run at `DEBUG` — and a deployment
+/// that *does* turn `DEBUG` on to chase a problem no longer widens what a log holds.
 fn path_only_span(request: &Request) -> tracing::Span {
     tracing::info_span!(
         "request",
         method = %request.method(),
-        // Not `request.uri()`: see this function's own documentation.
-        path = %traced_path(request),
+        // **`.path()` and never `.uri()`** — the whole point of this function. `no_query_string_`
+        // `reaches_a_request_span` drives this layer through a real subscriber, so reverting this
+        // to `request.uri()` turns that test red rather than merely contradicting a comment.
+        path = %request.uri().path(),
         version = ?request.version(),
     )
-}
-
-/// What of a request's target reaches a log line.
-///
-/// Separated from [`path_only_span`] so the transformation is testable: a `tracing::Span`'s recorded
-/// fields cannot be read back without standing up a subscriber, and the thing worth pinning is not
-/// the span machinery but that **the query is dropped**.
-fn traced_path(request: &Request) -> &str {
-    request.uri().path()
 }
 
 /// Generate correlation before every guard and return it without trusting a caller-supplied id.
@@ -1406,35 +1405,106 @@ mod tests {
     ///
     /// `TraceLayer`'s default span records `uri`, which is path *and* query. Two routes on this
     /// surface are handed a bearer credential in the query — the OIDC sign-in callback's `code`, and
-    /// the delegated acquisition callback's `code` and `state` — so at `debug` the default wrote an
+    /// the delegated acquisition callback's `code` and `state` — so the default wrote an
     /// authorization code into the log, which is exactly what both of those routes' documentation
     /// says they never do.
     ///
+    /// # Why this drives the whole layer
+    ///
+    /// The first version of this test called a `traced_path` helper and asserted on its return, and
+    /// the re-review caught that reverting `path_only_span` to `request.uri()` left it **green** —
+    /// a test that reads as a guard and is not one, which is precisely the class of defect B1 was
+    /// filed for. So it now runs a real request through `app()` under a real subscriber and asserts
+    /// on the fields the span actually recorded. The helper is gone; there is nothing left to test
+    /// that is not the thing that runs in production.
+    ///
     /// The two callbacks are driven by name because they are the ones that made this worth fixing,
-    /// and an arbitrary third path is driven with them because the rule is a class and not a list:
-    /// a query is caller-supplied data and no span needs one.
-    #[test]
-    fn no_query_string_reaches_a_request_span() {
+    /// and a third path is driven with them because the rule is a class and not a list: a query is
+    /// caller-supplied data and no span needs one. The responses are not asserted on — the span is
+    /// made before routing, so a `404` exercises it exactly as a `200` does.
+    #[tokio::test]
+    async fn no_query_string_reaches_a_request_span() {
+        use crate::DevIdentity;
+        use std::sync::{Arc, Mutex};
+        use tower::ServiceExt;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+
+        /// Every field of every span this host opens, as the subscriber saw it.
+        #[derive(Clone, Default)]
+        struct Recorded(Arc<Mutex<Vec<String>>>);
+
+        struct Fields(Arc<Mutex<Vec<String>>>);
+
+        impl Visit for Fields {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .lock()
+                    .expect("the field recorder")
+                    .push(format!("{}={value:?}", field.name()));
+            }
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
+            fn on_new_span(
+                &self,
+                attributes: &tracing::span::Attributes<'_>,
+                _id: &tracing::Id,
+                _context: Context<'_, S>,
+            ) {
+                attributes.record(&mut Fields(Arc::clone(&self.0)));
+            }
+        }
+
+        let recorded = Recorded::default();
+        // A thread-local default rather than the global one, so this test cannot fight another.
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
+
+        let state = AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster("user:alice@acme").expect("a roster"),
+        ));
         for (path, query) in [
             (
                 "/api/acquisitions/callback",
-                "state=abc123&code=SECRET-CODE",
+                "state=abc123&code=SECRET-CODE-NOT-A-REAL-TOKEN",
             ),
-            ("/api/signin/callback", "state=def456&code=SECRET-CODE"),
-            ("/api/connections", "anything=SECRET-CODE"),
+            (
+                "/api/signin/callback",
+                "state=def456&code=SECRET-CODE-NOT-A-REAL-TOKEN",
+            ),
+            ("/api/connections", "anything=SECRET-CODE-NOT-A-REAL-TOKEN"),
         ] {
-            let request = HttpRequest::builder()
-                .uri(format!("{path}?{query}"))
-                .body(Body::empty())
-                .expect("a request");
+            app(state.clone())
+                .oneshot(
+                    HttpRequest::builder()
+                        .uri(format!("{path}?{query}"))
+                        .body(Body::empty())
+                        .expect("a request"),
+                )
+                .await
+                .expect("a response");
+        }
 
-            let traced = traced_path(&request);
-            assert_eq!(traced, path);
+        let fields = recorded.0.lock().expect("the recorder").clone();
+        // The leak first, so a regression says what leaked rather than what is missing.
+        for field in &fields {
             assert!(
-                !traced.contains("SECRET-CODE"),
-                "a query string reached a span: {traced}",
+                !field.contains("SECRET-CODE-NOT-A-REAL-TOKEN"),
+                "a query string reached a span field: {field}",
+            );
+            assert!(
+                !field.contains('?'),
+                "a span field carries a query separator, so something is recording a full URI: \
+                 {field}",
             );
         }
+        // Then the sanity check, so the loop above cannot be vacuously satisfied by a span that
+        // records nothing at all.
+        assert!(
+            fields.iter().any(|field| field == "path=/api/connections"),
+            "the span must record the path: {fields:?}",
+        );
     }
 
     /// X-03's deliverable, stated as an enumeration rather than as a route name: this host

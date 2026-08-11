@@ -296,10 +296,18 @@ impl std::fmt::Debug for AcquisitionBinding {
     }
 }
 
-/// The acquisition declarations this composition explicitly bound.
+/// The acquisition declarations this composition explicitly bound, and the redirect they agree with.
+///
+/// **The redirect lives here and nowhere else** (X-147 re-review, nit 3). It was briefly a second
+/// field on `AppState`, wired independently — which is the shape B1 was filed for, one level up: a
+/// composition could pass one redirect to this constructor and a different one to the state, and the
+/// authorize URL would carry the state's while the token request re-presented the grant's. Holding
+/// it on the value that validated it, and having `AppState::acquisition_redirect` read through to
+/// it, means there is one wiring and nothing to keep in step.
 #[derive(Clone, Debug, Default)]
 pub struct AcquisitionBindings {
     by_connector: BTreeMap<String, AcquisitionBinding>,
+    redirect: Option<AcquisitionRedirect>,
 }
 
 impl AcquisitionBindings {
@@ -355,12 +363,23 @@ impl AcquisitionBindings {
                 return Err("a connector has more than one credential-acquisition binding");
             }
         }
-        Ok(Self { by_connector })
+        Ok(Self {
+            by_connector,
+            redirect: configured.cloned(),
+        })
     }
 
     /// Look up only by the catalogue connector selected by the route.
     pub fn get(&self, connector: &str) -> Option<&AcquisitionBinding> {
         self.by_connector.get(connector)
+    }
+
+    /// The redirect URI every grant in this registry was checked against.
+    ///
+    /// `Some` whenever any binding here carries a delegated grant — [`new`](Self::new) refuses the
+    /// alternative — so a route that has found a grant has found this too.
+    pub fn redirect(&self) -> Option<&AcquisitionRedirect> {
+        self.redirect.as_ref()
     }
 }
 
@@ -416,6 +435,11 @@ impl HttpCredentialAcquirer {
     }
 
     /// Construct one startup-owned endpoint binding.
+    ///
+    /// # Errors
+    ///
+    /// A value-free reason when the endpoint is not a URL, when it is cleartext anywhere but a
+    /// loopback literal, or when babelforce's quirks are bound to another connector.
     pub fn new(
         connector: &str,
         endpoint: &str,
@@ -425,8 +449,20 @@ impl HttpCredentialAcquirer {
             return Err("babelforce token-endpoint quirks may only bind connector `babelforce`");
         }
         let endpoint = Url::parse(endpoint).map_err(|_| "credential endpoint URL is invalid")?;
-        if endpoint.scheme() != "https" && !cfg!(test) {
-            return Err("credential endpoint URL must use HTTPS");
+        // **A loopback literal rather than `cfg!(test)`**, for the reason M4 gives on
+        // `DelegatedGrant::new` — the re-review caught this one still standing a screen below that
+        // argument. Keying the exception to the build meant the rule was switched off in the only
+        // place that could exercise it, and this endpoint carries resource-owner passwords and
+        // refresh tokens in a POST body. Keying it to the address is the same rule
+        // `crate::acquisition_redirect` and `crate::hosted_origin` use, it is the exception a
+        // checkout actually needs, and a test can drive the refusal.
+        if endpoint.scheme() != "https"
+            && !(endpoint.scheme() == "http"
+                && endpoint
+                    .host_str()
+                    .is_some_and(crate::acquisition_redirect::is_loopback_literal))
+        {
+            return Err("credential endpoint URL must use HTTPS, or HTTP on a loopback literal");
         }
         // Token forms contain replayable resource-owner and refresh secrets. Even a same-origin
         // redirect changes which endpoint made the decision, and reqwest's default redirect policy
@@ -834,6 +870,44 @@ mod tests {
                 .expect_err("babelforce behavior must be bound structurally")
                 .to_string(),
             "a credential-acquisition performer is bound to another connector",
+        );
+    }
+
+    /// **A token endpoint may not be cleartext off a loopback literal** (X-147 re-review, nit 2).
+    ///
+    /// This rule was written as `!cfg!(test)`, which switched it off in the only place that could
+    /// exercise it — one screen below M4's own argument against exactly that construct. The endpoint
+    /// this guards carries resource-owner passwords and refresh tokens in a POST body, so the rule
+    /// is worth having and worth being able to run.
+    #[test]
+    fn a_cleartext_token_endpoint_is_refused_unless_it_is_loopback() {
+        assert_eq!(
+            HttpCredentialAcquirer::new(
+                "second",
+                "http://vendor.example.test/token",
+                TokenEndpointBehavior::Standard,
+            )
+            .err()
+            .expect("cleartext to a routable host must be refused"),
+            "credential endpoint URL must use HTTPS, or HTTP on a loopback literal",
+        );
+        assert!(
+            HttpCredentialAcquirer::new(
+                "second",
+                "https://vendor.example.test/token",
+                TokenEndpointBehavior::Standard,
+            )
+            .is_ok(),
+            "and HTTPS anywhere is admitted",
+        );
+        assert!(
+            HttpCredentialAcquirer::new(
+                "second",
+                "http://127.0.0.1:9/token",
+                TokenEndpointBehavior::Standard,
+            )
+            .is_ok(),
+            "as is a checkout's own loopback fixture, which is the exception that is actually needed",
         );
     }
 
