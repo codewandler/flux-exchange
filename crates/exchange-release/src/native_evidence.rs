@@ -12,6 +12,34 @@ pub const REPORT_SCHEMA: &str = "exchange.native-evidence-report.v1";
 pub const MAX_BYTES: usize = 256 * 1024;
 pub const BUNDLED_BYTES: &[u8] = include_bytes!("../native-evidence-v1.json");
 
+/// The exact Exchange-owned process proofs publication consumes for the retained provider store.
+///
+/// X-139 owns the final authority document; these two names are what it may never lose. One proves
+/// production connect crash recovery, restart QUERY and byte-identical same-proposal replay; the
+/// other proves the one retained `FileStore` lease excludes a second process through recovery and
+/// readiness and releases after an abrupt exit. Renaming either is a repair in two places, never a
+/// silent drop that still reports a complete native inventory.
+const RETAINED_PROVIDER_TESTS: [&str; 2] = [
+    "real_server_retains_the_c515_lease_through_recovery_and_readiness",
+    "unix_connect_crashes_recover_before_readiness_and_replay_one_receipt",
+];
+
+/// The obligations whose Cargo bindings are exactly those two Exchange-owned proofs.
+const RETAINED_PROVIDER_OBLIGATIONS: [&str; 2] =
+    ["x134-c515-retained-lease", "x134-connect-crash-replay"];
+
+/// The applicable published C-515 tests Exchange inherits rather than re-proves.
+///
+/// The provider release stays portable: Exchange consumes this evidence by name and never restates,
+/// narrows or re-runs it. Dropping one would leave a provider obligation asserted by nothing.
+const INHERITED_PROVIDER_TESTS: [&str; 5] = [
+    "every_durable_transaction_boundary_recovers_one_complete_state",
+    "file_store_holds_a_lifetime_non_blocking_lease",
+    "native_upgrade_fixture_proves_legacy_quiescence_and_v2_refusal",
+    "two_children_prove_lease_refusal_and_abrupt_release",
+    "unix_lease_metadata_is_owner_only_one_link_and_never_repaired",
+];
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeEvidenceAuthority {
@@ -329,6 +357,66 @@ impl NativeEvidenceAuthority {
         }
         if joins.len() != 1 {
             return schema("native authority requires one cross-cutting assertion join");
+        }
+        self.validate_retained_provider_evidence()
+    }
+
+    /// The retained connector-secrets 0.20 recovery, replay and lease evidence, exactly (X-138).
+    ///
+    /// Every Exchange-owned process binding joins the retained-lease assertion, so a binding cannot
+    /// be reported as complete native evidence while the assertion that gives it meaning covers
+    /// something else.
+    fn validate_retained_provider_evidence(&self) -> Result<()> {
+        let supported = SUPPORTED_TARGETS.iter().copied().collect::<BTreeSet<_>>();
+        let mut exchange_owned = BTreeSet::new();
+        for id in RETAINED_PROVIDER_OBLIGATIONS {
+            let obligation = self.obligations.get(id).ok_or_else(|| {
+                Error::Schema(format!("missing retained provider obligation {id:?}"))
+            })?;
+            for binding_id in &obligation.bindings {
+                let binding = self
+                    .bindings
+                    .get(binding_id)
+                    .ok_or_else(|| Error::Schema(format!("unknown binding {binding_id:?}")))?;
+                if self
+                    .target_set(&binding.target_set)?
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>()
+                    != supported
+                {
+                    return schema(
+                        "retained provider evidence does not cover both supported Linux targets",
+                    );
+                }
+                exchange_owned.insert(binding.exact_test.as_str());
+            }
+        }
+        if exchange_owned != RETAINED_PROVIDER_TESTS.into_iter().collect() {
+            return schema("retained provider evidence is not the exact Exchange-owned test pair");
+        }
+
+        let inherited = self
+            .release_evidence
+            .values()
+            .map(|evidence| evidence.exact_test.rsplit("::").next().unwrap_or_default())
+            .collect::<BTreeSet<_>>();
+        if inherited != INHERITED_PROVIDER_TESTS.into_iter().collect() {
+            return schema("inherited C-515 release evidence is not the exact published test set");
+        }
+
+        let joined = self
+            .assertion_joins
+            .iter()
+            .map(|join| join.binding_class.as_str())
+            .collect::<BTreeSet<_>>();
+        if self.bindings.values().any(|binding| {
+            !binding
+                .classes
+                .iter()
+                .any(|class| joined.contains(class.as_str()))
+        }) {
+            return schema("one Exchange process binding joins no retained provider assertion");
         }
         Ok(())
     }

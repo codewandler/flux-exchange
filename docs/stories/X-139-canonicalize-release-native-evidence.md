@@ -1,7 +1,7 @@
 ---
 id: X-139
 title: "Canonicalize the two-target Linux native-evidence inventory"
-status: blocked
+status: ready
 epic: connections
 areas: [exchange-release, tests, workflows, docs]
 depends_on: [X-135, X-136, X-137, X-138]
@@ -64,6 +64,9 @@ literal count, stale fixture or non-Linux report may certify publication.
 - Immutable audit baseline `3dc7b28` contained a committed fixture selecting 12 cases while its
   release self-test required 13. That contradiction remains failing-first provenance for derived
   inventories; neither number is the new acceptance ratchet.
+- 2026-08-07: unblocked. This story was filed `blocked` as the serialized tail of the X-134
+  sequence; X-135, X-136, X-137 and X-138 are all `done` on canonical `origin/main`, so the exact
+  production tests this story consumes now exist and it is dispatchable.
 
 ## Notes
 

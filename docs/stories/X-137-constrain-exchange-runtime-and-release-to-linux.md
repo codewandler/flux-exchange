@@ -81,6 +81,11 @@ release inventory and target selector close over exactly the two supported Linux
   every exact Linux process binding once with zero ignored or filtered tests, including owner root,
   peer refusal, readiness/liveness, helper FD closure, SCM_RIGHTS handoff and proc-start identity;
   the same authority maps those bindings to `ubuntu-24.04-arm` for the aarch64 release target.
+- 2026-08-05: Trailing x86_64 native evidence exposed that the helper-input test seam's 300 ms
+  result budget was shorter than the admitted five-second pre-ceremony window. A deterministic
+  observer-delay regression reproduced the value-free exit before `/dev/tty`; the repaired
+  test-only budget now includes setup plus its 300 ms input-expiry window while production remains
+  unchanged at 335 seconds.
 
 ## Notes
 
