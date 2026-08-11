@@ -30,3 +30,27 @@ private Track plugin, tmux control channel or hand-written state-file edits.
       commands without modifying this checkout.
 - [ ] The public and contributor documentation remains honest about Exchange's Linux-only runtime,
       then the focused test and ordinary integrated repository gate pass.
+
+## Progress
+
+- 2026-08-12: **A partial implementation of this story exists and was nearly lost.** It was recovered
+  from `stash@{1}` (`codex-preserve-failed-wave167-exchange-x140-before-cleanup-20260806`) onto the
+  branch `rescue/X-140-installed-board-fleet-workflow`, which is pushed. `scripts/check-agent-workflow.sh`
+  existed in **no commit anywhere** in the repository; the stash was `apply`-ed rather than popped,
+  so it is still in place too.
+
+  **That branch is a preservation point, not a proposal.** Run against this tree the checker reports
+  two failures — a stale private `/track` command in `docs/stories/README.md`, and the documented
+  Board check command failing against its hermetic fixture — and its `.github/workflows/ci.yml` change
+  wires the checker into CI, so merging as-is lands a red gate. It also carries
+  `.flux/board/idempotency.json`, which is local run state rather than repository content and must be
+  dropped before any merge.
+
+  Owner-stated 2026-08-12: **the `/track` tooling will stop being used within a day or two.** That is
+  what makes this story live rather than speculative — the migration it describes is the direction of
+  travel, not a hypothetical. Whoever picks it up should treat the rescued branch as a head start on
+  `check-agent-workflow.sh` and finish the half that never landed, rather than starting over.
+
+  Note the ordering consequence: `/track:board` is still the tool that regenerates
+  `docs/stories/README.md` today, and the rescued checker refuses exactly that. Those two cannot both
+  be right, so this story owns the cutover — including what regenerates the board afterwards.

@@ -42,14 +42,19 @@ lockfile and compile-time tests.
 ## Next (ready — take the top one unless the user named a story)
 - [X-140 — Repository agents use the installed Board and Fleet operator workflow](X-140-use-installed-board-fleet-operator-workflow.md) · Fleet dogfood — replace private Track workflow and pin the bounded handoff/watch commands a plain agent can run
 - [X-141 — Exchange story workers publish bounded Fleet handoff evidence](X-141-publish-bounded-fleet-handoff-evidence.md) · Fleet dogfood — one deterministic targeted-check receipt without terminal scraping or duplicate full gates
+- [X-150 — Remove the Windows runtime residue the Linux contraction left behind](X-150-remove-the-windows-runtime-residue.md) · X-137 made Exchange Linux-only but left ~9.7k lines of Windows code, including 3,444 lines in three source files no mod declaration compiles and two dangling references that only build.rs's panic keeps hidden
+- [X-149 — Adopt the current vite line in the console](X-149-adopt-the-current-vite-line-in-the-console.md) · vite 6 -> 8 and @vitejs/plugin-vue 5 -> 6 are one change: neither resolves without the other, and vite 8 swaps the bundler from esbuild to rolldown
+
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
 
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
-- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
 
 ## Backlog
 - [X-51 — A broken doc link fails the build instead of hiding among twenty others](X-51-a-broken-doc-link-is-visible.md) · found by X-48, 2026-08-01: `cargo doc --workspace --no-deps` emits ~20 unresolved intra-doc link warnings and is not in the gate, so a genuinely broken link in new code is invisible
+- [X-146 — Adopt the released flux 0.58 and connector 0.21 lines](X-146-adopt-the-released-flux-0-58-and-connector-0-21-lines.md) · Core · post-v0.18.0: both pin sets move as one compatibility unit once connector-pack 0.21 requires flux-runtime ^0.58; the one known compile break in range is the C-531 DispatchId parameter on the flux-lang FlowSink impl
 
 ### Apps
 - [X-131 — Validate Datasource.kind against published connector datasource members](X-131-validate-datasource-kind-against-published-members.md) · Decision 0006 — put_datasource refuses a kind that is not a published connector datasource member reference; gated on the upstream connector surface
@@ -59,6 +64,13 @@ lockfile and compile-time tests.
 - [X-21 — A half connection is distinguishable from a deliberately partial one](X-21-half-connection-visibility.md) · raised by X-18's implementor, 2026-08-01: GET answers 200 for a connection whose delete failed half way, which reads as 'connected' — but a connector may legitimately hold a subset of what it declares, so the two render identically and telling them apart needs a record this module deliberately does not keep
 - [X-50 — A connector that needs no credential can actually be connected](X-50-a-connector-that-needs-nothing-can-be-connected.md) · found adjacent to X-49, 2026-08-01: the console disables Connect for a connector that declares no credentials — a state X-46 made reachable and X-49 pinned the *render* of, but nobody can act on it
 - [X-79 — A catalogue-declared closed set is only honoured on an endpoint field](X-79-a-closed-set-on-a-non-endpoint-field-is-ignored.md) · found by X-70's independent review, 2026-08-02: the SettingKind::Username short-circuit at settings.rs:507 returns before the choices_for lookup ten lines later, so a closed set declared on a non-endpoint field is silently ignored. Nothing shipped is affected and the census test would fire — but the rule reads as general and is not
+
+### Hosted single-org
+_One organization operating Exchange on its own shared infrastructure — a dev Kubernetes cluster is_
+- [X-142 — Hosted single-org posture and member token minting](X-142-hosted-single-org-posture-and-member-token-minting.md) · Core · Decision 0019 rules 1-2: reachable SingleTenant behind OIDC is a named posture; members mint bounded Service Account tokens; operator authority stays deployment-declared
+- [X-143 — Deployment-declared destination aperture](X-143-deployment-declared-destination-aperture.md) · Core · Decision 0019 rule 3: the deployment declares admitted egress destinations; members never select or widen; everything else stays refused post-resolution
+- [X-144 — Declarative provisioning from file-shaped secrets](X-144-declarative-provisioning-from-file-shaped-secrets.md) · Core · Decision 0019 rule 4: connections, settings, grants and tenant Datasource bindings declared in config; secrets only as mounted file references; idempotent startup reconciliation
+- [X-145 — Kubernetes deployment artifacts and runbook](X-145-kubernetes-deployment-artifacts-and-runbook.md) · Core · Decision 0019 rule 6: manifests and runbook encode the delivered constraints - one writer, PVC audit journal, store modes, same-origin console
 
 ### a public documentation site
 _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
