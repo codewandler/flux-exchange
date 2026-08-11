@@ -236,9 +236,41 @@ pub fn app_with_console(state: AppState, console: Option<&Path>) -> Router {
     };
 
     app.layer(middleware::from_fn(security_headers))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(path_only_span))
         .layer(middleware::from_fn(request_correlation))
         .with_state(state)
+}
+
+/// The request span, carrying the **path** and never the query string.
+///
+/// `DefaultMakeSpan` records `uri`, which is path *and* query, and X-147's review found what that
+/// means on this surface: two routes receive a bearer credential in the query — the OIDC sign-in
+/// callback's `code` and the delegated acquisition callback's `code` and `state`. At `debug` they
+/// are written to the log, which is the thing both of those routes' documentation says they never
+/// do, and an authorization code in a log is one whoever reads the log can spend.
+///
+/// The fix is a class rather than a list. A query string is **caller-supplied data**; a span is for
+/// correlating what this host did, and the path plus the method is that. Enumerating the routes
+/// whose query is sensitive would be a list that drifts the moment somebody adds a third — and this
+/// host already has the correlation identifier `request_correlation` mints for tying a request
+/// together, which is what a query in a span was standing in for.
+fn path_only_span(request: &Request) -> tracing::Span {
+    tracing::info_span!(
+        "request",
+        method = %request.method(),
+        // Not `request.uri()`: see this function's own documentation.
+        path = %traced_path(request),
+        version = ?request.version(),
+    )
+}
+
+/// What of a request's target reaches a log line.
+///
+/// Separated from [`path_only_span`] so the transformation is testable: a `tracing::Span`'s recorded
+/// fields cannot be read back without standing up a subscriber, and the thing worth pinning is not
+/// the span machinery but that **the query is dropped**.
+fn traced_path(request: &Request) -> &str {
+    request.uri().path()
 }
 
 /// Generate correlation before every guard and return it without trusting a caller-supplied id.
@@ -1370,6 +1402,41 @@ mod tests {
         );
     }
 
+    /// **No request's query string reaches a log line** (X-147 review, M5).
+    ///
+    /// `TraceLayer`'s default span records `uri`, which is path *and* query. Two routes on this
+    /// surface are handed a bearer credential in the query — the OIDC sign-in callback's `code`, and
+    /// the delegated acquisition callback's `code` and `state` — so at `debug` the default wrote an
+    /// authorization code into the log, which is exactly what both of those routes' documentation
+    /// says they never do.
+    ///
+    /// The two callbacks are driven by name because they are the ones that made this worth fixing,
+    /// and an arbitrary third path is driven with them because the rule is a class and not a list:
+    /// a query is caller-supplied data and no span needs one.
+    #[test]
+    fn no_query_string_reaches_a_request_span() {
+        for (path, query) in [
+            (
+                "/api/acquisitions/callback",
+                "state=abc123&code=SECRET-CODE",
+            ),
+            ("/api/signin/callback", "state=def456&code=SECRET-CODE"),
+            ("/api/connections", "anything=SECRET-CODE"),
+        ] {
+            let request = HttpRequest::builder()
+                .uri(format!("{path}?{query}"))
+                .body(Body::empty())
+                .expect("a request");
+
+            let traced = traced_path(&request);
+            assert_eq!(traced, path);
+            assert!(
+                !traced.contains("SECRET-CODE"),
+                "a query string reached a span: {traced}",
+            );
+        }
+    }
+
     /// X-03's deliverable, stated as an enumeration rather than as a route name: this host
     /// publishes at least one route that actually requires a principal.
     ///
@@ -1655,6 +1722,12 @@ mod tests {
             // caller that decides which credential this tenant's operations run under is doing
             // human work, exactly as `MAY_SUPPLY_A_CREDENTIAL` argues.
             ("acquisitions", "/api/acquisitions/{connector}/authorize"),
+            // Revoking your **own** delegated credential. A `User` and not an `Operator` because
+            // the route takes no target and cannot be pointed anywhere: a delegated credential is
+            // addressed to one principal, so this destroys the caller's own and there is no other
+            // member's state in reach. Requiring an operator would mean a person could not revoke
+            // a token minted from their own vendor account, which is the wrong way round.
+            ("acquisitions", "/api/acquisitions/{connector}"),
         ];
 
         let gated: Vec<_> = published()

@@ -93,20 +93,28 @@ pub const DELEGATED_SERVICE_PREFIX: &str = "exchange-delegated-";
 /// every credential of every tenant pays.
 const DIGEST_HEX: usize = 32;
 
-/// The most delegated acquisitions one host will hold open at once.
+/// The most delegated acquisitions **one tenant** will hold open at once.
 ///
-/// The mirror of [`crate::oidc::flow`]'s bound, with the opposite resolution, and the difference is
-/// what sits in front of each store. Sign-in's store is behind an **anonymous** route, so refusing
-/// at the bound would let any stranger lock every real user out; this store is filled only from
-/// `POST /api/acquisitions/{connector}/authorize`, which requires a signed-in human. Filling it
-/// therefore takes an authenticated caller looping, refusing tells an operator exactly that, and the
-/// caller who would have been evicted is a colleague half way through authorizing a vendor account
-/// — one whose callback would then be refused for a reason nobody could act on.
+/// This bound is per tenant, and X-147's first review is why. A single global bound refuses the
+/// newest — which is right here, unlike sign-in's store, because this one is filled only by
+/// authenticated humans and the caller an eviction would cost is a colleague half way through
+/// authorizing a vendor account. But *whose* newest it refuses matters just as much: with one global
+/// counter, one signed-in person looping 256 times makes every other tenant's members wait out the
+/// [`PENDING_TTL`], which is one tenant buying a denial of service against the rest of the
+/// deployment for the price of a session. A tenant filling its own bound is a tenant refusing itself,
+/// which is the blast radius every other bound in this host already has.
 ///
-/// So this one refuses the newest, following
-/// [`SessionStore`](crate::session::SessionStore). Expired entries are swept first, so a refusal
-/// only ever happens when the store is genuinely full of live requests.
-const MAX_PENDING: usize = 256;
+/// The tenant comes from the resolved principal, as everywhere else, so it is not something a caller
+/// can spread its load across.
+const MAX_PENDING_PER_TENANT: usize = 64;
+
+/// The most delegated acquisitions this host will hold open across every tenant.
+///
+/// The memory ceiling, and deliberately not the fairness rule — [`MAX_PENDING_PER_TENANT`] is that.
+/// It exists because the per-tenant bound alone is unbounded in the number of tenants, and a
+/// multi-tenant deployment's memory is not a per-tenant quantity. Reaching it is an operational
+/// event rather than an attack by one caller: it takes as many tenants as the quotient of the two.
+const MAX_PENDING: usize = 4_096;
 
 /// One delegated acquisition this host opened.
 pub struct PendingDelegation {
@@ -228,7 +236,13 @@ impl PendingDelegations {
 
         let mut live = self.live();
         live.retain(|_, pending| pending.opened.elapsed() < PENDING_TTL);
-        if live.len() >= MAX_PENDING {
+        // The tenant's own bound first, because it is the one a caller can reach and the one whose
+        // refusal is actionable: the person who hits it is the person looping.
+        let held_by_tenant = live
+            .values()
+            .filter(|pending| pending.principal.tenant() == principal.tenant())
+            .count();
+        if held_by_tenant >= MAX_PENDING_PER_TENANT || live.len() >= MAX_PENDING {
             return Err(DelegationRefusal::TooManyPending);
         }
 
@@ -783,29 +797,51 @@ mod tests {
         assert_ne!(companions.refresh, companions.expiry);
     }
 
-    /// The bound refuses the next delegation rather than evicting a live one.
+    /// **A tenant that fills its bound refuses itself, and nobody else** (X-147 review, M3).
     ///
-    /// The opposite of `oidc::flow`, and the argument is on [`MAX_PENDING`]: this store is filled
-    /// only by signed-in humans, so the caller who would have been evicted is a colleague half way
-    /// through authorizing a vendor account.
+    /// Two claims in one run, and the second is the one the review was filed for. A full tenant
+    /// refuses its own next delegation rather than evicting a live one — the opposite of
+    /// `oidc::flow`, on [`MAX_PENDING_PER_TENANT`]'s argument, because the caller an eviction would
+    /// cost is a colleague half way through authorizing a vendor account. And a **different**
+    /// tenant is unaffected, which is what a single global counter got wrong: one signed-in person
+    /// looping made every other tenant's members wait out the TTL.
     #[test]
-    fn a_full_store_refuses_rather_than_evicting_somebody_elses_authorization() {
+    fn a_tenant_that_fills_its_bound_refuses_itself_and_not_another_tenant() {
         let pending = PendingDelegations::new();
         let alice = member("alice");
+        let outsider = Principal::new(
+            PrincipalKind::User,
+            "carol",
+            Tenant::new("globex").expect("a second tenant"),
+        );
 
         let first = pending.begin("gitlab", &alice).expect("randomness");
-        for _ in 1..MAX_PENDING {
+        for _ in 1..MAX_PENDING_PER_TENANT {
             pending.begin("gitlab", &alice).expect("randomness");
         }
-        assert_eq!(pending.open(), MAX_PENDING);
+        assert_eq!(pending.open(), MAX_PENDING_PER_TENANT);
 
         assert!(
             matches!(
                 pending.begin("gitlab", &alice),
                 Err(DelegationRefusal::TooManyPending)
             ),
-            "a full store refuses the newest",
+            "a tenant at its bound refuses its own newest",
         );
+        assert!(
+            matches!(
+                pending.begin("gitlab", &member("bob")),
+                Err(DelegationRefusal::TooManyPending)
+            ),
+            "and the bound is the tenant's, so a colleague shares it",
+        );
+
+        // The assertion this test exists for: another tenant is not paying for `acme`'s loop.
+        assert!(
+            pending.begin("gitlab", &outsider).is_ok(),
+            "one tenant filling its bound must not lock another tenant out of connecting",
+        );
+
         assert!(
             matches!(claim_as(&pending, &first), ClaimedDelegation::Delegation(_)),
             "and the oldest is still completable",

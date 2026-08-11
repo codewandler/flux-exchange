@@ -776,6 +776,13 @@ mod tests {
              than to the tenant an agent calls for.",
         ),
         (
+            "/api/acquisitions/{connector}",
+            "revoking the delegated credential the person calling it authorized. The item half of \
+             the route above and the same operator work, not a second agent capability — an agent \
+             holds no delegated credential to revoke, because one belongs to a human's vendor \
+             account.",
+        ),
+        (
             "/api/acquisitions/callback",
             "the vendor's redirect back, mid-authorization. Nothing calls it deliberately, and an \
              agent that could would be presenting somebody else's authorization code.",

@@ -131,6 +131,41 @@ unset — the safe default — can run this flow.
   companions are not), and this route's tenant-occupancy check sums one connector's scope rather than
   every connector.
 
+- 2026-08-12: **Reworked after independent review.** One blocking finding and five minors.
+
+  **B1, blocking — the redirect URI had three uncompared sources, and the ticked criterion was not
+  true.** The route read the startup-validated deployment value only to check it was *present* and
+  then sent a composition argument to the vendor, so everything `acquisition_redirect` checks guarded
+  a string that never left the process; the string that did left after one `is_empty` test. The
+  claim that one grant in two places made this structural was also wrong — they were two independent
+  `Option<DelegatedGrant>` fields set by two calls with no equality check. Fixed so divergence cannot
+  be constructed rather than being unlikely: `AcquisitionRedirect` is a newtype with one checking
+  constructor; `AcquisitionBindings::new` takes the deployment's redirect and **refuses** a bound
+  grant that is not byte-equal to it; `AcquisitionBinding::delegating` sets the browser-facing and
+  back-channel halves from one `Arc`; and the route composes the authorize URL from
+  `AppState::acquisition_redirect`. Three tests pin it, two of them proved by mutation.
+
+  **M1 — a delegated credential could not be revoked at all.** Worse than this story recorded:
+  `DELETE /api/connections/{connector}` walks declared addresses and `exchange-acquisition`
+  companions, so it answered `204` while the delegated credential and a live refresh token survived.
+  Added `DELETE /api/acquisitions/{connector}` (`Access::User`), which destroys the caller's **own**
+  in one batch — it takes no target and cannot be pointed at anybody else's. **Still open and
+  recorded rather than guessed at:** what a *tenant-level* disconnect should do to every member's
+  delegated credentials. That is entangled with the addressing question below.
+
+  **M2** — the callback's read-decide-write now holds the `ConnectionGuard` tenant claim, taken after
+  the vendor answers so one tenant's members do not serialise on a network round trip. **M3** — the
+  pending bound is per tenant (64) with a global memory ceiling (4096), so one signed-in person can
+  no longer lock every other tenant out for the TTL. **M4** — `DelegatedGrant`'s transport rule is
+  keyed to a loopback literal instead of `cfg!(test)`, so the rule is reachable from a test.
+  **M5** — `TraceLayer`'s default span recorded the whole URI, so the authorization code and `state`
+  reached a `DEBUG` span from the layer rather than from any handler; the span now records the path
+  only, which also closes the same leak on `/api/signin/callback`. **M6** — board regenerated.
+
+  **Open, and deliberately not implemented:** the owner's proposal to replace the derived digest in
+  the service segment with an allocated UUID plus a companion mapping and a read-side index. The
+  derivation stays confined to one function so swapping it is one function and a migration.
+
 ## Notes
 
 - **Refresh already exists and is not in scope**, but this story is what makes it reachable:

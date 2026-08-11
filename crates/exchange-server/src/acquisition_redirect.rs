@@ -40,6 +40,44 @@ pub const SETTING: &str = "FLUX_EXCHANGE_ACQUISITION_REDIRECT_URI";
 /// at the last step with the vendor reporting success.
 pub const CALLBACK_PATH: &str = "/api/acquisitions/callback";
 
+/// **This deployment's redirect URI, as a value that cannot exist without having been checked.**
+///
+/// A newtype and not a `String`, because X-147's first review found the reason: the checking below
+/// guarded a value that never left the process, while the string that *did* reach a vendor came
+/// from a composition argument and was checked only for being non-empty. Two strings for one fact
+/// is how "compared exactly" becomes a sentence in a doc comment. There is exactly one constructor,
+/// it runs [`canonical`], and every redirect anywhere in this composition is one of these.
+///
+/// Equality is byte equality, deliberately: two spellings a vendor would treat as one URL are still
+/// two strings, and RFC 6749 §4.1.3 has the token request re-present the *same* value the
+/// authorization request carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcquisitionRedirect(String);
+
+impl AcquisitionRedirect {
+    /// Check one redirect URI and keep it.
+    ///
+    /// # Errors
+    ///
+    /// A value-free reason naming the setting and the shape. It never quotes the operator's value
+    /// back: the refusal is about a shape, and a startup log is a place a mistyped URL would be
+    /// permanent.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        canonical(value).map(Self)
+    }
+
+    /// The URI as it goes into the authorization request and back out at the token endpoint.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for AcquisitionRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// This deployment's acquisition redirect URI, or `None` if it configured none.
 ///
 /// Unset is not an error and does not refuse startup: a deployment that never connects a delegated
@@ -53,10 +91,10 @@ pub const CALLBACK_PATH: &str = "/api/acquisitions/callback";
 /// A value-free reason naming the setting. It never quotes the operator's value back: the refusal
 /// is about a shape, and a startup log is a place a mistyped URL with a credential in its query
 /// would be permanent.
-pub fn configured() -> Result<Option<String>, String> {
+pub fn configured() -> Result<Option<AcquisitionRedirect>, String> {
     match std::env::var(SETTING) {
         Ok(value) if value.is_empty() => Err(format!("{SETTING} is explicitly empty")),
-        Ok(value) => canonical(&value).map(Some),
+        Ok(value) => AcquisitionRedirect::parse(&value).map(Some),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!("{SETTING} is not Unicode")),
         Err(std::env::VarError::NotPresent) => Ok(None),
     }
@@ -92,7 +130,7 @@ fn canonical(value: &str) -> Result<String, String> {
     // URL, and a code in cleartext is a code anyone on the path can spend — the same argument
     // `crate::oidc::config`'s transport check makes for the browser-facing sign-in variables, and
     // the same exception for the loopback bind a checkout runs on.
-    if parsed.scheme() == "http" && !literal_loopback(host) {
+    if parsed.scheme() == "http" && !is_loopback_literal(host) {
         return Err(refusal());
     }
     if parsed.path() != CALLBACK_PATH {
@@ -109,7 +147,11 @@ fn canonical(value: &str) -> Result<String, String> {
 /// A literal and not a name: `localhost` resolves through whatever the machine's resolver says, and
 /// a name that resolves to loopback today is not a transport guarantee. `crate::hosted_origin`
 /// draws the same line.
-fn literal_loopback(host: &str) -> bool {
+///
+/// `pub` since X-147's review: `DelegatedGrant::new` needs the identical rule for the authorization
+/// endpoint, and the alternative it replaced was a `cfg!(test)` escape that made the rule untestable
+/// in the crate that states it.
+pub fn is_loopback_literal(host: &str) -> bool {
     let unwrapped = host
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))

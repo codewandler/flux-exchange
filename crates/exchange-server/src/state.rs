@@ -8,6 +8,7 @@ use exchange_host::{
     PureEditorTools, SecretStore, WorkflowStore,
 };
 
+use crate::acquisition_redirect::AcquisitionRedirect;
 use crate::audit::AuditJournal;
 use crate::bind::IdentityBinding;
 use crate::channel::ChannelSupervisor;
@@ -63,7 +64,7 @@ pub struct AppState {
     /// that argument. `None` is a composition that configured none, and
     /// `POST /api/acquisitions/{connector}/authorize` refuses by name rather than deriving one from
     /// a request's `Host` header, which is a value a caller controls.
-    acquisition_redirect: Option<Arc<str>>,
+    acquisition_redirect: Option<AcquisitionRedirect>,
     /// The delegated authorizations this host has opened and not yet finished.
     ///
     /// Shared across every clone of this state, for [`connections`](Self::connections)' reason:
@@ -656,8 +657,8 @@ impl AppState {
     /// and this says where this deployment is reachable. A composition can legitimately have one
     /// without the other — a delegated grant bound with no redirect configured refuses by name,
     /// which is the failure an operator can act on.
-    pub fn with_acquisition_redirect(mut self, redirect: impl Into<Arc<str>>) -> Self {
-        self.acquisition_redirect = Some(redirect.into());
+    pub fn with_acquisition_redirect(mut self, redirect: AcquisitionRedirect) -> Self {
+        self.acquisition_redirect = Some(redirect);
         self
     }
 
@@ -666,8 +667,8 @@ impl AppState {
     /// Never derived from a request. `crate::acquisition_redirect` carries why, and refuses at
     /// startup any spelling that is not already canonical, so what a route sends to a vendor and
     /// what the token request re-presents cannot be two different strings.
-    pub fn acquisition_redirect(&self) -> Option<&str> {
-        self.acquisition_redirect.as_deref()
+    pub fn acquisition_redirect(&self) -> Option<&AcquisitionRedirect> {
+        self.acquisition_redirect.as_ref()
     }
 
     /// The delegated authorizations this host has opened and not yet finished.

@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::acquisition_redirect::AcquisitionRedirect;
 use exchange_host::{
     async_trait, AcquiredCredential, AcquisitionRefusal, AuthHazard, AuthPosture,
     AuthPostureRefusal, AuthorizationCodeRedemption, CredentialAcquirer, PasswordRedemption,
@@ -21,13 +22,24 @@ use serde::Deserialize;
 
 /// The deployment-owned half of a delegated authorization-code grant.
 ///
-/// **One value held in two places on purpose.** The browser-facing half — where to send the person,
-/// which client is asking, which scopes — is what [`crate::routes::acquisitions`] composes into the
-/// authorization URL; the back-channel half is what [`HttpCredentialAcquirer`] sends to the token
-/// endpoint. They must agree: RFC 6749 §4.1.3 has the token request re-present the same
-/// `redirect_uri` and the same client, and a vendor answers a disagreement with `invalid_grant` at
-/// the last step. Carrying both halves in one value and handing it to both holders is what makes
-/// that agreement structural rather than a thing two composition arguments happen to spell alike.
+/// # One grant, shared — and checked against the deployment before it is bound
+///
+/// X-147's first review found this claim overstated and it is now what it says. The browser-facing
+/// half — where to send the person, which client is asking, which scopes — is what
+/// [`crate::routes::acquisitions`] needs; the back-channel half is what [`HttpCredentialAcquirer`]
+/// sends to the token endpoint. They must agree, because RFC 6749 §4.1.3 has the token request
+/// re-present the *same* `redirect_uri`, and a vendor answers a disagreement with `invalid_grant` at
+/// the last step of a redirect nobody can replay.
+///
+/// Three things now make that agreement real rather than asserted:
+///
+/// 1. The redirect is an [`AcquisitionRedirect`], which cannot be constructed without passing
+///    `crate::acquisition_redirect`'s canonical check. There is no `String` path into this field.
+/// 2. [`AcquisitionBinding::delegating`] is the only way the concrete HTTP performer receives a
+///    grant, and it hands **one `Arc`** to the binding and to the performer in one call. There is no
+///    second argument to spell differently.
+/// 3. [`AcquisitionBindings::new`] refuses a registry whose grant is not byte-equal to the redirect
+///    this deployment configured. A binding that disagrees with the deployment does not exist.
 ///
 /// It is **not** connector metadata. Composing an authorize URL from the connector's own
 /// `Acquisition::OAuth2` declaration is what waits on the 0.21 connector line; until then a
@@ -38,7 +50,7 @@ pub struct DelegatedGrant {
     client_id: String,
     client_secret: Option<Secret>,
     scopes: Vec<String>,
-    redirect_uri: String,
+    redirect: AcquisitionRedirect,
 }
 
 impl DelegatedGrant {
@@ -46,24 +58,35 @@ impl DelegatedGrant {
     ///
     /// # Errors
     ///
-    /// A value-free reason when the authorization endpoint is not an absolute HTTPS URL, when the
-    /// client id is empty, or when a scope is empty or carries the space that separates scopes.
-    /// Each is a composition fault an operator reads once, rather than a vendor rejection at the
-    /// end of a redirect nobody can replay.
+    /// A value-free reason when the authorization endpoint is not an absolute URL, when it is
+    /// cleartext off a loopback literal, when the client id is empty, or when a scope is empty or
+    /// carries the space that separates scopes. Each is a composition fault an operator reads once,
+    /// rather than a vendor rejection at the end of a redirect nobody can replay.
     pub fn new(
         authorization_endpoint: &str,
         client_id: impl Into<String>,
         client_secret: Option<Secret>,
         scopes: impl IntoIterator<Item = String>,
-        redirect_uri: impl Into<String>,
+        redirect: AcquisitionRedirect,
     ) -> Result<Self, &'static str> {
         let parsed = Url::parse(authorization_endpoint)
             .map_err(|_| "the authorization endpoint is not a URL")?;
         // The URL a person's browser navigates to carries `state` and the PKCE challenge, and the
         // answer comes back carrying an authorization code. `crate::oidc::config`'s transport check
         // makes the same argument for the sign-in authorization endpoint.
-        if parsed.scheme() != "https" && !cfg!(test) {
-            return Err("the authorization endpoint must use HTTPS");
+        //
+        // **A loopback literal rather than `cfg!(test)`** (X-147 review, M4). Keying the exception
+        // to the build meant no unit test in this crate could reach the refusal at all, so the rule
+        // was unpinned exactly where it is written down. Keying it to the address is the rule
+        // `crate::acquisition_redirect` and `crate::hosted_origin` already use, it is the same
+        // exception a checkout actually needs, and it is a case a test can drive.
+        if parsed.scheme() != "https"
+            && !(parsed.scheme() == "http"
+                && parsed
+                    .host_str()
+                    .is_some_and(crate::acquisition_redirect::is_loopback_literal))
+        {
+            return Err("the authorization endpoint must use HTTPS, or HTTP on a loopback literal");
         }
         let client_id = client_id.into();
         if client_id.is_empty() {
@@ -79,16 +102,12 @@ impl DelegatedGrant {
         {
             return Err("a scope is one space-free token; the list is what carries the separator");
         }
-        let redirect_uri = redirect_uri.into();
-        if redirect_uri.is_empty() {
-            return Err("a delegated grant needs the deployment's redirect URI");
-        }
         Ok(Self {
             authorization_endpoint: authorization_endpoint.to_owned(),
             client_id,
             client_secret,
             scopes,
-            redirect_uri,
+            redirect,
         })
     }
 
@@ -111,9 +130,9 @@ impl DelegatedGrant {
         self.scopes.join(" ")
     }
 
-    /// The redirect URI, re-presented verbatim at the token endpoint.
-    pub fn redirect_uri(&self) -> &str {
-        &self.redirect_uri
+    /// The deployment's redirect URI, re-presented verbatim at the token endpoint.
+    pub fn redirect(&self) -> &AcquisitionRedirect {
+        &self.redirect
     }
 }
 
@@ -127,7 +146,7 @@ impl std::fmt::Debug for DelegatedGrant {
                 &self.client_secret.as_ref().map(|_| "[REDACTED]"),
             )
             .field("scopes", &self.scopes)
-            .field("redirect_uri", &self.redirect_uri)
+            .field("redirect", &self.redirect)
             .finish()
     }
 }
@@ -138,7 +157,7 @@ pub struct AcquisitionBinding {
     connector: String,
     credential: String,
     hazard: Option<AuthHazard>,
-    delegated: Option<DelegatedGrant>,
+    delegated: Option<Arc<DelegatedGrant>>,
     performer: Arc<dyn CredentialAcquirer>,
 }
 
@@ -162,9 +181,45 @@ impl AcquisitionBinding {
         }
     }
 
-    /// Declare that this connector's credential may also be acquired by delegated authorization.
+    /// **Bind one delegated grant to the concrete HTTP performer that will redeem it**, in one call.
+    ///
+    /// This exists instead of two builder calls, and that is the whole of it: the browser-facing
+    /// half and the back-channel half are set here from **one `Arc`**, so there is no second
+    /// argument for a composition to spell differently. X-147's first review found the previous
+    /// shape — `with_delegated_grant` on the binding and `performing_delegated_grant` on the
+    /// performer — was two independent fields with no equality check, while the documentation
+    /// claimed the agreement was structural.
+    ///
+    /// It takes the performer **by value and concretely**, which is what makes that possible: an
+    /// `Arc<dyn CredentialAcquirer>` cannot be handed a grant after the fact. A generic performer
+    /// that holds no redirect of its own still uses
+    /// [`with_delegated_grant`](Self::with_delegated_grant), where there is nothing to diverge.
+    pub fn delegating(
+        connector: impl Into<String>,
+        credential: impl Into<String>,
+        hazard: Option<AuthHazard>,
+        grant: DelegatedGrant,
+        performer: HttpCredentialAcquirer,
+    ) -> Self {
+        let grant = Arc::new(grant);
+        let performer = performer.performing_delegated_grant(Arc::clone(&grant));
+        Self {
+            connector: connector.into(),
+            credential: credential.into(),
+            hazard,
+            delegated: Some(grant),
+            performer: Arc::new(performer),
+        }
+    }
+
+    /// Declare that this connector's credential may be acquired by delegated authorization, for a
+    /// performer that holds no redirect of its own.
+    ///
+    /// The seam a product binding uses, and the one every test double here uses. Where the performer
+    /// *does* re-present a redirect at a token endpoint — which is every HTTP one — use
+    /// [`delegating`](Self::delegating), so the two halves cannot be two values.
     pub fn with_delegated_grant(mut self, grant: DelegatedGrant) -> Self {
-        self.delegated = Some(grant);
+        self.delegated = Some(Arc::new(grant));
         self
     }
 
@@ -201,7 +256,7 @@ impl AcquisitionBinding {
 
     /// The delegated grant this composition bound, when it bound one.
     pub fn delegated(&self) -> Option<&DelegatedGrant> {
-        self.delegated.as_ref()
+        self.delegated.as_deref()
     }
 
     /// Decide a deployment's posture against whatever hazard this binding declares.
@@ -248,9 +303,28 @@ pub struct AcquisitionBindings {
 }
 
 impl AcquisitionBindings {
-    /// Construct a registry, refusing duplicate connector bindings.
+    /// Construct a registry, refusing duplicate connector bindings and any delegated grant that
+    /// disagrees with the redirect URI **this deployment** configured.
+    ///
+    /// # Why the deployment's redirect is an argument here (X-147 review, B1)
+    ///
+    /// It is the one place every registry passes through, so it is the one place that can make
+    /// "compared exactly" true rather than intended. Before this, `crate::acquisition_redirect`'s
+    /// canonical check guarded a value that reached no vendor while the string that *did* was
+    /// checked for being non-empty — a control that only appeared to exist.
+    ///
+    /// A grant is refused when the deployment configured **no** redirect, and when its redirect is
+    /// not byte-equal to the configured one. Byte equality and not URL equivalence: RFC 6749 §4.1.3
+    /// has the token request re-present the same value, and a vendor comparing strings does not know
+    /// which two spellings we consider the same.
+    ///
+    /// # Errors
+    ///
+    /// A value-free reason. It names the disagreement, never either URL: a startup log is permanent
+    /// and a redirect is deployment topology.
     pub fn new(
         bindings: impl IntoIterator<Item = AcquisitionBinding>,
+        configured: Option<&AcquisitionRedirect>,
     ) -> Result<Self, &'static str> {
         let mut by_connector = BTreeMap::new();
         for binding in bindings {
@@ -260,6 +334,19 @@ impl AcquisitionBindings {
                 .is_some_and(|owner| owner != binding.connector)
             {
                 return Err("a credential-acquisition performer is bound to another connector");
+            }
+            if let Some(grant) = binding.delegated.as_ref() {
+                match configured {
+                    None => return Err(
+                        "a delegated acquisition grant is bound and this deployment configured \
+                             no acquisition redirect URI",
+                    ),
+                    Some(configured) if configured != grant.redirect() => return Err(
+                        "a delegated acquisition grant names a redirect URI that is not the one \
+                             this deployment configured",
+                    ),
+                    Some(_) => {}
+                }
             }
             if by_connector
                 .insert(binding.connector.clone(), binding)
@@ -309,7 +396,7 @@ pub struct HttpCredentialAcquirer {
     client: Client,
     endpoint: Url,
     behavior: TokenEndpointBehavior,
-    delegated: Option<DelegatedGrant>,
+    delegated: Option<Arc<DelegatedGrant>>,
 }
 
 impl HttpCredentialAcquirer {
@@ -318,7 +405,12 @@ impl HttpCredentialAcquirer {
     /// Without this, [`redeem_authorization_code`](CredentialAcquirer::redeem_authorization_code)
     /// keeps the port's default refusal: a performer bound with no delegated grant does not silently
     /// half-perform one.
-    pub fn performing_delegated_grant(mut self, grant: DelegatedGrant) -> Self {
+    ///
+    /// `pub(crate)` and taking the shared `Arc` since X-147's review: the only caller is
+    /// [`AcquisitionBinding::delegating`], which sets the binding's half and this one from one
+    /// value. A composition that could call this separately could give the performer a redirect the
+    /// authorization URL never carried, and the vendor would answer that at the last step.
+    pub(crate) fn performing_delegated_grant(mut self, grant: Arc<DelegatedGrant>) -> Self {
         self.delegated = Some(grant);
         self
     }
@@ -475,7 +567,7 @@ impl CredentialAcquirer for HttpCredentialAcquirer {
             ("code_verifier", redemption.verifier()),
             // Re-presented verbatim (RFC 6749 §4.1.3). It is the same value the authorization
             // request carried, from one `DelegatedGrant`, so the two cannot be two spellings.
-            ("redirect_uri", delegated.redirect_uri()),
+            ("redirect_uri", delegated.redirect().as_str()),
             ("client_id", delegated.client_id()),
         ];
         if let Some(secret) = delegated.client_secret.as_ref() {
@@ -728,12 +820,15 @@ mod tests {
             }),
         )
         .expect("babelforce performer");
-        let result = AcquisitionBindings::new([AcquisitionBinding::new(
-            "second",
-            "second.access_token",
-            Some(AuthHazard::ResourceOwnerSecretShared),
-            Arc::new(performer),
-        )]);
+        let result = AcquisitionBindings::new(
+            [AcquisitionBinding::new(
+                "second",
+                "second.access_token",
+                Some(AuthHazard::ResourceOwnerSecretShared),
+                Arc::new(performer),
+            )],
+            None,
+        );
         assert_eq!(
             result
                 .expect_err("babelforce behavior must be bound structurally")
@@ -786,9 +881,17 @@ mod tests {
         );
     }
 
-    fn delegated(redirect: &str) -> DelegatedGrant {
+    /// The one canonical spelling `crate::acquisition_redirect` admits, as a checked value.
+    fn redirect() -> AcquisitionRedirect {
+        AcquisitionRedirect::parse("https://exchange.example.test/api/acquisitions/callback")
+            .expect("a canonical redirect")
+    }
+
+    fn delegated(redirect: AcquisitionRedirect) -> DelegatedGrant {
         DelegatedGrant::new(
-            "http://vendor.invalid/oauth/authorize",
+            // A loopback literal, so the transport rule is the one that actually runs here rather
+            // than one a `cfg!(test)` escape switched off — see `DelegatedGrant::new`.
+            "http://127.0.0.1:9/oauth/authorize",
             "exchange-client",
             Some(Secret::new("client-secret-never-print-this")),
             ["read_api".to_owned(), "read_user".to_owned()],
@@ -808,7 +911,6 @@ mod tests {
                 .with_state(Arc::clone(&recorded)),
         )
         .await;
-        let redirect = "https://exchange.example.test/api/acquisitions/callback";
         // Bound with babelforce's measured quirks on purpose: the table on `TokenEndpointBehavior`
         // records that `authorization_code` is the grant that does not read `expires_in`, and a
         // quirk leaking into this form would be a lifetime the vendor silently ignores.
@@ -822,7 +924,7 @@ mod tests {
             }),
         )
         .expect("fixture binding")
-        .performing_delegated_grant(delegated(redirect));
+        .performing_delegated_grant(Arc::new(delegated(redirect())));
         let code = Secret::new("authorization-code");
         let verifier = Secret::new("the-code-verifier");
 
@@ -885,43 +987,153 @@ mod tests {
     /// The grant refuses a shape that could not work, at composition, naming what was wrong.
     #[test]
     fn a_delegated_grant_refuses_an_unusable_shape() {
-        let redirect = "https://exchange.example.test/api/acquisitions/callback";
+        let loopback = "http://127.0.0.1:9/oauth/authorize";
         for (why, result) in [
             (
                 "no scopes",
-                DelegatedGrant::new("http://v.invalid/a", "c", None, [], redirect),
+                DelegatedGrant::new(loopback, "c", None, [], redirect()),
             ),
             (
                 "a scope carrying the separator",
                 DelegatedGrant::new(
-                    "http://v.invalid/a",
+                    loopback,
                     "c",
                     None,
                     ["read_api read_user".to_owned()],
-                    redirect,
+                    redirect(),
                 ),
             ),
             (
                 "no client id",
-                DelegatedGrant::new("http://v.invalid/a", "", None, ["s".to_owned()], redirect),
-            ),
-            (
-                "no redirect",
-                DelegatedGrant::new("http://v.invalid/a", "c", None, ["s".to_owned()], ""),
+                DelegatedGrant::new(loopback, "", None, ["s".to_owned()], redirect()),
             ),
             (
                 "an endpoint that is not a URL",
-                DelegatedGrant::new("not-a-url", "c", None, ["s".to_owned()], redirect),
+                DelegatedGrant::new("not-a-url", "c", None, ["s".to_owned()], redirect()),
+            ),
+            // **The transport rule, now reachable from a test** (X-147 review, M4). It was behind
+            // `cfg!(test)`, so the one place it is written down was the one place nothing could
+            // drive it. Cleartext to a routable host puts `state` and the PKCE challenge on the
+            // wire and brings an authorization code back the same way.
+            (
+                "a cleartext endpoint that is not loopback",
+                DelegatedGrant::new(
+                    "http://vendor.example.test/oauth/authorize",
+                    "c",
+                    None,
+                    ["s".to_owned()],
+                    redirect(),
+                ),
             ),
         ] {
             assert!(result.is_err(), "admitted a delegated grant with {why}");
         }
 
-        let grant = delegated(redirect);
+        // And the two shapes that must still be admitted, or the rule above is one nobody can run
+        // a checkout against.
+        assert!(DelegatedGrant::new(
+            "https://vendor.example.test/oauth/authorize",
+            "c",
+            None,
+            ["s".to_owned()],
+            redirect(),
+        )
+        .is_ok());
+        assert!(
+            DelegatedGrant::new(loopback, "c", None, ["s".to_owned()], redirect()).is_ok(),
+            "a checkout's own loopback vendor fixture stays usable",
+        );
+
+        let grant = delegated(redirect());
         assert_eq!(grant.scope(), "read_api read_user");
         assert!(
             !format!("{grant:?}").contains("client-secret-never-print-this"),
             "a grant must not print the client secret it holds",
+        );
+    }
+
+    /// **B1's failing-first test.** A grant whose redirect is not the one this deployment configured
+    /// does not become a registry, so it can never reach a vendor.
+    ///
+    /// Both strings are canonical and both would pass every check
+    /// `crate::acquisition_redirect` makes on their own — which is the point. What is wrong with the
+    /// second is not its shape but that it is *not this deployment's*, and before this the only
+    /// thing standing between it and the vendor was that a fixture happened to spell both the same.
+    #[test]
+    fn a_grant_whose_redirect_is_not_this_deployments_is_refused_at_composition() {
+        let elsewhere =
+            AcquisitionRedirect::parse("https://other.example.test/api/acquisitions/callback")
+                .expect("a canonical redirect somewhere else");
+        assert_ne!(elsewhere, redirect());
+
+        let binding = || {
+            AcquisitionBinding::new(
+                "second",
+                "second.access_token",
+                None,
+                Arc::new(
+                    HttpCredentialAcquirer::new(
+                        "second",
+                        "https://vendor.example.test/token",
+                        TokenEndpointBehavior::Standard,
+                    )
+                    .expect("a standard performer"),
+                ),
+            )
+        };
+
+        assert_eq!(
+            AcquisitionBindings::new(
+                [binding().with_delegated_grant(delegated(elsewhere))],
+                Some(&redirect()),
+            )
+            .expect_err("a divergent redirect must not become a registry"),
+            "a delegated acquisition grant names a redirect URI that is not the one this \
+             deployment configured",
+        );
+
+        assert_eq!(
+            AcquisitionBindings::new(
+                [binding().with_delegated_grant(delegated(redirect()))],
+                None
+            )
+            .expect_err("a grant with no deployment redirect must not become a registry"),
+            "a delegated acquisition grant is bound and this deployment configured no acquisition \
+             redirect URI",
+        );
+
+        // The agreeing case, or the two refusals above would pass for a registry that refuses
+        // everything.
+        assert!(AcquisitionBindings::new(
+            [binding().with_delegated_grant(delegated(redirect()))],
+            Some(&redirect()),
+        )
+        .is_ok());
+    }
+
+    /// **The other half of B1**: one grant reaches the browser and the token endpoint, because
+    /// `delegating` sets both halves from one `Arc` and there is no second argument.
+    #[test]
+    fn one_arc_reaches_the_binding_and_the_performer_it_binds() {
+        let performer = HttpCredentialAcquirer::new(
+            "second",
+            "https://vendor.example.test/token",
+            TokenEndpointBehavior::Standard,
+        )
+        .expect("a standard performer");
+        let binding = AcquisitionBinding::delegating(
+            "second",
+            "second.access_token",
+            None,
+            delegated(redirect()),
+            performer,
+        );
+
+        let bound = binding.delegated().expect("the binding holds the grant");
+        assert_eq!(bound.redirect(), &redirect());
+        assert!(
+            AcquisitionBindings::new([binding], Some(&redirect())).is_ok(),
+            "and it agrees with the deployment it was composed against",
         );
     }
 

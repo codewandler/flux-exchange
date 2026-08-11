@@ -334,11 +334,28 @@ a connection they could rename or delete, and the UUID would have to be minted o
 a second registry keyed by principal, with its own staleness. The reserved-service level needs no
 registry: a person who never authorized simply has no address.
 
-What that costs, recorded rather than discovered: the delegated address is **not** projected by
-`GET /api/connections`, exactly as `exchange-acquisition`'s companions are not, so an operator cannot
-yet see which members hold one. The tenant-occupancy sum is likewise narrower on this route than on
-`POST /api/connections/{connector}` — it counts one connector's scope rather than every connector,
-because the wider sum needs the tenant-wide claim that route holds.
+What that costs, recorded rather than discovered:
+
+- The delegated address is **not** projected by `GET /api/connections`, exactly as
+  `exchange-acquisition`'s companions are not, so an operator cannot yet see which members hold one.
+- `DELETE /api/connections/{connector}` walks the connector's declared addresses and their
+  `exchange-acquisition` companions, so it does **not** destroy a delegated credential and answers
+  `204` while one survives. `DELETE /api/acquisitions/{connector}` closes the half with an obvious
+  answer — a person may always revoke their own, at an address nothing else can reach. What a
+  *tenant-level* disconnect should do to every member's delegated credentials is open, and is
+  entangled with the addressing question below.
+- The tenant-occupancy sum is narrower on this route than on `POST /api/connections/{connector}`: it
+  counts one connector's scope rather than every connector. The tenant claim is held across the read
+  and the write, so the X-25 race is closed; what remains is that the total is an under-count.
+
+### Still open: an allocated UUID instead of a derived digest
+
+The owner has proposed replacing the derived digest with an **allocated UUID plus a companion
+mapping committed in the same `SecretBatch`**, with a read-side index so an operator can see which
+members hold one. A UUID fits `validate_service_name`'s `[a-z0-9-]+` grammar with no upstream change,
+and it would answer the visibility gap above and give the tenant-level delete question something to
+enumerate. It is **not** implemented; the derivation is deliberately confined to
+`delegated_acquisition::delegated_service` so that swapping it is one function and a migration.
 
 ### `state`, PKCE, and what the callback may be
 
@@ -364,15 +381,36 @@ identity and cannot: the principal comes from the pending delegation, and the cl
 before any vendor is contacted and before the store is touched — the ordering `oidc::complete_admission`
 records, and the reason a callback this host did not open costs one map lookup.
 
-### The redirect URI
+### The redirect URI, and what "compared exactly" had to mean
 
 A new variable, `FLUX_EXCHANGE_ACQUISITION_REDIRECT_URI`, and deliberately not
 `FLUX_EXCHANGE_OIDC_REDIRECT_URI`: that one points at `/api/signin/callback` and is registered with
 the identity provider, while this one points at `/api/acquisitions/callback` and is registered with
-each vendor. "Compared exactly" is made checkable rather than intended — startup refuses any spelling
-a URL parser would normalise, so the string sent to the authorization endpoint and the string
-re-presented at the token endpoint cannot be two different strings, and neither is ever derived from
-a request's `Host` header.
+each vendor.
+
+The first implementation validated that variable thoroughly and then **sent a different string to the
+vendor** — the route read the configured value only to check it was present and composed the
+authorize URL from a composition argument checked for being non-empty. Every rule in
+`acquisition_redirect` guarded a string that never left the process, and no test could see it because
+one fixture spelled both the same. That is a control that only appears to exist, and it is worth
+recording because the shape is generic: *a check on one copy of a value is not a check on the copy
+that travels.*
+
+Four things now make it true, and none is a comment:
+
+1. **`AcquisitionRedirect` is a newtype with one constructor**, which runs the canonical check. There
+   is no `String` path into a redirect field anywhere in the composition.
+2. **Startup refuses any spelling a URL parser would normalise**, so there is one spelling per
+   deployment and byte equality is a usable comparison.
+3. **`AcquisitionBindings::new` takes the deployment's redirect and refuses** a bound grant that is
+   not byte-equal to it. Every registry passes through it, so a binding that disagrees with its
+   deployment cannot be constructed.
+4. **`AcquisitionBinding::delegating` sets the browser-facing half and the back-channel half from one
+   `Arc`**, so the performer that re-presents the redirect at the token endpoint holds the same value
+   the authorization URL carried, rather than a second argument that happens to match.
+
+The value the route sends is `AppState::acquisition_redirect` — the deployment's own — and it is
+never derived from a request's `Host` header, which a caller controls.
 
 ### What still waits on the 0.21 connector line
 

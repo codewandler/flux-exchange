@@ -1,8 +1,9 @@
 //! Delegated credential acquisition over HTTP: the redirect out, and the callback back.
 //!
 //! ```text
-//! POST /api/acquisitions/{connector}/authorize   open one delegated authorization
-//! GET  /api/acquisitions/callback                the vendor's redirect back
+//! POST   /api/acquisitions/{connector}/authorize   open one delegated authorization
+//! DELETE /api/acquisitions/{connector}             revoke the one you authorized
+//! GET    /api/acquisitions/callback                the vendor's redirect back
 //! ```
 //!
 //! # What this is, and how it differs from `POST /api/connections/{connector}`
@@ -54,7 +55,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post, MethodRouter};
+use axum::routing::{delete, get, post, MethodRouter};
 use axum::{Extension, Json};
 use connector_catalog::{Provider, ProviderKey};
 use exchange_host::{
@@ -93,6 +94,17 @@ pub(super) const MODULE: Module = Module {
             method_router: authorize_route,
         },
         Route {
+            // **Revoking your own delegated credential**, and a `User` for the same reason the
+            // route above is. A delegated credential is addressed to one principal and nothing
+            // else can reach it, so this route needs no target and takes none: it destroys the
+            // caller's own and cannot be pointed at anybody else's. That is what makes it safe to
+            // be a `User` route rather than an `Operator` one — there is no other member's state
+            // in reach to destroy.
+            path: "/api/acquisitions/{connector}",
+            access: Access::User,
+            method_router: revoke_route,
+        },
+        Route {
             path: CALLBACK_PATH,
             access: Access::Anonymous,
             method_router: callback_route,
@@ -105,8 +117,97 @@ fn authorize_route() -> MethodRouter<AppState> {
     post(authorize)
 }
 
+fn revoke_route() -> MethodRouter<AppState> {
+    delete(revoke)
+}
+
 fn callback_route() -> MethodRouter<AppState> {
     get(callback)
+}
+
+/// Destroy the caller's own delegated credential for one connector.
+///
+/// # Why this route exists (X-147 review, M1)
+///
+/// Because without it a delegated credential could not be destroyed at all.
+/// `DELETE /api/connections/{connector}` walks the connector's *declared* addresses and the
+/// `exchange-acquisition` companions beside them; a delegated credential lives under a reserved
+/// per-principal service that route knows nothing about, so it answered `204` while the credential
+/// survived — on the route whose own documentation says the case it exists for is revoking a leaked
+/// secret.
+///
+/// **What this does not answer** is what a *tenant-level* disconnect should do to the delegated
+/// credentials of every member — destroy them, refuse while any exist, or leave them. That is a
+/// design decision entangled with the addressing question the owner has reopened, and it is recorded
+/// on the story rather than guessed at here. This route closes the half that has one obvious answer:
+/// a person may always revoke their own.
+///
+/// Idempotent, and answers the same either way: whether this principal held one is a fact about
+/// them, and a `404` that distinguished it would let one member probe for another's by timing
+/// nothing — but more simply, "it is gone" is the true answer in both cases.
+async fn revoke(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(connector): Path<String>,
+) -> Response {
+    let Some(provider) = catalogued(&connector) else {
+        return refuse(
+            StatusCode::NOT_FOUND,
+            format!("no connector `{connector}` is in this host's catalogue"),
+            "unknown_connector",
+            json!({ "connector": connector }),
+        );
+    };
+    let Some(binding) = state.acquisitions().get(provider.id) else {
+        return not_delegable(provider);
+    };
+    let Some(store) = state.credentials().cloned() else {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this host has no credential store bound",
+            "no_credential_store",
+            json!({ "connector": provider.id }),
+        );
+    };
+    let writes = match delegated_writes(principal.clone(), provider, binding.credential()) {
+        Ok(writes) => writes,
+        Err(refusal) => return delegation_refused(provider, &refusal),
+    };
+
+    // One batch, so a revocation cannot leave a refresh token behind that still renews at the
+    // vendor. `delete` is idempotent in the store contract, so this is the same batch whether or
+    // not the caller held one.
+    let mut batch = SecretBatch::new(writes.scope.clone());
+    for reference in [
+        writes.access.clone(),
+        writes.refresh.clone(),
+        writes.expiry.clone(),
+        writes.managed.clone(),
+    ] {
+        if let Err(reason) = batch.delete(reference) {
+            error!(connector = provider.id, %reason, "a delegated revocation batch could not be assembled");
+            return refuse(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "this host could not assemble the revocation",
+                "revocation_unavailable",
+                json!({ "connector": provider.id }),
+            );
+        }
+    }
+    if let Err(error) = store.apply(&batch).await {
+        error!(%error, connector = provider.id, "a delegated credential could not be revoked");
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this host's credential store refused the revocation",
+            "revocation_unavailable",
+            json!({ "connector": provider.id }),
+        );
+    }
+    if let Some(channels) = state.channels() {
+        channels.restart(principal.tenant(), provider.id);
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// Open one delegated authorization and tell the console where to send the person.
@@ -137,9 +238,15 @@ async fn authorize(
     if let Err(refusal) = admit_hazard(&state, provider, binding) {
         return *refusal;
     }
-    if state.acquisition_redirect().is_none() {
+    // **The deployment's own value, and the one that goes to the vendor.** Not `grant.redirect()`:
+    // X-147's first review found this route reading the configured value for presence and then
+    // sending a composition argument, so every check in `crate::acquisition_redirect` guarded a
+    // string that never left the process. `AcquisitionBindings::new` has already refused any grant
+    // whose redirect is not byte-equal to this, so the two cannot differ — and this is the one that
+    // travels, so if they ever could, the vendor would be told the deployment's.
+    let Some(redirect) = state.acquisition_redirect() else {
         return delegation_refused(provider, &DelegationRefusal::NoRedirectUri);
-    }
+    };
 
     // Derived before anything is drawn or remembered, so a principal whose delegated credential
     // could never be addressed is refused with no state opened and nothing planted.
@@ -155,9 +262,6 @@ async fn authorize(
         }
     };
 
-    // One `DelegatedGrant`, so the `redirect_uri` here and the one the token request re-presents are
-    // the same bytes; `crate::acquisition_redirect` refuses at startup any spelling a URL parser
-    // would rewrite, which is what makes "compared exactly" a property rather than an intention.
     let separator = if grant.authorization_endpoint().contains('?') {
         '&'
     } else {
@@ -173,7 +277,7 @@ async fn authorize(
          &code_challenge_method={method}",
         endpoint = grant.authorization_endpoint(),
         client_id = urlencoded(grant.client_id()),
-        redirect_uri = urlencoded(grant.redirect_uri()),
+        redirect_uri = urlencoded(redirect.as_str()),
         scope = urlencoded(&grant.scope()),
         state_parameter = begun.state,
         challenge = begun.challenge.as_str(),
@@ -198,8 +302,15 @@ async fn authorize(
 /// What a vendor puts in the redirect back.
 ///
 /// `code` is optional because a person who declines consent is redirected here with `error` and no
-/// code. Neither field is ever echoed back or logged: `error` is the vendor's own words about a
-/// person's decision, and a code is a bearer credential.
+/// code. Neither field is ever echoed back to a caller or written to a log by anything in this
+/// module: `error` is the vendor's own words about a person's decision, and a code is a bearer
+/// credential.
+///
+/// **That claim covers this module, and it needed the request span to be made true** (X-147 review,
+/// M5). `TraceLayer`'s default span records the whole URI, query included, so at `debug` these two
+/// fields were written to the log by the layer rather than by any handler —
+/// `crate::routes::path_only_span` is what stopped that, and
+/// `crate::routes::tests::no_query_string_reaches_a_request_span` is what keeps it stopped.
 #[derive(Deserialize)]
 struct Callback {
     state: Option<String>,
@@ -323,6 +434,22 @@ async fn complete(state: &AppState, pending: PendingDelegation, code: &str) -> R
         + refresh_token.as_ref().map_or(0, stored_bytes)
         + expiry.as_ref().map_or(0, stored_bytes)
         + MANAGED_VALUE.len();
+
+    // **The tenant claim, held across the read and the write it makes stale** (X-147 review, M2).
+    // Occupancy is a sum over what a tenant holds, so two of its members finishing an
+    // authorization at once each read a total the other has not written yet and both are admitted —
+    // which is exactly the X-25 defect `crate::routes::connections` documents on its own claim.
+    // Taken *after* the vendor has answered, deliberately: the redemption is the slow part and a
+    // claim held across it would serialise one tenant's members on a network round trip.
+    let Some(_allowance) = state
+        .connections()
+        .claim_tenant(pending.principal().tenant())
+    else {
+        return finished_refusal(
+            "another change to this tenant's connections is in flight; the vendor authorized this \
+             connection but it was not stored — start the connection again",
+        );
+    };
     let held_bytes = match occupied_scope(&store, &writes.scope).await {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -602,7 +729,10 @@ mod tests {
     };
     use tower::ServiceExt as _;
 
-    use crate::credential_acquisition::{AcquisitionBindings, DelegatedGrant};
+    use crate::acquisition_redirect::AcquisitionRedirect;
+    use crate::credential_acquisition::{
+        AcquisitionBindings, DelegatedGrant, HttpCredentialAcquirer, TokenEndpointBehavior,
+    };
     use crate::delegated_acquisition::BINDER_COOKIE;
     use crate::dev_identity::DevIdentity;
     use crate::routes::app;
@@ -612,6 +742,11 @@ mod tests {
     /// This deployment's configured redirect, in the one canonical spelling
     /// `crate::acquisition_redirect` admits.
     const REDIRECT: &str = "http://127.0.0.1:3000/api/acquisitions/callback";
+
+    /// [`REDIRECT`] as the checked value every holder of one carries.
+    fn redirect() -> AcquisitionRedirect {
+        AcquisitionRedirect::parse(REDIRECT).expect("a canonical redirect")
+    }
 
     /// A scratch directory holding a real file-backed store, removed on drop.
     ///
@@ -682,6 +817,48 @@ mod tests {
         }
     }
 
+    /// A local token endpoint that records the form it was sent and answers one token.
+    ///
+    /// A real endpoint rather than a double, because the claim under test is about the bytes that
+    /// leave this process through `HttpCredentialAcquirer`'s own client.
+    async fn serve_token_endpoint(
+        recorded: Arc<Mutex<Vec<String>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::body::Bytes;
+        use axum::routing::post;
+        use axum::Router;
+
+        async fn record(
+            axum::extract::State(recorded): axum::extract::State<Arc<Mutex<Vec<String>>>>,
+            body: Bytes,
+        ) -> (StatusCode, &'static str) {
+            recorded
+                .lock()
+                .expect("recorder")
+                .push(String::from_utf8_lossy(&body).into_owned());
+            (
+                StatusCode::OK,
+                r#"{"access_token":"DELEGATED-ACCESS-NOT-A-REAL-SECRET","refresh_token":"DELEGATED-REFRESH-NOT-A-REAL-SECRET","expires_in":3600}"#,
+            )
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a fixture token endpoint");
+        let address = listener.local_addr().expect("a fixture address");
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/token", post(record))
+                    .with_state(recorded),
+            )
+            .await
+            .expect("serve the fixture token endpoint");
+        });
+        (format!("http://{address}/token"), task)
+    }
+
     fn gitlab() -> &'static Provider {
         catalogued("gitlab").expect("the catalogue declares gitlab")
     }
@@ -703,11 +880,11 @@ mod tests {
     /// on the fail-closed posture.
     fn composed(codes: &Arc<Mutex<Vec<String>>>, store: &CredentialStore) -> AppState {
         let grant = DelegatedGrant::new(
-            "http://vendor.invalid/oauth/authorize",
+            "http://127.0.0.1:9/oauth/authorize",
             "exchange-client",
             None,
             ["read_api".to_owned()],
-            REDIRECT,
+            redirect(),
         )
         .expect("a delegated grant");
         let binding = AcquisitionBinding::new(
@@ -726,10 +903,10 @@ mod tests {
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         ))
         .with_credentials(store.secrets())
-        .with_acquisition_redirect(REDIRECT)
+        .with_acquisition_redirect(redirect())
         .with_credential_acquisition(
             AuthPosture::fail_closed(),
-            Arc::new(AcquisitionBindings::new([binding]).expect("one binding")),
+            Arc::new(AcquisitionBindings::new([binding], Some(&redirect())).expect("one binding")),
         )
     }
 
@@ -1037,7 +1214,7 @@ mod tests {
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         ))
-        .with_acquisition_redirect(REDIRECT)
+        .with_acquisition_redirect(redirect())
         .with_credential_acquisition(
             AuthPosture::fail_closed(),
             Arc::new(AcquisitionBindings::default()),
@@ -1049,45 +1226,300 @@ mod tests {
         assert_eq!(state.pending_delegations().open(), 0);
     }
 
-    /// A deployment that bound a grant and configured no redirect refuses by name rather than
+    /// A deployment that bound a grant and gave the state no redirect refuses by name rather than
     /// deriving one from the request's `Host` header, which is a value a caller controls.
+    ///
+    /// Since the B1 rework, `AcquisitionBindings::new` refuses a delegated grant outright when the
+    /// deployment configured none, so the only way to reach this route's guard at all is a
+    /// composition that built its registry against a redirect and then did not hand the same one to
+    /// the state. That is a narrow residual and the guard stays for it: the alternative to refusing
+    /// is a route that answers with a `redirect_uri` it made up.
     #[tokio::test]
     async fn an_unconfigured_redirect_refuses_rather_than_being_derived() {
         let codes = Arc::new(Mutex::new(Vec::new()));
         let scratch = Scratch::new();
         let store = scratch.store();
         let grant = DelegatedGrant::new(
-            "http://vendor.invalid/oauth/authorize",
+            "http://127.0.0.1:9/oauth/authorize",
             "exchange-client",
             None,
             ["read_api".to_owned()],
-            REDIRECT,
+            redirect(),
         )
         .expect("a delegated grant");
+        let binding = AcquisitionBinding::new(
+            gitlab().id,
+            bound_credential(),
+            None,
+            Arc::new(RecordingPerformer {
+                codes: Arc::clone(&codes),
+            }),
+        )
+        .with_delegated_grant(grant);
+
+        // First: the composition-level refusal, which is the one that now catches this.
+        assert!(
+            AcquisitionBindings::new([binding.clone()], None).is_err(),
+            "a delegated grant with no deployment redirect must not become a registry",
+        );
+
+        // Then the route's own guard, reached the only way that is left.
         let state = AppState::with_development_identity(Arc::new(
             DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
         ))
         .with_credentials(store.secrets())
         .with_credential_acquisition(
             AuthPosture::fail_closed(),
-            Arc::new(
-                AcquisitionBindings::new([AcquisitionBinding::new(
-                    gitlab().id,
-                    bound_credential(),
-                    None,
-                    Arc::new(RecordingPerformer {
-                        codes: Arc::clone(&codes),
-                    }),
-                )
-                .with_delegated_grant(grant)])
-                .expect("one binding"),
-            ),
+            Arc::new(AcquisitionBindings::new([binding], Some(&redirect())).expect("one binding")),
         );
 
         let (status, body, _) = authorize_as(&state, "alice").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert!(body.contains("redirect_uri_unconfigured"), "{body}");
         assert_eq!(state.pending_delegations().open(), 0);
+    }
+
+    /// **B1, end to end: the string the vendor is redirected with is the string the token request
+    /// re-presents, and both are the deployment's.**
+    ///
+    /// The composition checks (`AcquisitionBindings::new`, `AcquisitionBinding::delegating`) make
+    /// divergence unconstructible; this drives the whole path with a **real**
+    /// `HttpCredentialAcquirer` against a recording token endpoint and compares the two strings that
+    /// actually left the process. Before the rework the authorize URL carried a composition argument
+    /// and the configured value reached no vendor at all, and no test could see it because one
+    /// fixture spelled both the same — so this compares them against
+    /// `AppState::acquisition_redirect`, the deployment's own value, rather than against a constant.
+    #[tokio::test]
+    async fn the_redirect_the_vendor_is_sent_is_the_one_the_token_request_re_presents() {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let (token_endpoint, task) = serve_token_endpoint(Arc::clone(&recorded)).await;
+        let scratch = Scratch::new();
+        let store = scratch.store();
+
+        let grant = DelegatedGrant::new(
+            "http://127.0.0.1:9/oauth/authorize",
+            "exchange-client",
+            None,
+            ["read_api".to_owned()],
+            redirect(),
+        )
+        .expect("a delegated grant");
+        // `delegating` is what binds the browser-facing half and the back-channel half from one
+        // `Arc`. There is no second argument here to spell differently.
+        let binding = AcquisitionBinding::delegating(
+            gitlab().id,
+            bound_credential(),
+            None,
+            grant,
+            HttpCredentialAcquirer::new(
+                gitlab().id,
+                &token_endpoint,
+                TokenEndpointBehavior::Standard,
+            )
+            .expect("a real HTTP performer"),
+        );
+        let state = AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+        ))
+        .with_credentials(store.secrets())
+        .with_acquisition_redirect(redirect())
+        .with_credential_acquisition(
+            AuthPosture::fail_closed(),
+            Arc::new(AcquisitionBindings::new([binding], Some(&redirect())).expect("one binding")),
+        );
+
+        let (status, body, cookies) = authorize_as(&state, "alice").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let answered: Value = serde_json::from_str(&body).expect("a JSON answer");
+        let authorize_url = answered["authorize_url"]
+            .as_str()
+            .expect("an authorize URL");
+        let sent_to_browser = authorize_url
+            .split("&redirect_uri=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .expect("the authorize URL carries a redirect_uri");
+        let state_parameter = authorize_url
+            .split("&state=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .expect("the authorize URL carries a state");
+        let binder = cookies
+            .iter()
+            .find(|cookie| cookie.starts_with(&format!("{BINDER_COOKIE}=")))
+            .and_then(|cookie| cookie.split_once('='))
+            .and_then(|(_, rest)| rest.split(';').next())
+            .expect("a binder");
+
+        let (status, page) = callback_request(
+            &state,
+            &format!("state={state_parameter}&code=THE-CODE"),
+            Some(binder),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+
+        let forms = recorded.lock().expect("recorder");
+        let form = forms.first().expect("one token request reached the vendor");
+        let re_presented = form
+            .split("redirect_uri=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .expect("the token request carries a redirect_uri");
+
+        // The deployment's own configured value, and nothing composed beside it.
+        let configured = state
+            .acquisition_redirect()
+            .expect("this deployment configured one");
+        assert_eq!(
+            sent_to_browser,
+            urlencoded(configured.as_str()),
+            "the authorize URL must carry the redirect this deployment configured",
+        );
+        assert_eq!(
+            re_presented,
+            urlencoded(configured.as_str()),
+            "and the token request must re-present the same bytes (RFC 6749 §4.1.3)",
+        );
+        assert_eq!(
+            sent_to_browser, re_presented,
+            "the two strings that left this process must be one string",
+        );
+        task.abort();
+    }
+
+    /// **M1: a delegated credential can be destroyed by the person who authorized it**, and the
+    /// revocation takes its refresh token with it.
+    ///
+    /// Before this route there was no surface that could delete one at all:
+    /// `DELETE /api/connections/{connector}` walks declared addresses and `exchange-acquisition`
+    /// companions, so it answered `204` while the delegated credential and a live refresh token
+    /// survived. The second half of this test is the part that matters — a revocation that left the
+    /// refresh token behind would leave something that still renews at the vendor.
+    #[tokio::test]
+    async fn a_person_can_revoke_the_delegated_credential_they_authorized() {
+        let codes = Arc::new(Mutex::new(Vec::new()));
+        let scratch = Scratch::new();
+        let store = scratch.store();
+        let state = composed(&codes, &store);
+
+        // Authorize, so there is something to revoke.
+        let (status, body, cookies) = authorize_as(&state, "alice").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let answered: Value = serde_json::from_str(&body).expect("a JSON answer");
+        let authorize_url = answered["authorize_url"]
+            .as_str()
+            .expect("an authorize URL");
+        let state_parameter = authorize_url
+            .split("&state=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .expect("a state");
+        let binder = cookies
+            .iter()
+            .find(|cookie| cookie.starts_with(&format!("{BINDER_COOKIE}=")))
+            .and_then(|cookie| cookie.split_once('='))
+            .and_then(|(_, rest)| rest.split(';').next())
+            .expect("a binder");
+        let (status, _) = callback_request(
+            &state,
+            &format!("state={state_parameter}&code=THE-CODE"),
+            Some(binder),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let hers = crate::delegated_acquisition::delegated_address(
+            &member("alice"),
+            gitlab().authority.expect("gitlab declares an authority"),
+            gitlab().auth[0].leaf,
+        )
+        .expect("an address");
+        let companions =
+            crate::delegated_acquisition::delegated_companions(&hers).expect("companions");
+        let secrets = store.secrets();
+        assert!(secrets.get(&hers).await.is_ok(), "it is held before");
+        assert!(secrets.get(&companions.refresh).await.is_ok());
+
+        let response = app(state.clone())
+            .oneshot(
+                HttpRequest::builder()
+                    .method(Method::DELETE)
+                    .uri("/api/acquisitions/gitlab")
+                    .header(header::AUTHORIZATION, "Bearer alice")
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("a response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        assert!(
+            secrets.get(&hers).await.is_err_and(|e| e.is_not_found()),
+            "the access token is gone",
+        );
+        assert!(
+            secrets
+                .get(&companions.refresh)
+                .await
+                .is_err_and(|e| e.is_not_found()),
+            "and so is the refresh token — a revocation that left one behind would leave something \
+             that still renews at the vendor",
+        );
+        assert!(secrets
+            .get(&companions.expiry)
+            .await
+            .is_err_and(|e| e.is_not_found()));
+        assert!(secrets
+            .get(&companions.managed)
+            .await
+            .is_err_and(|e| e.is_not_found()));
+    }
+
+    /// Revoking is idempotent, and one member's revocation does not reach another's.
+    #[tokio::test]
+    async fn a_revocation_is_idempotent_and_reaches_only_the_callers_own() {
+        let codes = Arc::new(Mutex::new(Vec::new()));
+        let scratch = Scratch::new();
+        let store = scratch.store();
+        let state = composed(&codes, &store);
+        let secrets = store.secrets();
+
+        // Bob holds one; Alice has never authorized.
+        let bobs = crate::delegated_acquisition::delegated_address(
+            &member("bob"),
+            gitlab().authority.expect("an authority"),
+            gitlab().auth[0].leaf,
+        )
+        .expect("an address");
+        secrets
+            .put(&bobs, &Secret::new("BOBS-DELEGATED-TOKEN"))
+            .await
+            .expect("a placed fixture credential");
+
+        for _ in 0..2 {
+            let response = app(state.clone())
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(Method::DELETE)
+                        .uri("/api/acquisitions/gitlab")
+                        .header(header::AUTHORIZATION, "Bearer alice")
+                        .body(Body::empty())
+                        .expect("a request"),
+                )
+                .await
+                .expect("a response");
+            assert_eq!(
+                response.status(),
+                StatusCode::NO_CONTENT,
+                "revoking what you do not hold is the same answer as revoking what you do",
+            );
+        }
+
+        assert!(
+            secrets.get(&bobs).await.is_ok(),
+            "Alice's revocation must not reach Bob's delegated credential",
+        );
     }
 
     /// The address a delegated credential lands at is under a service no connector can declare, and

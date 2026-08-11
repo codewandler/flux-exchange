@@ -9351,12 +9351,15 @@ mod tests {
                 refresh_calls: Arc::clone(&refresh_calls),
                 refusal,
             });
-            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
-                "babelforce",
-                "babelforce.access_token",
-                Some(AuthHazard::ResourceOwnerSecretShared),
-                performer,
-            )])
+            let bindings = AcquisitionBindings::new(
+                [AcquisitionBinding::new(
+                    "babelforce",
+                    "babelforce.access_token",
+                    Some(AuthHazard::ResourceOwnerSecretShared),
+                    performer,
+                )],
+                None,
+            )
             .expect("one acquisition binding");
             let mut state = AppState::with_development_identity(Arc::new(
                 DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
@@ -9742,12 +9745,15 @@ mod tests {
 
             let scratch = Scratch::new();
             let store = scratch.store();
-            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
-                "babelforce",
-                "babelforce.access_token",
-                Some(AuthHazard::ResourceOwnerSecretShared),
-                Arc::new(AccessOnly),
-            )])
+            let bindings = AcquisitionBindings::new(
+                [AcquisitionBinding::new(
+                    "babelforce",
+                    "babelforce.access_token",
+                    Some(AuthHazard::ResourceOwnerSecretShared),
+                    Arc::new(AccessOnly),
+                )],
+                None,
+            )
             .expect("one acquisition binding");
             let app = super::super::super::app(
                 AppState::with_development_identity(Arc::new(
@@ -9867,12 +9873,15 @@ mod tests {
                 refresh_calls: Arc::new(AtomicU64::new(0)),
                 refusal: None,
             });
-            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
-                "babelforce",
-                "babelforce.access_token",
-                Some(AuthHazard::ResourceOwnerSecretShared),
-                performer,
-            )])
+            let bindings = AcquisitionBindings::new(
+                [AcquisitionBinding::new(
+                    "babelforce",
+                    "babelforce.access_token",
+                    Some(AuthHazard::ResourceOwnerSecretShared),
+                    performer,
+                )],
+                None,
+            )
             .expect("one acquisition binding");
             let journal = Arc::new(
                 crate::audit::AuditJournal::bind(scratch.0.join("refresh-audit.sqlite3"))
@@ -9973,12 +9982,15 @@ mod tests {
                 refresh_calls: Arc::new(AtomicU64::new(0)),
                 refusal: None,
             });
-            let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
-                "babelforce",
-                "babelforce.access_token",
-                Some(AuthHazard::ResourceOwnerSecretShared),
-                performer,
-            )])
+            let bindings = AcquisitionBindings::new(
+                [AcquisitionBinding::new(
+                    "babelforce",
+                    "babelforce.access_token",
+                    Some(AuthHazard::ResourceOwnerSecretShared),
+                    performer,
+                )],
+                None,
+            )
             .expect("one acquisition binding");
             let app = super::super::super::app(
                 AppState::with_development_identity(Arc::new(
