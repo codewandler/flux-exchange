@@ -72,7 +72,7 @@ jobs:
         # promotes to errors, so a floating CI toolchain breaks on code that is clean locally. To
         # bump it, change it here and in `crates-io.yml` together, run clippy and fmt locally on that
         # same version, fix, commit.
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           # `master` above pins the action's *code* to a commit; the toolchain the tag used to encode
           # is an explicit — and, at this SHA, required — input.
@@ -153,7 +153,7 @@ jobs:
       - name: Install the declared MSRV toolchain
         # Same action and same pin as `check` above. No `components`: this job neither lints nor
         # formats, and clippy's output on an old toolchain is not something we act on.
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
@@ -208,7 +208,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install Rust toolchain for the native target
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.97.0"
           targets: ${{ matrix.target }}
@@ -288,7 +288,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.97.0"
 
@@ -389,7 +389,7 @@ jobs:
           ./scripts/check-publication-readiness.sh --self-test
 
       - name: Install release-verifier toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.97.0"
 
