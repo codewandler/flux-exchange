@@ -14,6 +14,7 @@ use crate::channel::ChannelSupervisor;
 use crate::connection_guard::{Claim, ConnectionGuard};
 use crate::credential_acquisition::AcquisitionBindings;
 use crate::credential_head::CredentialHeadStore;
+use crate::delegated_acquisition::PendingDelegations;
 use crate::dev_identity::DevIdentity;
 use crate::local_identity::LocalUsers;
 use crate::local_management::TransactionCoordinator;
@@ -56,6 +57,20 @@ pub struct AppState {
     auth_posture: AuthPosture,
     /// Explicit server bindings for released connector acquisition declarations.
     acquisitions: Arc<AcquisitionBindings>,
+    /// The startup-validated redirect URI a vendor returns a delegated authorization to.
+    ///
+    /// Deployment configuration and never connector data — `crate::acquisition_redirect` carries
+    /// that argument. `None` is a composition that configured none, and
+    /// `POST /api/acquisitions/{connector}/authorize` refuses by name rather than deriving one from
+    /// a request's `Host` header, which is a value a caller controls.
+    acquisition_redirect: Option<Arc<str>>,
+    /// The delegated authorizations this host has opened and not yet finished.
+    ///
+    /// Shared across every clone of this state, for [`connections`](Self::connections)' reason:
+    /// `AppState` is the only thing every request holds a handle to, and the authorize leg and the
+    /// callback are two requests that have to meet. Not an `Option` — an empty store costs nothing
+    /// and every route that reaches it already refuses when no delegated grant is bound.
+    pending_delegations: Arc<PendingDelegations>,
     /// Where a tenant's **non-secret** connection values are kept, as the port.
     ///
     /// A separate binding from [`credentials`](Self::credentials) and a separate store behind it,
@@ -263,6 +278,8 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            acquisition_redirect: None,
+            pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -300,6 +317,8 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            acquisition_redirect: None,
+            pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -334,6 +353,8 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            acquisition_redirect: None,
+            pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -370,6 +391,8 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            acquisition_redirect: None,
+            pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -407,6 +430,8 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            acquisition_redirect: None,
+            pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -441,6 +466,8 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            acquisition_redirect: None,
+            pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
             connection_registry: None,
@@ -620,6 +647,32 @@ impl AppState {
     /// Explicit connector acquisition bindings available to this composition.
     pub fn acquisitions(&self) -> &Arc<AcquisitionBindings> {
         &self.acquisitions
+    }
+
+    /// Bind this deployment's startup-validated acquisition redirect URI.
+    ///
+    /// A separate builder from [`with_credential_acquisition`](Self::with_credential_acquisition)
+    /// because it is a different kind of fact: the bindings say what this composition can perform,
+    /// and this says where this deployment is reachable. A composition can legitimately have one
+    /// without the other — a delegated grant bound with no redirect configured refuses by name,
+    /// which is the failure an operator can act on.
+    pub fn with_acquisition_redirect(mut self, redirect: impl Into<Arc<str>>) -> Self {
+        self.acquisition_redirect = Some(redirect.into());
+        self
+    }
+
+    /// This deployment's acquisition redirect URI, exactly as configured.
+    ///
+    /// Never derived from a request. `crate::acquisition_redirect` carries why, and refuses at
+    /// startup any spelling that is not already canonical, so what a route sends to a vendor and
+    /// what the token request re-presents cannot be two different strings.
+    pub fn acquisition_redirect(&self) -> Option<&str> {
+        self.acquisition_redirect.as_deref()
+    }
+
+    /// The delegated authorizations this host has opened and not yet finished.
+    pub fn pending_delegations(&self) -> &Arc<PendingDelegations> {
+        &self.pending_delegations
     }
 
     /// Bind the connection-settings store this composition holds.

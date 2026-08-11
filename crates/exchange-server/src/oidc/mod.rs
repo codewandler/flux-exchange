@@ -372,7 +372,11 @@ impl Identity for Oidc {
 /// Applied to the configured values that go into the authorization URL. They are an operator's, not
 /// a caller's, so this is not a defence against injection — it is what makes a client id containing
 /// a `&` work rather than silently truncating the query at the provider.
-fn urlencoded(raw: &str) -> String {
+///
+/// `pub(crate)` since X-147: the delegated acquisition composes the *other* authorization URL this
+/// host builds, and a second encoder would be a second place for the unreserved set to drift. That
+/// set is what decides whether a redirect URI arrives at the provider intact.
+pub(crate) fn urlencoded(raw: &str) -> String {
     let mut encoded = String::with_capacity(raw.len());
 
     for byte in raw.bytes() {

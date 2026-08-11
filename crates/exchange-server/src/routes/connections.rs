@@ -927,7 +927,7 @@ async fn create_acquired_connection(
             "this connector has no released credential-acquisition declaration bound",
         );
     };
-    if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+    if let Err(refusal) = binding.admit(state.auth_posture()) {
         return auth_posture_refused(&refusal);
     }
 
@@ -1065,7 +1065,7 @@ async fn refresh_acquired_connection(
             "refresh must name the acquired access credential",
         );
     }
-    if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+    if let Err(refusal) = binding.admit(state.auth_posture()) {
         return auth_posture_refused(&refusal);
     }
     let declared = declared_credentials(provider);
@@ -2410,7 +2410,7 @@ async fn create_instance(
                 "this connector has no released credential-acquisition declaration bound",
             );
         };
-        if let Err(refusal) = state.auth_posture().admit(provider.id, binding.hazard()) {
+        if let Err(refusal) = binding.admit(state.auth_posture()) {
             return auth_posture_refused(&refusal);
         }
         let reference =
@@ -9354,7 +9354,7 @@ mod tests {
             let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
                 "babelforce",
                 "babelforce.access_token",
-                AuthHazard::ResourceOwnerSecretShared,
+                Some(AuthHazard::ResourceOwnerSecretShared),
                 performer,
             )])
             .expect("one acquisition binding");
@@ -9745,7 +9745,7 @@ mod tests {
             let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
                 "babelforce",
                 "babelforce.access_token",
-                AuthHazard::ResourceOwnerSecretShared,
+                Some(AuthHazard::ResourceOwnerSecretShared),
                 Arc::new(AccessOnly),
             )])
             .expect("one acquisition binding");
@@ -9870,7 +9870,7 @@ mod tests {
             let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
                 "babelforce",
                 "babelforce.access_token",
-                AuthHazard::ResourceOwnerSecretShared,
+                Some(AuthHazard::ResourceOwnerSecretShared),
                 performer,
             )])
             .expect("one acquisition binding");
@@ -9976,7 +9976,7 @@ mod tests {
             let bindings = AcquisitionBindings::new([AcquisitionBinding::new(
                 "babelforce",
                 "babelforce.access_token",
-                AuthHazard::ResourceOwnerSecretShared,
+                Some(AuthHazard::ResourceOwnerSecretShared),
                 performer,
             )])
             .expect("one acquisition binding");

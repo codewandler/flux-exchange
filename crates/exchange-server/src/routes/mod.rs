@@ -14,6 +14,7 @@
 //! routes as data and its `Router` is *derived* from them, so [`published`] is the whole surface by
 //! construction. The seam is the same; only the direction of the dependency changed.
 
+mod acquisitions;
 mod apps;
 pub(crate) mod catalogue;
 mod channels;
@@ -63,6 +64,7 @@ const MODULES: &[Module] = &[
     identity::MODULE,
     signin::MODULE,
     connections::MODULE,
+    acquisitions::MODULE,
     service_accounts::MODULE,
     invoke::MODULE,
     local_management_frames::MODULE,
@@ -1319,6 +1321,29 @@ mod tests {
             // secret to the verifier-backed identity, is globally rate-limited with sign-in, and
             // answers wrong-user and wrong-secret identically.
             ("signin", "/api/signin/local"),
+            // The delegated credential acquisition's callback. X-147's widening, and the one that
+            // needed the most argument on this list, because it is the only anonymous route that
+            // **mints tenant authority**: it finishes with a vendor credential written into a
+            // tenant's store.
+            //
+            // It has to be anonymous for the reason the sign-in callback does, and more strongly.
+            // The browser arrives mid-redirect from the vendor's origin, and the session cookie is
+            // `SameSite=Strict` — so it is *not sent* on that navigation, whatever the caller
+            // holds. A guarded declaration here would refuse every real vendor redirect and pass
+            // only in a test that forged the cookie: a control that appears to exist, which this
+            // repository refuses elsewhere for the same reason.
+            //
+            // What keeps it from being a hole is that it reads **no caller identity, and cannot**.
+            // The principal the credential is addressed to was recorded when a signed-in human
+            // opened the authorization on `POST /api/acquisitions/{connector}/authorize`, which is
+            // `Access::User`; nothing on this route — no header, no cookie, no body, no query —
+            // reaches the address. Its authority is a single-use `state` this host drew from the
+            // OS plus a binder cookie only this host could have planted, spent together or not at
+            // all, and it answers with a document and a `Set-Cookie` rather than a body a script
+            // could read a token, an address or a `state` out of.
+            // `crate::routes::acquisitions`'s module documentation carries the long form, and
+            // `an_unmatched_callback_reaches_no_vendor` is what holds it.
+            ("acquisitions", "/api/acquisitions/callback"),
             // The agent descriptor. X-42's widening, and the one on this list that had to be
             // argued field by field rather than route by route — `crate::routes::onboarding`
             // carries that argument, and the types there are `deny_unknown_fields` so a field
@@ -1620,7 +1645,17 @@ mod tests {
     /// an ordinary connection owner may inspect its value-free state within the resolved tenant.
     #[test]
     fn the_human_surface_is_only_what_was_declared() {
-        const USER_GATED: &[(&str, &str)] = &[("connections", "/api/connections/{connector}/plan")];
+        const USER_GATED: &[(&str, &str)] = &[
+            ("connections", "/api/connections/{connector}/plan"),
+            // Opening a delegated authorization (X-147). A human and **not** an operator, which is
+            // the one place on this surface where the weaker gate is the deliberate one: the
+            // credential this produces is the caller's *own* vendor account, so an operator-only
+            // route would mean one administrator authorizing on everybody's behalf — which is the
+            // shared credential the whole story exists to replace. It stays kind-gated because a
+            // caller that decides which credential this tenant's operations run under is doing
+            // human work, exactly as `MAY_SUPPLY_A_CREDENTIAL` argues.
+            ("acquisitions", "/api/acquisitions/{connector}/authorize"),
+        ];
 
         let gated: Vec<_> = published()
             .filter(|(_, route)| route.access == Access::User)

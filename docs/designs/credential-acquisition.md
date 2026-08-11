@@ -1,6 +1,7 @@
 # Design: the host acquires a credential, and a weak way of acquiring one is labelled
 
-**Status:** accepted · **Epic:** `credential-acquisition` · **Stories:** X-72, X-73, X-74, X-75, X-76
+**Status:** accepted · **Epic:** `credential-acquisition` · **Stories:** X-72, X-73, X-74, X-75, X-76,
+X-147
 
 ## Why
 
@@ -257,9 +258,139 @@ The vendor response's `expires_in` is different: it is observed state, not a req
 performer turns it into an absolute expiry and the connection stores it. No default TTL is invented
 when the response omits it.
 
+## The delegated lane (X-147, 2026-08-12)
+
+The password grant above exists because a vendor that offers nothing else offers this or nothing. The
+**authorization code** grant is the one it is a fallback for, and it is the half X-72 filed and never
+built: the person authorizes at the vendor, in their own browser, with their own account, and this
+host never sees a resource-owner secret at all. That is why it declares **no hazard** — RFC 9700 §2.4
+objects to the password grant precisely because the secret crosses the client, and here it does not.
+
+The seam is X-75's, unchanged: a port in `exchange-host`, its HTTP binding in `exchange-server`. The
+port gains `CredentialAcquirer::redeem_authorization_code`, taking an `AuthorizationCodeRedemption`
+of two secrets — the code and the PKCE verifier — and returning the same `AcquiredCredential`. It
+carries no authorization endpoint, no redirect URI, no client id and no scopes: those are deployment
+configuration or connector declaration, and a port that carried them would be the published crate
+describing a browser flow it does not perform.
+
+**The method has a default body that refuses.** `codewandler-flux-exchange-host` is published, so a
+required method would break every downstream performer at the version that added it — including the
+ones bound to connectors that carry no delegated grant and would have to write the same refusal by
+hand. The default is `AcquisitionRefusal::GrantNotPerformed`: a refusal like every other variant,
+decided before anything is sent.
+
+### Hazard-free must be expressible, and not as a variant
+
+`AcquisitionBinding`'s hazard becomes `Option<AuthHazard>`, and `AcquisitionBinding::admit` is the
+one place the absence is decided. `AuthHazard::None` was the obvious alternative and is refused for
+the reason §1 gives for the type existing at all: it is *a named weakness*, each variant a citation,
+and a member meaning "there is nothing wrong with this" would put a no-op inside a closed set that
+every exhaustive match in `exchange_host::acquisition` would then need a skip arm for.
+
+The cost is stated rather than waved at: a `None` **admits unconditionally**, so a binding that
+forgot its hazard is one a fail-closed deployment now performs. What holds it is that there is no
+default — `AcquisitionBinding::new` takes the option positionally, so every composition site says
+which it meant.
+
+### Addressing a delegated credential
+
+**The decision: a reserved service segment per principal.**
+
+A delegated token is `catalog::Subject::User` — it acts *as the person*. One kept at the connection's
+ordinary tenant-wide address would let any member of the tenant act as any other, which is the
+failure this whole story exists to remove rather than relocate. `CredentialRef` has no principal
+component and `connector-address` is upstream, so the principal has to go in a segment that already
+exists.
+
+It goes in the **service**, which is the segment this host already reserves for state a connector did
+not declare — X-75's `exchange-acquisition`, holding a connection's refresh token, expiry and managed
+marker. A delegated credential lives at:
+
+```text
+tenants/<tenant>/<authority>/exchange-delegated-<digest>/<leaf>
+```
+
+`<digest>` is 128 bits of SHA-256 over a length-prefixed, domain-separated encoding of the
+principal's kind, id and tenant. A digest and not the id itself because the service grammar
+`connector-address` enforces is lowercase ASCII letters, digits and `-`, and a principal id is an
+OIDC `sub`, an email address or a roster handle — refusing every principal whose id is not already an
+address segment would refuse most real deployments, and rewriting one into the grammar is a lossy
+transform, which is a collision manufactured by the encoding. It is **derived at every use** from the
+resolved principal, so there is nothing stored to go stale and nothing for a caller to name.
+
+The three companion leaves sit under the *same* per-principal service rather than under
+`exchange-acquisition`, which is the point: one shared companion address would put every member's
+refresh token in one slot and the last person to authorize would silently overwrite the rest. A
+connector declaring a credential named like one of them is refused by name rather than accommodated.
+
+**The rejected alternative: `@instances/<uuid>`.**
+
+`connector-address` already has a level below the authority, and a delegated credential could have
+been filed as one of the tenant's several connections with a UUID minted per principal. It was
+rejected because that level is X-14's *labelled connection* namespace and is read as such by four
+things at once: the connection registry's label overlay, `GET /api/connections`, the plan surface,
+and the first-to-second migration. A per-person credential filed there would appear to an operator as
+a connection they could rename or delete, and the UUID would have to be minted once and remembered —
+a second registry keyed by principal, with its own staleness. The reserved-service level needs no
+registry: a person who never authorized simply has no address.
+
+What that costs, recorded rather than discovered: the delegated address is **not** projected by
+`GET /api/connections`, exactly as `exchange-acquisition`'s companions are not, so an operator cannot
+yet see which members hold one. The tenant-occupancy sum is likewise narrower on this route than on
+`POST /api/connections/{connector}` — it counts one connector's scope rather than every connector,
+because the wider sum needs the tenant-wide claim that route holds.
+
+### `state`, PKCE, and what the callback may be
+
+PKCE is mandatory and `S256`-only, reusing `oidc::pkce` rather than growing a second one. The pending
+store is a **sibling** of `oidc::flow::PendingAuthorizations` rather than a generalisation of it: that
+one carries an OIDC `nonce` a connector grant has nothing to echo, and this one carries a `Principal`
+sign-in cannot have. `Binder`, its entropy source, its redaction, its emptiness rule and the
+`Set-Cookie` formatter are all shared. The binder cookie has a **distinct name** —
+`__Host-flux_exchange_acquire` — because a person connecting a connector is by construction already
+signed in, so both flows can be live in one browser and one name would have the second silently
+invalidate the first.
+
+`state` is bound to the **`Principal`** and not to a session handle. There is no session handle every
+caller has: a person signed in through `LocalUsers` or a service-account bearer holds no
+`SessionToken`, so a store keyed on one would work for the OIDC deployment and silently exclude the
+others. Every guarded route has `Extension<Principal>` from `routes::require_principal`.
+
+The callback is **`Access::Anonymous`**, and it has to be: the browser arrives mid-redirect from the
+vendor's origin and the session cookie is `SameSite=Strict`, so it is not sent on that navigation. A
+guarded callback would refuse every real vendor redirect and pass only in a test that forged the
+cookie. What makes an anonymous route that mints tenant authority safe is that it reads no caller
+identity and cannot: the principal comes from the pending delegation, and the claim happens **first**,
+before any vendor is contacted and before the store is touched — the ordering `oidc::complete_admission`
+records, and the reason a callback this host did not open costs one map lookup.
+
+### The redirect URI
+
+A new variable, `FLUX_EXCHANGE_ACQUISITION_REDIRECT_URI`, and deliberately not
+`FLUX_EXCHANGE_OIDC_REDIRECT_URI`: that one points at `/api/signin/callback` and is registered with
+the identity provider, while this one points at `/api/acquisitions/callback` and is registered with
+each vendor. "Compared exactly" is made checkable rather than intended — startup refuses any spelling
+a URL parser would normalise, so the string sent to the authorization endpoint and the string
+re-presented at the token endpoint cannot be two different strings, and neither is ever derived from
+a request's `Host` header.
+
+### What still waits on the 0.21 connector line
+
+The authorization URL is composed from an **injected** `DelegatedGrant`, not from the connector's own
+`Acquisition::OAuth2` declaration; production still composes an empty `AcquisitionBindings`; and
+refusing a connector that declares an unperformable grant needs the declaration to exist. Those three
+are the only parts of X-147 that genuinely wait, and closing the gap with a `path` or `git` dependency
+on the sibling checkout is refused by [`AGENTS.md`](../../AGENTS.md) § The dependency situation.
+
 ## Acceptance / done
 
 An operator connects babelforce with a username and a password on a deployment that has explicitly
 opted in; the stored credential is a token with an expiry, the password appears nowhere on disk or in
 any log; and the same connection attempt on a deployment that has **not** opted in is refused by name,
 with the hazard cited, before any request leaves the process.
+
+For the delegated lane: a signed-in person opens an authorization, authorizes at the vendor in their
+own browser, and the token lands at an address derived from *their* principal — one another member of
+the same tenant cannot resolve. A callback whose `state` is unknown, expired, already spent, or
+presented by a different browser is refused with no vendor contacted and nobody else's authorization
+consumed.

@@ -8,6 +8,26 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A signed-in person can authorize a connection with their own vendor account** (X-147, the half
+  that needs no unreleased connector metadata). `POST /api/acquisitions/{connector}/authorize` opens
+  one delegated authorization for the calling human and `GET /api/acquisitions/callback` finishes it.
+  PKCE is mandatory and `S256`-only, reusing the sign-in flow's own implementation; `state` is drawn
+  from the OS, bound to the initiating **`Principal`** rather than to a session handle, expires, and
+  is spent exactly once together with a browser binder cookie planted under its own `__Host-` name. A
+  callback whose `state` is unknown, expired, already spent, or presented by a different browser is
+  refused before any vendor is contacted and without consuming anybody else's authorization. The
+  acquired credential is stored under a reserved per-principal service segment, so one member of a
+  tenant cannot resolve another's — `docs/designs/credential-acquisition.md` carries the addressing
+  decision and the alternative it rejected. `CredentialAcquirer` gains
+  `redeem_authorization_code` as a **default** method refusing `grant_not_performed`, so no
+  downstream performer breaks, and `AcquisitionBinding`'s hazard becomes `Option<AuthHazard>` so a
+  grant that carries no named weakness runs on the fail-closed default. A new
+  `FLUX_EXCHANGE_ACQUISITION_REDIRECT_URI` is deployment configuration, validated at startup and
+  compared exactly; it is deliberately not the OIDC sign-in redirect. Production still composes an
+  empty acquisition registry: composing the authorize URL from the connector's own `OAuth2`
+  declaration, binding it in production, and refusing an unperformable declared grant all wait on the
+  0.21 connector line (X-146).
+
 - **The published native inventory now pins the retained provider recovery, replay and lease
   evidence** (X-138). `NativeEvidenceAuthority::validate` refuses a substituted or dropped
   `real_server_retains_the_c515_lease_through_recovery_and_readiness` or

@@ -768,6 +768,19 @@ mod tests {
             "operator recovery of a failed safe delivery, not a new agent capability.",
         ),
         (
+            "/api/acquisitions/{connector}/authorize",
+            "a signed-in **person** authorizing a connection with their own vendor account, in \
+             their own browser. It is the connections capability's operator half, and it is the \
+             one route on this surface an agent structurally cannot use: it needs a human at a \
+             vendor's consent screen, and the credential it produces belongs to that person rather \
+             than to the tenant an agent calls for.",
+        ),
+        (
+            "/api/acquisitions/callback",
+            "the vendor's redirect back, mid-authorization. Nothing calls it deliberately, and an \
+             agent that could would be presenting somebody else's authorization code.",
+        ),
+        (
             "/api/onboarding",
             "this document itself. It names its own endpoint in `endpoint`, which is where a \
              caller looks for it, rather than as something an agent is told to go and do.",
