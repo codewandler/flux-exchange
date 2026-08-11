@@ -12,7 +12,7 @@
     "test": "node --test 'test/**/*.test.mjs'"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5.2.1",
+    "@vitejs/plugin-vue": "^6.0.8",
     "typescript": "^5.7.3",
     "vite": "^6.0.11",
     "vue-tsc": "^3.3.9"
