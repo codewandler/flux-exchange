@@ -47,7 +47,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The gate proves the frozen fixture against its earlier candidate commit without a
           # network fetch, so retain the history that contains that immutable object.
@@ -75,7 +75,7 @@ jobs:
         # `rust-version` — that is the MSRV a consumer must have, not the toolchain we ship from.
         # The number is deliberately not restated here; `ci.yml`'s `msrv` job reads it out of
         # `Cargo.toml` and proves the workspace still builds on it.
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.97.0"
           components: clippy, rustfmt
