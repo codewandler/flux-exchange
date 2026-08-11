@@ -5,7 +5,7 @@ status: in-progress
 priority: 2
 epic: remote-deployment
 areas: [exchange-host, exchange-server, deployment]
-note: "The file store is honest and mode-safe but application-plaintext; the existing SecretStore port is the seam for a managed Vault-class backend."
+note: "The file store is honest and mode-safe but application-plaintext; the SecretStore port is the seam. The shipped connector-secrets VaultStore is NOT that backend — it refuses references, apply and every prepared transaction."
 design: docs/designs/managed-secret-backend.md
 ---
 
@@ -36,6 +36,38 @@ and auditability no longer reduce to one plaintext file and its platform volume.
       dependency surface narrow.
 - [ ] Produce a versioned Fly release and live-verify managed reads/writes/rotation, refusal when the
       backend is unavailable, and completion of old-store decommissioning.
+
+## Progress
+
+- 2026-08-03 — Design filed. Nothing built.
+- 2026-08-12 — Status audited. `in-progress` means *design filed, zero implementation*: all eight
+  acceptance boxes are unchecked and no branch, local or remote, carries any X-97 code. The two
+  commits mentioning X-97 are documentation only.
+
+  **"Bind the existing `VaultStore`; don't build one" was checked and does not hold.** The type is
+  real — `connector_secrets::vault::VaultStore`, package `codewandler-connector-secrets` 0.20.0,
+  `src/vault.rs:143`, a HashiCorp Vault KV v2 client present in every published version — but it
+  cannot satisfy this story's acceptance, for four independent reasons:
+
+  1. `references()` returns `StoreError::Unsupported` (`vault.rs:384`) — *"Vault KV v2 listing and
+     policy semantics are not implemented"*. Acceptance requires a **measured inventory**.
+  2. `apply()` returns `StoreError::Unsupported` (`vault.rs:391`). Acceptance requires **atomic**
+     migration, and the live connection routes already depend on `apply` — the tests at
+     `crates/exchange-server/src/routes/connections.rs:10341` and `:10393` fail against it today.
+  3. `impl PreparedSecretStore for VaultStore {}` is empty (`vault.rs:401`), so all five methods keep
+     the trait defaults that return `PreparedSecretError::Unsupported` (`transaction.rs:170-205`).
+  4. It authenticates with a **static long-lived token only** (`vault.rs:31-38`, "expiry, refresh and
+     rotation are out of scope for this crate by instruction") — which the second acceptance bullet
+     explicitly forbids.
+
+  It is also not compiled here: the `vault` feature is non-default and this workspace does not enable
+  it, as `crates/exchange-host/tests/no_second_request_path.rs:114-119` states in so many words.
+
+  So the design's choice stands and the note below is still the governing constraint: the adapter has
+  to be built and **released upstream in `connector-secrets`** before Exchange can consume it. No AWS
+  Secrets Manager implementation exists in any of the ten `connector-secrets` versions on disk.
+  **This story is upstream-blocked in the same way [[X-146]] and [[X-147]] are** — kept
+  `in-progress` rather than `blocked` only because the design work inside it is genuinely live.
 
 ## Notes
 

@@ -34,7 +34,7 @@ lockfile and compile-time tests.
 - [X-91 — Signing in does not make every member an operator](X-91-signing-in-does-not-make-every-member-an-operator.md) · Preserve organization-wide authentication, but key administrative authority by immutable OIDC sub and fail closed when no operator is configured.
 - [X-92 — Private reporting and protected main](X-92-private-reporting-and-protected-main.md) · Private reporting, protected main and baseline scanning are live; GitHub Free cannot enable validity checks or non-provider patterns.
 - [X-96 — Traffic controls are fair as well as bounded](X-96-traffic-controls-are-fair-as-well-as-bounded.md) · Fair budgets, bounded metrics and edge occupancy controls are ready; live release verification remains.
-- [X-97 — Public credentials leave the file store](X-97-public-credentials-leave-the-file-store.md) · The file store is honest and mode-safe but application-plaintext; the existing SecretStore port is the seam for a managed Vault-class backend.
+- [X-97 — Public credentials leave the file store](X-97-public-credentials-leave-the-file-store.md) · The file store is honest and mode-safe but application-plaintext; the SecretStore port is the seam. The shipped connector-secrets VaultStore is NOT that backend — it refuses references, apply and every prepared transaction.
 - [X-111 — Host every connector runtime through Exchange (epic)](X-111-rich-connector-runtimes-epic.md) · EPIC — Exchange is the sole official-integration executor: ship the effective catalogue and existing HTTP invoke first, then rich runtimes and lifecycle
 - [X-126 — Publish verified local Exchange binaries for Linux](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — supported Linux Flux can manage a separately released, attested Exchange executable without bundling plugins or trusting PATH
 - [X-134 — Publish owner-bound local onboarding without secret JSON](X-134-publish-owner-bound-local-onboarding.md) · Milestone 1 — Linux OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public Linux release
@@ -43,10 +43,15 @@ lockfile and compile-time tests.
 - [X-140 — Repository agents use the installed Board and Fleet operator workflow](X-140-use-installed-board-fleet-operator-workflow.md) · Fleet dogfood — replace private Track workflow and pin the bounded handoff/watch commands a plain agent can run
 - [X-141 — Exchange story workers publish bounded Fleet handoff evidence](X-141-publish-bounded-fleet-handoff-evidence.md) · Fleet dogfood — one deterministic targeted-check receipt without terminal scraping or duplicate full gates
 
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
+
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
-- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
+- [X-146 — Adopt the released flux 0.58 and connector 0.21 lines](X-146-adopt-the-released-flux-0-58-and-connector-0-21-lines.md) · Core · blocked: connector 0.21 is NOT published — crates.io's newest connector line is 0.20.0. Both pin sets move as one unit once it ships; two compile breaks are already known (C-531 DispatchId on FlowSink, and ConfigField gaining also_services)
+- [X-147 — The host performs the authorization code grant on behalf of a signed-in person](X-147-the-host-performs-the-authorization-code-grant.md) · the delegated half of X-72 — X-75 redeems a password and redeem_refresh renews, but nothing here can OBTAIN a token by user grant; blocked on the connector line that declares one reaching crates.io (X-146)
+- [X-148 — A delegated token is renewed before it expires, so an unattended run outlives it](X-148-a-delegated-token-is-renewed-before-it-expires.md) · a GitLab OAuth access token expires in about two hours and an autonomous fleet run outlives that; redeem_refresh exists and nothing calls it on a schedule — blocked behind X-147, which first produces a credential to renew
 
 ## Backlog
 - [X-51 — A broken doc link fails the build instead of hiding among twenty others](X-51-a-broken-doc-link-is-visible.md) · found by X-48, 2026-08-01: `cargo doc --workspace --no-deps` emits ~20 unresolved intra-doc link warnings and is not in the gate, so a genuinely broken link in new code is invisible
@@ -59,6 +64,13 @@ lockfile and compile-time tests.
 - [X-21 — A half connection is distinguishable from a deliberately partial one](X-21-half-connection-visibility.md) · raised by X-18's implementor, 2026-08-01: GET answers 200 for a connection whose delete failed half way, which reads as 'connected' — but a connector may legitimately hold a subset of what it declares, so the two render identically and telling them apart needs a record this module deliberately does not keep
 - [X-50 — A connector that needs no credential can actually be connected](X-50-a-connector-that-needs-nothing-can-be-connected.md) · found adjacent to X-49, 2026-08-01: the console disables Connect for a connector that declares no credentials — a state X-46 made reachable and X-49 pinned the *render* of, but nobody can act on it
 - [X-79 — A catalogue-declared closed set is only honoured on an endpoint field](X-79-a-closed-set-on-a-non-endpoint-field-is-ignored.md) · found by X-70's independent review, 2026-08-02: the SettingKind::Username short-circuit at settings.rs:507 returns before the choices_for lookup ten lines later, so a closed set declared on a non-endpoint field is silently ignored. Nothing shipped is affected and the census test would fire — but the rule reads as general and is not
+
+### Hosted single-org
+_One organization operating Exchange on its own shared infrastructure — a dev Kubernetes cluster is_
+- [X-142 — Hosted single-org posture and member token minting](X-142-hosted-single-org-posture-and-member-token-minting.md) · Core · Decision 0019 rules 1-2: reachable SingleTenant behind OIDC is a named posture; members mint bounded Service Account tokens; operator authority stays deployment-declared
+- [X-143 — Deployment-declared destination aperture](X-143-deployment-declared-destination-aperture.md) · Core · Decision 0019 rule 3: the deployment declares admitted egress destinations; members never select or widen; everything else stays refused post-resolution
+- [X-144 — Declarative provisioning from file-shaped secrets](X-144-declarative-provisioning-from-file-shaped-secrets.md) · Core · Decision 0019 rule 4: connections, settings, grants and tenant Datasource bindings declared in config; secrets only as mounted file references; idempotent startup reconciliation
+- [X-145 — Kubernetes deployment artifacts and runbook](X-145-kubernetes-deployment-artifacts-and-runbook.md) · Core · Decision 0019 rule 6: manifests and runbook encode the delivered constraints - one writer, PVC audit journal, store modes, same-origin console
 
 ### a public documentation site
 _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deployed to GitHub Pages by_
