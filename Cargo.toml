@@ -100,7 +100,7 @@ connector-secrets = { package = "codewandler-connector-secrets", version = "0.20
 # `rustls-tls` and `default-features = false` keep OpenSSL out of the build, so the binary does not
 # acquire a C toolchain dependency for one HTTPS call. `jsonwebtoken` picks the pure-Rust backend for
 # the same reason.
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 libc = "0.2"
 minisign-verify = "0.2.5"
 minisign = "0.9.1"

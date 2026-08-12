@@ -116,6 +116,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- **`jsonwebtoken` moves to 11.0.0, and a JWK of a kind this build does not recognise now admits no
+  algorithm.** The crate made `AlgorithmParameters` `#[non_exhaustive]` and began parsing an unknown
+  `kty` into a catch-all variant rather than failing the whole key set, so a key kind this build does
+  not implement reaches id-token verification as an ordinary `Jwk` instead of being refused by the
+  parser's accident. `permitted_algorithms` refuses it explicitly: the allowlist is derived from the
+  key precisely so that something is outside it, and defaulting to the RSA families — the shape the
+  compile error invites, since such a JWK often carries a modulus and exponent anyway — would verify
+  a token against semantics nothing here has checked. **The consequence is deliberate and will look
+  like an outage**: a provider that rotates onto a key kind this build predates turns its sign-in off
+  and says so, rather than guessing. `rust-version` is unchanged at 1.88, which both `jsonwebtoken`
+  releases require; no other API this repository uses moved, and the lock's re-resolution unified
+  several `windows-sys 0.59` dependents onto 0.61.
+
 - **Exchange runtime and binary releases now have one exact Linux product boundary** (X-137).
   Release selection, packaging, download policy, workflows and interim native fixtures close over
   `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, each as a deterministic `tar.zst`
