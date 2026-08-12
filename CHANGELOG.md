@@ -34,6 +34,12 @@ All notable changes to this project are documented in this file. The format is b
   registry 0.20 `FileStore` excludes another process before readiness as well as after it, then
   releases on abrupt exit without changing the provider identity or five-method port.
 
+
+- **Isolated Fleet story checks now produce one bounded Exchange-owned receipt** (X-141).
+  A clean story branch can select a closed host, server, console, web, or evidence profile and receive
+  exact argv, duration, typed terminal outcome, and digest-only stdout/stderr metadata in an
+  8192-byte `flux-exchange.story-evidence.v1` JSON record. This targeted handoff does not duplicate or
+  replace the complete integrated-wave gate.
 - **Hosted and owner-native local management now share one non-resetting decision deadline**
   (X-135). Admission owns the 300-second pre-decision budget, durable decision starts one fixed
   30-second receipt-bearing roll-forward budget, and cancellation can abort only before that
