@@ -1,7 +1,7 @@
 ---
 id: X-154
 title: "Read the complete OAuth2 declaration from the catalog artifact"
-status: in-progress
+status: done
 priority: 1
 epic: catalog-artifact
 areas: [exchange-host, exchange-server]
@@ -45,34 +45,34 @@ the current op grammar can express.
 
 ## Acceptance
 
-- [ ] The authorize URL is composed from the artifact's `OAuth2Spec` — endpoint resolved against that
+- [x] The authorize URL is composed from the artifact's `OAuth2Spec` — endpoint resolved against that
       service's base URL, plus declared `authorize_path` and `scopes`. A caller names no host, path
       or scope; a scope absent from the declaration is one this host does not request. **This ticks
       X-147's second criterion.**
-- [ ] Production composes a **non-empty** `AcquisitionBindings` derived from the artifact, and the
+- [x] Production composes a **non-empty** `AcquisitionBindings` derived from the artifact, and the
       C-440 comment in `crates/exchange-server/src/credential_acquisition.rs` is replaced by what is
       then true. **This ticks X-147's seventh.**
-- [ ] A connector declaring a grant this host cannot perform is refused **at composition**, naming the
+- [x] A connector declaring a grant this host cannot perform is refused **at composition**, naming the
       grant — never attempted, never silently downgraded to another grant in its list. babelforce
       declares `Password` and `RefreshToken`; GitLab declares `AuthorizationCode` and `RefreshToken`;
       both must compose or refuse deliberately. **This ticks X-147's eighth.**
-- [ ] A declaration too incomplete to compose from — an empty endpoint or authorize path where the
+- [x] A declaration too incomplete to compose from — an empty endpoint or authorize path where the
       grant needs one — is refused at composition **naming the connector and the missing field**,
       rather than producing a malformed URL a vendor rejects opaquely.
-- [ ] **Registration identity comes from deployment configuration, never from the artifact.** The
+- [x] **Registration identity comes from deployment configuration, never from the artifact.** The
       artifact declares that a `client_id` is *required*; the value resolves alongside the redirect
       URI. A deployment missing one is refused at startup naming the connector — never defaulted,
       never read from the catalogue even if a future document carries a non-empty string. A
       failing-first test drives the refusal, and another asserts a catalogue-supplied value is
       ignored rather than trusted.
-- [ ] The hazard is read from the declaration rather than from the injected binding. Upstream C-440
+- [x] The hazard is read from the declaration rather than from the injected binding. Upstream C-440
       has landed: babelforce declares `hazard: Some(ResourceOwnerSecretShared)`, the first released
       connector to do so, and X-74's gate should now be driven by released metadata rather than only
       by fixtures.
-- [ ] Failing-first tests for each refusal, and one end-to-end test that composes GitLab's authorize
+- [x] Failing-first tests for each refusal, and one end-to-end test that composes GitLab's authorize
       URL from the artifact and matches it against the URL X-147's route produces from an injected
       grant — the two must agree, which is what proves the injected seam was a faithful stand-in.
-- [ ] No token, code, verifier or client secret appears in an error, a log or a `Debug`. The client id
+- [x] No token, code, verifier or client secret appears in an error, a log or a `Debug`. The client id
       is public by specification and may appear; nothing else may.
 
 ## Progress
@@ -95,6 +95,17 @@ the current op grammar can express.
   acceptance bullets 1/2/6, and carries the review's four minors (two overstating comments, the
   hazard/credential argument pairing in `binding_from_declaration`, `Unusable.connector` carrying
   a count where a name is documented).
+
+- 2026-08-12: Round 2 merged (`0784c88`, from `impl/X-154-r2` `d6bef87`); story done.
+  `endpoint_base` resolves through the served catalogue, filling template variables from declared
+  defaults only — `NoDeclaredDefault` refuses naming connector and variable (Zendesk's
+  `{subdomain}` is the driving case) — so GitLab composes in production from the artifact alone
+  and the e2e agreement test's supplied constant is deleted. The review's four minors closed. Two
+  recorded open edges, deliberately not this story's: a tenant-overridden origin still authorizes
+  against the declared default (per-request composition is a different lifetime, stated in the
+  design doc), and a loaded pack cataloguing fewer connectors than the build embeds refuses a
+  registered missing one at startup — the served catalogue as authority, an X-153×X-154
+  interaction neither acceptance named, chosen fail-closed.
 
 ## Notes
 

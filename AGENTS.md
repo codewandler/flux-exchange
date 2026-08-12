@@ -212,7 +212,9 @@ left is one rule, and it is the one that bites:
   `connector-pack`'s requirement out of the crates.io sparse index before you edit a manifest.** X-146
   was filed asserting connector-pack 0.21 requires `flux-runtime ^0.58`; it requires `^0.54`, and
   believing the story instead of the index would have reproduced X-11 exactly.
-- Three tests in `crates/exchange-host/tests/engine_line.rs` keep this true rather than review:
+- Three of the six tests in `crates/exchange-host/tests/engine_line.rs` keep this true rather
+  than review (the other three pin the connector line's checksums, the address vocabulary, and
+  the prepared-secret port — supply-chain and readiness evidence, not engine coupling):
   one links `connector_pack::pack` against `flux_web::http::HttpRequestTool` so a divergence that
   touches the seam is a compile error, one reads the manifests so a divergence that does not touch
   it is still caught, and one reads `Cargo.lock` — because a manifest stating one line proves

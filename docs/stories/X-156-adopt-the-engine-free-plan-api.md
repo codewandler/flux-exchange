@@ -1,7 +1,7 @@
 ---
 id: X-156
 title: "Adopt the engine-free plan API and own the Tool projection"
-status: in-progress
+status: blocked
 priority: 2
 epic: catalog-artifact
 areas: [exchange-host]

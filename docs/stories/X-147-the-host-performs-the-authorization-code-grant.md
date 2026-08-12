@@ -1,7 +1,7 @@
 ---
 id: X-147
 title: The host performs the authorization code grant on behalf of a signed-in person
-status: in-progress
+status: done
 priority: 0
 epic: credential-acquisition
 design: docs/designs/credential-acquisition.md
@@ -64,7 +64,7 @@ unset — the safe default — can run this flow.
 - [x] `CredentialAcquirer` gains an authorization-code leg beside `redeem_password`, returning the
       same `AcquiredCredential`. The host crate keeps only the secret-in/secret-out port; HTTP,
       endpoint composition and vendor quirks stay in the composing binary, exactly as X-75 arranged.
-- [ ] The authorize URL is composed **from the connector's own declaration** — the `OAuth2`
+- [x] The authorize URL is composed **from the connector's own declaration** — the `OAuth2`
       acquisition's endpoint reference resolved against that service's base URL, plus its declared
       `authorize_path` and `scopes`. A caller cannot name a host, a path or a scope; a scope absent
       from the connector's list is one this host does not request. *(Requires the 0.21 line.)*
@@ -81,9 +81,9 @@ unset — the safe default — can run this flow.
       one member cannot resolve another's.
 - [x] Refusals are typed and value-free, reusing `AcquisitionRefusal`. No authorization code, token,
       verifier or state appears in an error, a log or a `Debug`.
-- [ ] Production composes a **non-empty** `AcquisitionBindings` derived from the released catalogue,
+- [x] Production composes a **non-empty** `AcquisitionBindings` derived from the released catalogue,
       and the comment quoted above is replaced by what is actually true. *(Requires the 0.21 line.)*
-- [ ] A connector declaring a grant this host cannot perform is refused at composition, naming the
+- [x] A connector declaring a grant this host cannot perform is refused at composition, naming the
       grant — never attempted and never silently downgraded to another grant in the list.
       *(Requires the 0.21 line: there is no declared grant list to compare a performer against.)*
 
@@ -193,6 +193,13 @@ unset — the safe default — can run this flow.
 
   Nits 4-6 (span level, tenant-wide channel restart on revoke, no guard claim on revoke) needed no
   code change; the span's level change is now named in its doc comment.
+
+- 2026-08-12: The three remaining criteria closed by X-154 (rounds 1 and 2, merged `bf61155` and
+  `0784c88`): the authorize URL composes from the connector's own declaration through the served
+  catalogue (the e2e agreement test proves this route's injected-grant URL identical to the
+  artifact-composed one, with no supplied constant); production composes a non-empty
+  `AcquisitionBindings` for a registered GitLab; an unperformable grant refuses at composition
+  naming the grant. Story done.
 
 ## Notes
 

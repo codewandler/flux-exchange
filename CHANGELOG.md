@@ -8,6 +8,21 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **Delegated authorizations compose from the connector's own declaration** (X-154, closing
+  X-147's remaining criteria and with them the credential-acquisition epic X-72). The authorize
+  URL is composed from the catalogue artifact — the OAuth2 endpoint's base URL resolved through
+  the served catalogue with template variables filled from declared defaults only, plus the
+  declared authorize path and scopes; a caller names no host, path or scope. Production composes
+  a non-empty acquisition registry for a registered connector (GitLab composes; babelforce
+  refuses on its `password` grant, named). Every impossibility refuses at composition naming its
+  subject: an unperformable grant, an incomplete declaration, a template variable with no
+  declared default (Zendesk's `{subdomain}`), a missing registration, an unknown connector.
+  Registration identity comes from deployment configuration only — a catalogue-supplied value is
+  structurally discarded — and the connector's declared hazard drives the acquisition gate from
+  released metadata. An end-to-end test proves the artifact-composed URL identical to the one the
+  delegated-grant route produced from its injected seam, with no supplied constants; no token,
+  code, verifier or client secret appears in any error, log or Debug.
+
 - **The catalogue is served as a versioned, digest-carrying pack — including one newer than this
   binary** (X-153, Decision 0022's data-not-code half). A deployment may point Exchange at a
   `catalog.pack` on disk (startup configuration, never request-derived); the digest, container
