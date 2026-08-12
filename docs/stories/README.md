@@ -42,6 +42,11 @@ lockfile and compile-time tests.
 ## Next (ready — take the top one unless the user named a story)
 - [X-140 — Repository agents use the installed Board and Fleet operator workflow](X-140-use-installed-board-fleet-operator-workflow.md) · Fleet dogfood — replace private Track workflow and pin the bounded handoff/watch commands a plain agent can run
 - [X-141 — Exchange story workers publish bounded Fleet handoff evidence](X-141-publish-bounded-fleet-handoff-evidence.md) · Fleet dogfood — one deterministic targeted-check receipt without terminal scraping or duplicate full gates
+- [X-150 — Remove the Windows runtime residue the Linux contraction left behind](X-150-remove-the-windows-runtime-residue.md) · X-137 made Exchange Linux-only but left ~9.7k lines of Windows code, including 3,444 lines in three source files no mod declaration compiles and two dangling references that only build.rs's panic keeps hidden
+- [X-149 — Adopt the current vite line in the console](X-149-adopt-the-current-vite-line-in-the-console.md) · vite 6 -> 8 and @vitejs/plugin-vue 5 -> 6 are one change: neither resolves without the other, and vite 8 swaps the bundler from esbuild to rolldown
+
+### Connections: an address the caller cannot name, and a refusal where the address is incomplete
+- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
