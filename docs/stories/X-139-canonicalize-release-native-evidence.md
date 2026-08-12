@@ -80,6 +80,17 @@ literal count, stale fixture or non-Linux report may certify publication.
   already passed at the pinned base, so no argv could show them failing first. They now live in
   their own `native_evidence_authority_rejects_a_renamed_dropped_or_invented_family`, which matches
   no test at the base commit.
+- 2026-08-12 (X-158, this document edited while `done`): the three obligation and assertion
+  descriptions that named a connector version were re-derived. `retained-c515-server-lease` and
+  `x134-c515-retained-lease` describe the retained registry `FileStore` — the artifact this
+  authority pins — and moved 0.20 → 0.23 behind X-157's package identity, which had moved without
+  them. `c515-legacy-quiescence` kept its 0.19.1 and 0.20 and gained a sentence saying why: the
+  body of `native_upgrade_fixture_proves_legacy_quiescence_and_v2_refusal`, the
+  `released_v0_19_1_accepts` helper and `file.rs`'s module doc are byte-identical between the
+  published 0.20.0 and 0.23.0 crates, so those numbers name the release in which `FileStore::open`
+  began taking the kernel lease and the last line that did not — the provider's migration boundary,
+  not the pinned line. Renumbering it would have made it false. The authority identity moved
+  `503e6408…` → `510116b2…` and `fixture-set.json` was rebound in the following commit.
 
 ## Notes
 

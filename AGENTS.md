@@ -336,6 +336,50 @@ version number is burned, and a wrong `description`, `readme` or `keywords` is f
   mismatch surfaces where it is free to fix. The tag check stays regardless: a tag can be pushed at a
   commit no pull request touched.
 
+### Moving a connector pin moves the C-515 evidence with it
+
+**`crates/exchange-release/native-evidence-v1.json` is not a list of test names. It binds the
+inherited C-515 obligations to one *published artifact*** — a version, the SHA-256 of its `.crate`
+bytes on the registry, and the upstream commit that released them — and publication then asserts
+those obligations about the binary this workspace actually resolves. So a `codewandler-connector-*`
+bump that leaves the authority behind does not merely go stale: it publishes evidence about a
+`FileStore` that is not the one shipped. **Re-derive the authority in the same change as the pin.**
+
+X-146 moved the workspace to 0.21 and X-155 to 0.23 while the authority held 0.20.0. Both gates were
+green both times, because the checks that existed each compared `Cargo.lock` against their *own* copy
+of the expected line and so moved with the bump. The disagreement surfaced when the `v0.18.0` tag
+reached the readiness gate — after the version number had been spent.
+
+Four fields move, and none of them may be copied out of the file under test:
+
+- `authorities.c515.package.version` and `registry_sha256` — the checksum comes from the **crates.io
+  sparse index**, `curl -s https://index.crates.io/co/de/codewandler-connector-secrets`, read
+  *before* the manifest is edited. Taken from `Cargo.lock` afterwards it proves only that the file
+  agrees with itself.
+- `authorities.c515.package.released_commit` — `git rev-parse vX.Y.Z^{commit}` in a flux-connectors
+  clone, not the previous release's commit.
+- `crates/exchange-release/src/native_evidence.rs`'s `validate_upstream_package`, which restates the
+  same four fields as a compile-time pin. It is deliberately a second, independent statement: it is
+  what stops the JSON being edited alone.
+- `tests/fixtures/exchange-release-v2/fixture-set.json`'s `native_evidence_sha256` and
+  `exchange_commit`. Edit it surgically — `examples/generate_fixtures.rs` mints fresh minisign keys
+  and would rewrite every signed fixture — and put the authority edit in its **own earlier commit**,
+  because `contract.rs` requires `exchange_commit` to be an ancestor of `HEAD` and never `HEAD`.
+
+Then read the prose. Obligation and assertion descriptions that name a version are not all the same
+kind of claim: one describing *the retained registry `FileStore`* moves with the pin, while
+`c515-legacy-quiescence`'s 0.19.1 and 0.20 name the release in which `FileStore::open` began taking
+the kernel lease and the last line that did not. That is the provider's own migration boundary, it is
+still worded that way in the published 0.23.0 source, and renumbering it makes it false. Read what
+the named upstream test asserts before touching a number in a sentence about it.
+
+**CI now refuses the mismatch**, so this is a pull-request failure rather than a tag failure:
+`ci.yml` runs `check-publication-readiness.sh` for real after its self-test, and
+`crates/exchange-release/tests/upstream_authority_lock.rs` holds `Cargo.lock`'s resolved version and
+checksum against the authority's pinned package. Neither expects a version literal — the readiness
+script reads the line out of the authority precisely because two places holding one fact is what
+caused this. When one of them refuses, re-derive the authority; do not edit the number that refused.
+
 ## Supply chain — checked, not trusted
 
 **Every third-party action in `.github/workflows/` is pinned to a full 40-char commit SHA, with its
