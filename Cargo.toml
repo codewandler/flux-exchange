@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/exchange-host", "crates/exchange-release", "crates/exchange-server"]
 
 [workspace.package]
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -13,7 +13,7 @@ authors = ["codewandler"]
 [workspace.dependencies]
 # The crates.io package carries the `codewandler-` vanity prefix (matching the flux family); the
 # alias key and the lib name stay bare, so `use exchange_host::…` is unaffected.
-exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exchange-host", version = "0.17.0" }
+exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exchange-host", version = "0.18.0" }
 
 async-trait = "0.1"
 anyhow = "1"
@@ -78,16 +78,26 @@ flux-system = { package = "codewandler-flux-system", version = "0.54" }
 flux-web = { package = "codewandler-flux-web", version = "0.54" }
 flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 
-# The connector crates, all on the 0.21 line. `connector-catalog` has no dependencies at all and
+# The connector crates, all on the 0.23 line. `connector-catalog` has no dependencies at all and
 # `connector-secrets` defaults to no features (its Vault client and reqwest sit behind `vault`).
 #
-# **X-146: 0.21 moved the catalogue, not the engine.** `connector-pack` 0.21.0 requires
-# `codewandler-flux-runtime ^0.54` — byte for byte what 0.20.0 required — so this bump is a
-# connector-only bump and every `codewandler-flux-*` pin above stays where it is. That
-# `codewandler-flux-runtime` is published up to 0.59.3 is not a reason to move: the line is set by
-# what `connector-pack` requires, never by what is newest, and raising it here alone would put two
-# `flux_runtime::Tool` traits in one lock. Adopting a newer engine needs its own story, gated on a
-# `connector-pack` release that asks for it.
+# **X-155: 0.23 moved the artifact surface, not the engine — the third reading of the same rule.**
+# `connector-pack` 0.23.0 requires `codewandler-flux-core`, `-lang` and `-runtime` at `^0.54`, byte
+# for byte what 0.21.0 required, so this is a connector-only bump and every `codewandler-flux-*` pin
+# above stays where it is. Read out of the crates.io sparse index before this line was edited, per
+# the X-146 lesson — the story is not the evidence:
+#
+#     curl -sS https://index.crates.io/co/de/codewandler-connector-pack \
+#       | jq -r 'select(.vers == "0.23.0") | .deps[] | "\(.package // .name) \(.req)"'
+#
+# That `codewandler-flux-runtime` is published far past 0.54 is not a reason to move: the line is
+# set by what `connector-pack` requires, never by what is newest, and raising it here alone would
+# put two `flux_runtime::Tool` traits in one lock. Adopting a newer engine needs its own story,
+# gated on a `connector-pack` release that asks for it.
+#
+# 0.23.0 adds one requirement, `codewandler-connector-resolve ^0.23.0`, which therefore enters
+# `Cargo.lock` transitively. It is deliberately **not** named here: a direct pin arrives with the
+# story that calls it (X-156), carrying its own `no_second_request_path` allow-list sentence.
 #
 # `connector-address` is the **address vocabulary**, and it replaces `connector-spec` here.
 # That is a reorganisation rather than a rename (upstream C-407): `connector-spec` is the connector
@@ -99,10 +109,19 @@ flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 #
 # `connector-pack` is an ordinary `exchange-host` dependency: invocation and channel planning both
 # end there, while the composing server owns the guarded transports and never names the pack.
-connector-address = { package = "codewandler-connector-address", version = "0.21" }
-connector-catalog = { package = "codewandler-connector-catalog", version = "0.21" }
-connector-pack = { package = "codewandler-connector-pack", version = "0.21" }
-connector-secrets = { package = "codewandler-connector-secrets", version = "0.21" }
+#
+# `connector-catalog-reader` is named directly since X-153, and it is the one pin here that is not
+# about linking a compiler or a runtime. It is the catalogue *pack* reader: no dependencies at all,
+# no network, no filesystem walk — one local file, a vendored SHA-256, and `&str` slices of the
+# bytes it verified. `connector-catalog` already re-exports it as `catalog::reader`, so this pin
+# adds nothing to the graph; it is direct because Decision 0022 makes the catalogue a **data**
+# dependency and a deployment loading one from a path is a capability this repository owns rather
+# than inherits. It carries its own `no_second_request_path` allow-list sentence.
+connector-address = { package = "codewandler-connector-address", version = "0.23" }
+connector-catalog = { package = "codewandler-connector-catalog", version = "0.23" }
+connector-catalog-reader = { package = "codewandler-connector-catalog-reader", version = "0.23" }
+connector-pack = { package = "codewandler-connector-pack", version = "0.23" }
+connector-secrets = { package = "codewandler-connector-secrets", version = "0.23" }
 # The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family
 # precedent is sibling flux-connectors, which already uses reqwest and jsonwebtoken for exactly this
 # exchange; the alternative was hand-rolling signature verification, which nobody should do.

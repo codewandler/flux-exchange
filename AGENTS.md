@@ -55,7 +55,7 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.17.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
+**v0.18.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
 authentication, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
@@ -107,16 +107,15 @@ implies a working service costs more than an honest gap.
 
 ⚠ **Hazardous credential acquisition is fail-closed** (X-74). Unset,
 `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` permits no declared hazard; an unknown entry refuses startup and
-names it. `resource_owner_secret_shared` is the only recognised opt-in. **Upstream C-440 has landed**
-(connector 0.21, X-146): `catalog::Credential` now carries `hazard`, and babelforce declares
-`ResourceOwnerSecretShared` on its `access_token`. That is a released declaration — but it does not
-reach this policy yet, because Exchange decides admission from the hazard on X-75's injected
-`AcquisitionBinding` and production still composes an empty `AcquisitionBindings`. So the production
-registry remains empty and the path stays fixture-tested rather than vendor-live, **for a different
-reason than before**: the declaration exists and nothing here reads it. Wiring the catalogue's
-`hazard` into the posture is X-147's neighbourhood, not a formality. Once something does activate it,
-omitting the opt-in will look like a connection outage: the host answers its own `403` refusal naming
-the connector and hazard before any vendor request, distinct from the vendor rejecting credentials.
+names it. `resource_owner_secret_shared` is the only recognised opt-in. **Since X-154 the
+declaration reaches this policy**: production composes `AcquisitionBindings` from the served
+catalogue for the connectors `FLUX_EXCHANGE_ACQUISITION_CONNECTORS` registers, and the hazard on a
+composed binding is *read* from the released declaration rather than injected. babelforce declares
+`ResourceOwnerSecretShared` on its `access_token` and is currently refused earlier — at
+composition, on its `password` grant — so no hazardous binding exists to admit yet; the first
+connector that composes with a declared hazard is where the opt-in bites. Omitting it will look
+like a connection outage: the host answers its own `403` refusal naming the connector and hazard
+before any vendor request, distinct from the vendor rejecting credentials.
 
 ## Build / test / run
 
@@ -190,8 +189,9 @@ separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
-**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.21
-(X-146) and `connector-pack` links here. What is left is one rule, and it is the one that bites:
+**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.23
+(X-146 took 0.21, X-155 took 0.23 — both connector-only) and `connector-pack` links here. What is
+left is one rule, and it is the one that bites:
 
 - **The flux engine line is `0.54`, and it is written down once** — in `[workspace.dependencies]`
   in the root `Cargo.toml`, under the `ENGINE_LINE` marker. Every `codewandler-flux-*` pin carries
@@ -211,7 +211,9 @@ separate Node build and does not participate in the Cargo workspace.
   `connector-pack`'s requirement out of the crates.io sparse index before you edit a manifest.** X-146
   was filed asserting connector-pack 0.21 requires `flux-runtime ^0.58`; it requires `^0.54`, and
   believing the story instead of the index would have reproduced X-11 exactly.
-- Three tests in `crates/exchange-host/tests/engine_line.rs` keep this true rather than review:
+- Three of the six tests in `crates/exchange-host/tests/engine_line.rs` keep this true rather
+  than review (the other three pin the connector line's checksums, the address vocabulary, and
+  the prepared-secret port — supply-chain and readiness evidence, not engine coupling):
   one links `connector_pack::pack` against `flux_web::http::HttpRequestTool` so a divergence that
   touches the seam is a compile error, one reads the manifests so a divergence that does not touch
   it is still caught, and one reads `Cargo.lock` — because a manifest stating one line proves

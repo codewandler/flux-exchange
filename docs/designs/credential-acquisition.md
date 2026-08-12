@@ -453,13 +453,79 @@ validated copy and a travelling copy of the same value, kept in step by conventi
 looks rigorous, the tests pass, and the thing that reaches the outside world was never checked. The
 repair is always the same — make it one value, or make the divergence refuse at composition.
 
-### What still waits on the 0.21 connector line
+### ~~What still waits on the 0.21 connector line~~ — superseded by X-154
 
-The authorization URL is composed from an **injected** `DelegatedGrant`, not from the connector's own
-`Acquisition::OAuth2` declaration; production still composes an empty `AcquisitionBindings`; and
-refusing a connector that declares an unperformable grant needs the declaration to exist. Those three
-are the only parts of X-147 that genuinely wait, and closing the gap with a `path` or `git` dependency
-on the sibling checkout is refused by [`AGENTS.md`](../../AGENTS.md) § The dependency situation.
+*Recorded as it stood: the authorization URL was composed from an **injected** `DelegatedGrant`
+rather than from the connector's own `Acquisition::OAuth2` declaration; production composed an empty
+`AcquisitionBindings`; and refusing a connector that declares an unperformable grant needed the
+declaration to exist. Closing the gap with a `path` or `git` dependency on the sibling checkout was
+refused by [`AGENTS.md`](../../AGENTS.md) § The dependency situation, and still is.*
+
+## Composing an acquisition from the declaration (X-154, 2026-08-12)
+
+The declaration exists — connector 0.23, `catalog::Acquisition::OAuth2` — and
+`crate::credential_acquisition` now reads it. What each value is decided by is the whole design, and
+it is one sentence per axis:
+
+| Value | Decided by | Why |
+|---|---|---|
+| authorize path, token path, scopes, permitted grants | the connector's declaration | vendor truth; a caller names none of them, and a scope absent from the list is one this host does not request |
+| the endpoint's base URL | the served catalogue's document, filled from the connector's declared default | `OAuth2::endpoint` names a *service*, and only that service's document entry says what host it is — see below |
+| declared acquisition hazard | the connector's declaration | X-74's gate is a *property* filter, and babelforce is the first released connector to carry one |
+| `client_id`, `client_secret` | this deployment | Decision 0022, amended 2026-08-12: *"the artifact publishes the registration **requirement**, never a value"*, and upstream C-536 refuses to emit one |
+| redirect URI | this deployment | X-147's rule, unchanged; upstream's `OAuthRedirect` models a loopback port and path, which is the desktop shape |
+| which connectors are acquired for at all | this deployment | `FLUX_EXCHANGE_ACQUISITION_CONNECTORS`; a registry derived from every connector that *declares* an OAuth2 acquisition would offer an authorization for a vendor nobody registered an application with |
+
+**Every refusal is at composition and names the connector.** A declared grant this composition does
+not perform is refused *naming that grant* and is never downgraded to another entry in the same list
+— the pairing that would otherwise silently work is babelforce's `[password, refresh_token]`, where
+falling back to refresh means renewing a credential nothing ever obtained. `password` itself is the
+interesting case: this host *has* a performer for it, and it is still not derivable from a
+declaration, because X-75's lane needs a stated endpoint, an explicit hazard opt-in and a resource
+owner typing a secret — none of which is in a catalogue, and inventing them would stand up the exact
+grant RFC 9700 §2.4 says MUST NOT be used out of vendor metadata.
+
+### Resolving the endpoint — measured in round 1, closed in round 2
+
+`catalog::OAuth2::endpoint` is a **service name**. The base URL it resolves against is in the
+connector's canonical document (`services[].base_url`), and the generated `&'static` tables carry
+only `Provider::base_url` — the *default* service's. GitLab's OAuth2 declaration names `login`,
+whose document base URL is `{origin}`; `catalog::Provider::base_url` is `{origin}/api/v4`, the API
+service. They are different services and the second is not a substitute for the first.
+
+`ConfigField::also_services` is the near miss worth naming, because it looks like the answer: it says
+the `origin` *variable* is shared with `login`, which is not the same as saying `login`'s base URL is
+that variable. Deriving one from the other happens to be right for GitLab and is wrong for `default`
+in the same declaration — a guess that reads as a rule.
+
+Round 1 therefore refused a named endpoint by name rather than guessing. [[X-153]] then landed
+`ServedCatalogue`, and `endpoint_base` now reads the service's own `base_url` out of the document
+through `ServedCatalogue::provider_document` — **the catalogue this deployment serves**, threaded in
+from the composition rather than reached for, so a deployment that loaded a newer pack composes the
+acquisitions that pack declares.
+
+`also_services` is consulted after all, for the job upstream documents it for: filling `login`'s
+`{origin}` from the answer declared on `default`.
+
+### What fills a template, and the question that leaves open
+
+A startup composition has no tenant. So the only value it may substitute into a base URL template is
+the **connector's own declared default** — GitLab declares `https://gitlab.com` on the `origin`
+field — and a variable with no declared default is refused, naming the connector and the variable.
+Zendesk is the shipped case: `https://{subdomain}.zendesk.com`, `required`, no default, because
+there is no such thing as a default Zendesk.
+
+**The open question, stated rather than solved.** GitLab's `origin` carries `approval = operator`
+precisely so a deployment can point a connection at a self-managed instance — and a tenant that has
+done so would still be sent to `https://gitlab.com` to authorize, because this registry is composed
+once at startup and that setting is per connection. Nothing here is wrong for the default
+deployment and nothing here is right for that one.
+
+Closing it means composing the authorize URL **per request**, from the resolved principal's tenant
+settings, at the point `routes::acquisitions::authorize` runs — which is a different lifetime from a
+startup registry, needs the settings store the registry does not hold, and has its own question about
+what an operator-approved origin means for a credential already acquired against another one. That
+is a story, not a patch, and it is filed as this one's successor rather than guessed at here.
 
 ## Acceptance / done
 

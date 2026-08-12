@@ -17,6 +17,7 @@ mod acquisition_redirect;
 mod audit;
 mod auth_posture;
 mod bind;
+mod catalogue;
 pub mod channel;
 mod connection_guard;
 pub mod credential_acquisition;
@@ -659,20 +660,53 @@ async fn compose(
     // needs none, and the route that would use one refuses by name.
     let acquisition_redirect = acquisition_redirect::configured()
         .map_err(|reason| StartupRefusal::AcquisitionRedirect { reason })?;
+    // **The catalogue, before anything that reads one** (X-153). A configured pack is verified —
+    // container format, digest, document schema — here, so a pack that does not verify is a process
+    // that never opened a socket rather than one serving records nothing vouched for. Unset serves
+    // the catalogue this build embeds, which is what a checkout does.
+    let catalogue = catalogue::configured().map_err(|refusal| StartupRefusal::CataloguePack {
+        reason: refusal.to_string(),
+    })?;
+    match catalogue.path() {
+        Some(path) => info!(
+            path = %path.display(),
+            digest = catalogue.digest(),
+            schema_version = catalogue.schema_version(),
+            providers = catalogue.provider_count(),
+            operations = catalogue.operation_count(),
+            "serving a loaded connector catalogue"
+        ),
+        None => info!(
+            digest = catalogue.digest(),
+            providers = catalogue.provider_count(),
+            operations = catalogue.operation_count(),
+            "serving the connector catalogue this build embeds"
+        ),
+    }
+    // **Derived from the catalogue this deployment is about to serve** (X-154), for the connectors
+    // `FLUX_EXCHANGE_ACQUISITION_CONNECTORS` names. The same `Arc` goes to the state below, so the
+    // acquisitions are composed from the pack every other surface answers from — a second
+    // `ServedCatalogue` here would be a deployment whose loaded catalogue served one set of
+    // connectors and acquired for another.
+    //
+    // A deployment that registered nothing composes an empty registry, which is what a checkout
+    // does; one that registered a connector it cannot acquire for **refuses to start** rather than
+    // serving a surface that answers `422` for the one connector its operator configured.
+    let acquisitions =
+        credential_acquisition::configured(&catalogue, acquisition_redirect.as_ref()).map_err(
+            |refusal| StartupRefusal::CredentialAcquisition {
+                reason: refusal.to_string(),
+            },
+        )?;
     let mut state = compose_identity(startup)?
         .with_tenancy(startup.tenancy().clone())
+        .with_catalogue(catalogue)
         .with_credential_acquisition(
             auth_posture,
             // The redirect is passed to the registry and to nothing else: it is the value every
-            // bound grant is checked against, and `AppState::acquisition_redirect` reads through to
-            // it. Production binds no acquisitions yet, so this registry is empty and carries the
-            // configured redirect forward for the composition that will (X-146).
-            Arc::new(
-                credential_acquisition::AcquisitionBindings::new([], acquisition_redirect.as_ref())
-                    .map_err(|reason| StartupRefusal::AcquisitionRedirect {
-                        reason: reason.to_owned(),
-                    })?,
-            ),
+            // bound grant is checked against, and `AppState::acquisition_redirect` reads through
+            // to it.
+            Arc::new(acquisitions),
         );
     if let Some(origin) = hosted_origin {
         state = state.with_hosted_origin(origin);

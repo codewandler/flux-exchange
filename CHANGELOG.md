@@ -6,6 +6,62 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-12
+
+### Added
+
+- **Delegated authorizations compose from the connector's own declaration** (X-154, closing
+  X-147's remaining criteria and with them the credential-acquisition epic X-72). The authorize
+  URL is composed from the catalogue artifact — the OAuth2 endpoint's base URL resolved through
+  the served catalogue with template variables filled from declared defaults only, plus the
+  declared authorize path and scopes; a caller names no host, path or scope. Production composes
+  a non-empty acquisition registry for a registered connector (GitLab composes; babelforce
+  refuses on its `password` grant, named). Every impossibility refuses at composition naming its
+  subject: an unperformable grant, an incomplete declaration, a template variable with no
+  declared default (Zendesk's `{subdomain}`), a missing registration, an unknown connector.
+  Registration identity comes from deployment configuration only — a catalogue-supplied value is
+  structurally discarded — and the connector's declared hazard drives the acquisition gate from
+  released metadata. An end-to-end test proves the artifact-composed URL identical to the one the
+  delegated-grant route produced from its injected seam, with no supplied constants; no token,
+  code, verifier or client secret appears in any error, log or Debug.
+
+- **The catalogue is served as a versioned, digest-carrying pack — including one newer than this
+  binary** (X-153, Decision 0022's data-not-code half). A deployment may point Exchange at a
+  `catalog.pack` on disk (startup configuration, never request-derived); the digest, container
+  format and schema major version are verified before a single record serves, and each failure
+  refuses at startup distinguishably by name — never a partial load, never a silent fallback to
+  the embedded pack. The onboarding descriptor and the catalogue listing report which catalogue
+  is serving (embedded or loaded) and its digest through one shared projection, so they cannot
+  describe two catalogues. What a loaded pack cannot yet change — settings and verification
+  still answer from the embedded documents — is pinned by a test rather than left implicit, and
+  closes behind upstream C-540. Every release of flux-connectors attaches the pack beside its
+  checksum, so a new provider stops requiring an Exchange rebuild once that gap closes.
+
+### Changed
+
+- **Settings and connection verification read the catalog document, not parsed Flux** (X-152, the
+  Exchange half of connectors C-539). The four `Rehearsal::of(.., entry.flux)` sites in
+  `settings.rs` — three production, one test; the story's own note had the attribution inverted
+  and measurement corrected it — now derive through `connector_pack::DocumentRehearsal`, so this
+  host holds zero runtime Flux parses of connector artifacts on the settings and verification
+  paths. The swap is proven behaviour-preserving, not trusted: an 892-line characterization
+  golden over all 835 catalogued operations was committed against the old parse first and is
+  byte-identical after the swap, and `no_connector_flux_parse.rs` structurally refuses the parse
+  returning — while stating plainly that workflow Flux parsing (X-98) is a different parse and
+  stays. The document surfaces Exchange deliberately does not consume yet (`roles`,
+  `quirks.pagination`, `quirks.rate_limit`, `graphs`) are recorded with reasons, and a test fails
+  when one silently acquires a consumer.
+
+- **The connector crates move to the released 0.23 line; the engine does not move** (X-155, the
+  third reading of the X-11/X-146 rule). `connector-pack` 0.23.0 requires flux `^0.54` — byte for
+  byte what 0.21.0 required, read out of the crates.io sparse index before any manifest was
+  edited — so every `codewandler-flux-*` pin stays on 0.54 and `Cargo.lock` still resolves one
+  engine line. What the bump brings into reach is the whole catalog-artifact surface the X-151
+  epic consumes: the canonical per-provider documents, the pack and its dependency-free reader,
+  the document-backed `Rehearsal` equivalent, and the engine-free request-plan API
+  (`codewandler-connector-resolve`, entering the lock transitively now and the dependency graph
+  deliberately only with X-156). Zero API drift: the workspace compiled unchanged.
+
 ### Added
 
 - **A signed-in person can authorize a connection with their own vendor account** (X-147, the half

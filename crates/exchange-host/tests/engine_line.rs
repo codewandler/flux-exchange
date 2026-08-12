@@ -244,27 +244,36 @@ fn the_lock_carries_one_engine_line() {
 /// package and the exact audited archive checksums. A path/git source or stale lock is a contract
 /// failure even when the public Rust signatures happen to compile.
 ///
-/// **X-146 moved this to 0.21 and moved nothing else.** The checksums below were read out of the
+/// **X-155 moved this to 0.23 and moved nothing else.** The checksums below were read out of the
 /// crates.io sparse index before the manifest was edited, not copied out of the lock afterwards —
 /// a checksum taken from the file under test proves only that the file agrees with itself.
 #[test]
-fn the_lock_carries_the_exact_registry_connector_021_line() {
-    const EXPECTED: [(&str, &str); 4] = [
+fn the_lock_carries_the_exact_registry_connector_023_line() {
+    const EXPECTED: [(&str, &str); 5] = [
         (
             "codewandler-connector-address",
-            "65dbef43261a0009f6c68843321ac36f06eab3b195eb2f10c33d98d0968343b9",
+            "f9aaf7652a6618a17232c016fb312695ae7568b1ea9debf079fc1453b7b2ec1b",
         ),
         (
             "codewandler-connector-catalog",
-            "c88c13adb47b3a105eb0b1798b35a15978e5e61c752c53e8e44b7d874c9f6f0e",
+            "7483c4d0902da5a90f7ab503fedfc1e3e9a4871fdca065430a9aaaa135629048",
+        ),
+        // X-153 made the pack reader a **direct** dependency, so it joins the pinned set for this
+        // test's stated reason: a deployment may now load a catalogue this crate did not compile,
+        // and the code that verifies the pack is the code whose archive is worth pinning. Read out
+        // of the crates.io sparse index before the manifest was edited, not copied out of the lock
+        // afterwards.
+        (
+            "codewandler-connector-catalog-reader",
+            "a0cd4a06285c3549a74077ad05dcfd05d1bac3e17286922fcab720236805633d",
         ),
         (
             "codewandler-connector-secrets",
-            "5521a8afe9127c0e887beb540e0fc037dd434e86a80935e606551340b8f78cba",
+            "360225fcfbd3af81248eb4fa449175a4909651612abdf5ffd9a54a09c35a2e14",
         ),
         (
             "codewandler-connector-pack",
-            "bfda4109b04d68c8dcb4265470fc96cc20fca3c811cbf2361eb1f65dcf86f2d0",
+            "8988681b0e6141d5a680c68203ffc59912beb7009efdfbcd3eeafbc365ea531a",
         ),
     ];
 
@@ -289,8 +298,8 @@ fn the_lock_carries_the_exact_registry_connector_021_line() {
         let block = matches[0];
         assert_eq!(
             block.lines().find_map(|line| value_of(line, "version")),
-            Some("0.21.0"),
-            "`{name}` is not locked to the released 0.21.0 provider line",
+            Some("0.23.0"),
+            "`{name}` is not locked to the released 0.23.0 provider line",
         );
         assert_eq!(
             block.lines().find_map(|line| value_of(line, "source")),

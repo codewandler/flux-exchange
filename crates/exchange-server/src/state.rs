@@ -5,7 +5,7 @@ use std::sync::Arc;
 use exchange_host::GrantTransactions;
 use exchange_host::{
     AuthPosture, ConnectionRegistry, ConnectionSettings, Identity, Invoker, Principal,
-    PureEditorTools, SecretStore, WorkflowStore,
+    PureEditorTools, SecretStore, ServedCatalogue, WorkflowStore,
 };
 
 use crate::acquisition_redirect::AcquisitionRedirect;
@@ -126,6 +126,15 @@ pub struct AppState {
     /// Startup tenancy policy. In the single-tenant shape this rejects disagreement; it never
     /// rewrites a resolved principal into another tenant.
     tenancy: Tenancy,
+    /// **The connector catalogue this deployment serves** (X-153) — embedded, or a pack an operator
+    /// pointed this host at.
+    ///
+    /// Not an `Option`, because there is always a catalogue: a composition that binds nothing
+    /// serves the one this build embeds, which is what every deployment served before X-153. The
+    /// value is the *seam*, and it is on the state for the reason every other port is — so that
+    /// "which catalogue is answering" has one answer a route reads rather than a choice each route
+    /// makes.
+    catalogue: Arc<ServedCatalogue>,
 }
 
 /// What this composition can offer a human who wants to sign in.
@@ -275,6 +284,7 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            catalogue: Arc::default(),
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -313,6 +323,7 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            catalogue: Arc::default(),
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -348,6 +359,7 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            catalogue: Arc::default(),
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -385,6 +397,7 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            catalogue: Arc::default(),
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -423,6 +436,7 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            catalogue: Arc::default(),
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -458,6 +472,7 @@ impl AppState {
             grant_transactions: None,
             auth_posture: AuthPosture::fail_closed(),
             acquisitions: Arc::default(),
+            catalogue: Arc::default(),
             pending_delegations: Arc::default(),
             settings: None,
             connections: Arc::default(),
@@ -683,6 +698,28 @@ impl AppState {
     /// host **derived** from the resolved principal and the connector's own declaration.
     pub fn settings(&self) -> Option<&Arc<dyn ConnectionSettings>> {
         self.settings.as_ref()
+    }
+
+    /// Serve `catalogue` rather than the one this build embeds (X-153).
+    ///
+    /// An additive builder method for [`with_credentials`](Self::with_credentials)' reason. The
+    /// composition has already verified the pack — schema version and digest — before it gets here;
+    /// this only decides *which verified catalogue* the surfaces report and resolve through. There
+    /// is deliberately no method that takes a path: loading is a startup act with a refusal, and a
+    /// setter that could load would be one a route could reach.
+    pub fn with_catalogue(mut self, catalogue: Arc<ServedCatalogue>) -> Self {
+        self.catalogue = catalogue;
+        self
+    }
+
+    /// **The catalogue this deployment serves.**
+    ///
+    /// The one answer, and the reason it is `&` rather than a clone of some rendering: a caller that
+    /// wants the identity asks for [`ServedCatalogue::report`], and a caller that wants a provider's
+    /// canonical document asks this — both from the same value, so no two surfaces can describe two
+    /// catalogues.
+    pub fn catalogue(&self) -> &Arc<ServedCatalogue> {
+        &self.catalogue
     }
 
     /// Bind the Service Account store this composition holds.

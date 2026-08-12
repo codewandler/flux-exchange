@@ -1,0 +1,892 @@
+# Exchange's connector configuration surface, as this crate derives it (X-152).
+# providers=55 operations=835
+provider airtable -
+operation airtable-record-get airtable/default -
+operation airtable-record-create airtable/default -
+operation airtable-record-update airtable/default -
+operation airtable-record-delete airtable/default -
+provider algolia default:endpoint.app_id
+operation algolia-index-list algolia/default default:endpoint.app_id
+operation algolia-index-search algolia/default default:endpoint.app_id
+operation algolia-object-get algolia/default default:endpoint.app_id
+operation algolia-object-save algolia/default default:endpoint.app_id
+operation algolia-object-delete algolia/default default:endpoint.app_id
+provider anthropic -
+operation anthropic-models-list anthropic/models -
+operation anthropic-model-get anthropic/models -
+operation anthropic-organization-get anthropic/admin -
+operation anthropic-organization-members-list anthropic/admin -
+operation anthropic-organization-member-get anthropic/admin -
+operation anthropic-workspaces-list anthropic/admin -
+operation anthropic-workspace-get anthropic/admin -
+operation anthropic-workspace-members-list anthropic/admin -
+operation anthropic-workspace-member-get anthropic/admin -
+operation anthropic-api-keys-list anthropic/admin -
+operation anthropic-invites-list anthropic/admin -
+provider asana -
+operation asana-task-get asana/default -
+operation asana-task-create asana/default -
+operation asana-task-update asana/default -
+operation asana-task-story-add asana/default -
+operation asana-project-get asana/default -
+provider asterisk default:endpoint.host default:username.asterisk.password default:channel.ari-events.query.app default:channel.ari-events.query.subscribeAll
+operation asterisk-ari-applications-list asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-ping asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-list asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-create asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-destroy asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-list asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-originate asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-hangup asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-device-states-list asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-endpoints-list asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-mailboxes-list asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-playbacks-get asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-playbacks-stop asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-list-stored asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-sounds-list asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-applications-get asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-applications-filter asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-get-object asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-update-object asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-delete-object asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-list-log-channels asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-add-log asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-delete-log asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-rotate-log asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-list-modules asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-get-module asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-load-module asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-reload-module asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-unload-module asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-get-global-var asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-asterisk-set-global-var asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-get asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-create-with-id asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-start-moh asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-stop-moh asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-record asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-get-bridge-var asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-set-bridge-var asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-set-bridge-vars asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-clear-video-source asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-bridges-set-video-source asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-create asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-external-media asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-get asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-originate-with-id asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-answer asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-continue-in-dialplan asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-dial asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-send-dtmf asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-hold asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-unhold asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-start-moh asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-stop-moh asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-move asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-mute asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-unmute asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-progress asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-record asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-redirect asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-ring asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-ring-stop asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-rtpstatistics asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-start-silence asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-stop-silence asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-snoop-channel asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-snoop-channel-with-id asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-transfer_progress asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-get-channel-var asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-set-channel-var asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-channels-set-channel-vars asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-device-states-get asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-device-states-update asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-device-states-delete asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-endpoints-refer asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-endpoints-send-message asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-endpoints-list-by-tech asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-endpoints-get asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-endpoints-refer-to-endpoint asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-endpoints-send-message-to-endpoint asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-events-claim-channel asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-mailboxes-get asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-mailboxes-update asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-mailboxes-delete asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-playbacks-control asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-get-live asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-cancel asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-mute asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-unmute asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-pause asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-unpause asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-stop asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-get-stored asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-delete-stored asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-copy-stored asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-recordings-get-stored-file asterisk/default default:endpoint.host default:username.asterisk.password
+operation asterisk-ari-sounds-get asterisk/default default:endpoint.host default:username.asterisk.password
+provider babelforce -
+operation babelforce-agent-list babelforce/manager -
+operation babelforce-agent-get babelforce/manager -
+operation babelforce-agent-status-update babelforce/manager -
+operation babelforce-call-list babelforce/manager -
+operation babelforce-call-get babelforce/manager -
+operation babelforce-call-hangup babelforce/manager -
+operation babelforce-call-session-set babelforce/manager -
+operation babelforce-session-get babelforce/manager -
+operation babelforce-session-update babelforce/manager -
+operation babelforce-list-all-simple-reporting-calls babelforce/manager -
+operation babelforce-list-dashboards babelforce/manager -
+operation babelforce-list-live-logs babelforce/manager -
+operation babelforce-list-users babelforce/manager -
+operation babelforce-user-me-get babelforce/user -
+operation babelforce-flush-dialer babelforce/manager -
+operation babelforce-list-actions babelforce/manager -
+operation babelforce-execute-action babelforce/manager -
+operation babelforce-list-action-params babelforce/manager -
+operation babelforce-list-single-action-session-variables babelforce/manager -
+operation babelforce-create-agent babelforce/manager -
+operation babelforce-bulk-agent-action babelforce/manager -
+operation babelforce-list-agent-groups babelforce/manager -
+operation babelforce-create-agent-group babelforce/manager -
+operation babelforce-bulk-delete-agent-groups babelforce/manager -
+operation babelforce-list-agents-in-group babelforce/manager -
+operation babelforce-add-agent-to-group babelforce/manager -
+operation babelforce-remove-agent-from-group babelforce/manager -
+operation babelforce-get-agent-group babelforce/manager -
+operation babelforce-update-agent-group babelforce/manager -
+operation babelforce-delete-agent-group babelforce/manager -
+operation babelforce-list-all-agent-logs babelforce/manager -
+operation babelforce-list-agent-presences babelforce/manager -
+operation babelforce-create-agent-presence babelforce/manager -
+operation babelforce-get-agent-presence babelforce/manager -
+operation babelforce-update-agent-presence babelforce/manager -
+operation babelforce-delete-agent-presence babelforce/manager -
+operation babelforce-export-agents babelforce/manager -
+operation babelforce-get-agent-import-job babelforce/manager -
+operation babelforce-push-to-agent babelforce/manager -
+operation babelforce-list-available-agent-statuses babelforce/manager -
+operation babelforce-update-agent babelforce/manager -
+operation babelforce-delete-agent babelforce/manager -
+operation babelforce-create-agent-outbound-call babelforce/manager -
+operation babelforce-disable-agent babelforce/manager -
+operation babelforce-enable-agent babelforce/manager -
+operation babelforce-hangup-agent-call babelforce/manager -
+operation babelforce-list-agent-logs babelforce/manager -
+operation babelforce-update-agent-password babelforce/manager -
+operation babelforce-get-agent-status babelforce/manager -
+operation babelforce-list-applications babelforce/manager -
+operation babelforce-create-application babelforce/manager -
+operation babelforce-list-application-actions babelforce/manager -
+operation babelforce-bulk-update-applications babelforce/manager -
+operation babelforce-delete-many-applications babelforce/manager -
+operation babelforce-list-application-errors babelforce/manager -
+operation babelforce-list-modules babelforce/manager -
+operation babelforce-list-local-automations babelforce/manager -
+operation babelforce-create-local-automation babelforce/manager -
+operation babelforce-get-local-automation babelforce/manager -
+operation babelforce-update-local-automation babelforce/manager -
+operation babelforce-delete-local-automation babelforce/manager -
+operation babelforce-get-application babelforce/manager -
+operation babelforce-update-application babelforce/manager -
+operation babelforce-delete-application babelforce/manager -
+operation babelforce-clone-application babelforce/manager -
+operation babelforce-dispatch-local-automations babelforce/manager -
+operation babelforce-list-audit-logs babelforce/manager -
+operation babelforce-list-all-local-automations babelforce/manager -
+operation babelforce-list-babeldesks babelforce/manager -
+operation babelforce-create-babeldesk babelforce/manager -
+operation babelforce-get-babeldesk babelforce/manager -
+operation babelforce-update-babeldesk babelforce/manager -
+operation babelforce-delete-babeldesk babelforce/manager -
+operation babelforce-list-babeldesk-widgets babelforce/manager -
+operation babelforce-create-babeldesk-widget babelforce/manager -
+operation babelforce-get-babeldesk-widget babelforce/manager -
+operation babelforce-update-babeldesk-widget babelforce/manager -
+operation babelforce-delete-babeldesk-widget babelforce/manager -
+operation babelforce-list-business-hours babelforce/manager -
+operation babelforce-create-business-hour babelforce/manager -
+operation babelforce-bulk-update-business-hours babelforce/manager -
+operation babelforce-bulk-delete-business-hours babelforce/manager -
+operation babelforce-get-business-hour babelforce/manager -
+operation babelforce-update-business-hour babelforce/manager -
+operation babelforce-delete-business-hour babelforce/manager -
+operation babelforce-list-business-hour-ranges babelforce/manager -
+operation babelforce-add-business-hour-ranges babelforce/manager -
+operation babelforce-get-business-hour-range babelforce/manager -
+operation babelforce-remove-business-hour-range babelforce/manager -
+operation babelforce-list-calendars babelforce/manager -
+operation babelforce-create-calendar babelforce/manager -
+operation babelforce-bulk-update-calendars babelforce/manager -
+operation babelforce-bulk-delete-calendars babelforce/manager -
+operation babelforce-test-calendar-date babelforce/manager -
+operation babelforce-get-calendar babelforce/manager -
+operation babelforce-update-calendar babelforce/manager -
+operation babelforce-delete-calendar babelforce/manager -
+operation babelforce-get-calender-dates babelforce/manager -
+operation babelforce-add-calendar-date babelforce/manager -
+operation babelforce-get-calendar-date babelforce/manager -
+operation babelforce-update-calendar-date babelforce/manager -
+operation babelforce-remove-calendar-date babelforce/manager -
+operation babelforce-list-dialer-simple-reporting-calls babelforce/manager -
+operation babelforce-list-inbound-simple-reporting-calls babelforce/manager -
+operation babelforce-list-outbound-simple-reporting-calls babelforce/manager -
+operation babelforce-create-inbound-test-call babelforce/manager -
+operation babelforce-cancel-call babelforce/manager -
+operation babelforce-list-conferences babelforce/manager -
+operation babelforce-get-conference babelforce/manager -
+operation babelforce-list-conversations babelforce/manager -
+operation babelforce-create-conversation babelforce/manager -
+operation babelforce-list-all-conversation-events babelforce/manager -
+operation babelforce-close-conversation babelforce/manager -
+operation babelforce-list-conversation-events babelforce/manager -
+operation babelforce-add-conversation-event babelforce/manager -
+operation babelforce-get-first-conversation-event babelforce/manager -
+operation babelforce-get-latest-conversation-event babelforce/manager -
+operation babelforce-open-conversation babelforce/manager -
+operation babelforce-get-conversation-session babelforce/manager -
+operation babelforce-update-conversation-session babelforce/manager -
+operation babelforce-get-conversation babelforce/manager -
+operation babelforce-update-conversation babelforce/manager -
+operation babelforce-delete-conversation babelforce/manager -
+operation babelforce-create-dashboard babelforce/manager -
+operation babelforce-get-dashboard babelforce/manager -
+operation babelforce-update-dashboard babelforce/manager -
+operation babelforce-delete-dashboard babelforce/manager -
+operation babelforce-list-dashboard-users babelforce/manager -
+operation babelforce-add-dashboard-user babelforce/manager -
+operation babelforce-remove-dashboard-user babelforce/manager -
+operation babelforce-get-server-time babelforce/manager -
+operation babelforce-list-timezones babelforce/manager -
+operation babelforce-get-dialer-info babelforce/manager -
+operation babelforce-echo babelforce/manager -
+operation babelforce-list-events babelforce/manager -
+operation babelforce-create-custom-event babelforce/manager -
+operation babelforce-delete-custom-event babelforce/manager -
+operation babelforce-list-global-automations babelforce/manager -
+operation babelforce-create-global-automation babelforce/manager -
+operation babelforce-bulk-update-event-triggers babelforce/manager -
+operation babelforce-bulk-delete-event-triggers babelforce/manager -
+operation babelforce-dispatch-event-trigger babelforce/manager -
+operation babelforce-get-global-automation babelforce/manager -
+operation babelforce-update-global-automation babelforce/manager -
+operation babelforce-delete-global-automation babelforce/manager -
+operation babelforce-clone-event-trigger babelforce/manager -
+operation babelforce-list-expressions babelforce/manager -
+operation babelforce-evaluate-expression babelforce/manager -
+operation babelforce-list-files babelforce/manager -
+operation babelforce-list-backup-files babelforce/manager -
+operation babelforce-get-bulk-file-download babelforce/manager -
+operation babelforce-post-bulk-file-download babelforce/manager -
+operation babelforce-list-files-by-type babelforce/manager -
+operation babelforce-list-prompt-files babelforce/manager -
+operation babelforce-bulk-delete-files babelforce/manager -
+operation babelforce-list-recording-files babelforce/manager -
+operation babelforce-get-file babelforce/manager -
+operation babelforce-delete-file babelforce/manager -
+operation babelforce-download-file babelforce/manager -
+operation babelforce-list-integrations babelforce/manager -
+operation babelforce-create-integration babelforce/manager -
+operation babelforce-list-available-integrations babelforce/manager -
+operation babelforce-bulk-update-integrations babelforce/manager -
+operation babelforce-bulk-delete-integrations babelforce/manager -
+operation babelforce-list-integration-providers babelforce/manager -
+operation babelforce-get-integration babelforce/manager -
+operation babelforce-update-integration babelforce/manager -
+operation babelforce-delete-integration babelforce/manager -
+operation babelforce-authorize-integration babelforce/manager -
+operation babelforce-clone-integration babelforce/manager -
+operation babelforce-integrate-integration babelforce/manager -
+operation babelforce-list-integration-tokens babelforce/manager -
+operation babelforce-get-integration-token babelforce/manager -
+operation babelforce-delete-integration-token babelforce/manager -
+operation babelforce-refresh-integration-token babelforce/manager -
+operation babelforce-integration-api-proxy-get babelforce/manager -
+operation babelforce-integration-api-proxy-post babelforce/manager -
+operation babelforce-add-integration-association babelforce/manager -
+operation babelforce-delete-integration-association babelforce/manager -
+operation babelforce-dispatch-action-get babelforce/manager -
+operation babelforce-dispatch-action babelforce/manager -
+operation babelforce-get-integration-provider-logo babelforce/manager -
+operation babelforce-list-provider-session-variables babelforce/manager -
+operation babelforce-get-integration-provider-template babelforce/manager -
+operation babelforce-list-integration-type-actions babelforce/manager -
+operation babelforce-dispatch-integration-type-action babelforce/manager -
+operation babelforce-get-integration-template babelforce/manager -
+operation babelforce-write-log babelforce/manager -
+operation babelforce-disable-live-logging babelforce/manager -
+operation babelforce-enable-live-logging babelforce/manager -
+operation babelforce-get-me babelforce/manager -
+operation babelforce-get-all-metric-definitions babelforce/manager -
+operation babelforce-list-metric-ids babelforce/manager -
+operation babelforce-get-metric babelforce/manager -
+operation babelforce-get-metric-definition babelforce/manager -
+operation babelforce-list-service-numbers babelforce/manager -
+operation babelforce-get-service-number babelforce/manager -
+operation babelforce-update-service-number babelforce/manager -
+operation babelforce-add-tags-to-number babelforce/manager -
+operation babelforce-list-outbound-attempts babelforce/manager -
+operation babelforce-list-campaigns babelforce/manager -
+operation babelforce-create-campaign babelforce/manager -
+operation babelforce-get-campaign babelforce/manager -
+operation babelforce-update-campaign babelforce/manager -
+operation babelforce-delete-campaign babelforce/manager -
+operation babelforce-list-campaign-attempts babelforce/manager -
+operation babelforce-get-campaign-hopper babelforce/manager -
+operation babelforce-list-campaign-leads babelforce/manager -
+operation babelforce-list-campaign-processed-leads babelforce/manager -
+operation babelforce-get-campaign-list babelforce/manager -
+operation babelforce-set-campaign-list babelforce/manager -
+operation babelforce-unset-campaign-list babelforce/manager -
+operation babelforce-set-campaign-list-by-id babelforce/manager -
+operation babelforce-logout-all-campaign-agents babelforce/manager -
+operation babelforce-get-campaign-statistics babelforce/manager -
+operation babelforce-get-campaign-status babelforce/manager -
+operation babelforce-list-dialer-behaviours babelforce/manager -
+operation babelforce-create-dialer-behaviour babelforce/manager -
+operation babelforce-get-dialer-behaviour babelforce/manager -
+operation babelforce-update-dialer-behaviour babelforce/manager -
+operation babelforce-delete-dialer-behaviour babelforce/manager -
+operation babelforce-list-outbound-leads babelforce/manager -
+operation babelforce-list-processed-outbound-leads babelforce/manager -
+operation babelforce-list-outbound-lists babelforce/manager -
+operation babelforce-create-outbound-list babelforce/manager -
+operation babelforce-get-outbound-list babelforce/manager -
+operation babelforce-update-outbound-list babelforce/manager -
+operation babelforce-delete-outbound-list babelforce/manager -
+operation babelforce-list-leads-in-list babelforce/manager -
+operation babelforce-add-outbound-lead babelforce/manager -
+operation babelforce-clear-outbound-list babelforce/manager -
+operation babelforce-bulk-delete-outbound-leads-alt babelforce/manager -
+operation babelforce-bulk-delete-outbound-leads babelforce/manager -
+operation babelforce-get-lead-in-list babelforce/manager -
+operation babelforce-update-outbound-lead babelforce/manager -
+operation babelforce-delete-outbound-lead babelforce/manager -
+operation babelforce-list-phonebook-entrys babelforce/manager -
+operation babelforce-create-phonebook-entry babelforce/manager -
+operation babelforce-download-phonebook-entries babelforce/manager -
+operation babelforce-bulk-delete-phonebook-entries babelforce/manager -
+operation babelforce-get-phonebook-entry babelforce/manager -
+operation babelforce-update-phonebook-entry babelforce/manager -
+operation babelforce-delete-phonebook-entry babelforce/manager -
+operation babelforce-ping babelforce/manager -
+operation babelforce-list-prompts babelforce/manager -
+operation babelforce-get-prompt babelforce/manager -
+operation babelforce-update-prompt babelforce/manager -
+operation babelforce-delete-prompt babelforce/manager -
+operation babelforce-get-prompt-uses babelforce/manager -
+operation babelforce-get-push-token babelforce/manager -
+operation babelforce-list-queues babelforce/manager -
+operation babelforce-create-queue babelforce/manager -
+operation babelforce-bulk-update-queues babelforce/manager -
+operation babelforce-list-global-queue-selections babelforce/manager -
+operation babelforce-get-queue babelforce/manager -
+operation babelforce-update-queue babelforce/manager -
+operation babelforce-delete-queue babelforce/manager -
+operation babelforce-queue-callback babelforce/manager -
+operation babelforce-list-queued-calls babelforce/manager -
+operation babelforce-get-agents-for-queue-selection babelforce/manager -
+operation babelforce-list-queue-selections babelforce/manager -
+operation babelforce-create-queue-selection babelforce/manager -
+operation babelforce-set-queue-selections-priority babelforce/manager -
+operation babelforce-get-queue-selection babelforce/manager -
+operation babelforce-update-queue-selection babelforce/manager -
+operation babelforce-delete-queue-selection babelforce/manager -
+operation babelforce-add-agent-to-queue-selection babelforce/manager -
+operation babelforce-remove-agent-from-queue-selection babelforce/manager -
+operation babelforce-add-group-to-queue-selection babelforce/manager -
+operation babelforce-remove-group-from-queue-selection babelforce/manager -
+operation babelforce-add-tag-to-queue-selection babelforce/manager -
+operation babelforce-remove-tag-from-queue-selection babelforce/manager -
+operation babelforce-list-queue-triggers babelforce/manager -
+operation babelforce-list-recordings babelforce/manager -
+operation babelforce-start-recording babelforce/manager -
+operation babelforce-bulk-recording-action babelforce/manager -
+operation babelforce-get-recording babelforce/manager -
+operation babelforce-update-recording babelforce/manager -
+operation babelforce-delete-recording babelforce/manager -
+operation babelforce-get-recording-flag babelforce/manager -
+operation babelforce-toggle-recording-flag babelforce/manager -
+operation babelforce-flag-recording babelforce/manager -
+operation babelforce-unflag-recording babelforce/manager -
+operation babelforce-list-routings babelforce/manager -
+operation babelforce-create-routing babelforce/manager -
+operation babelforce-get-routing babelforce/manager -
+operation babelforce-update-routing babelforce/manager -
+operation babelforce-delete-routing babelforce/manager -
+operation babelforce-create-session babelforce/manager -
+operation babelforce-list-all-settings babelforce/manager -
+operation babelforce-clear-all-settings babelforce/manager -
+operation babelforce-get-settings-for-app-agent-status babelforce/manager -
+operation babelforce-update-settings-for-app-agent-status babelforce/manager -
+operation babelforce-get-settings-for-app-conversations babelforce/manager -
+operation babelforce-update-settings-for-app-conversations babelforce/manager -
+operation babelforce-get-settings-for-app-customer-logging babelforce/manager -
+operation babelforce-update-settings-for-app-customer-logging babelforce/manager -
+operation babelforce-get-settings-for-app-integrations babelforce/manager -
+operation babelforce-update-settings-for-app-integrations babelforce/manager -
+operation babelforce-get-settings-for-audit-default babelforce/manager -
+operation babelforce-update-settings-for-audit-default babelforce/manager -
+operation babelforce-get-settings-for-retention-periods babelforce/manager -
+operation babelforce-update-settings-for-retention-periods babelforce/manager -
+operation babelforce-get-settings-for-telephony-agent-inbound babelforce/manager -
+operation babelforce-update-settings-for-telephony-agent-inbound babelforce/manager -
+operation babelforce-get-settings-for-telephony-agent-outbound babelforce/manager -
+operation babelforce-update-settings-for-telephony-agent-outbound babelforce/manager -
+operation babelforce-get-settings-for-telephony-agent-recording babelforce/manager -
+operation babelforce-update-settings-for-telephony-agent-recording babelforce/manager -
+operation babelforce-get-settings-for-telephony-agent-wrapup babelforce/manager -
+operation babelforce-update-settings-for-telephony-agent-wrapup babelforce/manager -
+operation babelforce-get-settings-for-telephony-post-call babelforce/manager -
+operation babelforce-update-settings-for-telephony-post-call babelforce/manager -
+operation babelforce-get-settings-for-ui-i18n babelforce/manager -
+operation babelforce-update-settings-for-ui-i18n babelforce/manager -
+operation babelforce-list-settings-in-scope babelforce/manager -
+operation babelforce-clear-settings-in-scope babelforce/manager -
+operation babelforce-clear-setting babelforce/manager -
+operation babelforce-list-smss babelforce/manager -
+operation babelforce-send-sms babelforce/manager -
+operation babelforce-report-sms babelforce/manager -
+operation babelforce-test-inbound-sms babelforce/manager -
+operation babelforce-get-sms babelforce/manager -
+operation babelforce-delete-sms babelforce/manager -
+operation babelforce-get-api-status babelforce/manager -
+operation babelforce-list-tags babelforce/manager -
+operation babelforce-list-tags-by-category babelforce/manager -
+operation babelforce-export-templates babelforce/manager -
+operation babelforce-list-triggers babelforce/manager -
+operation babelforce-create-trigger babelforce/manager -
+operation babelforce-bulk-trigger-action babelforce/manager -
+operation babelforce-list-trigger-expressions babelforce/manager -
+operation babelforce-list-trigger-operators babelforce/manager -
+operation babelforce-test-triggers babelforce/manager -
+operation babelforce-get-trigger babelforce/manager -
+operation babelforce-update-trigger babelforce/manager -
+operation babelforce-delete-trigger babelforce/manager -
+operation babelforce-clone-trigger babelforce/manager -
+operation babelforce-list-trigger-conditions babelforce/manager -
+operation babelforce-set-trigger-conditions babelforce/manager -
+operation babelforce-get-trigger-uses babelforce/manager -
+operation babelforce-create-user babelforce/manager -
+operation babelforce-get-user-by-email babelforce/manager -
+operation babelforce-delete-users babelforce/manager -
+operation babelforce-disable-users babelforce/manager -
+operation babelforce-enable-users babelforce/manager -
+operation babelforce-reset-passwords babelforce/manager -
+operation babelforce-list-available-roles babelforce/manager -
+operation babelforce-add-roles babelforce/manager -
+operation babelforce-remove-roles babelforce/manager -
+operation babelforce-get-user babelforce/manager -
+operation babelforce-get-widget-settings babelforce/manager -
+operation babelforce-list-accounts babelforce/user -
+operation babelforce-reset-password babelforce/user -
+operation babelforce-change-agent-lock babelforce/task-automation -
+operation babelforce-agent-action-on-task babelforce/task-automation -
+operation babelforce-tasks babelforce/task-automation -
+operation babelforce-submit-task babelforce/task-automation -
+operation babelforce-testing babelforce/task-automation -
+operation babelforce-list-secret-prefixes babelforce/task-automation -
+operation babelforce-list-secret-keys babelforce/task-automation -
+operation babelforce-create-secrets babelforce/task-automation -
+operation babelforce-patch-secrets babelforce/task-automation -
+operation babelforce-delete-secret-keys babelforce/task-automation -
+operation babelforce-read-selection-configuration babelforce/task-automation -
+operation babelforce-create-selection-configuration babelforce/task-automation -
+operation babelforce-update-selection-configuration babelforce/task-automation -
+operation babelforce-delete-selection-configuration babelforce/task-automation -
+operation babelforce-list babelforce/task-automation -
+operation babelforce-agent-interaction-duration babelforce/task-automation -
+operation babelforce-agent-interactions babelforce/task-automation -
+operation babelforce-task-journal babelforce/task-automation -
+operation babelforce-list-scripts babelforce/task-automation -
+operation babelforce-submit-script babelforce/task-automation -
+operation babelforce-get-script babelforce/task-automation -
+operation babelforce-update-script babelforce/task-automation -
+operation babelforce-delete-script babelforce/task-automation -
+operation babelforce-submit-task-template babelforce/task-automation -
+operation babelforce-task-usage babelforce/task-automation -
+operation babelforce-task-usage-types babelforce/task-automation -
+operation babelforce-task babelforce/task-automation -
+operation babelforce-update-task babelforce/task-automation -
+operation babelforce-manager-interrupt-on-task babelforce/task-automation -
+operation babelforce-change-task-state babelforce/task-automation -
+operation babelforce-get-task-schedules babelforce/task-schedule -
+operation babelforce-submit-task-schedule babelforce/task-schedule -
+operation babelforce-get-task-schedule babelforce/task-schedule -
+operation babelforce-delete-schedule-task babelforce/task-schedule -
+provider bitbucket default:endpoint.workspace
+operation bitbucket-repository-list bitbucket/default default:endpoint.workspace
+operation bitbucket-repository-get bitbucket/default default:endpoint.workspace
+operation bitbucket-pull-request-list bitbucket/default default:endpoint.workspace
+operation bitbucket-pull-request-get bitbucket/default default:endpoint.workspace
+operation bitbucket-pull-request-create bitbucket/default default:endpoint.workspace
+operation bitbucket-pull-request-comment bitbucket/default default:endpoint.workspace
+operation bitbucket-pull-request-approve bitbucket/default default:endpoint.workspace
+provider box -
+operation box-user-me box/default -
+operation box-folder-get box/default -
+operation box-folder-items-list box/default -
+operation box-file-get box/default -
+operation box-folder-create box/default -
+operation box-file-copy box/default -
+provider calendly -
+operation calendly-user-me calendly/default -
+operation calendly-event-type-list calendly/default -
+operation calendly-scheduled-event-list calendly/default -
+operation calendly-scheduled-event-get calendly/default -
+operation calendly-invitee-list calendly/default -
+provider clickup -
+operation clickup-team-list clickup/default -
+operation clickup-space-folder-list clickup/default -
+operation clickup-list-task-list clickup/default -
+operation clickup-task-get clickup/default -
+operation clickup-task-create clickup/default -
+operation clickup-task-update clickup/default -
+provider cloudflare default:endpoint.zone_id
+operation cloudflare-zone-list cloudflare/default -
+operation cloudflare-dns-record-list cloudflare/default default:endpoint.zone_id
+operation cloudflare-dns-record-create cloudflare/default default:endpoint.zone_id
+operation cloudflare-dns-record-delete cloudflare/default default:endpoint.zone_id
+operation cloudflare-cache-purge cloudflare/default default:endpoint.zone_id
+provider confluence default:endpoint.site default:username.confluence.api_token
+operation confluence-space-list confluence/default default:endpoint.site default:username.confluence.api_token
+operation confluence-space-get confluence/default default:endpoint.site default:username.confluence.api_token
+operation confluence-space-pages confluence/default default:endpoint.site default:username.confluence.api_token
+operation confluence-page-get confluence/default default:endpoint.site default:username.confluence.api_token
+operation confluence-page-create confluence/default default:endpoint.site default:username.confluence.api_token
+operation confluence-comment-add confluence/default default:endpoint.site default:username.confluence.api_token
+provider contentful delivery:endpoint.environment_id delivery:endpoint.space_id management:endpoint.environment_id management:endpoint.space_id
+operation contentful-entry-get contentful/delivery delivery:endpoint.environment_id delivery:endpoint.space_id
+operation contentful-entries-list contentful/delivery delivery:endpoint.environment_id delivery:endpoint.space_id
+operation contentful-asset-get contentful/delivery delivery:endpoint.environment_id delivery:endpoint.space_id
+operation contentful-entry-create contentful/management management:endpoint.environment_id management:endpoint.space_id
+operation contentful-entry-publish contentful/management management:endpoint.environment_id management:endpoint.space_id
+provider datadog -
+operation datadog-monitor-list datadog/default -
+operation datadog-monitor-get datadog/default -
+operation datadog-incident-list datadog/default -
+operation datadog-incident-get datadog/default -
+provider discord -
+operation discord-current-user discord/default -
+operation discord-guild-list discord/default -
+operation discord-guild-get discord/default -
+operation discord-guild-channels discord/default -
+operation discord-channel-messages discord/default -
+operation discord-message-create discord/default -
+provider docusign default:endpoint.account_host default:endpoint.account_id
+operation docusign-verify docusign/default default:endpoint.account_host default:endpoint.account_id
+operation docusign-envelope-list docusign/default default:endpoint.account_host default:endpoint.account_id
+operation docusign-envelope-get docusign/default default:endpoint.account_host default:endpoint.account_id
+operation docusign-envelope-recipients-get docusign/default default:endpoint.account_host default:endpoint.account_id
+operation docusign-envelope-create-from-template docusign/default default:endpoint.account_host default:endpoint.account_id
+operation docusign-envelope-void docusign/default default:endpoint.account_host default:endpoint.account_id
+provider dropbox -
+operation dropbox-user-me dropbox/default -
+operation dropbox-folder-list dropbox/default -
+operation dropbox-metadata-get dropbox/default -
+operation dropbox-search dropbox/default -
+operation dropbox-folder-create dropbox/default -
+operation dropbox-temporary-link-get dropbox/default -
+provider figma -
+operation figma-user-me figma/default -
+operation figma-file-get figma/default -
+operation figma-file-nodes-get figma/default -
+operation figma-image-render-get figma/default -
+operation figma-project-files-list figma/default -
+operation figma-file-comments-list figma/default -
+provider fly -
+operation fly-regions-list fly/machines -
+operation fly-machines-list fly/machines -
+operation fly-machine-get fly/machines -
+operation fly-machine-events-list fly/machines -
+operation fly-machine-create fly/machines -
+operation fly-machine-start fly/machines -
+operation fly-machine-stop fly/machines -
+operation fly-machine-restart fly/machines -
+operation fly-machine-delete fly/machines -
+provider freshdesk default:endpoint.domain
+operation freshdesk-test freshdesk/default default:endpoint.domain
+operation freshdesk-ticket-list freshdesk/default default:endpoint.domain
+operation freshdesk-ticket-get freshdesk/default default:endpoint.domain
+operation freshdesk-ticket-create freshdesk/default default:endpoint.domain
+operation freshdesk-ticket-update freshdesk/default default:endpoint.domain
+operation freshdesk-ticket-note-add freshdesk/default default:endpoint.domain
+operation freshdesk-contact-list freshdesk/default default:endpoint.domain
+operation freshdesk-contact-get freshdesk/default default:endpoint.domain
+operation freshdesk-contact-create freshdesk/default default:endpoint.domain
+provider front -
+operation front-verify front/default -
+operation front-conversation-list front/default -
+operation front-conversation-get front/default -
+operation front-conversation-message-list front/default -
+operation front-conversation-reply front/default -
+operation front-conversation-tag-add front/default -
+provider github -
+operation github-repo-get github/default -
+operation github-issue-get github/default -
+operation github-pull-get github/default -
+operation github-issue-create github/default -
+operation github-issue-comment-add github/default -
+operation github-issue-list github/default -
+operation github-pull-files-list github/default -
+operation github-workflow-run-list github/default -
+operation github-commit-list github/default -
+operation github-user-get github/default -
+operation github-org-list github/default -
+operation github-org-repo-list github/default -
+operation github-user-repo-list github/default -
+provider gitlab default:endpoint.origin
+operation gitlab-user-get gitlab/default default:endpoint.origin
+operation gitlab-group-list gitlab/default default:endpoint.origin
+operation gitlab-project-list gitlab/default default:endpoint.origin
+operation gitlab-issue-list gitlab/default default:endpoint.origin
+operation gitlab-issue-get gitlab/default default:endpoint.origin
+operation gitlab-issue-create gitlab/default default:endpoint.origin
+operation gitlab-merge-request-list gitlab/default default:endpoint.origin
+operation gitlab-pipeline-get gitlab/default default:endpoint.origin
+operation gitlab-branch-list gitlab/default default:endpoint.origin
+provider google -
+operation google-gmail-message-get google/gmail -
+operation google-gmail-message-send google/gmail -
+operation google-gmail-labels-list google/gmail -
+operation google-calendar-event-get google/calendar -
+operation google-calendar-event-insert google/calendar -
+operation google-calendar-calendar-get google/calendar -
+operation google-drive-file-get google/drive -
+operation google-drive-file-update google/drive -
+provider hubspot -
+operation hubspot-contact-get hubspot/default -
+operation hubspot-contact-create hubspot/default -
+operation hubspot-contact-update hubspot/default -
+operation hubspot-company-get hubspot/default -
+operation hubspot-deal-get hubspot/default -
+provider intercom default:endpoint.host
+operation intercom-contact-get intercom/default default:endpoint.host
+operation intercom-contact-create intercom/default default:endpoint.host
+operation intercom-conversation-get intercom/default default:endpoint.host
+operation intercom-conversation-reply intercom/default default:endpoint.host
+operation intercom-contact-note-create intercom/default default:endpoint.host
+provider jira default:endpoint.site default:username.jira.api_token
+operation jira-issue-get jira/default default:endpoint.site default:username.jira.api_token
+operation jira-issue-create jira/default default:endpoint.site default:username.jira.api_token
+operation jira-issue-comment-list jira/default default:endpoint.site default:username.jira.api_token
+operation jira-issue-comment-add jira/default default:endpoint.site default:username.jira.api_token
+operation jira-issue-transitions-list jira/default default:endpoint.site default:username.jira.api_token
+operation jira-issue-transition jira/default default:endpoint.site default:username.jira.api_token
+provider klaviyo -
+operation klaviyo-account-list klaviyo/default -
+operation klaviyo-profile-list klaviyo/default -
+operation klaviyo-profile-get klaviyo/default -
+operation klaviyo-profile-create klaviyo/default -
+operation klaviyo-list-list klaviyo/default -
+operation klaviyo-event-create klaviyo/default -
+provider launchdarkly -
+operation launchdarkly-project-list launchdarkly/default -
+operation launchdarkly-environment-list launchdarkly/default -
+operation launchdarkly-flag-list launchdarkly/default -
+operation launchdarkly-flag-get launchdarkly/default -
+operation launchdarkly-flag-toggle launchdarkly/default -
+provider mailchimp default:endpoint.dc
+operation mailchimp-ping mailchimp/default default:endpoint.dc
+operation mailchimp-audience-list mailchimp/default default:endpoint.dc
+operation mailchimp-audience-get mailchimp/default default:endpoint.dc
+operation mailchimp-audience-member-list mailchimp/default default:endpoint.dc
+operation mailchimp-audience-member-get mailchimp/default default:endpoint.dc
+operation mailchimp-audience-member-upsert mailchimp/default default:endpoint.dc
+operation mailchimp-campaign-list mailchimp/default default:endpoint.dc
+provider microsoft_graph -
+operation microsoft_graph-mail-message-get microsoft_graph/mail -
+operation microsoft_graph-mail-message-reply microsoft_graph/mail -
+operation microsoft_graph-mail-folder-list microsoft_graph/mail -
+operation microsoft_graph-calendar-event-get microsoft_graph/calendar -
+operation microsoft_graph-calendar-event-create microsoft_graph/calendar -
+operation microsoft_graph-calendar-calendar-get microsoft_graph/calendar -
+operation microsoft_graph-files-item-get microsoft_graph/files -
+operation microsoft_graph-files-item-update microsoft_graph/files -
+operation microsoft_graph-mail-message-list microsoft_graph/mail -
+operation microsoft_graph-calendar-category-list microsoft_graph/calendar -
+operation microsoft_graph-calendar-time-zone-list microsoft_graph/calendar -
+operation microsoft_graph-calendar-language-list microsoft_graph/calendar -
+provider miro -
+operation miro-board-list miro/default -
+operation miro-board-item-list miro/default -
+operation miro-board-item-get miro/default -
+operation miro-sticky-note-create miro/default -
+operation miro-sticky-note-update miro/default -
+operation miro-sticky-note-delete miro/default -
+provider newrelic default:endpoint.host
+operation newrelic-application-list newrelic/default default:endpoint.host
+operation newrelic-application-get newrelic/default default:endpoint.host
+operation newrelic-alert-policy-list newrelic/default default:endpoint.host
+operation newrelic-alert-violation-list newrelic/default default:endpoint.host
+operation newrelic-deployment-list newrelic/default default:endpoint.host
+operation newrelic-deployment-create newrelic/default default:endpoint.host
+provider notion -
+operation notion-user-me notion/default -
+operation notion-page-get notion/default -
+operation notion-database-query notion/default -
+operation notion-search notion/default -
+operation notion-page-create notion/default -
+provider okta default:endpoint.domain
+operation okta-user-list okta/default default:endpoint.domain
+operation okta-user-get okta/default default:endpoint.domain
+operation okta-group-list okta/default default:endpoint.domain
+operation okta-user-group-list okta/default default:endpoint.domain
+operation okta-user-deactivate okta/default default:endpoint.domain
+provider openai -
+operation openai-models-list openai/default -
+operation openai-model-get openai/default -
+operation openai-chat-completion openai/default -
+operation openai-embeddings-create openai/default -
+operation openai-response-get openai/default -
+operation openai-response-input-item-list openai/default -
+operation openai-file-list openai/default -
+operation openai-batch-list openai/default -
+provider openrouter -
+operation openrouter-models-list openrouter/default -
+operation openrouter-model-endpoints-list openrouter/default -
+operation openrouter-chat-completion openrouter/default -
+operation openrouter-credits-get openrouter/default -
+provider pagerduty -
+operation pagerduty-incident-list pagerduty/default -
+operation pagerduty-incident-get pagerduty/default -
+operation pagerduty-service-list pagerduty/default -
+operation pagerduty-oncall-list pagerduty/default -
+operation pagerduty-incident-acknowledge pagerduty/default -
+operation pagerduty-incident-resolve pagerduty/default -
+provider postmark -
+operation postmark-email-send postmark/server -
+operation postmark-deliverystats-get postmark/server -
+operation postmark-bounce-list postmark/server -
+operation postmark-bounce-get postmark/server -
+provider resend -
+operation resend-email-send resend/default -
+operation resend-email-get resend/default -
+operation resend-domain-list resend/default -
+operation resend-domain-get resend/default -
+provider salesforce default:endpoint.instance
+operation salesforce-whoami salesforce/default default:endpoint.instance
+operation salesforce-record-get salesforce/default default:endpoint.instance
+operation salesforce-record-create salesforce/default default:endpoint.instance
+operation salesforce-record-update salesforce/default default:endpoint.instance
+operation salesforce-sobject-describe salesforce/default default:endpoint.instance
+provider sendgrid -
+operation sendgrid-template-list sendgrid/default -
+operation sendgrid-template-get sendgrid/default -
+operation sendgrid-suppression-bounce-list sendgrid/default -
+operation sendgrid-email-validate sendgrid/default -
+provider sentry -
+operation sentry-issue-get sentry/default -
+operation sentry-issue-update sentry/default -
+operation sentry-project-get sentry/default -
+operation sentry-issue-event-latest sentry/default -
+provider shopify default:endpoint.shop
+operation shopify-order-get shopify/default default:endpoint.shop
+operation shopify-product-get shopify/default default:endpoint.shop
+operation shopify-product-update shopify/default default:endpoint.shop
+operation shopify-customer-get shopify/default default:endpoint.shop
+operation shopify-inventory-level-list shopify/default default:endpoint.shop
+provider slack -
+operation slack-chat-post-message slack/default -
+operation slack-conversations-history slack/default -
+operation slack-users-info slack/default -
+operation slack-reactions-add slack/default -
+provider statuspage default:endpoint.page_id
+operation statuspage-incident-list statuspage/default default:endpoint.page_id
+operation statuspage-incident-get statuspage/default default:endpoint.page_id
+operation statuspage-incident-create statuspage/default default:endpoint.page_id
+operation statuspage-incident-update statuspage/default default:endpoint.page_id
+operation statuspage-component-list statuspage/default default:endpoint.page_id
+provider stripe -
+operation stripe-balance-get stripe/default -
+operation stripe-customer-get stripe/default -
+operation stripe-charge-get stripe/default -
+operation stripe-payment-intent-get stripe/default -
+operation stripe-refund-get stripe/default -
+operation stripe-payment-intent-capture stripe/default -
+operation stripe-payment-intent-cancel stripe/default -
+operation stripe-charge-refund-create stripe/default -
+operation stripe-country-spec-list stripe/default -
+operation stripe-event-list stripe/default -
+operation stripe-exchange-rate-list stripe/default -
+operation stripe-billing-meter-list stripe/default -
+provider supabase default:endpoint.project_ref
+operation supabase-schema-describe supabase/default default:endpoint.project_ref
+operation supabase-rows-list supabase/default default:endpoint.project_ref
+operation supabase-auth-settings supabase/default default:endpoint.project_ref
+provider trello -
+operation trello-board-list trello/default -
+operation trello-board-get trello/default -
+operation trello-board-lists trello/default -
+operation trello-list-cards trello/default -
+operation trello-card-create trello/default -
+operation trello-card-archive trello/default -
+provider twilio default:endpoint.username.twilio.basic_auth default:username.twilio.basic_auth
+operation twilio-account-get twilio/default default:username.twilio.basic_auth
+operation twilio-message-list twilio/default default:username.twilio.basic_auth
+operation twilio-message-get twilio/default default:username.twilio.basic_auth
+operation twilio-call-list twilio/default default:username.twilio.basic_auth
+operation twilio-call-get twilio/default default:username.twilio.basic_auth
+operation twilio-recording-list twilio/default default:endpoint.username.twilio.basic_auth default:username.twilio.basic_auth
+operation twilio-recording-get twilio/default default:endpoint.username.twilio.basic_auth default:username.twilio.basic_auth
+operation twilio-usage-record-list twilio/default default:endpoint.username.twilio.basic_auth default:username.twilio.basic_auth
+operation twilio-conference-list twilio/default default:endpoint.username.twilio.basic_auth default:username.twilio.basic_auth
+provider typeform -
+operation typeform-user-me typeform/default -
+operation typeform-form-list typeform/default -
+operation typeform-form-get typeform/default -
+operation typeform-response-list typeform/default -
+operation typeform-response-delete typeform/default -
+provider vercel default:endpoint.teamId
+operation vercel-projects-list vercel/default default:endpoint.teamId
+operation vercel-project-get vercel/default default:endpoint.teamId
+operation vercel-deployments-list vercel/default default:endpoint.teamId
+operation vercel-deployment-get vercel/default default:endpoint.teamId
+operation vercel-deployment-cancel vercel/default default:endpoint.teamId
+provider webflow -
+operation webflow-site-list webflow/default -
+operation webflow-collection-list webflow/default -
+operation webflow-collection-get webflow/default -
+operation webflow-collection-item-list webflow/default -
+operation webflow-collection-item-get webflow/default -
+operation webflow-site-publish webflow/default -
+provider zendesk default:endpoint.subdomain default:username.zendesk.api_token default:username.zendesk.messaging_key help-center:endpoint.subdomain help-center:username.zendesk.api_token help-center:username.zendesk.messaging_key messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.api_token messaging:username.zendesk.messaging_key
+operation zendesk-ticket-audit-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-incremental-ticket-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-incremental-user-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-incremental-organization-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-incremental-ticket-event-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-custom-object-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-ticket-recent-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-view-ticket-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-user-show zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-organization-show zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-group-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-ticket-field-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-ticket-form-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-custom-status-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-test zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-ticket-search zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-ticket-show zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-ticket-comment-list zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-ticket-update zendesk/default default:endpoint.subdomain default:username.zendesk.api_token
+operation zendesk-help-center-category-list zendesk/help-center help-center:endpoint.subdomain help-center:username.zendesk.api_token
+operation zendesk-help-center-section-list zendesk/help-center help-center:endpoint.subdomain help-center:username.zendesk.api_token
+operation zendesk-help-center-article-list zendesk/help-center help-center:endpoint.subdomain help-center:username.zendesk.api_token
+operation zendesk-help-center-article-get zendesk/help-center help-center:endpoint.subdomain help-center:username.zendesk.api_token
+operation zendesk-help-center-translation-list zendesk/help-center help-center:endpoint.subdomain help-center:username.zendesk.api_token
+operation zendesk-help-center-article-incremental-list zendesk/help-center help-center:endpoint.subdomain help-center:username.zendesk.api_token
+operation zendesk-help-center-article-create zendesk/help-center help-center:endpoint.subdomain help-center:username.zendesk.api_token
+operation zendesk-messaging-conversation-create zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+operation zendesk-messaging-conversation-get zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+operation zendesk-messaging-conversation-update zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+operation zendesk-messaging-participant-list zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+operation zendesk-messaging-message-create zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+operation zendesk-messaging-message-list zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+operation zendesk-messaging-user-create zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+operation zendesk-messaging-user-get zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+operation zendesk-messaging-user-update zendesk/messaging messaging:endpoint.appId messaging:endpoint.subdomain messaging:username.zendesk.messaging_key
+provider zoom -
+operation zoom-meeting-delete zoom/default -
+operation zoom-user-get zoom/default -

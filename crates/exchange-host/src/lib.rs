@@ -31,7 +31,7 @@
 //!
 //! # Status
 //!
-//! **v0.17.0, and the service around these types runs operations and generated channels.** Since X-12,
+//! **v0.18.0, and the service around these types runs operations and generated channels.** Since X-12,
 //! `POST /api/operations/{operation}/invoke` executes one catalogue operation for the caller's
 //! tenant through [`Invoker`], over a credential store, a connection-settings store and an OIDC
 //! sign-in. What is *not* built is itemized in the repository README, and keeping that page
@@ -68,6 +68,7 @@ pub const WORKFLOW_STORE_SETTING: &str = "FLUX_EXCHANGE_WORKFLOWS";
 // lives, this one answers *how it got there*.
 mod acquisition;
 mod app;
+mod catalogue;
 mod channel;
 mod connections;
 // The platform-native owner-only implementation lives in connector-secrets: Unix modes and owners
@@ -153,6 +154,10 @@ pub use app::{
     AvailableConnection, ConnectionRequirement, Datasource, DatasourceRequirement, EventDelivery,
     FrozenAppOperation, InstallRequest, ModelProfile, PackageProvenance, PackageRegistry,
     PackageRequirements, PackageTrigger, RuntimeOperation, TriggerTarget, APP_STORE_SETTING,
+};
+pub use catalogue::{
+    CatalogueOrigin, CatalogueRefusal, CatalogueReport, ServedCatalogue,
+    SUPPORTED_CATALOGUE_FORMAT, SUPPORTED_CATALOGUE_SCHEMA,
 };
 pub use channel::{
     ChannelId, ChannelPlanRefusal, ChannelRecord, ChannelRefusal, Channels,

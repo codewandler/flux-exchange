@@ -106,6 +106,16 @@ const ALLOWED: &[(&str, &str)] = &[
          anything.",
     ),
     (
+        "connector-catalog-reader",
+        "**the catalogue pack's reader, and a reader is not a transport.** It has zero \
+         dependencies — not a client behind a feature flag, none at all — and what it can do is \
+         bounded by that: read the bytes of one local file the composition named at startup, check \
+         a SHA-256 it vendors rather than imports, and hand out `&str` slices of bytes already in \
+         hand. It dials nothing, resolves no name and walks no directory. The thing that would \
+         make it a transport is a path derived from a caller, and there is none: \
+         `ServedCatalogue` is built once by the composition and only read afterwards.",
+    ),
+    (
         "connector-pack",
         "the thing that builds the request, and the whole point. It holds no HTTP client either — \
          its transport is the `Egress` this crate hands it, which is the same port one level down.",
@@ -194,6 +204,33 @@ mod rules {
     /// Files allowed to name [`REHEARSAL`]: the one that derives a connector's configuration
     /// surface from its operations' own Flux.
     pub const MAY_NAME_REHEARSAL: &[&str] = &["settings.rs"];
+
+    /// **The pack's fourth entry point** (X-152, counted here by X-156).
+    ///
+    /// The document-backed twin of [`REHEARSAL`]: it answers the same questions — the contract,
+    /// whether the operation is exposed, the configuration surface, and the request over a bound
+    /// `Configuration` — from the catalogue's canonical document instead of from a runtime parse of
+    /// the operation's emitted Flux.
+    ///
+    /// It is counted for exactly the reason [`REHEARSAL`] is, and this is the case that row was
+    /// written against: *"a **fourth** entry point. The rule knows the three that exist; a new one
+    /// is invisible until upstream ships it and somebody reads the changelog."* Upstream shipped it
+    /// in `connector-pack` 0.23, X-152 adopted it in `settings.rs`, and for that story's span the
+    /// count was held next door by
+    /// `tests/no_connector_flux_parse.rs::the_document_backed_rehearsal_stays_in_the_settings_module`
+    /// because this file was outside its fence. It is held here now.
+    ///
+    /// Like [`REHEARSAL`] it is a **count, not a refusal**: it takes no [`TRANSPORT_PORT`], holds no
+    /// transport and has no `execute`, so nothing reached through it can dispatch. What it can do is
+    /// compose a request — `DocumentRehearsal::request` calls the same
+    /// `connector_resolve::build_request` the live path calls — so a second file entering it is a
+    /// second file deriving a request, which is the thing this whole file counts.
+    pub const DOCUMENT_REHEARSAL: &str = "connector_pack::DocumentRehearsal";
+
+    /// Files allowed to name [`DOCUMENT_REHEARSAL`]: the same one that may name [`REHEARSAL`],
+    /// because it is the same job — deriving a connector's configuration surface — read out of the
+    /// document rather than out of a parse.
+    pub const MAY_NAME_DOCUMENT_REHEARSAL: &[&str] = &["settings.rs"];
 
     /// The zero-transport channel entry point. It may compose one generated handshake plan but has
     /// no client, socket or `Egress`; the composing binary executes that plan through Flux's
@@ -690,6 +727,39 @@ fn the_scanner_catches_what_it_claims_to() {
         "the scanner accepted the pack's third entry point in a file that may not name it",
     );
 
+    // The pack's fourth entry point, under the same treatment and for the same reason. The two
+    // spellings differ by one word and one of them contains the other's tail, so the accept
+    // direction here is doing real work: a rule that refused `settings.rs` for naming the
+    // replacement would be red on the code X-152 landed.
+    let rehearsing_the_document = |name: &str| {
+        (
+            name.to_owned(),
+            format!("let r = {}::of(entry.id)?;", rules::DOCUMENT_REHEARSAL),
+        )
+    };
+    assert!(
+        violations(&[seam(), rehearsing_the_document("settings.rs")]).is_empty(),
+        "the scanner rejects the one file that may derive a configuration surface from the \
+         canonical document",
+    );
+    assert!(
+        !violations(&[seam(), rehearsing_the_document("elsewhere.rs")]).is_empty(),
+        "the scanner accepted the pack's fourth entry point in a file that may not name it",
+    );
+
+    // And the two rules are independent rather than one rule matching twice: the emitted-Flux
+    // rehearsal's marker is a prefix of nothing here, but `DocumentRehearsal` ends in `Rehearsal`,
+    // so a rule written as a bare `contains` would report the document-backed call as the parse it
+    // replaced — and the fix somebody would reach for is to loosen the older rule.
+    let found = violations(&[seam(), rehearsing_the_document("elsewhere.rs")]);
+    assert!(
+        found.iter().all(|violation| !violation.contains(&format!(
+            "names `{}`, the pack's third entry point",
+            rules::REHEARSAL
+        ))),
+        "the document-backed rehearsal was reported as the emitted-Flux one: {found:?}",
+    );
+
     let planning = |name: &str| {
         (
             name.to_owned(),
@@ -1115,6 +1185,7 @@ fn lock_2_markers() -> Vec<&'static str> {
         rules::SEAM,
         rules::MODEL_FACING_SEAM,
         rules::REHEARSAL,
+        rules::DOCUMENT_REHEARSAL,
         rules::CHANNEL_PLAN,
         rules::UNWRAPS_THE_TRANSPORT,
         rules::DISPATCH,
@@ -1320,6 +1391,23 @@ fn violations(sources: &[(String, String)]) -> Vec<String> {
                  ways into `connector-pack` from this crate is bounded on purpose, and a new one \
                  belongs in `MAY_NAME_REHEARSAL` with a reason.",
                 rules::REHEARSAL,
+            ));
+        }
+    }
+
+    for path in naming(rules::DOCUMENT_REHEARSAL) {
+        if !rules::MAY_NAME_DOCUMENT_REHEARSAL
+            .iter()
+            .any(|allowed| path.ends_with(allowed))
+        {
+            found.push(format!(
+                "`{path}` names `{}`, the pack's fourth entry point. Like the third it cannot \
+                 dispatch — no `Egress`, no `execute` — so this is a count rather than a refusal. \
+                 What it *can* do is compose a request from the canonical document, through the \
+                 same `connector_resolve::build_request` the live path calls, so a second file \
+                 entering it is a second file deriving a request. A new one belongs in \
+                 `MAY_NAME_DOCUMENT_REHEARSAL` with a reason.",
+                rules::DOCUMENT_REHEARSAL,
             ));
         }
     }

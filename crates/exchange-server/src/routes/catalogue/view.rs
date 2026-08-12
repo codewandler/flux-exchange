@@ -27,7 +27,9 @@
 //!    tenant has stored one is per-principal state, and it is not on this surface at all. See
 //!    [`ConnectorCredentials`].
 
-use exchange_host::{operation_input_schema, InputSchemaError, OperationFacts};
+use exchange_host::{
+    operation_input_schema, CatalogueReport, InputSchemaError, OperationFacts, ServedCatalogue,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -40,6 +42,18 @@ use connector_catalog as catalog;
 /// The body of `GET /api/catalogue/connectors`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConnectorList {
+    /// **Which catalogue answered** (X-153) — embedded or loaded, and its digest.
+    ///
+    /// One object beside the directory rather than a field on every entry, for the reason
+    /// [`ConnectorCredentials`] states about its own shape: this is one fact about the whole
+    /// answer, and repeating it 55 times would be a payload for every caller that only wanted the
+    /// ids. It is here at all because the question it answers — *is this the catalogue I think it
+    /// is?* — is the first one an operator has when an operation they expect is missing, and
+    /// answering it from a log means having the log.
+    ///
+    /// It is [`exchange_host::CatalogueReport`], the same value the onboarding descriptor
+    /// serialises, so the two surfaces cannot describe two catalogues.
+    pub catalogue: CatalogueReport,
     /// Every connector the catalogue carries, in the catalogue's own (id-sorted) order.
     pub connectors: Vec<ConnectorEntry>,
 }
@@ -256,13 +270,25 @@ impl UnknownConnector {
     }
 }
 
-/// Every connector in the catalogue.
+/// Every connector in the catalogue, and which catalogue that is.
 ///
 /// Read from `catalog::providers()` on every call rather than assembled once: the catalogue is
 /// `&'static` data with no initialisation to amortise, and a cache would be a second copy of a
 /// constant that could go stale against it.
-pub fn connectors() -> ConnectorList {
+///
+/// `served` is the composition's one [`ServedCatalogue`], passed in rather than reached for. That
+/// is the seam working: this function reports the catalogue the deployment serves and does not get
+/// to decide which one that is.
+///
+/// **The entries still come from the typed `&'static` tables**, and that is a fact about this
+/// deployment rather than an oversight. Those tables carry `Operation::flux` — emitted Flux the
+/// canonical documents replaced with a request template — and the execution path parses it, so
+/// upstream keeps them generated until the emitter is retired. A loaded pack therefore changes what
+/// `catalogue` reports and not yet what `connectors` lists; X-153's report says so in as many words,
+/// and closing it is C-540's to make possible.
+pub fn connectors(served: &ServedCatalogue) -> ConnectorList {
     ConnectorList {
+        catalogue: served.report(),
         connectors: catalog::providers()
             .iter()
             .map(|provider| ConnectorEntry {
@@ -536,7 +562,10 @@ mod tests {
             !expected.is_empty(),
             "an empty catalogue would vacuously pass"
         );
-        assert_eq!(connectors().connectors, expected);
+        assert_eq!(
+            connectors(&ServedCatalogue::embedded()).connectors,
+            expected
+        );
     }
 
     /// **X-86's failing-first server test.** A connector result needs the human name and sentence
@@ -547,7 +576,8 @@ mod tests {
     /// catalogue facts must not become a place for tenant, grant, holding or credential state.
     #[test]
     fn connector_results_publish_the_catalogues_human_facts_and_nothing_private() {
-        let body = serde_json::to_value(connectors()).expect("the listing serialises");
+        let body = serde_json::to_value(connectors(&ServedCatalogue::embedded()))
+            .expect("the listing serialises");
         let served = body["connectors"]
             .as_array()
             .expect("connectors is an array");
@@ -949,7 +979,8 @@ mod tests {
     /// The listing's own shape, including the human facts X-86 added for catalogue search.
     #[test]
     fn the_wire_shape_of_the_listing_is_the_agreed_contract() {
-        let body = serde_json::to_value(connectors()).expect("serialises");
+        let body =
+            serde_json::to_value(connectors(&ServedCatalogue::embedded())).expect("serialises");
         let listed = body["connectors"].as_array().expect("an array");
 
         let zendesk = listed

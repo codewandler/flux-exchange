@@ -1,7 +1,7 @@
 ---
 id: X-152
 title: "Settings and verification read the catalog document, not parsed Flux"
-status: backlog
+status: done
 priority: 2
 epic: catalog-artifact
 areas: [exchange-host]
@@ -42,23 +42,23 @@ was actually reading.
 
 ## Acceptance
 
-- [ ] **Characterization tests first, before any migration.** For every catalogued operation, record
+- [x] **Characterization tests first, before any migration.** For every catalogued operation, record
       what the current `Rehearsal` derivation reports — declared settings, their kinds, their
       binding targets — as committed expected output. Written against the *current* parse, they must
       pass unchanged after the swap. This is the acceptance criterion that can be satisfied **before
       upstream ships anything**, and it is the reason to start early.
-- [ ] All four `Rehearsal::of(.., *.flux)` sites read document data. No call site passes a `.flux`
+- [x] All four `Rehearsal::of(.., *.flux)` sites read document data. No call site passes a `.flux`
       field.
-- [ ] Connection verification (`settings.rs:3449`) is covered by a failing-first test proving a
+- [x] Connection verification (`settings.rs:3449`) is covered by a failing-first test proving a
       connection that verified before still verifies, and one that did not still does not. Verification
       is the site where a silent difference would look like an operator's mistake rather than ours.
-- [ ] A test asserts `crates/exchange-host` reaches no connector `.flux` text on any path from the
+- [x] A test asserts `crates/exchange-host` reaches no connector `.flux` text on any path from the
       catalogue to a settings or verification answer, so the parse cannot come back.
-- [ ] The four surfaces the design says reach no artifact today — `roles`, `quirks.pagination`,
+- [x] The four surfaces the design says reach no artifact today — `roles`, `quirks.pagination`,
       `quirks.rate_limit`, `graphs` — are either consumed here or explicitly recorded as not
       consumed. A document that carries more than the parse did should not leave Exchange silently
       ignoring it.
-- [ ] Workflow Flux parsing is untouched. `flux_lang` stays a dependency of `exchange-host` for
+- [x] Workflow Flux parsing is untouched. `flux_lang` stays a dependency of `exchange-host` for
       X-98's workflows; this story removes the *connector* parse only, and the distinction is stated
       where a future reader will look for it.
 
@@ -66,6 +66,22 @@ was actually reading.
 
 - 2026-08-12: Filed against Decision 0022 / C-539. Upstream has begun no implementation, so the
   document-backed `Rehearsal` does not exist yet — but the characterization tests do not need it.
+
+- 2026-08-12: Promoted to ready by the cross-repo coordinator: flux-connectors v0.23.0 published
+  the complete surface this story consumes (documents, pack, reader, DocumentRehearsal, plan
+  API) — the upstream blockers recorded above are closed. X-155 lands the pins first.
+
+- 2026-08-12: Implemented on `impl/X-152` (`4787d0a` characterization-only, `a6007bd` the swap
+  — the commit order is the proof), merged `06a92ab`. The story's own Notes had the call-site
+  attribution inverted and the implementor corrected it by measurement: settings.rs:1457 is
+  PRODUCTION connection verification (`CatalogueCustomOriginPolicy::read`), :3449 is its unit
+  test; three production sites, one test site, all four now document-backed. The golden
+  (892 lines, 55 providers, 835 operations) passed against the Flux parse and was byte-identical
+  after the swap. One deliberate deferral, coordinator-decided: `no_second_request_path`'s lock-2
+  does not yet name `DocumentRehearsal` as the pack's fourth entry point — the interim bound is
+  `no_connector_flux_parse.rs::the_document_backed_rehearsal_stays_in_the_settings_module`, and
+  the lock-2 widening (plus the `docs/designs/invoke.md` sentence its own test demands) rides
+  X-156, where the lock-2 surgery happens once for the plan API.
 
 ## Notes
 

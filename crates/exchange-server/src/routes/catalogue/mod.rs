@@ -247,9 +247,13 @@ fn operation_is_connected(
     }
 }
 
-/// Every connector this binary carries.
-async fn connectors() -> Json<view::ConnectorList> {
-    Json(view::connectors())
+/// Every connector this deployment serves, and which catalogue that is.
+///
+/// It takes state for exactly one reason: since X-153 a deployment may serve a catalogue pack from
+/// disk, so "which catalogue answered" is a fact about this composition rather than about this
+/// build, and the listing publishes it. The entries themselves are still `&'static` catalogue data.
+async fn connectors(State(state): State<AppState>) -> Json<view::ConnectorList> {
+    Json(view::connectors(state.catalogue()))
 }
 
 /// One connector's operations, or a refusal naming the id that was asked for.
@@ -317,6 +321,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::Request;
+    use exchange_host::ServedCatalogue;
     use serde_json::Value;
     use tower::ServiceExt;
 
@@ -363,7 +368,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             body,
-            serde_json::to_value(view::connectors()).expect("serialises"),
+            serde_json::to_value(view::connectors(&ServedCatalogue::embedded()))
+                .expect("serialises"),
         );
         assert!(
             !body["connectors"].as_array().expect("an array").is_empty(),

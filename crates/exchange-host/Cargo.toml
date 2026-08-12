@@ -33,6 +33,7 @@ path = "src/lib.rs"
 async-trait.workspace = true
 connector-address.workspace = true
 connector-catalog.workspace = true
+connector-catalog-reader.workspace = true
 connector-pack.workspace = true
 connector-secrets.workspace = true
 flux-core.workspace = true
