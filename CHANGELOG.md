@@ -17,6 +17,23 @@ All notable changes to this project are documented in this file. The format is b
   the checksum taken from the crates.io index and the released-commit from the v0.23.0 tag; the
   self-test and the full release-policy suite pass.
 
+- **A connector bump that leaves the C-515 evidence behind now fails in its own pull request**
+  (X-158). X-157 repaired the pin; this removes the three defects that let it drift through two
+  connector releases unseen. `ci.yml` ran the readiness checker's `--self-test` and never pointed it
+  at the tree — proving the checker *could* refuse and then not asking — so it now runs the real
+  check straight after, and `check_wiring` refuses a tree where that step is missing. The expected
+  connector version and checksum were written down twice, in the script and in the authority; the
+  script now reads them out of `native-evidence-v1.json`, whose shape it validates first so a blank
+  version cannot widen the accept-set. A new
+  `crates/exchange-release/tests/upstream_authority_lock.rs` holds `Cargo.lock`'s resolved version,
+  registry checksum and crates.io source against the authority's pinned package, naming both values
+  and the re-derivation procedure when they disagree — proved red against a reconstruction of the
+  tree that was actually tagged. The three C-515 descriptions that named a version were re-derived:
+  the two describing the retained registry `FileStore` moved 0.20 → 0.23, while
+  `c515-legacy-quiescence`'s 0.19.1 and 0.20 were verified byte-identical in the published 0.23.0
+  source and kept — they name the provider's migration boundary, not the pinned line. `AGENTS.md`
+  carries the procedure beside the Publishing contract.
+
 ## [0.18.0] - 2026-08-12
 
 ### Added

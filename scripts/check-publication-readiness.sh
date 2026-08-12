@@ -6,10 +6,11 @@ root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
 fail() { printf 'check-publication-readiness: %s\n' "$*" >&2; exit 1; }
 
 check_wiring() {
-  local tree="$1" local_workflow crates_workflow publish_script
+  local tree="$1" local_workflow crates_workflow ci_workflow publish_script
   local checkout self_test ordinary secret toolchain metadata network
   local_workflow="$tree/.github/workflows/local-release.yml"
   crates_workflow="$tree/.github/workflows/crates-io.yml"
+  ci_workflow="$tree/.github/workflows/ci.yml"
   publish_script="$tree/scripts/publish-crates-io.sh"
 
   checkout="$(grep -nF 'uses: actions/checkout@' "$local_workflow" | head -n1 | cut -d: -f1)"
@@ -31,6 +32,19 @@ check_wiring() {
     && [ "$checkout" -lt "$self_test" ] && [ "$self_test" -lt "$ordinary" ] \
     && [ "$ordinary" -lt "$secret" ] && [ "$ordinary" -lt "$toolchain" ] \
     || { printf '%s\n' 'check-publication-readiness: crates.io workflow does not run readiness first after checkout and before tokens/tools' >&2; return 1; }
+
+  # Ordinary CI runs the real check, not only the self-test. The two release workflows above are the
+  # only paths that *must* refuse, but they run on a tag — by which point a wrong version number has
+  # already been spent, and the v0.18.0 publish is what that costs. This check reads the tree and
+  # touches no network, so the pull request that causes the drift can afford to be the one that
+  # fails. Its self-test still runs first: a checker that has not just proved it catches a violation
+  # is not evidence there are none.
+  checkout="$(grep -nF 'uses: actions/checkout@' "$ci_workflow" | head -n1 | cut -d: -f1)"
+  self_test="$(grep -nF './scripts/check-publication-readiness.sh --self-test' "$ci_workflow" | head -n1 | cut -d: -f1)"
+  ordinary="$(grep -nE '^[[:space:]]+\./scripts/check-publication-readiness\.sh$' "$ci_workflow" | head -n1 | cut -d: -f1)"
+  [ -n "$checkout" ] && [ -n "$self_test" ] && [ -n "$ordinary" ] \
+    && [ "$checkout" -lt "$self_test" ] && [ "$self_test" -lt "$ordinary" ] \
+    || { printf '%s\n' 'check-publication-readiness: ordinary CI does not run the real readiness check after its self-test' >&2; return 1; }
 
   ordinary="$(grep -nE '^\./scripts/check-publication-readiness\.sh( \|\| exit 1)?$' "$publish_script" | head -n1 | cut -d: -f1)"
   metadata="$(grep -nE '^[[:space:]]*cargo metadata ' "$publish_script" | head -n1 | cut -d: -f1)"
@@ -90,6 +104,30 @@ if len(upstream) != 1 or not isinstance(upstream[0].get("package"), dict):
     refuse("native-evidence authority lacks one inherited upstream package identity")
 upstream_package = upstream[0]["package"]
 
+# The expected connector line is *read* here, never restated. It used to be written down twice —
+# once as a literal accept-set in this script and once in the authority — and two places holding one
+# fact is exactly the drift that let X-146 and X-155 move the workspace to 0.21 and then 0.23 while
+# this check still demanded 0.20.0. The authority is the source because it is the document that has
+# to be true: it binds the published C-515 obligations to one artifact, so if the workspace resolves
+# a different one the evidence is wrong regardless of what any checker expects.
+#
+# Validate the identity's shape before deriving anything from it. A blank or malformed version would
+# otherwise widen the accept-set instead of narrowing it, which is the one failure mode a
+# read-it-from-the-document rule introduces that a literal does not have.
+expected_name = upstream_package.get("name")
+expected_version = upstream_package.get("version")
+expected_checksum = upstream_package.get("registry_sha256")
+if (
+    not isinstance(expected_name, str)
+    or not expected_name
+    or not isinstance(expected_version, str)
+    or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", expected_version) is None
+    or not isinstance(expected_checksum, str)
+    or re.fullmatch(r"[0-9a-f]{64}", expected_checksum) is None
+):
+    refuse("native-evidence upstream identity is not one crate name, release version and SHA-256")
+expected_series = ".".join(expected_version.split(".")[:2])
+
 try:
     manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
     lock = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
@@ -99,10 +137,10 @@ except (OSError, tomllib.TOMLDecodeError) as error:
 dependency = manifest.get("workspace", {}).get("dependencies", {}).get("connector-secrets")
 if not isinstance(dependency, dict):
     refuse("workspace connector-secrets is not one direct registry dependency table")
-if dependency.get("package") != "codewandler-connector-secrets":
+if dependency.get("package") != expected_name:
     refuse("workspace connector-secrets does not name the published provider crate")
-if dependency.get("version") not in {"0.23", "0.23.0", "=0.23.0"}:
-    refuse("workspace connector-secrets does not select the 0.23.0 release line")
+if dependency.get("version") not in {expected_series, expected_version, f"={expected_version}"}:
+    refuse(f"workspace connector-secrets does not select the {expected_version} release line")
 if any(key in dependency for key in ("path", "git", "registry")):
     refuse("workspace connector-secrets uses a path, git, or alternate-registry source")
 
@@ -118,11 +156,11 @@ for name in connector_dependencies:
     if len(selected) != 1:
         refuse(f"Cargo.lock contains {len(selected)} instances of {name}, want exactly one")
     package = selected[0]
-    if package.get("version") != "0.23.0":
-        refuse(f"Cargo.lock selects {name} {package.get('version')!r}, want 0.23.0")
+    if package.get("version") != expected_version:
+        refuse(f"Cargo.lock selects {name} {package.get('version')!r}, want {expected_version}")
     if package.get("source") != registry or not re.fullmatch(r"[0-9a-f]{64}", package.get("checksum", "")):
-        refuse(f"Cargo.lock does not authenticate crates.io bytes for {name} 0.23.0")
-    if name == upstream_package.get("name") and package.get("checksum") != upstream_package.get("registry_sha256"):
+        refuse(f"Cargo.lock does not authenticate crates.io bytes for {name} {expected_version}")
+    if name == expected_name and package.get("checksum") != expected_checksum:
         refuse("Cargo.lock connector-secrets checksum disagrees with its canonical upstream authority")
 
 obsolete = root / "tests/fixtures/exchange-release-v1"
@@ -347,7 +385,7 @@ missing_contract_cases = sorted(required_contract_cases - set(case_ids) - set(na
 if missing_contract_cases:
     refuse(f"v2 fixtures omit minimum contract cases: {missing_contract_cases}")
 
-print("PASS publication readiness: registry 0.23, v2 producers/fixtures, eight protocols and authority-derived native evidence")
+print(f"PASS publication readiness: registry {expected_series}, v2 producers/fixtures, eight protocols and authority-derived native evidence")
 PY
 }
 
@@ -407,14 +445,24 @@ for relative in (
     TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 - uses: dtolnay/rust-toolchain@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 ''', encoding="utf-8")
+(root / ".github/workflows/ci.yml").write_text('''- uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+- name: readiness
+  run: |
+    ./scripts/check-publication-readiness.sh --self-test
+    ./scripts/check-publication-readiness.sh
+''', encoding="utf-8")
 (root / "scripts/publish-crates-io.sh").write_text('''#!/usr/bin/env bash
 ./scripts/check-publication-readiness.sh || exit 1
 cargo metadata --offline
 curl https://crates.io
 ''', encoding="utf-8")
 
-(root / "Cargo.toml").write_text('''[workspace]\n[workspace.dependencies]\nconnector-secrets = { package = "codewandler-connector-secrets", version = "0.23" }\n''')
 upstream = next(item for item in authority["authorities"].values() if item["class"] == "inherited_upstream")["package"]
+# The synthetic tree is built from the authority for the same reason the check reads it: a fixture
+# restating the expected line would have to be moved by hand on every connector bump, and a
+# self-test fixture nobody moved is how a mutation quietly stops mutating anything.
+series = ".".join(upstream["version"].split(".")[:2])
+(root / "Cargo.toml").write_text(f'''[workspace]\n[workspace.dependencies]\nconnector-secrets = {{ package = "{upstream["name"]}", version = "{series}" }}\n''')
 lock = "version = 4\n\n"
 lock += f'[[package]]\nname = "{upstream["name"]}"\nversion = "{upstream["version"]}"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{upstream["registry_sha256"]}"\n\n'
 (root / "Cargo.lock").write_text(lock, encoding="utf-8")
@@ -494,8 +542,23 @@ PY
     fi
   }
 
+  # Corrupt whatever checksum the lock actually records, rather than a literal prefix of the one it
+  # recorded when this line was written. A fixed `sed` pattern silently matches nothing once the
+  # connector line moves, and a mutation that does not mutate proves a refusal that never happened.
   cp "$scratch/Cargo.lock" "$scratch/Cargo.lock.clean"
-  expect_refusal "a changed registry checksum" sed -i.bak 's/360225fcfbd3/060225fcfbd3/' "$scratch/Cargo.lock"
+  expect_refusal "a changed registry checksum" python3 -c '
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+changed, count = re.subn(
+    r"(checksum = \")([0-9a-f])",
+    lambda match: match.group(1) + ("1" if match.group(2) == "0" else "0"),
+    text,
+    count=1,
+)
+assert count == 1 and changed != text, "self-test could not corrupt the recorded checksum"
+open(path, "w").write(changed)
+' "$scratch/Cargo.lock"
   mv "$scratch/Cargo.lock.clean" "$scratch/Cargo.lock"
   cp "$scratch/Cargo.toml" "$scratch/Cargo.toml.clean"
   sed -i.bak 's/version = "0.23"/version = "0.23", path = "..\/provider"/' "$scratch/Cargo.toml"
@@ -510,6 +573,10 @@ PY
   sed -i.bak '/check-publication-readiness/d' "$scratch/.github/workflows/crates-io.yml"
   if check_wiring "$scratch" >/dev/null 2>&1; then fail "self-test: accepted crates.io readiness removal"; fi
   mv "$scratch/crates-io.clean" "$scratch/.github/workflows/crates-io.yml"
+  cp "$scratch/.github/workflows/ci.yml" "$scratch/ci.clean"
+  sed -i.bak '/check-publication-readiness\.sh$/d' "$scratch/.github/workflows/ci.yml"
+  if check_wiring "$scratch" >/dev/null 2>&1; then fail "self-test: accepted ordinary CI keeping only the self-test"; fi
+  mv "$scratch/ci.clean" "$scratch/.github/workflows/ci.yml"
   cp "$scratch/scripts/publish-crates-io.sh" "$scratch/publish.clean"
   sed -i.bak '/check-publication-readiness/d' "$scratch/scripts/publish-crates-io.sh"
   if check_wiring "$scratch" >/dev/null 2>&1; then fail "self-test: accepted publish-script readiness removal"; fi
@@ -593,6 +660,25 @@ PY
   if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a missing canonical native family"; fi
   mv "$authority.clean" "$authority"
 
+  # The expected connector line is read out of the authority, so moving the authority alone must
+  # refuse the workspace that has not followed it — and must say which line it now expects. Asserting
+  # the message, not merely that something refused, is what distinguishes a derived expectation from
+  # a literal that happens to agree with the document today.
+  cp "$authority" "$authority.clean"
+  python3 - "$authority" <<'PY'
+import json, sys
+path=sys.argv[1]; value=json.load(open(path))
+package=next(item for item in value["authorities"].values() if item["class"] == "inherited_upstream")["package"]
+package["version"]="0.24.0"
+open(path,"w").write(json.dumps(value,ensure_ascii=False,separators=(",",":"),sort_keys=True))
+PY
+  if check_tree "$scratch" >/dev/null 2>"$scratch/derived-line.err"; then
+    fail "self-test: accepted a workspace that did not follow the authority's connector line"
+  fi
+  grep -qF 'does not select the 0.24.0 release line' "$scratch/derived-line.err" \
+    || fail "self-test: the expected connector line is not read out of the native-evidence authority"
+  mv "$authority.clean" "$authority"
+
   cp "$fixture_set" "$fixture_set.clean"
   python3 - "$fixture_set" <<'PY'
 import json, sys
@@ -602,7 +688,7 @@ PY
   if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a dropped trust-v1 refusal"; fi
   mv "$fixture_set.clean" "$fixture_set"
 
-  printf 'PASS self-test: dependency, interim closure, inventory, trust and two-target readiness mutations refused without Cargo or network access\n'
+  printf 'PASS self-test: dependency, derived connector line, CI wiring, interim closure, inventory, trust and two-target readiness mutations refused without Cargo or network access\n'
   exit 0
 fi
 
