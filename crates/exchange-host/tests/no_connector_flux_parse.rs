@@ -35,11 +35,18 @@
 //! lock 2 would be satisfied by any number of `Rehearsal` calls inside `settings.rs`, and this file
 //! is satisfied by none anywhere.
 //!
-//! Lock 2's rule list has not been widened to count `connector_pack::DocumentRehearsal` as a fourth
-//! pack entry point. It should be — and doing so also means a sentence in
-//! `docs/designs/invoke.md`'s lock 2 section, which `the_design_says_what_every_lock_2_rule_is`
-//! checks. Both files were outside this story's fence, so the bound is held here in the meantime by
-//! [`the_document_backed_rehearsal_stays_in_the_settings_module`].
+//! **X-156 widened lock 2 to count `connector_pack::DocumentRehearsal` as a fourth pack entry
+//! point**, with the sentence in `docs/designs/invoke.md`'s lock 2 section that
+//! `the_design_says_what_every_lock_2_rule_is` demands. Both files were outside X-152's fence,
+//! which is why the bound lived here alone for a story's span.
+//!
+//! [`the_document_backed_rehearsal_stays_in_the_settings_module`] is **kept** rather than subsumed,
+//! and the reason is the one this section already gives about `Rehearsal`: the two answer different
+//! questions. Lock 2's rule is a *bounded-files refusal* — it is satisfied by `settings.rs` naming
+//! the rehearsal any number of times, and equally by **no file naming it at all**, which is the
+//! shape of a silent revert to the parse this story retired. The assertion below is an equality
+//! against `["settings.rs"]`, so it fails in that second direction too. Deleting it would keep the
+//! half that says *not elsewhere* and lose the half that says *here, and still here*.
 
 use std::fs;
 use std::path::{Path, PathBuf};
