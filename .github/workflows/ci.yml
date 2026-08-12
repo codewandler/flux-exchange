@@ -54,7 +54,7 @@ jobs:
     name: build · test · clippy · fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Release-fixture tests inspect the committed candidate named by the non-self-referential
           # follow-up manifest, so the candidate object must be present in the offline checkout.
@@ -72,7 +72,7 @@ jobs:
         # promotes to errors, so a floating CI toolchain breaks on code that is clean locally. To
         # bump it, change it here and in `crates-io.yml` together, run clippy and fmt locally on that
         # same version, fix, commit.
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           # `master` above pins the action's *code* to a commit; the toolchain the tag used to encode
           # is an explicit — and, at this SHA, required — input.
@@ -80,7 +80,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # `--locked` here, not on the four gate steps below: it makes a stale or hand-edited
       # `Cargo.lock` an obvious, named failure rather than something cargo silently repairs, while
@@ -132,7 +132,7 @@ jobs:
     permissions:
       contents: read # restates the workflow default, so the job is readable on its own
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The whole trick: the toolchain installer takes a version string, so the manifest becomes the
       # input. `head -n1` because `[workspace.package]` declares it once and the member crates
@@ -153,13 +153,13 @@ jobs:
       - name: Install the declared MSRV toolchain
         # Same action and same pin as `check` above. No `components`: this job neither lints nor
         # formats, and clippy's output on an old toolchain is not something we act on.
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
       - name: Cache cargo
         # Keyed by toolchain version, so this gets its own entry rather than fighting `check` for one.
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # `--locked`: a consumer builds the dependency versions we committed. Letting cargo resolve
       # something newer here would test a tree nobody ships, and a dependency that has raised its own
@@ -173,7 +173,7 @@ jobs:
     outputs:
       matrix: ${{ steps.authority.outputs.matrix }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Project the sole native authority
         id: authority
         shell: bash
@@ -205,16 +205,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain for the native target
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.97.0"
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: local-state-${{ matrix.target }}
 
@@ -241,7 +241,7 @@ jobs:
     # import only Vue, a sibling component and `catalog.mts`. AGENTS.md § The console states that as
     # an invariant enforced by a test; nothing was running the test.
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Node
         # Pinned for the same reason the Rust toolchain above is, and at the version and SHA
@@ -285,15 +285,15 @@ jobs:
     name: Rust dependency advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.97.0"
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install cargo-audit 0.22.0
         run: cargo install cargo-audit --version 0.22.0 --locked
@@ -327,7 +327,7 @@ jobs:
     permissions:
       contents: read # restates the workflow default, so the job is readable on its own
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Every third-party action names a full commit SHA
         run: |
@@ -363,7 +363,7 @@ jobs:
     permissions:
       contents: read # restates the workflow default, so the job is readable on its own
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: One current version is one number
         run: |
@@ -382,19 +382,19 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Prove the fail-closed publication readiness boundary
         run: |
           ./scripts/check-publication-readiness.sh --self-test
 
       - name: Install release-verifier toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: "1.97.0"
 
       - name: Cache release-verifier dependencies
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: local-release-contract
 

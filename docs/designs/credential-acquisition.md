@@ -348,14 +348,41 @@ What that costs, recorded rather than discovered:
   counts one connector's scope rather than every connector. The tenant claim is held across the read
   and the write, so the X-25 race is closed; what remains is that the total is an under-count.
 
-### Still open: an allocated UUID instead of a derived digest
+### Deferred: an allocated UUID instead of a derived digest
 
-The owner has proposed replacing the derived digest with an **allocated UUID plus a companion
-mapping committed in the same `SecretBatch`**, with a read-side index so an operator can see which
-members hold one. A UUID fits `validate_service_name`'s `[a-z0-9-]+` grammar with no upstream change,
-and it would answer the visibility gap above and give the tenant-level delete question something to
-enumerate. It is **not** implemented; the derivation is deliberately confined to
-`delegated_acquisition::delegated_service` so that swapping it is one function and a migration.
+The owner proposed replacing the derived digest with an **allocated UUID plus a companion mapping
+committed in the same `SecretBatch`**, with a read-side index so an operator can see which members
+hold one. A UUID fits `validate_service_name`'s `[a-z0-9-]+` grammar with no upstream change, and the
+upstream `TenantLayout` doc already cites the pattern approvingly — action-proxy's
+`customer/<uuid>/integrations/<uuid>`, *"the same idea with the vendor identity replaced by an opaque
+row id, so nothing about the path says which API it opens."*
+
+**Decided 2026-08-12: keep the derivation for now, and revisit it with [[X-97]].** Three reasons, in
+order:
+
+1. **The rename risk it solves does not exist for the case that matters.** `Principal::id` is the
+   immutable OIDC `sub` for a federated human, not an email or a display name, so the digest is
+   already stable across a rename. The exposure is roster and local-user handles, which are the
+   loopback development paths.
+2. **The visibility gap does not require a UUID.** The digest is computable *forward* from a
+   principal, and a deployment knows its principals, so "does this member hold one" and "which
+   members hold one" are both answerable by iteration. What a UUID adds is a reverse lookup, which
+   is a convenience rather than a capability.
+3. **It would introduce a second source of truth that `SecretBatch` cannot atomically span.** A batch
+   is scoped to one `(tenant, authority)` and admits nothing outside it, so a mapping row and a
+   credential write have no shared commit point unless the mapping is itself a companion in the same
+   batch — at which point the "companion DB" is the secret store, and the DB is a rebuildable index.
+
+The sequencing is what decides it. **Vault KV v2 has a native `/metadata/` facility**, and X-97 is
+now committed to a Vault-class backend. When that lands, the metadata store exists as a property of
+the backend rather than as bespoke infrastructure, and the UUID scheme becomes cheap and consistent
+instead of a second thing to keep in step. Building it before then means inventing the companion
+store twice.
+
+The derivation is deliberately confined to `delegated_acquisition::delegated_service`, so swapping it
+is one function plus a migration. **It is free to change until the first delegated credential is
+stored; after that it is a migration** — which is the fact that should force the decision, not this
+document.
 
 ### `state`, PKCE, and what the callback may be
 

@@ -35,22 +35,25 @@ path, client id, scopes and permitted grants; `catalog::Subject` says whether a 
 the integration or as a person; C-531 lets a hosted deployment declare its redirect URI. Verified at
 flux-connectors commit `428938cd`, `crates/catalog/src/lib.rs:398-496`.
 
-**What does not exist.** None of it is published. The newest `codewandler-connector-*` release on
-crates.io is **0.20.0**, and 0.20.0's `Acquisition` has exactly three variants — `Static`, `Minted`,
-`BasicJoin`. There is no `OAuth2`, no `Subject`, no `providers/gitlab.toml` declaring
-`authorization_code`. The flux-connectors working tree is still versioned `0.20.0`; the 0.21 line is
-unreleased.
+**What did not exist when this was filed, and now does.** On 2026-08-11 the newest
+`codewandler-connector-*` release was 0.20.0, whose `Acquisition` had exactly three variants —
+`Static`, `Minted`, `BasicJoin`. So the criteria below that read connector metadata could not be
+satisfied against any crate this workspace may legitimately depend on, and closing that gap with a
+`path` or `git` dependency on the sibling checkout is refused by [`AGENTS.md`](../../AGENTS.md)
+§ The dependency situation.
 
-So the acceptance criterion below that composes an authorize URL *from released connector metadata*
-cannot be satisfied against any crate this workspace may legitimately depend on. Closing that gap
-with a `path` or `git` dependency on the sibling checkout is refused by
-[`AGENTS.md`](../../AGENTS.md) § The dependency situation — it couples a shipped image to an
-unreviewed working tree, and the family has already decided against it.
+**flux-connectors released `v0.21.0` on 2026-08-12** and all four connector crates are on crates.io.
+The released `codewandler-connector-catalog` 0.21.0 carries `Acquisition::OAuth2`, `OAuth2`,
+`OAuthGrant`, `OAuthRedirect`, `Subject` and `Credential.subject` — verified against the published
+crate, not the working tree.
 
-**What unblocks this story:** flux-connectors publishes the 0.21 line to crates.io, then [[X-146]]
-moves both pin sets — every `codewandler-connector-*` to 0.21 and every `codewandler-flux-*` to the
-engine line `connector-pack` 0.21 then requires — as one commit. This story starts when X-146 is
-done, not before.
+**What remains before the metadata-dependent criteria can be ticked:** [[X-146]] moves the four
+`codewandler-connector-*` pins to 0.21. Note that story's own premise needed correcting —
+`connector-pack` 0.21.0 requires `codewandler-flux-runtime ^0.54`, exactly as 0.20.0 did, so the
+**engine line does not move** and no `codewandler-flux-*` pin changes. This is a connector-only bump.
+
+The slice delivered here deliberately depends on none of that: it composes the authorize URL from an
+**injected** grant, which is the same seam X-75 established for the password grant.
 
 Note this needs **no `AuthHazard` opt-in**: the hazard gate exists for the resource-owner password
 grant, and `authorization_code` carries none. A deployment with `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS`

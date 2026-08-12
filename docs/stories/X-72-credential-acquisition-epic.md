@@ -53,11 +53,20 @@ it — which is what that same contract already says the host is for.
   specification, so none of it becomes a field on the vocabulary: **owner-decided 2026-08-02, a
   behaviour no document declares is a quirk of one endpoint.**
 
-Upstream: **C-440** in flux-connectors declares the acquisition and the hazard on `[[auth]]`. This
-epic reads what it publishes rather than keeping a local copy of the same fact.
+- **X-147** — the *delegated* half, and the one this epic cannot close without: the host performs the
+  **authorization code** grant for a signed-in person, with mandatory PKCE and a single-use `state`.
+  X-75 redeems a password and `redeem_refresh` renews, so this host can already renew a token it
+  holds and still cannot **obtain** one by user grant.
+- **X-148** — renewing that token before it expires: single-flight per credential, atomic through the
+  prepared-transaction store, and a permanent failure that names who must re-authorize.
+
+Upstream: **C-440** in flux-connectors declares the acquisition and the hazard on `[[auth]]`; **C-525**
+adds `Acquisition::OAuth2` and `Subject`, and **C-531** the hosted redirect URI. This epic reads what
+they publish rather than keeping a local copy of the same fact — which is exactly why it is still
+open: none of C-525 or C-531 is *published*. See X-147.
 
 ## Acceptance
-- [ ] The union of X-73, X-74 and X-75's acceptance.
+- [ ] The union of X-73, X-74, X-75, X-147 and X-148's acceptance.
 - [ ] An operator connects babelforce with a username and a password on an opted-in deployment, and
       the stored credential is a token with an expiry.
 - [ ] The password appears in no file the host writes and in no log line it emits — named test, not
@@ -70,6 +79,12 @@ epic reads what it publishes rather than keeping a local copy of the same fact.
 - 2026-08-03 — X-73/X-74 are complete and the X-75/X-76 implementation lane is in progress. The
   released connector catalogue still lacks C-440, so the server path is exercised through an
   explicit injected acquisition binding and the epic remains open pending live babelforce proof.
+- 2026-08-12 — The delegated lane was filed as [[X-147]] and [[X-148]] (first written on a branch as
+  X-123/X-124, IDs already taken on `main`). **This epic closes when those two land, and neither can
+  start yet:** the `Acquisition::OAuth2` / `Subject` metadata X-147 reads is unpublished — crates.io's
+  newest `codewandler-connector-*` line is 0.20.0, which carries only `Static`, `Minted` and
+  `BasicJoin`. So the whole epic — X-75's live proof included — is waiting on the same upstream
+  release, tracked by [[X-146]].
 
 ## Notes
 - The design records why `produces_credential` is not the mechanism (C-432 measured it: `connector-flux`
