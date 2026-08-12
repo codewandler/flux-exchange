@@ -5,7 +5,7 @@ status: in-progress
 priority: 2
 epic: remote-deployment
 areas: [exchange-host, exchange-server, deployment]
-note: "The file store is honest and mode-safe but application-plaintext; the SecretStore port is the seam. The shipped connector-secrets VaultStore is NOT that backend — it refuses references, apply and every prepared transaction."
+note: "Owner-decided 2026-08-12: Vault, not AWS Secrets Manager — the team already operates Vault. Deferred, not dropped. The shipped connector-secrets VaultStore is a starting point, not the backend: it refuses references, apply and every prepared transaction, and holds a static token."
 design: docs/designs/managed-secret-backend.md
 ---
 
@@ -38,6 +38,46 @@ and auditability no longer reduce to one plaintext file and its platform volume.
       backend is unavailable, and completion of old-store decommissioning.
 
 ## Progress
+
+- 2026-08-12 — **Owner-decided: Vault, not AWS Secrets Manager, and not right now.** The reason given
+  is operational rather than technical — the team already runs Vault and has experience with it — and
+  that is the right kind of reason for this decision. It supersedes the backend selection in
+  [`docs/designs/managed-secret-backend.md`](../designs/managed-secret-backend.md), which must be
+  re-issued or superseded before implementation starts. Everything in it that is **not** the backend
+  choice still holds: the scope-manifest commit point, the error-translation table, the
+  no-dual-write cutover, and the rule that the adapter ships upstream in `connector-secrets` first.
+
+  Worth recording that this is competitive rather than a compromise. Vault KV v2's `options.cas` is a
+  real compare-and-swap, so it supports **multiple writers**; the AWS design's own text admits its
+  per-scope mutex is *"sufficient only because the public deployment has one Machine"* and requires
+  startup to refuse a multi-Machine configuration. Vault also removes the AWS SDK pin risk entirely
+  (`aws-config =1.8.13` / `aws-sdk-secretsmanager =1.99.0` resolving under Rust 1.88), because
+  `reqwest` is already in this tree.
+
+  The work is bigger than the AWS adapter's, and it is upstream in
+  `flux-connectors/crates/connector-secrets/`:
+  - `references()` — `vault.rs:384` returns `Unsupported`. Vault KV v2 *does* list, via
+    `LIST /v1/<mount>/metadata/<prefix>`. Note `pub enum Method` (`vault.rs:61`) has only
+    `Get`/`Post`/`Delete` and is **not** `#[non_exhaustive]`, so adding `List` is a breaking change to
+    the public `VaultTransport` seam.
+  - `apply()` — `vault.rs:391` returns `Unsupported`. The comment *"Vault KV v2 provides no
+    multi-path transaction"* is accurate but does not block this: the real contract is one
+    atomically-advanceable pointer per `(tenant, authority)` scope, which a manifest path plus `cas`
+    gives. Current `put` sends no `cas` option at all, so writes are last-writer-wins today.
+  - The five `PreparedSecretStore` methods — `vault.rs:401` is an empty impl, so all five default to
+    `Unsupported`. FileStore's equivalent is ~675 lines.
+  - Non-static auth — `vault.rs:31-38` declines it by instruction. On Fly the applicable method is
+    Vault's **JWT auth against Fly's OIDC issuer**, the same `/.fly/oidc_token` the AWS design used.
+    AppRole would reintroduce a bootstrap secret and fail acceptance bullet 2.
+
+  Prior art to crib rather than reinvent: `codewandler-flux-credentials` already ships a
+  `VaultCredentialStore` with Kubernetes auth, a 60-second renew buffer and rotated-JWT re-read
+  (`lib.rs:722-830`, tests at `:2097`, `:2172`, `:2238`).
+
+  One consequence beyond this story: Vault KV v2 has a native `/metadata/` facility, which is where a
+  principal → credential index would naturally live. That is why [[X-147]]'s addressing decision
+  defers its allocated-UUID scheme to land alongside this work rather than inventing a companion
+  store first.
 
 - 2026-08-03 — Design filed. Nothing built.
 - 2026-08-12 — Status audited. `in-progress` means *design filed, zero implementation*: all eight
