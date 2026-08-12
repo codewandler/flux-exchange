@@ -146,7 +146,7 @@ pub use flux_runtime::{ToolContext, ToolRegistry};
 
 pub use acquisition::{
     AcquiredCredential, AcquisitionRefusal, AuthHazard, AuthPosture, AuthPostureRefusal,
-    CredentialAcquirer, PasswordRedemption, RefreshRedemption,
+    AuthorizationCodeRedemption, CredentialAcquirer, PasswordRedemption, RefreshRedemption,
 };
 pub use app::{
     AccessLayer, ActivityEvent, AppInstallation, AppPackage, AppRefusal, AppRuntimeToken, AppStore,

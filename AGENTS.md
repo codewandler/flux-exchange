@@ -30,6 +30,19 @@ The board's status lists are generated — after any change to a story's `status
 `epic`, regenerate it. Story frontmatter is the single source of truth.
 <!-- END track:agents -->
 
+## Bounded Fleet story evidence
+
+After committing an isolated story, run one closed targeted profile with
+`python3 scripts/story_evidence.py <STORY-ID> <PROFILE>`. The checkout must be clean, its branch and
+story file must match the explicit id, and the only profiles are `evidence`, `host`, `server`,
+`console`, and `web`. The command emits one `flux-exchange.story-evidence.v1` JSON receipt no larger
+than 8192 bytes; command output is represented only by its byte count and SHA-256 digest.
+
+This receipt is targeted story evidence, not the repository gate. Fleet integration still runs the
+complete Cargo workspace, console, web, repository-security, and release-policy gate once for the
+integrated wave. Story workers must not duplicate that full gate or treat a targeted receipt as
+release evidence.
+
 ## What this is
 
 The platform layer of the [flux](https://github.com/codewandler/flux) family: a service that holds
