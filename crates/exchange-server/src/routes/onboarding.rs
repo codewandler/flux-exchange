@@ -18,14 +18,28 @@
 //!
 //! # What is in it, and what is deliberately not
 //!
-//! Everything except one boolean is `&'static` and **identical in every deployment of this build**.
-//! It is not read from this composition, from the store, from the catalogue or from the request:
-//! [`DERIVED`] is a compile-time artifact generated from the console's own surface declaration, so
-//! there is no code path here by which a tenant, a principal, an address, a count, a connector or a
-//! configured endpoint could reach a caller. `tests::the_document_is_identical_with_two_tenants_connected`
-//! drives that adversarially rather than trusting the reading.
+//! Everything except **two** fields is `&'static` and identical in every deployment of this build.
+//! It is not read from the store or from the request: [`DERIVED`] is a compile-time artifact
+//! generated from the console's own surface declaration, so there is no code path here by which a
+//! tenant, a principal, an address or a configured endpoint could reach a caller.
+//! `tests::the_document_is_identical_with_two_tenants_connected` drives that adversarially rather
+//! than trusting the reading.
 //!
-//! The one field that varies is [`Published::sign_in_available`], and it is deliberately a field
+//! The two that vary are both facts about the **deployment**, and each is admitted on the same
+//! test: does a stranger learn anything from it that this surface does not already publish?
+//!
+//! [`Published::catalogue`] (X-153) is the catalogue's identity — embedded or loaded, its digest,
+//! its schema version, and how many providers and operations it carries. Since X-153 a deployment
+//! may serve a catalogue pack from disk, so *which catalogue answered* stopped being a fact about
+//! the build; an operator debugging an operation that is not there needs to know which catalogue
+//! was asked, and the point of putting it here is that they get it without having the log. It
+//! discloses nothing new: `/api/catalogue/connectors` is anonymous and publishes that catalogue's
+//! whole contents, so a digest and a count of them are two facts a stranger could already compute.
+//! **The configured path is deliberately not here** — that is deployment layout rather than
+//! catalogue identity, and it is named only in the startup refusal, where the reader is the
+//! operator.
+//!
+//! The other is [`Published::sign_in_available`], and it is deliberately a field
 //! this surface **already publishes** at `/api/signin/availability` (X-43) rather than a new fact:
 //! embedding it costs a stranger nothing they could not already learn from one more request, and
 //! `crate::state::SignIn::available` carries the argument for why the three states collapse to a
@@ -71,6 +85,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, MethodRouter};
 use axum::Json;
+use exchange_host::CatalogueReport;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::error;
@@ -217,6 +232,15 @@ struct Call {
 struct Published<'a> {
     #[serde(flatten)]
     derived: &'a Onboarding,
+    /// **Which connector catalogue this deployment serves** (X-153).
+    ///
+    /// The same [`exchange_host::CatalogueReport`] value `GET /api/catalogue/connectors` publishes,
+    /// serialised from the same `ServedCatalogue` on the same `AppState` — so the two surfaces
+    /// cannot describe two catalogues, which is the whole reason the seam is one value rather than
+    /// a rendering per route.
+    ///
+    /// It carries no path; see this module's header for what that leaves out and why.
+    catalogue: CatalogueReport,
     /// Whether a human could complete a sign-in against **this** deployment.
     ///
     /// The only field here that differs between two hosts running one build, and it is one this
@@ -234,7 +258,11 @@ struct Published<'a> {
 
 /// Serve the descriptor.
 async fn onboarding(State(state): State<AppState>) -> Response {
-    match document(DERIVED, state.sign_in().available()) {
+    match document(
+        DERIVED,
+        state.sign_in().available(),
+        state.catalogue().report(),
+    ) {
         Ok(document) => Json(document).into_response(),
         // Refuse; never repair. Half a descriptor is worse than none: an agent that reads a
         // capability list missing its last entry concludes the capability is not there. The reason
@@ -258,14 +286,30 @@ async fn onboarding(State(state): State<AppState>) -> Response {
 /// Parsed per request rather than once at startup. It costs a few microseconds on a route nothing
 /// calls in a loop, and it keeps the failure a *refusal* — a document parsed once and cached would
 /// have to decide what to do about a failure at a point where there is no caller to refuse.
-fn document(derived: &str, sign_in_available: bool) -> Result<Value, serde_json::Error> {
+fn document(
+    derived: &str,
+    sign_in_available: bool,
+    catalogue: CatalogueReport,
+) -> Result<Value, serde_json::Error> {
     let derived: Onboarding = serde_json::from_str(derived)?;
 
     serde_json::to_value(Published {
         derived: &derived,
+        catalogue,
         sign_in_available,
     })
 }
+
+/// The keys this host composes at runtime, on top of [`DERIVED`].
+///
+/// One list rather than a literal at each call site, because every test that compares the served
+/// document against the artifact has to strip exactly these — and a test that stripped a stale set
+/// would silently start asserting *less* than it says while still reporting a pass. It is held to
+/// the served document by
+/// [`tests::the_document_is_the_derived_artifact_plus_exactly_these_deployment_facts`], so a third
+/// runtime field added without a line here fails rather than disappears.
+#[cfg(test)]
+const COMPOSED_AT_RUNTIME: &[&str] = &["catalogue", "sign_in_available"];
 
 #[cfg(test)]
 mod tests {
@@ -394,6 +438,11 @@ mod tests {
     }
 
     /// The derived artifact, parsed — what this host serves before it adds its one runtime field.
+    /// The catalogue a test composition serves when it binds none: the embedded one.
+    fn embedded_catalogue() -> CatalogueReport {
+        exchange_host::ServedCatalogue::embedded().report()
+    }
+
     fn artifact() -> Value {
         serde_json::from_str(DERIVED).expect("the compiled-in descriptor is a JSON document")
     }
@@ -1126,23 +1175,105 @@ mod tests {
         let mut with_only_the_boolean = with.clone();
         let mut without_only_the_boolean = without.clone();
         for document in [&mut with_only_the_boolean, &mut without_only_the_boolean] {
-            document
-                .as_object_mut()
-                .expect("a JSON object")
-                .remove("sign_in_available");
+            let object = document.as_object_mut().expect("a JSON object");
+            for composed in COMPOSED_AT_RUNTIME {
+                object.remove(*composed);
+            }
         }
 
         assert_eq!(
             with_only_the_boolean, without_only_the_boolean,
-            "two compositions answered with two different documents; the only thing this document \
-             may say about a deployment is whether sign-in works",
+            "two compositions answered with two different documents; what this document may say \
+             about a deployment is whether sign-in works and which catalogue is served, and \
+             neither composition here changed the catalogue",
         );
         assert_eq!(
             with_only_the_boolean,
             artifact(),
-            "what this host serves is no longer the derived artifact plus one field, so something \
-             is being composed at runtime that the page cannot see and the console tests cannot \
-             compare against",
+            "what this host serves is no longer the derived artifact plus `COMPOSED_AT_RUNTIME`, \
+             so something is being composed at runtime that the page cannot see and the console \
+             tests cannot compare against",
+        );
+    }
+
+    /// **`COMPOSED_AT_RUNTIME` is the whole of what this host adds to the artifact.**
+    ///
+    /// The list is what every comparison against [`artifact`] strips, so a stale one makes those
+    /// comparisons quietly weaker rather than red — a third deployment fact could reach the
+    /// anonymous surface and the tests that exist to notice would each be stripping the two they
+    /// knew about. Derived here from the served document rather than restated, so the list has to
+    /// be right for this to pass.
+    #[tokio::test]
+    async fn the_document_is_the_derived_artifact_plus_exactly_these_deployment_facts() {
+        let (status, body) = fetched(&super::super::app(AppState::without_identity())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let served: Value = serde_json::from_str(&body).expect("a JSON document");
+        let served = served.as_object().expect("a JSON object");
+        let derived = artifact();
+        let derived = derived.as_object().expect("a JSON object");
+
+        let mut composed: Vec<&str> = served
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !derived.contains_key(*key))
+            .collect();
+        composed.sort_unstable();
+
+        let mut declared: Vec<&str> = COMPOSED_AT_RUNTIME.to_vec();
+        declared.sort_unstable();
+
+        assert_eq!(
+            composed, declared,
+            "this host composes a set of runtime fields that `COMPOSED_AT_RUNTIME` does not \
+             describe. Every test comparing the served document against the derived artifact \
+             strips that list, so a field missing from it is a field those tests stop seeing — \
+             add it there, next to the argument for publishing it on an anonymous surface",
+        );
+    }
+
+    /// **The served-catalogue seam, on the two surfaces that publish it** (X-153).
+    ///
+    /// The property is not that each surface reports *a* catalogue — it is that they report *the
+    /// same* one, from the same value on the same state. Two renderings of "which catalogue is
+    /// answering" is exactly the drift the seam exists to prevent, and it would be invisible to
+    /// anyone who did not think to compare two pages.
+    #[tokio::test]
+    async fn the_descriptor_and_the_catalogue_listing_name_one_served_catalogue() {
+        let app = super::super::app(AppState::without_identity());
+
+        let (status, body) = fetched(&app).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let descriptor: Value = serde_json::from_str(&body).expect("a JSON document");
+
+        let (status, listing) =
+            call(&app, Method::GET, "/api/catalogue/connectors", None, None).await;
+        assert_eq!(status, StatusCode::OK, "{listing}");
+        let listing: Value = serde_json::from_str(&listing).expect("a JSON document");
+
+        assert_eq!(
+            descriptor["catalogue"], listing["catalogue"],
+            "the descriptor and the catalogue listing described two catalogues; they read one \
+             `ServedCatalogue` off one `AppState`, so this can only mean a second rendering of it \
+             was written somewhere",
+        );
+        assert_eq!(
+            descriptor["catalogue"]["source"], "embedded",
+            "a composition that configured no pack serves the catalogue this build embeds",
+        );
+        assert_eq!(
+            descriptor["catalogue"]["digest"]
+                .as_str()
+                .expect("the digest is a string")
+                .len(),
+            64,
+            "the catalogue's identity is its lowercase-hex SHA-256",
+        );
+        assert!(
+            descriptor["catalogue"]["providers"]
+                .as_u64()
+                .is_some_and(|count| count > 0),
+            "an empty catalogue would pass every other assertion here: {descriptor}",
         );
     }
 
@@ -1176,17 +1307,17 @@ mod tests {
              principal and the descriptor must say so: {body}",
         );
 
-        document
-            .as_object_mut()
-            .expect("a JSON object")
-            .remove("sign_in_available");
+        let object = document.as_object_mut().expect("a JSON object");
+        for composed in COMPOSED_AT_RUNTIME {
+            object.remove(*composed);
+        }
 
         assert_eq!(
             document,
             artifact(),
-            "what this host serves is no longer the derived artifact plus one field, so arming a \
-             local identity has widened what a stranger learns about this deployment beyond \
-             whether sign-in works",
+            "what this host serves is no longer the derived artifact plus `COMPOSED_AT_RUNTIME`, \
+             so arming a local identity has widened what a stranger learns about this deployment \
+             beyond whether sign-in works and which catalogue is served",
         );
     }
 
@@ -1292,7 +1423,7 @@ mod tests {
     #[test]
     fn an_artifact_this_host_cannot_read_refuses_rather_than_serving_half_a_document() {
         assert!(
-            document("{ \"descriptor\": ", true).is_err(),
+            document("{ \"descriptor\": ", true, embedded_catalogue()).is_err(),
             "a truncated artifact must not produce a document",
         );
 
@@ -1300,7 +1431,7 @@ mod tests {
         // appeared in the console model and was never argued for here does not reach a caller.
         let widened = DERIVED.replacen('{', "{ \"tenant\": \"acme\",", 1);
         assert!(
-            document(&widened, true).is_err(),
+            document(&widened, true, embedded_catalogue()).is_err(),
             "a field nobody added to `Onboarding` reached the anonymous surface; \
              `deny_unknown_fields` is what makes widening this document a deliberate act",
         );

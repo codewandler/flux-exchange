@@ -68,6 +68,7 @@ pub const WORKFLOW_STORE_SETTING: &str = "FLUX_EXCHANGE_WORKFLOWS";
 // lives, this one answers *how it got there*.
 mod acquisition;
 mod app;
+mod catalogue;
 mod channel;
 mod connections;
 // The platform-native owner-only implementation lives in connector-secrets: Unix modes and owners
@@ -153,6 +154,10 @@ pub use app::{
     AvailableConnection, ConnectionRequirement, Datasource, DatasourceRequirement, EventDelivery,
     FrozenAppOperation, InstallRequest, ModelProfile, PackageProvenance, PackageRegistry,
     PackageRequirements, PackageTrigger, RuntimeOperation, TriggerTarget, APP_STORE_SETTING,
+};
+pub use catalogue::{
+    CatalogueOrigin, CatalogueRefusal, CatalogueReport, ServedCatalogue,
+    SUPPORTED_CATALOGUE_FORMAT, SUPPORTED_CATALOGUE_SCHEMA,
 };
 pub use channel::{
     ChannelId, ChannelPlanRefusal, ChannelRecord, ChannelRefusal, Channels,

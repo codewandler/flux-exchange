@@ -109,8 +109,17 @@ flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 #
 # `connector-pack` is an ordinary `exchange-host` dependency: invocation and channel planning both
 # end there, while the composing server owns the guarded transports and never names the pack.
+#
+# `connector-catalog-reader` is named directly since X-153, and it is the one pin here that is not
+# about linking a compiler or a runtime. It is the catalogue *pack* reader: no dependencies at all,
+# no network, no filesystem walk — one local file, a vendored SHA-256, and `&str` slices of the
+# bytes it verified. `connector-catalog` already re-exports it as `catalog::reader`, so this pin
+# adds nothing to the graph; it is direct because Decision 0022 makes the catalogue a **data**
+# dependency and a deployment loading one from a path is a capability this repository owns rather
+# than inherits. It carries its own `no_second_request_path` allow-list sentence.
 connector-address = { package = "codewandler-connector-address", version = "0.23" }
 connector-catalog = { package = "codewandler-connector-catalog", version = "0.23" }
+connector-catalog-reader = { package = "codewandler-connector-catalog-reader", version = "0.23" }
 connector-pack = { package = "codewandler-connector-pack", version = "0.23" }
 connector-secrets = { package = "codewandler-connector-secrets", version = "0.23" }
 # The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family

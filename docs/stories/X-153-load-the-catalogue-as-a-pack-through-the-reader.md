@@ -1,7 +1,7 @@
 ---
 id: X-153
 title: "Load the catalogue as a pack, including one newer than this binary"
-status: ready
+status: in-progress
 priority: 3
 epic: catalog-artifact
 areas: [exchange-host, exchange-server, deployment]
@@ -35,24 +35,24 @@ from a path. That is this story.
 
 ## Acceptance
 
-- [ ] Exchange reads the catalogue through the reader over the embedded pack, with the existing
+- [x] Exchange reads the catalogue through the reader over the embedded pack, with the existing
       `catalog` API surface unchanged and no behavioural difference — proven by the X-152
       characterization output, not by inspection.
-- [ ] A deployment may point Exchange at a catalogue pack on disk. Schema version and digest are
+- [x] A deployment may point Exchange at a catalogue pack on disk. Schema version and digest are
       verified **before a single record is served**, and a pack that fails either is refused at
       startup naming which check failed — never partially loaded, never silently ignored in favour of
       the embedded one. *Refuse; never repair.*
-- [ ] A pack whose **major** schema version this build does not understand is refused, with the
+- [x] A pack whose **major** schema version this build does not understand is refused, with the
       refusal naming both versions. Additive minor differences load. The design makes this the
       schema's own rule; Exchange enforces its side of it.
-- [ ] The configured path is deployment configuration read at startup, never derived from a request
+- [x] The configured path is deployment configuration read at startup, never derived from a request
       — the same rule every other store binding in this service follows.
-- [ ] The onboarding descriptor and `GET /api/catalogue` report **which** catalogue is being served —
+- [x] The onboarding descriptor and `GET /api/catalogue` report **which** catalogue is being served —
       embedded or loaded, and its digest — so an operator debugging a missing operation can tell
       which catalogue answered without reading a log.
-- [ ] Failing-first tests: a truncated pack, a digest mismatch, a major-version mismatch, and a path
+- [x] Failing-first tests: a truncated pack, a digest mismatch, a major-version mismatch, and a path
       that does not exist. Each refuses distinguishably; none falls back.
-- [ ] The `no_second_request_path` allow-list is unchanged, or the reader's entry carries a written
+- [x] The `no_second_request_path` allow-list is unchanged, or the reader's entry carries a written
       sentence saying why a catalogue reader is not a transport.
 
 ## Progress
@@ -63,6 +63,31 @@ from a path. That is this story.
 - 2026-08-12: Promoted to ready by the cross-repo coordinator: flux-connectors v0.23.0 published
   the complete surface this story consumes (documents, pack, reader, DocumentRehearsal, plan
   API) — the upstream blockers recorded above are closed. X-155 lands the pins first.
+
+- 2026-08-12: Implemented on `impl/X-153`. **The seam is `exchange_host::ServedCatalogue`**, built
+  once by the composition and held on `AppState`; its one wire projection is
+  `exchange_host::CatalogueReport`, which the onboarding descriptor and the connector listing both
+  *serialise* rather than each render — so the two surfaces cannot describe two catalogues, and
+  X-154 round 2 has one place to resolve `services[].base_url` from
+  (`ServedCatalogue::provider_document`). `FLUX_EXCHANGE_CATALOGUE_PACK` is the startup setting,
+  read in `exchange-server`'s `catalogue` module and nowhere else; a scan holds the route sources to
+  never naming it or the loading constructor.
+
+  Two things a reader of this story should not have to rediscover:
+
+  - **`GET /api/catalogue` does not exist.** The Acceptance names it; the served listing is
+    `GET /api/catalogue/connectors`, and that is where the report landed. Its body was already an
+    object, so the field is additive.
+  - **A loaded pack changes what is *reported*, not yet what is *served or executed*.** The
+    listing's entries still come from `connector_catalog`'s generated `&'static` tables, and
+    settings/verification still resolve through `connector_pack::DocumentRehearsal::of(id)`, which
+    takes an id and reads `connector-resolve`'s own embedded documents — there is no constructor a
+    loaded pack could be handed to. So a pack carrying a provider this binary was not built with is
+    counted in the report and cannot be connected or invoked. Convergence needs upstream to retire
+    the Flux emitter (C-540) and to offer a pack-parameterised rehearsal; it is X-154-round-2 /
+    X-156 territory, not something this host can fix from the outside. The split is asserted rather
+    than described, in
+    `exchange-server`'s `catalogue::tests::a_loaded_pack_is_reported_but_does_not_yet_change_what_is_served`.
 
 ## Notes
 

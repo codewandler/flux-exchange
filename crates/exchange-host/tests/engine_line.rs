@@ -249,7 +249,7 @@ fn the_lock_carries_one_engine_line() {
 /// a checksum taken from the file under test proves only that the file agrees with itself.
 #[test]
 fn the_lock_carries_the_exact_registry_connector_023_line() {
-    const EXPECTED: [(&str, &str); 4] = [
+    const EXPECTED: [(&str, &str); 5] = [
         (
             "codewandler-connector-address",
             "f9aaf7652a6618a17232c016fb312695ae7568b1ea9debf079fc1453b7b2ec1b",
@@ -257,6 +257,15 @@ fn the_lock_carries_the_exact_registry_connector_023_line() {
         (
             "codewandler-connector-catalog",
             "7483c4d0902da5a90f7ab503fedfc1e3e9a4871fdca065430a9aaaa135629048",
+        ),
+        // X-153 made the pack reader a **direct** dependency, so it joins the pinned set for this
+        // test's stated reason: a deployment may now load a catalogue this crate did not compile,
+        // and the code that verifies the pack is the code whose archive is worth pinning. Read out
+        // of the crates.io sparse index before the manifest was edited, not copied out of the lock
+        // afterwards.
+        (
+            "codewandler-connector-catalog-reader",
+            "a0cd4a06285c3549a74077ad05dcfd05d1bac3e17286922fcab720236805633d",
         ),
         (
             "codewandler-connector-secrets",
