@@ -1,21 +1,49 @@
 //! Server-owned credential acquisition performers and their startup bindings.
 //!
 //! The host crate owns only the secret-in/secret-out port. HTTP, endpoint URLs and vendor form
-//! quirks stay here in the composing binary. Production composes an empty [`AcquisitionBindings`];
-//! tests inject an explicit binding and thus cannot accidentally make the built-in catalogue claim a
-//! capability its released metadata does not declare.
+//! quirks stay here in the composing binary.
 //!
-//! **Upstream C-440 has shipped** — connector 0.21 gives `catalog::Credential` a `hazard` and
-//! babelforce declares `ResourceOwnerSecretShared` (X-146) — **and nothing here reads it yet.** The
-//! bindings stay empty in production not because the declaration is missing but because this module
-//! has no code path from a catalogue declaration to an [`AcquisitionBinding`]. Building one is X-147;
-//! until then the distinction above still holds, and it is now the only thing holding it.
+//! # Production composes from the released catalogue (X-154)
+//!
+//! This module used to say *"production composes an empty [`AcquisitionBindings`]"*, and then, once
+//! connector 0.21 landed, that upstream C-440 had shipped and **nothing here read it**. Both
+//! sentences are retired: [`configured`] derives the registry from `connector_catalog`'s own
+//! declarations — the OAuth2 acquisition's endpoint, authorize path, token path, scopes, permitted
+//! grants, and the credential's declared [`AuthHazard`] — for the connectors **this deployment
+//! registered**, and refuses at composition rather than composing something a vendor would reject
+//! at the last step of a redirect nobody can replay.
+//!
+//! What is *not* read from the catalogue is the registration identity. Decision 0022 (amended
+//! 2026-08-12): *"OAuth2 registration identity (`client_id`, `client_secret`, redirect URI) is
+//! deployment configuration, not vendor truth… The artifact publishes the registration
+//! **requirement**, never a value."* So [`grant_from_declaration`] destructures the declaration
+//! exhaustively and names `client_id` as a field it discards — a deployment that supplied none is
+//! refused by name even if a future document carried a non-empty string.
+//!
+//! # The one declared fact the generated tables do not carry
+//!
+//! `catalog::OAuth2::endpoint` is a **service name**, and the base URL it resolves against lives in
+//! the connector's canonical document (`services[].base_url`) — not in the generated `&'static`
+//! tables this crate reads, where `catalog::Provider` carries exactly one `base_url`, its *default*
+//! service's. GitLab's OAuth2 declaration names `login`, whose document base URL is `{origin}`;
+//! `catalog::providers()` cannot answer that, and neither `Provider::base_url`
+//! (`{origin}/api/v4` — the API service, not the login service) nor `ConfigField::also_services`
+//! (which says the *variable* is shared, not what the template is) is the same fact.
+//!
+//! [`endpoint_base`] therefore **refuses a named endpoint by name** rather than guessing one, so the
+//! gap is a startup refusal an operator reads once instead of a malformed authorize URL. Reading the
+//! canonical document is X-153's pack-and-reader path; when it lands, `endpoint_base` is the one
+//! function that changes.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::acquisition_redirect::AcquisitionRedirect;
+use connector_catalog::{
+    Acquisition, AuthHazard as DeclaredHazard, Credential, OAuth2, OAuthGrant, Provider,
+    ProviderKey,
+};
 use exchange_host::{
     async_trait, AcquiredCredential, AcquisitionRefusal, AuthHazard, AuthPosture,
     AuthPostureRefusal, AuthorizationCodeRedemption, CredentialAcquirer, PasswordRedemption,
@@ -46,9 +74,13 @@ use serde::Deserialize;
 /// 3. [`AcquisitionBindings::new`] refuses a registry whose grant is not byte-equal to the redirect
 ///    this deployment configured. A binding that disagrees with the deployment does not exist.
 ///
-/// It is **not** connector metadata. Composing an authorize URL from the connector's own
-/// `Acquisition::OAuth2` declaration is what waits on the 0.21 connector line; until then a
-/// composition states these values explicitly, which is honest about where they came from.
+/// # Where each half now comes from (X-154)
+///
+/// The redirect and the client identity are **not** connector metadata and never were. What changed
+/// is the other half: the authorization endpoint and the scopes are composed from the connector's
+/// own `Acquisition::OAuth2` declaration by [`grant_from_declaration`], rather than stated by a
+/// composition. A grant constructed by hand is still admissible — that is what every test double
+/// here does — but production reaches this type through the declaration.
 #[derive(Clone)]
 pub struct DelegatedGrant {
     authorization_endpoint: String,
@@ -386,6 +418,589 @@ impl AcquisitionBindings {
     pub fn redirect(&self) -> Option<&AcquisitionRedirect> {
         self.redirect.as_ref()
     }
+}
+
+/// The connectors this deployment holds an OAuth2 registration for, comma-separated.
+///
+/// **The selection is deployment configuration, and there is deliberately no catalogue-driven
+/// default.** A registry derived from every connector that *declares* an OAuth2 acquisition would
+/// offer a delegated authorization for a vendor nobody registered an application with, and the
+/// person who clicked it would arrive at the vendor's own error page holding no credential — which
+/// is a connection outage that looks like a bug in the vendor. A deployment says which vendors it is
+/// registered at; the catalogue says what running that registration means.
+pub const ACQUISITION_CONNECTORS_ENV: &str = "FLUX_EXCHANGE_ACQUISITION_CONNECTORS";
+
+/// The prefix of the per-connector OAuth2 client id, completed by the connector id in upper case.
+pub const CLIENT_ID_ENV_PREFIX: &str = "FLUX_EXCHANGE_OAUTH_CLIENT_ID_";
+
+/// The prefix of the per-connector OAuth2 client secret, completed the same way.
+///
+/// Optional: a public client registered for PKCE alone has none, and RFC 7636 is what makes that
+/// safe rather than an omission.
+pub const CLIENT_SECRET_ENV_PREFIX: &str = "FLUX_EXCHANGE_OAUTH_CLIENT_SECRET_";
+
+/// The OAuth2 grants **this composition performs**, in the order it decides them.
+///
+/// `AuthorizationCode` is how a credential is *obtained* here and `RefreshToken` is how it is
+/// renewed, which is exactly the pair `CredentialAcquirer` exposes to the delegated lane.
+///
+/// # Why `Password` is not in this list, when `redeem_password` exists
+///
+/// It is a grant this host performs and **not one a composition may derive from a declaration**.
+/// X-75's password lane is composed explicitly: a deployment states the endpoint, opts into
+/// [`AuthHazard::ResourceOwnerSecretShared`] by name, and a resource owner types a secret into this
+/// host at request time. None of those three is in a catalogue declaration, so deriving one from
+/// `grants: [password]` would stand up the exact grant RFC 9700 §2.4 says MUST NOT be used, out of
+/// vendor metadata, without an operator having asked for it. `ClientCredentials` this host performs
+/// nowhere at all.
+///
+/// A connector declaring a grant that is not here is refused **naming that grant**, and is never
+/// quietly downgraded to another entry in its list — see [`performable`].
+const PERFORMED_GRANTS: &[OAuthGrant] = &[OAuthGrant::AuthorizationCode, OAuthGrant::RefreshToken];
+
+/// One deployment's registration identity at one vendor.
+///
+/// **Never connector data**, and the artifact agrees: upstream C-536 refuses to emit a `client_id`
+/// into a canonical document at all, so what a declaration publishes is the *requirement* and this
+/// is where the value comes from. It is the same shape [`AcquisitionRedirect`] already has, which
+/// X-147 established and this makes the rule rather than the exception.
+#[derive(Clone)]
+pub struct OAuthRegistration {
+    client_id: String,
+    client_secret: Option<Secret>,
+}
+
+impl OAuthRegistration {
+    /// Hold one registration identity.
+    ///
+    /// The client id is public by specification (RFC 6749 §2.2) and may appear in a refusal or a
+    /// log; the secret may not, and [`Debug`](std::fmt::Debug) below is what makes that structural.
+    pub fn new(client_id: impl Into<String>, client_secret: Option<Secret>) -> Self {
+        Self {
+            client_id: client_id.into(),
+            client_secret,
+        }
+    }
+
+    /// This deployment's client identifier at the vendor.
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+}
+
+impl std::fmt::Debug for OAuthRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthRegistration")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+/// Why a catalogue declaration and this deployment's configuration did not compose an acquisition.
+///
+/// **Every variant refuses at composition and names a connector**, because that is the one fact an
+/// operator acts on: which connector to register, which field the connector's own declaration is
+/// missing, or which grant this host will not run. None carries a value — a client secret, a token
+/// or a URL an operator typed — for the reason a startup log is permanent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompositionRefusal {
+    /// The deployment named a connector this build does not catalogue.
+    UnknownConnector {
+        /// The unrecognised connector id, which is a name rather than a value.
+        connector: String,
+    },
+    /// The connector declares no OAuth2-acquired credential to delegate.
+    NoDeclaration {
+        /// The connector the deployment registered.
+        connector: String,
+    },
+    /// The connector declares more than one OAuth2-acquired credential.
+    ///
+    /// Refused rather than resolved by order: picking the first would make which credential a
+    /// deployment acquires depend on the declaration order of a file in another repository.
+    SeveralDeclarations {
+        /// The connector the deployment registered.
+        connector: String,
+    },
+    /// The connector declares a grant this composition does not perform — see [`PERFORMED_GRANTS`].
+    GrantNotPerformed {
+        /// The connector the deployment registered.
+        connector: String,
+        /// The declared grant, in the catalogue's own spelling.
+        grant: &'static str,
+    },
+    /// The connector declares no grant by which this host could obtain a first credential.
+    NoAcquiringGrant {
+        /// The connector the deployment registered.
+        connector: String,
+    },
+    /// A field the grant needs is empty in the declaration.
+    IncompleteDeclaration {
+        /// The connector whose declaration is short.
+        connector: String,
+        /// The declared field that is empty, in the catalogue's own spelling.
+        field: &'static str,
+    },
+    /// The declaration names an endpoint the generated catalogue tables carry no base URL for.
+    ///
+    /// The module documentation has the whole of it: this is a real gap in the *tables*, not in the
+    /// artifact — the canonical document carries `services[].base_url` and X-153 is the story that
+    /// reads it. Refusing by name is what keeps it a startup refusal rather than a malformed URL.
+    UnresolvableEndpoint {
+        /// The connector whose declaration names it.
+        connector: String,
+        /// The declared endpoint (service) name. A name, never a URL.
+        endpoint: String,
+    },
+    /// The declaration's base URL still carries a `{placeholder}` this composition cannot fill.
+    ///
+    /// Endpoint variables are per-connection settings resolved for one tenant at request time; a
+    /// startup composition has no tenant, so a templated base URL is refused rather than sent with
+    /// the braces still in it.
+    TemplatedBaseUrl {
+        /// The connector whose base URL is templated.
+        connector: String,
+    },
+    /// The deployment registered the connector and supplied no client id.
+    NoRegistration {
+        /// The connector the deployment registered.
+        connector: String,
+        /// The variable that would have carried it. A name, never a value.
+        setting: String,
+    },
+    /// The deployment registered a connector and configured no acquisition redirect URI.
+    NoRedirect {
+        /// The connector the deployment registered.
+        connector: String,
+    },
+    /// The composed grant, performer or registry refused the shape the declaration produced.
+    Unusable {
+        /// The connector being composed.
+        connector: String,
+        /// The value-free reason from the constructor that refused.
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Display for CompositionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "refusing to start: ")?;
+        match self {
+            Self::UnknownConnector { connector } => write!(
+                f,
+                "{ACQUISITION_CONNECTORS_ENV} names `{connector}`, which this build does not \
+                 catalogue",
+            ),
+            Self::NoDeclaration { connector } => write!(
+                f,
+                "`{connector}` declares no OAuth2-acquired credential, so there is no delegated \
+                 authorization to compose",
+            ),
+            Self::SeveralDeclarations { connector } => write!(
+                f,
+                "`{connector}` declares more than one OAuth2-acquired credential, and which one a \
+                 deployment acquires must not depend on declaration order",
+            ),
+            Self::GrantNotPerformed { connector, grant } => write!(
+                f,
+                "`{connector}` declares the `{grant}` grant, which this host does not perform from \
+                 a catalogue declaration; it is not downgraded to another grant in that list",
+            ),
+            Self::NoAcquiringGrant { connector } => write!(
+                f,
+                "`{connector}` declares no `authorization_code` grant, so this host has no way to \
+                 obtain a first credential for it",
+            ),
+            Self::IncompleteDeclaration { connector, field } => write!(
+                f,
+                "`{connector}`'s OAuth2 declaration has an empty `{field}`, which is too \
+                 incomplete to compose an authorization from",
+            ),
+            Self::UnresolvableEndpoint {
+                connector,
+                endpoint,
+            } => write!(
+                f,
+                "`{connector}`'s OAuth2 declaration resolves against the `{endpoint}` endpoint, \
+                 and the generated catalogue tables carry no base URL for it — only the \
+                 connector's default service has one. The canonical document does; reading it is \
+                 X-153",
+            ),
+            Self::TemplatedBaseUrl { connector } => write!(
+                f,
+                "`{connector}`'s base URL carries an unresolved `{{placeholder}}`, which is a \
+                 per-connection setting and not something a startup composition can fill",
+            ),
+            Self::NoRegistration { connector, setting } => write!(
+                f,
+                "{ACQUISITION_CONNECTORS_ENV} names `{connector}` and {setting} is unset; the \
+                 registration identity is this deployment's and is never read from the catalogue",
+            ),
+            Self::NoRedirect { connector } => write!(
+                f,
+                "{ACQUISITION_CONNECTORS_ENV} names `{connector}` and this deployment configured \
+                 no acquisition redirect URI ({})",
+                crate::acquisition_redirect::SETTING,
+            ),
+            Self::Unusable { connector, reason } => {
+                write!(f, "`{connector}`'s acquisition does not compose: {reason}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CompositionRefusal {}
+
+/// **This deployment's acquisition registry, derived from the released catalogue.**
+///
+/// The production composition, and the replacement for the empty registry this module bound while
+/// no declaration existed to read.
+///
+/// # Errors
+///
+/// One [`CompositionRefusal`], naming the connector. Startup refuses rather than binding a partial
+/// registry: a deployment that registered a connector and cannot acquire for it must be told, not
+/// handed a surface that answers `422` for the one connector its operator configured.
+pub fn configured(
+    redirect: Option<&AcquisitionRedirect>,
+) -> Result<AcquisitionBindings, CompositionRefusal> {
+    from_environment(|name| std::env::var(name).ok(), redirect)
+}
+
+/// [`configured`], reading by name from an injected source so tests do not mutate process-wide
+/// environment — the shape `crate::auth_posture::read` already uses.
+fn from_environment(
+    lookup: impl Fn(&str) -> Option<String>,
+    redirect: Option<&AcquisitionRedirect>,
+) -> Result<AcquisitionBindings, CompositionRefusal> {
+    let mut bindings = Vec::new();
+    for connector in lookup(ACQUISITION_CONNECTORS_ENV)
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let Some(provider) = connector_catalog::provider(ProviderKey::id(connector)) else {
+            return Err(CompositionRefusal::UnknownConnector {
+                connector: connector.to_owned(),
+            });
+        };
+        let client_id_setting = registration_variable(CLIENT_ID_ENV_PREFIX, connector);
+        let Some(client_id) = lookup(&client_id_setting).filter(|value| !value.trim().is_empty())
+        else {
+            return Err(CompositionRefusal::NoRegistration {
+                connector: connector.to_owned(),
+                setting: client_id_setting,
+            });
+        };
+        let registration = OAuthRegistration::new(
+            client_id.trim(),
+            lookup(&registration_variable(CLIENT_SECRET_ENV_PREFIX, connector))
+                .filter(|value| !value.is_empty())
+                .map(|value| Secret::new(&value)),
+        );
+        let Some(redirect) = redirect else {
+            return Err(CompositionRefusal::NoRedirect {
+                connector: connector.to_owned(),
+            });
+        };
+        bindings.push(binding_from_catalogue(provider, &registration, redirect)?);
+    }
+
+    let composed = bindings.len();
+    AcquisitionBindings::new(bindings, redirect).map_err(|reason| CompositionRefusal::Unusable {
+        // The registry's own refusals are about the set rather than one member, and the set is
+        // empty of members only when nothing was selected — so naming the count is the honest
+        // address here, where naming one connector would be a guess.
+        connector: format!("{composed} registered connector(s)"),
+        reason,
+    })
+}
+
+/// The environment variable one connector's registration half is read from.
+///
+/// Upper case with `-` folded to `_`, which is the ordinary environment spelling and the one every
+/// catalogued connector id survives: ids are lowercase ASCII with `_`, so `microsoft_graph` becomes
+/// `MICROSOFT_GRAPH` and nothing collides.
+fn registration_variable(prefix: &str, connector: &str) -> String {
+    format!(
+        "{prefix}{}",
+        connector.to_ascii_uppercase().replace('-', "_")
+    )
+}
+
+/// Compose one connector's delegated binding from its own catalogue declaration.
+///
+/// # Errors
+///
+/// One [`CompositionRefusal`] naming this connector.
+pub fn binding_from_catalogue(
+    provider: &'static Provider,
+    registration: &OAuthRegistration,
+    redirect: &AcquisitionRedirect,
+) -> Result<AcquisitionBinding, CompositionRefusal> {
+    let (credential, spec) = declared_oauth2(provider)?;
+    let base = endpoint_base(provider.id, provider.base_url, spec)?;
+    binding_from_declaration(
+        provider.id,
+        credential.name,
+        credential.hazard,
+        spec,
+        &base,
+        registration,
+        redirect,
+    )
+}
+
+/// The single OAuth2-acquired credential a connector declares, with its declaration.
+///
+/// # Errors
+///
+/// [`CompositionRefusal::NoDeclaration`] or [`CompositionRefusal::SeveralDeclarations`]. A
+/// connector's other credentials — GitLab's `Static` personal access token beside its
+/// `gitlab.oauth_token` — are not candidates and are not counted.
+pub fn declared_oauth2(
+    provider: &'static Provider,
+) -> Result<(&'static Credential, &'static OAuth2), CompositionRefusal> {
+    let mut declared = provider.auth.iter().filter_map(|credential| {
+        match credential.acquire {
+            Acquisition::OAuth2(spec) => Some((credential, spec)),
+            // Named rather than caught by a wildcard: `catalog::Acquisition` is deliberately not
+            // `#[non_exhaustive]` so a new acquisition kind is a compile error at every consumer
+            // that decides what to do with one, and a `_` arm here would silently make the next one
+            // "not delegated".
+            Acquisition::Static | Acquisition::Minted { .. } | Acquisition::BasicJoin { .. } => {
+                None
+            }
+        }
+    });
+    let Some(first) = declared.next() else {
+        return Err(CompositionRefusal::NoDeclaration {
+            connector: provider.id.to_owned(),
+        });
+    };
+    if declared.next().is_some() {
+        return Err(CompositionRefusal::SeveralDeclarations {
+            connector: provider.id.to_owned(),
+        });
+    }
+    Ok(first)
+}
+
+/// The base URL a declaration's `authorize_path` and `token_path` are joined onto.
+///
+/// An **empty** `endpoint` means the connector's own base URL, which is what
+/// `catalog::OAuth2::endpoint` documents. A **named** one is a service, and the generated tables
+/// carry no base URL for a service — see this module's documentation for the measurement and for
+/// what closes it.
+///
+/// # Errors
+///
+/// [`CompositionRefusal::UnresolvableEndpoint`] for a named endpoint, and
+/// [`CompositionRefusal::TemplatedBaseUrl`] for a base URL still carrying a `{placeholder}`. Never
+/// a guess: a wrong base URL is an authorization request sent to somebody else's host.
+pub fn endpoint_base(
+    connector: &str,
+    provider_base_url: &str,
+    spec: &OAuth2,
+) -> Result<String, CompositionRefusal> {
+    if !spec.endpoint.is_empty() {
+        return Err(CompositionRefusal::UnresolvableEndpoint {
+            connector: connector.to_owned(),
+            endpoint: spec.endpoint.to_owned(),
+        });
+    }
+    if provider_base_url.contains('{') {
+        return Err(CompositionRefusal::TemplatedBaseUrl {
+            connector: connector.to_owned(),
+        });
+    }
+    Ok(provider_base_url.trim_end_matches('/').to_owned())
+}
+
+/// Refuse a declared grant list carrying one this composition does not perform.
+///
+/// Both halves matter and they are separate refusals: a grant that is *not* in
+/// [`PERFORMED_GRANTS`] is named and refused, and a list carrying none of the grants that could
+/// obtain a first credential is refused as a whole. Between them there is no path where a
+/// connector declaring `[password, refresh_token]` quietly acquires by refresh — which is a
+/// renewal of a credential nothing ever obtained.
+///
+/// # Errors
+///
+/// [`CompositionRefusal::GrantNotPerformed`] naming the grant, or
+/// [`CompositionRefusal::NoAcquiringGrant`].
+pub fn performable(connector: &str, grants: &[OAuthGrant]) -> Result<(), CompositionRefusal> {
+    for grant in grants {
+        if !PERFORMED_GRANTS.contains(grant) {
+            return Err(CompositionRefusal::GrantNotPerformed {
+                connector: connector.to_owned(),
+                grant: grant_word(*grant),
+            });
+        }
+    }
+    if !grants.contains(&OAuthGrant::AuthorizationCode) {
+        return Err(CompositionRefusal::NoAcquiringGrant {
+            connector: connector.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// The catalogue's own spelling of one grant.
+///
+/// Matched exhaustively rather than derived, for the reason `AuthHazard::as_str` gives: the word
+/// reaches an operator's startup log, and it must not move because a derive attribute did.
+const fn grant_word(grant: OAuthGrant) -> &'static str {
+    match grant {
+        OAuthGrant::AuthorizationCode => "authorization_code",
+        OAuthGrant::Password => "password",
+        OAuthGrant::RefreshToken => "refresh_token",
+        OAuthGrant::ClientCredentials => "client_credentials",
+    }
+}
+
+/// The declared acquisition hazard, in this host's vocabulary.
+///
+/// Exhaustive and wildcard-free on purpose: `catalog::AuthHazard` is not `#[non_exhaustive]`
+/// precisely so that a hazard added upstream is a **compile error** here rather than a value a
+/// catch-all arm quietly maps to "no weakness declared". `None` means *nothing was declared*, which
+/// is not the same as *reviewed and found safe* — the catalogue says so itself.
+pub const fn declared_hazard(declared: Option<DeclaredHazard>) -> Option<AuthHazard> {
+    match declared {
+        None => None,
+        Some(DeclaredHazard::ResourceOwnerSecretShared) => {
+            Some(AuthHazard::ResourceOwnerSecretShared)
+        }
+    }
+}
+
+/// Compose one delegated grant from a declaration and this deployment's registration.
+///
+/// # Where each value comes from, which is the whole point of this function
+///
+/// The declaration supplies the authorize path and the scopes; the deployment supplies the client
+/// id, the client secret and the redirect URI. **A caller supplies nothing** — there is no argument
+/// here a request could reach, so a scope absent from the connector's list is one this host does not
+/// request and a host is one nobody can name.
+///
+/// # Errors
+///
+/// [`CompositionRefusal::IncompleteDeclaration`] naming the empty field, or
+/// [`CompositionRefusal::Unusable`] carrying [`DelegatedGrant::new`]'s value-free reason.
+pub fn grant_from_declaration(
+    connector: &str,
+    spec: &OAuth2,
+    base: &str,
+    registration: &OAuthRegistration,
+    redirect: &AcquisitionRedirect,
+) -> Result<DelegatedGrant, CompositionRefusal> {
+    // **Exhaustive, so the two fields this host must not read are named rather than merely
+    // unused.** `client_id` is the one Decision 0022 settles: the artifact publishes the
+    // registration *requirement* and upstream C-536 refuses to emit a value, so reading one here
+    // would be trusting vendor metadata for a deployment's own identity. `redirect` models a
+    // loopback port and path — the local-development shape a desktop tool binds — and X-147 already
+    // decided a hosted deployment's redirect is configuration. A destructure means a field added
+    // upstream is a compile error rather than a fact silently ignored.
+    let OAuth2 {
+        endpoint: _,
+        authorize_path,
+        token_path: _,
+        client_id: _,
+        scopes,
+        grants,
+        redirect: _,
+    } = *spec;
+    performable(connector, grants)?;
+    if authorize_path.is_empty() {
+        return Err(CompositionRefusal::IncompleteDeclaration {
+            connector: connector.to_owned(),
+            field: "authorize_path",
+        });
+    }
+    if scopes.is_empty() {
+        return Err(CompositionRefusal::IncompleteDeclaration {
+            connector: connector.to_owned(),
+            field: "scopes",
+        });
+    }
+    DelegatedGrant::new(
+        &joined(base, authorize_path),
+        registration.client_id(),
+        registration.client_secret.clone(),
+        scopes.iter().map(|scope| (*scope).to_owned()),
+        redirect.clone(),
+    )
+    .map_err(|reason| CompositionRefusal::Unusable {
+        connector: connector.to_owned(),
+        reason,
+    })
+}
+
+/// Compose one binding from a declaration whose endpoint base URL is already resolved.
+///
+/// Split from [`binding_from_catalogue`] at exactly the seam this module's documentation names: the
+/// base URL is the one declared fact the generated tables do not carry, so it is an argument here
+/// and [`endpoint_base`] is what production has to get it from.
+///
+/// # Errors
+///
+/// One [`CompositionRefusal`] naming this connector.
+#[allow(clippy::too_many_arguments)]
+pub fn binding_from_declaration(
+    connector: &str,
+    credential: &str,
+    hazard: Option<DeclaredHazard>,
+    spec: &OAuth2,
+    base: &str,
+    registration: &OAuthRegistration,
+    redirect: &AcquisitionRedirect,
+) -> Result<AcquisitionBinding, CompositionRefusal> {
+    let grant = grant_from_declaration(connector, spec, base, registration, redirect)?;
+    if spec.token_path.is_empty() {
+        return Err(CompositionRefusal::IncompleteDeclaration {
+            connector: connector.to_owned(),
+            field: "token_path",
+        });
+    }
+    // `TokenEndpointBehavior::Standard`, and that is a measurement rather than an omission: the
+    // table on `TokenEndpointBehavior::Babelforce` records that `authorization_code` is the one
+    // grant babelforce's endpoint does not read `expires_in` for, and babelforce declares no
+    // `authorization_code` grant anyway — so no connector reaching this line has a quirk that
+    // applies to the form it will send.
+    let performer = HttpCredentialAcquirer::new(
+        connector,
+        &joined(base, spec.token_path),
+        TokenEndpointBehavior::Standard,
+    )
+    .map_err(|reason| CompositionRefusal::Unusable {
+        connector: connector.to_owned(),
+        reason,
+    })?;
+    Ok(AcquisitionBinding::delegating(
+        connector,
+        credential,
+        // **Read from the declaration, not stated by the composition** (X-154). babelforce is the
+        // first released connector to declare one, so X-74's gate is now driven by released
+        // metadata rather than only by a fixture.
+        declared_hazard(hazard),
+        grant,
+        performer,
+    ))
+}
+
+/// Join a declared path onto a base URL without doubling or dropping the separator.
+fn joined(base: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 /// Endpoint-specific request behavior owned by the concrete HTTP performer.
@@ -1213,6 +1828,407 @@ mod tests {
         assert!(
             AcquisitionBindings::new([binding], Some(&redirect())).is_ok(),
             "and it agrees with the deployment it was composed against",
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // X-154 — composing acquisitions from the released catalogue declaration.
+    // ---------------------------------------------------------------------------------------
+
+    fn provider(id: &str) -> &'static Provider {
+        connector_catalog::provider(ProviderKey::id(id)).expect("the catalogue declares it")
+    }
+
+    /// This deployment's registration identity, which never comes from the catalogue.
+    fn registration() -> OAuthRegistration {
+        OAuthRegistration::new("deployment-client", None)
+    }
+
+    /// **The grant refusal and the incomplete-field refusal, both against babelforce's released
+    /// declaration.**
+    ///
+    /// babelforce declares `[password, refresh_token]`, an empty `endpoint` and an empty
+    /// `authorize_path`. Two independent things are wrong with composing a delegated acquisition
+    /// from it, and each is refused on its own terms:
+    ///
+    /// 1. `password` is a grant this composition does not perform, and the refusal **names it**
+    ///    rather than silently downgrading to `refresh_token` — which would be renewing a
+    ///    credential nothing ever obtained.
+    /// 2. Shaped for the grant this host *does* perform, the same declaration is still too
+    ///    incomplete to compose from: there is no authorize path to send anybody to.
+    ///
+    /// The second half swaps only the grant list, so every field it refuses on is the released one.
+    #[test]
+    fn babelforce_is_refused_at_composition_by_its_grant_and_by_its_empty_authorize_path() {
+        let babelforce = provider("babelforce");
+        let (credential, spec) =
+            declared_oauth2(babelforce).expect("babelforce declares one OAuth2 credential");
+
+        // The released facts this test is written against, asserted rather than assumed.
+        assert_eq!(credential.name, "babelforce.access_token");
+        assert_eq!(
+            spec.grants,
+            &[OAuthGrant::Password, OAuthGrant::RefreshToken]
+        );
+        assert_eq!(spec.endpoint, "");
+        assert_eq!(spec.authorize_path, "");
+
+        // An empty endpoint *is* resolvable — it means the connector's own base URL — so the
+        // refusals below are about the grant and the path, not about a base URL nothing could find.
+        let base = endpoint_base(babelforce.id, babelforce.base_url, spec)
+            .expect("an empty endpoint resolves to the connector's own base URL");
+        assert_eq!(base, "https://services.babelforce.com");
+
+        let refusal =
+            grant_from_declaration(babelforce.id, spec, &base, &registration(), &redirect())
+                .expect_err("a grant this composition does not perform must be refused");
+        assert_eq!(
+            refusal,
+            CompositionRefusal::GrantNotPerformed {
+                connector: "babelforce".to_owned(),
+                grant: "password",
+            },
+        );
+        let message = refusal.to_string();
+        assert!(message.contains("babelforce"), "{message}");
+        assert!(message.contains("password"), "{message}");
+        assert!(
+            !message.contains("refresh_token"),
+            "the refusal must not read as an invitation to use the other grant in the list: \
+             {message}",
+        );
+
+        // The same declaration, shaped for the grant this host performs: still refused, now naming
+        // the field its own declaration leaves empty.
+        let shaped = OAuth2 {
+            grants: &[OAuthGrant::AuthorizationCode, OAuthGrant::RefreshToken],
+            ..*spec
+        };
+        let refusal =
+            grant_from_declaration(babelforce.id, &shaped, &base, &registration(), &redirect())
+                .expect_err("an empty authorize path cannot compose an authorization");
+        assert_eq!(
+            refusal,
+            CompositionRefusal::IncompleteDeclaration {
+                connector: "babelforce".to_owned(),
+                field: "authorize_path",
+            },
+        );
+        let message = refusal.to_string();
+        assert!(message.contains("babelforce"), "{message}");
+        assert!(message.contains("authorize_path"), "{message}");
+    }
+
+    /// **A declared grant is never downgraded to another in the same list.**
+    ///
+    /// The pairing that could silently work is `[password, refresh_token]` — this host has a
+    /// performer for the second — so it is the one worth pinning. `[client_credentials]` is the
+    /// other direction: a grant this host performs nowhere.
+    #[test]
+    fn a_grant_this_host_does_not_perform_is_named_rather_than_skipped() {
+        assert_eq!(
+            performable("fixture", &[OAuthGrant::Password, OAuthGrant::RefreshToken],)
+                .expect_err("password is not performed from a declaration"),
+            CompositionRefusal::GrantNotPerformed {
+                connector: "fixture".to_owned(),
+                grant: "password",
+            },
+        );
+        assert_eq!(
+            performable("fixture", &[OAuthGrant::ClientCredentials])
+                .expect_err("this host performs no client-credentials grant"),
+            CompositionRefusal::GrantNotPerformed {
+                connector: "fixture".to_owned(),
+                grant: "client_credentials",
+            },
+        );
+        assert_eq!(
+            performable("fixture", &[OAuthGrant::RefreshToken])
+                .expect_err("renewal alone obtains nothing"),
+            CompositionRefusal::NoAcquiringGrant {
+                connector: "fixture".to_owned(),
+            },
+        );
+        // And the pair every delegated connector needs, which must still compose or the refusals
+        // above would pass for a function that refuses everything.
+        performable(
+            "fixture",
+            &[OAuthGrant::AuthorizationCode, OAuthGrant::RefreshToken],
+        )
+        .expect("the grants this composition performs");
+    }
+
+    /// **The generated tables cannot resolve a *named* endpoint, and this refuses rather than
+    /// guessing one** (X-154 finding).
+    ///
+    /// GitLab's declaration resolves against the `login` service. `catalog::Provider` carries one
+    /// `base_url` and it is the **default** service's — `{origin}/api/v4`, the API, not the
+    /// authorization host — so there is nothing in the tables to join `/oauth/authorize` onto. The
+    /// canonical document carries `services[].base_url` (`{origin}` for `login`); reading it is
+    /// X-153.
+    ///
+    /// A guess here would be an authorization request sent to somebody else's host, so this is a
+    /// refusal that names the connector and the endpoint.
+    #[test]
+    fn a_named_endpoint_has_no_base_url_in_the_generated_tables() {
+        let gitlab = provider("gitlab");
+        let (credential, spec) = declared_oauth2(gitlab).expect("gitlab declares one");
+
+        assert_eq!(credential.name, "gitlab.oauth_token");
+        assert_eq!(spec.endpoint, "login");
+        assert_eq!(gitlab.base_url, "{origin}/api/v4");
+
+        let refusal = endpoint_base(gitlab.id, gitlab.base_url, spec)
+            .expect_err("a named endpoint is not resolvable from the generated tables");
+        assert_eq!(
+            refusal,
+            CompositionRefusal::UnresolvableEndpoint {
+                connector: "gitlab".to_owned(),
+                endpoint: "login".to_owned(),
+            },
+        );
+        let message = refusal.to_string();
+        assert!(message.contains("gitlab"), "{message}");
+        assert!(message.contains("login"), "{message}");
+
+        // The other half of the same gap: even the connector's *own* base URL is templated, and a
+        // startup composition has no tenant whose settings could fill `{origin}`.
+        let unnamed = OAuth2 {
+            endpoint: "",
+            ..*spec
+        };
+        assert_eq!(
+            endpoint_base(gitlab.id, gitlab.base_url, &unnamed)
+                .expect_err("a templated base URL is not a base URL"),
+            CompositionRefusal::TemplatedBaseUrl {
+                connector: "gitlab".to_owned(),
+            },
+        );
+    }
+
+    /// **The registration identity is this deployment's, and a missing one refuses at startup
+    /// naming the connector.**
+    #[test]
+    fn a_registered_connector_with_no_client_id_refuses_and_names_it() {
+        let refusal = from_environment(
+            |name| match name {
+                ACQUISITION_CONNECTORS_ENV => Some("gitlab".to_owned()),
+                _ => None,
+            },
+            Some(&redirect()),
+        )
+        .expect_err("a registered connector with no client id must refuse");
+
+        assert_eq!(
+            refusal,
+            CompositionRefusal::NoRegistration {
+                connector: "gitlab".to_owned(),
+                setting: "FLUX_EXCHANGE_OAUTH_CLIENT_ID_GITLAB".to_owned(),
+            },
+        );
+        let message = refusal.to_string();
+        assert!(message.contains("gitlab"), "{message}");
+        assert!(
+            message.contains("FLUX_EXCHANGE_OAUTH_CLIENT_ID_GITLAB"),
+            "{message}",
+        );
+
+        // An empty value is an operator who has not chosen one, not one who chose `""` — the rule
+        // `crate::acquisition_redirect` and `crate::hosted_origin` already state.
+        assert!(matches!(
+            from_environment(
+                |name| match name {
+                    ACQUISITION_CONNECTORS_ENV => Some("gitlab".to_owned()),
+                    "FLUX_EXCHANGE_OAUTH_CLIENT_ID_GITLAB" => Some("   ".to_owned()),
+                    _ => None,
+                },
+                Some(&redirect()),
+            ),
+            Err(CompositionRefusal::NoRegistration { .. }),
+        ));
+
+        // A connector this build does not catalogue is refused by name rather than skipped, for
+        // `DevIdentity`'s reason: a list that silently lost an entry is a list whose operator is
+        // debugging the wrong thing.
+        assert_eq!(
+            from_environment(
+                |name| (name == ACQUISITION_CONNECTORS_ENV).then(|| "not-a-connector".to_owned()),
+                Some(&redirect()),
+            )
+            .expect_err("an uncatalogued connector must refuse"),
+            CompositionRefusal::UnknownConnector {
+                connector: "not-a-connector".to_owned(),
+            },
+        );
+
+        // And a deployment that registered nothing composes an empty registry, which is what a
+        // checkout runs as and is not an error.
+        let empty = from_environment(|_| None, Some(&redirect()))
+            .expect("registering nothing is not a refusal");
+        assert!(empty.get("gitlab").is_none());
+        assert_eq!(empty.redirect(), Some(&redirect()));
+    }
+
+    /// **A catalogue-supplied `client_id` is ignored rather than trusted.**
+    ///
+    /// Decision 0022: the artifact publishes the registration *requirement*, never a value.
+    /// Upstream C-536 refuses to emit one, so every released declaration carries `""` — which means
+    /// a test written against the released tables could not tell "ignored" from "empty anyway".
+    /// This one supplies a non-empty catalogue value, which is the case that has to keep being
+    /// refused when a future document carries one.
+    #[test]
+    fn a_catalogue_supplied_client_id_is_never_read() {
+        const CATALOGUE_SUPPLIED: &str = "CATALOGUE-SUPPLIED-CLIENT-ID-NOT-TO-BE-TRUSTED";
+        let spec = OAuth2 {
+            endpoint: "",
+            authorize_path: "/oauth/authorize",
+            token_path: "/oauth/token",
+            client_id: CATALOGUE_SUPPLIED,
+            scopes: &["read_api"],
+            grants: &[OAuthGrant::AuthorizationCode, OAuthGrant::RefreshToken],
+            redirect: None,
+        };
+
+        let grant = grant_from_declaration(
+            "fixture",
+            &spec,
+            "https://vendor.example.test",
+            &registration(),
+            &redirect(),
+        )
+        .expect("the declaration composes");
+
+        assert_eq!(
+            grant.client_id(),
+            "deployment-client",
+            "the client id is the deployment's",
+        );
+        assert!(
+            !format!("{grant:?}").contains(CATALOGUE_SUPPLIED),
+            "a catalogue-supplied client id must not reach the composed grant: {grant:?}",
+        );
+        assert_eq!(
+            grant.authorization_endpoint(),
+            "https://vendor.example.test/oauth/authorize",
+            "and the endpoint and path are the declaration's",
+        );
+        assert_eq!(grant.scope(), "read_api");
+    }
+
+    /// **X-74's gate, driven by released metadata rather than by a fixture** (X-154).
+    ///
+    /// babelforce is the first released connector to declare a hazard. The binding's hazard is read
+    /// from that declaration, so a deployment on the safe default refuses its acquisition by name,
+    /// and one that opted in by name admits it — which is the difference the posture exists to
+    /// express, now decided from a vendor fact this repository did not write.
+    #[test]
+    fn the_hazard_a_binding_carries_is_read_from_the_released_declaration() {
+        let (babelforce, _) =
+            declared_oauth2(provider("babelforce")).expect("babelforce declares one");
+        let (gitlab, _) = declared_oauth2(provider("gitlab")).expect("gitlab declares one");
+
+        assert_eq!(
+            babelforce.hazard,
+            Some(DeclaredHazard::ResourceOwnerSecretShared),
+            "the released declaration, not a fixture",
+        );
+        assert_eq!(gitlab.hazard, None);
+
+        let hazard = declared_hazard(babelforce.hazard);
+        assert_eq!(hazard, Some(AuthHazard::ResourceOwnerSecretShared));
+        assert_eq!(declared_hazard(gitlab.hazard), None);
+
+        let binding = AcquisitionBinding::new(
+            "babelforce",
+            babelforce.name,
+            hazard,
+            Arc::new(
+                HttpCredentialAcquirer::new(
+                    "babelforce",
+                    "https://services.babelforce.com/oauth/token",
+                    TokenEndpointBehavior::Standard,
+                )
+                .expect("a performer"),
+            ),
+        );
+
+        let refusal = binding
+            .admit(&AuthPosture::fail_closed())
+            .expect_err("the safe default refuses a declared hazard");
+        let message = refusal.to_string();
+        assert!(message.contains("babelforce"), "{message}");
+        assert!(
+            message.contains("resource_owner_secret_shared"),
+            "{message}"
+        );
+
+        binding
+            .admit(&AuthPosture::allowing([
+                AuthHazard::ResourceOwnerSecretShared,
+            ]))
+            .expect("a deployment that opted in by name admits it");
+    }
+
+    /// **Nothing a composition holds prints its client secret**, and the client id does.
+    ///
+    /// RFC 6749 §2.2 makes the client id public, so it is what a refusal names and what an operator
+    /// matches against the application they registered. The secret is the other half and appears
+    /// nowhere — not in a grant, not in a binding, not in the registry that holds them, and not in
+    /// the refusal a bad shape produces.
+    #[test]
+    fn a_composition_prints_its_client_id_and_never_its_client_secret() {
+        const CLIENT_SECRET: &str = "CLIENT-SECRET-NOT-A-REAL-SECRET";
+        let registration =
+            OAuthRegistration::new("deployment-client", Some(Secret::new(CLIENT_SECRET)));
+        let spec = OAuth2 {
+            endpoint: "",
+            authorize_path: "/oauth/authorize",
+            token_path: "/oauth/token",
+            client_id: "",
+            scopes: &["read_api"],
+            grants: &[OAuthGrant::AuthorizationCode, OAuthGrant::RefreshToken],
+            redirect: None,
+        };
+        let binding = binding_from_declaration(
+            "fixture",
+            "fixture.oauth_token",
+            None,
+            &spec,
+            "https://vendor.example.test",
+            &registration,
+            &redirect(),
+        )
+        .expect("the declaration composes");
+        let registry =
+            AcquisitionBindings::new([binding.clone()], Some(&redirect())).expect("one binding");
+        // A shape that cannot compose, so the refusal rendering is covered too.
+        let refusal = grant_from_declaration(
+            "fixture",
+            &OAuth2 {
+                scopes: &[],
+                ..spec
+            },
+            "https://vendor.example.test",
+            &registration,
+            &redirect(),
+        )
+        .expect_err("no scopes cannot compose");
+
+        for rendering in [
+            format!("{registration:?}"),
+            format!("{binding:?}"),
+            format!("{registry:?}"),
+            format!("{refusal:?}"),
+            format!("{refusal}"),
+        ] {
+            assert!(
+                !rendering.contains(CLIENT_SECRET),
+                "a client secret reached a rendering: {rendering}",
+            );
+        }
+        assert!(
+            format!("{registration:?}").contains("deployment-client"),
+            "the client id is public by specification and is what an operator matches on",
         );
     }
 
