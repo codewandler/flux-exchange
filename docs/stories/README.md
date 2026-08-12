@@ -42,9 +42,8 @@ lockfile and compile-time tests.
 ## Next (ready — take the top one unless the user named a story)
 - [X-140 — Repository agents use the installed Board and Fleet operator workflow](X-140-use-installed-board-fleet-operator-workflow.md) · Fleet dogfood — replace private Track workflow and pin the bounded handoff/watch commands a plain agent can run
 - [X-141 — Exchange story workers publish bounded Fleet handoff evidence](X-141-publish-bounded-fleet-handoff-evidence.md) · Fleet dogfood — one deterministic targeted-check receipt without terminal scraping or duplicate full gates
-
-### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
+- [X-150 — Remove the Windows runtime residue the Linux contraction left behind](X-150-remove-the-windows-runtime-residue.md) · X-137 made Exchange Linux-only but left ~9.7k lines of Windows code, including 3,444 lines in three source files no mod declaration compiles and two dangling references that only build.rs's panic keeps hidden
+- [X-149 — Adopt the current vite line in the console](X-149-adopt-the-current-vite-line-in-the-console.md) · vite 6 -> 8 and @vitejs/plugin-vue 5 -> 6 are one change: neither resolves without the other, and vite 8 swaps the bundler from esbuild to rolldown
 
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
@@ -197,6 +196,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-136 — Bound helper plan validation and the absolute result envelope](X-136-bound-helper-plan-and-result-envelope.md) · X-134 child — revalidate the complete v2 plan and keep every helper operation inside one 5s setup / 335s result envelope
 - [X-137 — Constrain Exchange runtime and release to Linux](X-137-constrain-exchange-runtime-and-release-to-linux.md) · X-134 child — Decision 0012 replaces the stopped Windows proof with the exact two-target Linux product boundary
 - [X-138 — Bind provider recovery, replay and Linux-native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — retain the exact portable connector-secrets 0.20 identity and prove Exchange-owned recovery on both Linux release targets
+- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

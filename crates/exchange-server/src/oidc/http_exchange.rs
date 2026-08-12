@@ -27,6 +27,12 @@
 //! symmetric algorithm, so a token claiming one has no key to verify against and is rejected before
 //! any signature is computed. `a_token_signed_with_the_public_key_as_an_hmac_secret_is_refused`
 //! is what holds that.
+//!
+//! The same argument decides the key kinds this build has never heard of, and it decides them the
+//! same way: a type [`permitted_algorithms`] does not implement admits **nothing**. An allowlist
+//! derived from the key is only a guard while something stays outside it, so an unrecognised kind
+//! refuses rather than falling back to whichever family its parameters happen to resemble.
+//! `a_key_of_a_kind_this_build_does_not_recognise_admits_no_algorithm` is what holds that.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -377,8 +383,9 @@ impl HttpTokenExchange {
 /// The algorithms a key of this kind may have signed with.
 ///
 /// `None` for a symmetric key, which is not a thing a provider publishes for id-token verification
-/// and is exactly the shape the confusion attack needs. Returning `None` rather than an empty list
-/// keeps "no algorithm is acceptable" from being spelled the same way as "any of these are".
+/// and is exactly the shape the confusion attack needs — and `None` for any kind this build does
+/// not recognise, which is the wildcard arm's own argument. Returning `None` rather than an empty
+/// list keeps "no algorithm is acceptable" from being spelled the same way as "any of these are".
 fn permitted_algorithms(key: &Jwk) -> Option<Vec<Algorithm>> {
     match &key.algorithm {
         AlgorithmParameters::RSA(_) => Some(vec![
@@ -393,6 +400,20 @@ fn permitted_algorithms(key: &Jwk) -> Option<Vec<Algorithm>> {
         AlgorithmParameters::OctetKeyPair(_) => Some(vec![Algorithm::EdDSA]),
         // Symmetric. See the module documentation.
         AlgorithmParameters::OctetKey(_) => None,
+        // Any kind this build does not recognise — an unknown `kty`, which `jsonwebtoken` 11 parses
+        // into a catch-all instead of failing the key set, and any variant a later version adds to
+        // this `#[non_exhaustive]` enum without a compile error to prompt a decision.
+        //
+        // It refuses for the same reason the arms above are derived from the key at all: an
+        // allowlist guards nothing unless something is genuinely outside it, and this host cannot
+        // say what a key kind it does not implement was meant to sign. Defaulting to the RSA
+        // families is the tempting shape — a JWK naming an unrecognised kind often carries a
+        // modulus and exponent anyway — and taking them is the confusion attack with the provider's
+        // own label ignored rather than the token's header trusted. Refuse; never repair: an
+        // upgrade that introduces a key kind turns that provider's sign-in off and says so, instead
+        // of verifying against semantics nothing here has checked.
+        // `a_key_of_a_kind_this_build_does_not_recognise_admits_no_algorithm` is what holds that.
+        _ => None,
     }
 }
 
@@ -1008,6 +1029,82 @@ p/9whGz4WfzHlXvCL8fsg1W70m+Z70LYVLFGaGb4egokM7CKb2uJEZFmi1F/Uxf/
             assert!(
                 matches!(refusal, Err(ExchangeError::Rejected)),
                 "a token MAC'd with {spelling} must be refused, not {refusal:?}",
+            );
+        }
+    }
+
+    /// A key of a kind this build does not recognise admits **no** algorithm, so no token can be
+    /// verified against it.
+    ///
+    /// This became reachable with `jsonwebtoken` 11, which changed two things at once. An
+    /// unrecognised `kty` used to fail deserialization of the whole key set, so the refusal was the
+    /// parser's accident; now it parses into a catch-all variant and arrives here as an ordinary
+    /// `Jwk`. And `AlgorithmParameters` became `#[non_exhaustive]`, so every kind added after this
+    /// build — and every kind added by a future upgrade — lands in the same wildcard arm with no
+    /// compile error to prompt anyone to think about it. Both changes point the same way: the arm
+    /// has to be the refusing one, and something has to hold it there.
+    ///
+    /// Two spellings, because the wrong fix is attractive for a different reason in each:
+    ///
+    /// - A registered kind this build simply predates. `AKP` is the JOSE key type for post-quantum
+    ///   algorithm key pairs; the day a provider rotates onto one, this host must refuse sign-in
+    ///   and say so, not verify against a key whose semantics it does not implement.
+    /// - An unrecognised kind carrying the provider's **genuine** RSA modulus and exponent. Every
+    ///   ingredient of a real verification is present and the token really is signed by the
+    ///   matching private key, so a wildcard that fell back to the RSA families — tempting,
+    ///   because the numbers are right there and it would "work" — verifies a token whose key the
+    ///   provider labelled as something else entirely.
+    ///
+    /// Each case is asserted twice: that [`permitted_algorithms`] yields nothing, and that a whole
+    /// redemption is refused. The second is what the first is *for*, and asserting only the first
+    /// would leave "no algorithm is permitted" true while some later gate quietly did the refusing.
+    #[tokio::test]
+    async fn a_key_of_a_kind_this_build_does_not_recognise_admits_no_algorithm() {
+        let signing =
+            EncodingKey::from_rsa_pem(PRIVATE_KEY.as_bytes()).expect("the test key is a valid PEM");
+
+        for (spelling, published) in [
+            (
+                "a registered key type this build predates",
+                json!({
+                    "kty": "AKP",
+                    "use": "sig",
+                    "kid": KID,
+                    "alg": "ML-DSA-44",
+                    "pub": MODULUS,
+                }),
+            ),
+            (
+                "an unrecognised key type carrying real RSA parameters",
+                json!({
+                    "kty": "RSA-BUT-NOT-QUITE",
+                    "use": "sig",
+                    "kid": KID,
+                    "n": MODULUS,
+                    "e": EXPONENT,
+                }),
+            ),
+        ] {
+            let key: Jwk = serde_json::from_value(published.clone())
+                .expect("an unknown key type parses rather than failing the whole set");
+
+            assert!(
+                permitted_algorithms(&key).is_none(),
+                "{spelling} must admit no algorithm, not {:?}",
+                permitted_algorithms(&key),
+            );
+
+            let provider = StubProvider::serving(
+                answering_with(&signed_with(Algorithm::RS256, KID, &signing)),
+                json!({ "keys": [published] }).to_string(),
+            )
+            .await;
+
+            let refusal = redeem_at(&provider).await;
+
+            assert!(
+                matches!(refusal, Err(ExchangeError::Rejected)),
+                "a token offered against {spelling} must be refused, not {refusal:?}",
             );
         }
     }

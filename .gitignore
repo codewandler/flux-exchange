@@ -4,3 +4,7 @@ dist/
 .DS_Store
 *.log
 .claude/
+
+# Python bytecode from the repository scripts (X-141 onwards).
+__pycache__/
+*.pyc
