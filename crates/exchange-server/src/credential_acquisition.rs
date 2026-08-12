@@ -1,10 +1,15 @@
 //! Server-owned credential acquisition performers and their startup bindings.
 //!
 //! The host crate owns only the secret-in/secret-out port. HTTP, endpoint URLs and vendor form
-//! quirks stay here in the composing binary. Until upstream C-440 ships a connector declaration,
-//! production composes an empty [`AcquisitionBindings`]; tests inject an explicit binding and thus
-//! cannot accidentally make the built-in catalogue claim a capability its released metadata does
-//! not declare.
+//! quirks stay here in the composing binary. Production composes an empty [`AcquisitionBindings`];
+//! tests inject an explicit binding and thus cannot accidentally make the built-in catalogue claim a
+//! capability its released metadata does not declare.
+//!
+//! **Upstream C-440 has shipped** — connector 0.21 gives `catalog::Credential` a `hazard` and
+//! babelforce declares `ResourceOwnerSecretShared` (X-146) — **and nothing here reads it yet.** The
+//! bindings stay empty in production not because the declaration is missing but because this module
+//! has no code path from a catalogue declaration to an [`AcquisitionBinding`]. Building one is X-147;
+//! until then the distinction above still holds, and it is now the only thing holding it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
