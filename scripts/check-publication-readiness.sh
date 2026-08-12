@@ -101,8 +101,8 @@ if not isinstance(dependency, dict):
     refuse("workspace connector-secrets is not one direct registry dependency table")
 if dependency.get("package") != "codewandler-connector-secrets":
     refuse("workspace connector-secrets does not name the published provider crate")
-if dependency.get("version") not in {"0.20", "0.20.0", "=0.20.0"}:
-    refuse("workspace connector-secrets does not select the 0.20.0 release line")
+if dependency.get("version") not in {"0.23", "0.23.0", "=0.23.0"}:
+    refuse("workspace connector-secrets does not select the 0.23.0 release line")
 if any(key in dependency for key in ("path", "git", "registry")):
     refuse("workspace connector-secrets uses a path, git, or alternate-registry source")
 
@@ -118,10 +118,10 @@ for name in connector_dependencies:
     if len(selected) != 1:
         refuse(f"Cargo.lock contains {len(selected)} instances of {name}, want exactly one")
     package = selected[0]
-    if package.get("version") != "0.20.0":
-        refuse(f"Cargo.lock selects {name} {package.get('version')!r}, want 0.20.0")
+    if package.get("version") != "0.23.0":
+        refuse(f"Cargo.lock selects {name} {package.get('version')!r}, want 0.23.0")
     if package.get("source") != registry or not re.fullmatch(r"[0-9a-f]{64}", package.get("checksum", "")):
-        refuse(f"Cargo.lock does not authenticate crates.io bytes for {name} 0.20.0")
+        refuse(f"Cargo.lock does not authenticate crates.io bytes for {name} 0.23.0")
     if name == upstream_package.get("name") and package.get("checksum") != upstream_package.get("registry_sha256"):
         refuse("Cargo.lock connector-secrets checksum disagrees with its canonical upstream authority")
 
@@ -347,7 +347,7 @@ missing_contract_cases = sorted(required_contract_cases - set(case_ids) - set(na
 if missing_contract_cases:
     refuse(f"v2 fixtures omit minimum contract cases: {missing_contract_cases}")
 
-print("PASS publication readiness: registry 0.20, v2 producers/fixtures, eight protocols and authority-derived native evidence")
+print("PASS publication readiness: registry 0.23, v2 producers/fixtures, eight protocols and authority-derived native evidence")
 PY
 }
 
@@ -413,7 +413,7 @@ cargo metadata --offline
 curl https://crates.io
 ''', encoding="utf-8")
 
-(root / "Cargo.toml").write_text('''[workspace]\n[workspace.dependencies]\nconnector-secrets = { package = "codewandler-connector-secrets", version = "0.20" }\n''')
+(root / "Cargo.toml").write_text('''[workspace]\n[workspace.dependencies]\nconnector-secrets = { package = "codewandler-connector-secrets", version = "0.23" }\n''')
 upstream = next(item for item in authority["authorities"].values() if item["class"] == "inherited_upstream")["package"]
 lock = "version = 4\n\n"
 lock += f'[[package]]\nname = "{upstream["name"]}"\nversion = "{upstream["version"]}"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{upstream["registry_sha256"]}"\n\n'
@@ -495,10 +495,10 @@ PY
   }
 
   cp "$scratch/Cargo.lock" "$scratch/Cargo.lock.clean"
-  expect_refusal "a changed registry checksum" sed -i.bak 's/edf98bece86f/0df98bece86f/' "$scratch/Cargo.lock"
+  expect_refusal "a changed registry checksum" sed -i.bak 's/360225fcfbd3/060225fcfbd3/' "$scratch/Cargo.lock"
   mv "$scratch/Cargo.lock.clean" "$scratch/Cargo.lock"
   cp "$scratch/Cargo.toml" "$scratch/Cargo.toml.clean"
-  sed -i.bak 's/version = "0.20"/version = "0.20", path = "..\/provider"/' "$scratch/Cargo.toml"
+  sed -i.bak 's/version = "0.23"/version = "0.23", path = "..\/provider"/' "$scratch/Cargo.toml"
   if check_tree "$scratch" >/dev/null 2>&1; then fail "self-test: accepted a path provider dependency"; fi
   mv "$scratch/Cargo.toml.clean" "$scratch/Cargo.toml"
 
