@@ -9,7 +9,7 @@ done.
 
 ## Status
 
-_As of 2026-08-12:_ **v0.18.0 — the catalog-artifact adoption line: document-backed settings, the served catalogue pack and
+_As of 2026-08-12:_ **v0.18.1 — the catalog-artifact adoption line: document-backed settings, the served catalogue pack and
 instance-bound channels.**
 `cargo run -- --dev` is the loopback single-tenant shorthand; reachable binds still require a real
 identity provider. Complete OIDC sign-in, per-tenant connections and settings, metadata grants,

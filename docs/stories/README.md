@@ -13,7 +13,7 @@ directory (`<ID>-<slug>.md`); this board indexes them by status. New work? Copy
 
 ## Status
 
-**v0.18.0 — the catalog-artifact adoption line: document-backed settings, the served catalogue pack and artifact-composed authorizations.** The
+**v0.18.1 — the catalog-artifact adoption line: document-backed settings, the served catalogue pack and artifact-composed authorizations.** The
 host serves OIDC, verifier-backed local users and loopback development identity, canonical Service Account
 lifecycle and bearer authentication, tenant connections/settings/grants, ordinary connector invoke,
 immutable workflow publication, durable value-free run activity and live WebSocket subscriptions.
@@ -42,7 +42,7 @@ lockfile and compile-time tests.
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-140 — Repository agents use the installed Board and Fleet operator workflow](X-140-use-installed-board-fleet-operator-workflow.md) · Fleet dogfood — replace private Track workflow and pin the bounded handoff/watch commands a plain agent can run
-- [X-157 — The release-readiness pin follows the connector line to 0.23](X-157-move-the-release-readiness-pin-to-0-23.md) · check-publication-readiness.sh and native-evidence-v1.json pin the connector crates and connector-secrets' checksum to 0.20.0; X-146 (0.21) and X-155 (0.23) moved past it invisibly because no release ran the release-only check. The v0.18.0 publish failed on exactly this. Supply-chain checksum authority — verify against the crates.io index, never the lockfile
+- [X-157 — The release-readiness pin follows the connector line to 0.23](X-157-move-the-release-readiness-pin-to-0-23.md) · check-publication-readiness.sh and native-evidence-v1.json pin the connector crates and connector-secrets' checksum to 0.20.0; X-146 (0.21) and X-155 (0.23) moved past it invisibly because no release ran the release-only check. The v0.18.1 publish failed on exactly this. Supply-chain checksum authority — verify against the crates.io index, never the lockfile
 - [X-150 — Remove the Windows runtime residue the Linux contraction left behind](X-150-remove-the-windows-runtime-residue.md) · X-137 made Exchange Linux-only but left ~9.7k lines of Windows code, including 3,444 lines in three source files no mod declaration compiles and two dangling references that only build.rs's panic keeps hidden
 - [X-149 — Adopt the current vite line in the console](X-149-adopt-the-current-vite-line-in-the-console.md) · vite 6 -> 8 and @vitejs/plugin-vue 5 -> 6 are one change: neither resolves without the other, and vite 8 swaps the bundler from esbuild to rolldown
 

@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-08-12
+
+_First published release of the 0.18 line; v0.18.0 was tagged but its crates.io publish was pre-empted by the release-readiness pin corrected in X-157, and its tag is immutable._
+
 ### Fixed
 
 - **The release-readiness authority follows the connector line to 0.23** (X-157). The v0.18.0

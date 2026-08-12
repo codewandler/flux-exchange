@@ -15,7 +15,7 @@ Managed Agent and Service Account one meaning across the Flux family and labels 
 live versus target architecture.
 
 > [!WARNING]
-> **Status: v0.18.0 — the catalog-artifact adoption line: document-backed settings, the served catalogue pack, and artifact-composed authorizations.**
+> **Status: v0.18.1 — the catalog-artifact adoption line: document-backed settings, the served catalogue pack, and artifact-composed authorizations.**
 >
 > `cargo run -- --dev` binds `127.0.0.1:8080`, derives `user:${USER}@dev`, and binds the
 > complete durable local composition below the conventional per-user state directory without any
