@@ -87,6 +87,49 @@ impl std::fmt::Debug for RefreshRedemption<'_> {
     }
 }
 
+/// The two halves of one delegated authorization, presented once to an acquisition performer.
+///
+/// **Both are secrets, and the second is the one that is easy to get wrong.** The authorization
+/// code came back through a browser, so anything that saw that URL has it; the code verifier never
+/// left the host process and is what proves the redeemer is the party that opened the request
+/// (RFC 7636). A verifier in a log line is an authorization code anyone reading the log can spend,
+/// so this type redacts exactly as [`PasswordRedemption`] does.
+///
+/// What is deliberately **not** here: the authorization endpoint, the redirect URI, the client
+/// identifier and the scopes. Every one of them is deployment configuration or connector
+/// declaration owned by the composing binary, and a port that carried them would be this crate
+/// describing a browser flow it does not perform.
+pub struct AuthorizationCodeRedemption<'a> {
+    code: &'a Secret,
+    verifier: &'a Secret,
+}
+
+impl<'a> AuthorizationCodeRedemption<'a> {
+    /// Construct a one-use delegated redemption.
+    pub const fn new(code: &'a Secret, verifier: &'a Secret) -> Self {
+        Self { code, verifier }
+    }
+
+    /// The authorization code, exposed only to the bound performer.
+    pub fn code(&self) -> &str {
+        self.code.expose_secret()
+    }
+
+    /// The proof-key verifier this host drew when it opened the request.
+    pub fn verifier(&self) -> &str {
+        self.verifier.expose_secret()
+    }
+}
+
+impl std::fmt::Debug for AuthorizationCodeRedemption<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthorizationCodeRedemption")
+            .field("code", &"[REDACTED]")
+            .field("verifier", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// The secret material returned by a credential acquisition.
 ///
 /// `expires_at` is an absolute Unix timestamp reported or derived by the concrete performer. It is
@@ -156,6 +199,38 @@ pub trait CredentialAcquirer: Send + Sync {
         &self,
         redemption: RefreshRedemption<'_>,
     ) -> Result<AcquiredCredential, AcquisitionRefusal>;
+
+    /// Redeem one authorization code a person granted through their own browser.
+    ///
+    /// The delegated half of the acquisition port. The host still sees only secrets in and secrets
+    /// out: composing the authorization URL, planting the browser binding, spending the `state` and
+    /// comparing the redirect URI all belong to the composing binary, which is where the browser
+    /// and the transport already are.
+    ///
+    /// # Why this has a body, when the two above do not
+    ///
+    /// `codewandler-flux-exchange-host` is published, so a **required** method here would break
+    /// every downstream performer at the version that added it — including the ones bound to
+    /// connectors whose acquisition carries no delegated grant at all and which would have to write
+    /// this exact refusal by hand. The default is that refusal, stated once: a performer that does
+    /// not perform the grant says so, by name, before anything is sent.
+    ///
+    /// This is not a silent fallback. [`AcquisitionRefusal::GrantNotPerformed`] is a refusal like
+    /// every other variant here — nothing is attempted, nothing is stored, and a composition that
+    /// meant to perform the grant learns at the first attempt rather than at a vendor's `400`.
+    ///
+    /// # Errors
+    ///
+    /// [`AcquisitionRefusal::GrantNotPerformed`] unless a performer overrides this, and whatever
+    /// the vendor leg refuses with when one does.
+    async fn redeem_authorization_code(
+        &self,
+        _redemption: AuthorizationCodeRedemption<'_>,
+    ) -> Result<AcquiredCredential, AcquisitionRefusal> {
+        // Never read. The refusal is decided from the performer alone, so a default body that
+        // touched the code or the verifier would be one that could log or store either.
+        Err(AcquisitionRefusal::GrantNotPerformed)
+    }
 }
 
 /// A safe, value-free reason why an admitted acquisition did not produce a credential.
@@ -183,6 +258,16 @@ pub enum AcquisitionRefusal {
     /// from an ordinary invalid response so a composition cannot advise retrying the spent token.
     #[error("the refresh endpoint may have rotated the credential, but returned unusable state")]
     RefreshOutcomeUnusable,
+
+    /// The bound performer does not perform the grant this acquisition needs.
+    ///
+    /// Decided **here**, before any request leaves the process, so it is a composition fault an
+    /// operator fixes rather than a vendor rejection they would re-enter a credential for. It is
+    /// what [`CredentialAcquirer::redeem_authorization_code`]'s default body answers with, and it
+    /// names no grant: the connector and the acquisition the composition bound are what an operator
+    /// looks at, and neither is this crate's to quote.
+    #[error("the bound acquisition performer does not perform this grant")]
+    GrantNotPerformed,
 }
 
 impl AcquisitionRefusal {
@@ -195,6 +280,7 @@ impl AcquisitionRefusal {
             Self::Unreachable => "credential_endpoint_unreachable",
             Self::InvalidResponse => "invalid_credential_response",
             Self::RefreshOutcomeUnusable => "refresh_outcome_unusable",
+            Self::GrantNotPerformed => "grant_not_performed",
         }
     }
 }

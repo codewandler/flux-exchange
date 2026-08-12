@@ -14,6 +14,7 @@
 //! routes as data and its `Router` is *derived* from them, so [`published`] is the whole surface by
 //! construction. The seam is the same; only the direction of the dependency changed.
 
+mod acquisitions;
 mod apps;
 pub(crate) mod catalogue;
 mod channels;
@@ -63,6 +64,7 @@ const MODULES: &[Module] = &[
     identity::MODULE,
     signin::MODULE,
     connections::MODULE,
+    acquisitions::MODULE,
     service_accounts::MODULE,
     invoke::MODULE,
     local_management_frames::MODULE,
@@ -234,9 +236,40 @@ pub fn app_with_console(state: AppState, console: Option<&Path>) -> Router {
     };
 
     app.layer(middleware::from_fn(security_headers))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(path_only_span))
         .layer(middleware::from_fn(request_correlation))
         .with_state(state)
+}
+
+/// The request span, carrying the **path** and never the query string.
+///
+/// `DefaultMakeSpan` records `uri`, which is path *and* query, and X-147's review found what that
+/// means on this surface: two routes receive a bearer credential in the query — the OIDC sign-in
+/// callback's `code` and the delegated acquisition callback's `code` and `state`. They were written
+/// to the log by this layer, which is the thing both of those routes' documentation says they never
+/// do, and an authorization code in a log is one whoever reads the log can spend.
+///
+/// The fix is a class rather than a list. A query string is **caller-supplied data**; a span is for
+/// correlating what this host did, and the path plus the method is that. Enumerating the routes
+/// whose query is sensitive would be a list that drifts the moment somebody adds a third — and this
+/// host already has the correlation identifier `request_correlation` mints for tying a request
+/// together, which is what a query in a span was standing in for.
+///
+/// This **also raises the span's level** from `DefaultMakeSpan`'s `DEBUG` to `INFO`. That is a
+/// second change in one function and worth naming: the level is no longer what protects the query,
+/// so it is now chosen for what a request span is for. One span per request at `INFO` is what makes
+/// the correlation identifier usable in a deployment that does not run at `DEBUG` — and a deployment
+/// that *does* turn `DEBUG` on to chase a problem no longer widens what a log holds.
+fn path_only_span(request: &Request) -> tracing::Span {
+    tracing::info_span!(
+        "request",
+        method = %request.method(),
+        // **`.path()` and never `.uri()`** — the whole point of this function. `no_query_string_`
+        // `reaches_a_request_span` drives this layer through a real subscriber, so reverting this
+        // to `request.uri()` turns that test red rather than merely contradicting a comment.
+        path = %request.uri().path(),
+        version = ?request.version(),
+    )
 }
 
 /// Generate correlation before every guard and return it without trusting a caller-supplied id.
@@ -1319,6 +1352,29 @@ mod tests {
             // secret to the verifier-backed identity, is globally rate-limited with sign-in, and
             // answers wrong-user and wrong-secret identically.
             ("signin", "/api/signin/local"),
+            // The delegated credential acquisition's callback. X-147's widening, and the one that
+            // needed the most argument on this list, because it is the only anonymous route that
+            // **mints tenant authority**: it finishes with a vendor credential written into a
+            // tenant's store.
+            //
+            // It has to be anonymous for the reason the sign-in callback does, and more strongly.
+            // The browser arrives mid-redirect from the vendor's origin, and the session cookie is
+            // `SameSite=Strict` — so it is *not sent* on that navigation, whatever the caller
+            // holds. A guarded declaration here would refuse every real vendor redirect and pass
+            // only in a test that forged the cookie: a control that appears to exist, which this
+            // repository refuses elsewhere for the same reason.
+            //
+            // What keeps it from being a hole is that it reads **no caller identity, and cannot**.
+            // The principal the credential is addressed to was recorded when a signed-in human
+            // opened the authorization on `POST /api/acquisitions/{connector}/authorize`, which is
+            // `Access::User`; nothing on this route — no header, no cookie, no body, no query —
+            // reaches the address. Its authority is a single-use `state` this host drew from the
+            // OS plus a binder cookie only this host could have planted, spent together or not at
+            // all, and it answers with a document and a `Set-Cookie` rather than a body a script
+            // could read a token, an address or a `state` out of.
+            // `crate::routes::acquisitions`'s module documentation carries the long form, and
+            // `an_unmatched_callback_reaches_no_vendor` is what holds it.
+            ("acquisitions", "/api/acquisitions/callback"),
             // The agent descriptor. X-42's widening, and the one on this list that had to be
             // argued field by field rather than route by route — `crate::routes::onboarding`
             // carries that argument, and the types there are `deny_unknown_fields` so a field
@@ -1342,6 +1398,112 @@ mod tests {
             reachable, ANONYMOUS,
             "the set of routes answering a caller with no principal changed; every entry needs an \
              argument written beside it in ANONYMOUS, and these are what answered: {reachable:?}",
+        );
+    }
+
+    /// **No request's query string reaches a log line** (X-147 review, M5).
+    ///
+    /// `TraceLayer`'s default span records `uri`, which is path *and* query. Two routes on this
+    /// surface are handed a bearer credential in the query — the OIDC sign-in callback's `code`, and
+    /// the delegated acquisition callback's `code` and `state` — so the default wrote an
+    /// authorization code into the log, which is exactly what both of those routes' documentation
+    /// says they never do.
+    ///
+    /// # Why this drives the whole layer
+    ///
+    /// The first version of this test called a `traced_path` helper and asserted on its return, and
+    /// the re-review caught that reverting `path_only_span` to `request.uri()` left it **green** —
+    /// a test that reads as a guard and is not one, which is precisely the class of defect B1 was
+    /// filed for. So it now runs a real request through `app()` under a real subscriber and asserts
+    /// on the fields the span actually recorded. The helper is gone; there is nothing left to test
+    /// that is not the thing that runs in production.
+    ///
+    /// The two callbacks are driven by name because they are the ones that made this worth fixing,
+    /// and a third path is driven with them because the rule is a class and not a list: a query is
+    /// caller-supplied data and no span needs one. The responses are not asserted on — the span is
+    /// made before routing, so a `404` exercises it exactly as a `200` does.
+    #[tokio::test]
+    async fn no_query_string_reaches_a_request_span() {
+        use crate::DevIdentity;
+        use std::sync::{Arc, Mutex};
+        use tower::ServiceExt;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+
+        /// Every field of every span this host opens, as the subscriber saw it.
+        #[derive(Clone, Default)]
+        struct Recorded(Arc<Mutex<Vec<String>>>);
+
+        struct Fields(Arc<Mutex<Vec<String>>>);
+
+        impl Visit for Fields {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .lock()
+                    .expect("the field recorder")
+                    .push(format!("{}={value:?}", field.name()));
+            }
+        }
+
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Recorded {
+            fn on_new_span(
+                &self,
+                attributes: &tracing::span::Attributes<'_>,
+                _id: &tracing::Id,
+                _context: Context<'_, S>,
+            ) {
+                attributes.record(&mut Fields(Arc::clone(&self.0)));
+            }
+        }
+
+        let recorded = Recorded::default();
+        // A thread-local default rather than the global one, so this test cannot fight another.
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(recorded.clone()));
+
+        let state = AppState::with_development_identity(Arc::new(
+            DevIdentity::from_roster("user:alice@acme").expect("a roster"),
+        ));
+        for (path, query) in [
+            (
+                "/api/acquisitions/callback",
+                "state=abc123&code=SECRET-CODE-NOT-A-REAL-TOKEN",
+            ),
+            (
+                "/api/signin/callback",
+                "state=def456&code=SECRET-CODE-NOT-A-REAL-TOKEN",
+            ),
+            ("/api/connections", "anything=SECRET-CODE-NOT-A-REAL-TOKEN"),
+        ] {
+            app(state.clone())
+                .oneshot(
+                    HttpRequest::builder()
+                        .uri(format!("{path}?{query}"))
+                        .body(Body::empty())
+                        .expect("a request"),
+                )
+                .await
+                .expect("a response");
+        }
+
+        let fields = recorded.0.lock().expect("the recorder").clone();
+        // The leak first, so a regression says what leaked rather than what is missing.
+        for field in &fields {
+            assert!(
+                !field.contains("SECRET-CODE-NOT-A-REAL-TOKEN"),
+                "a query string reached a span field: {field}",
+            );
+            assert!(
+                !field.contains('?'),
+                "a span field carries a query separator, so something is recording a full URI: \
+                 {field}",
+            );
+        }
+        // Then the sanity check, so the loop above cannot be vacuously satisfied by a span that
+        // records nothing at all.
+        assert!(
+            fields.iter().any(|field| field == "path=/api/connections"),
+            "the span must record the path: {fields:?}",
         );
     }
 
@@ -1620,7 +1782,23 @@ mod tests {
     /// an ordinary connection owner may inspect its value-free state within the resolved tenant.
     #[test]
     fn the_human_surface_is_only_what_was_declared() {
-        const USER_GATED: &[(&str, &str)] = &[("connections", "/api/connections/{connector}/plan")];
+        const USER_GATED: &[(&str, &str)] = &[
+            ("connections", "/api/connections/{connector}/plan"),
+            // Opening a delegated authorization (X-147). A human and **not** an operator, which is
+            // the one place on this surface where the weaker gate is the deliberate one: the
+            // credential this produces is the caller's *own* vendor account, so an operator-only
+            // route would mean one administrator authorizing on everybody's behalf — which is the
+            // shared credential the whole story exists to replace. It stays kind-gated because a
+            // caller that decides which credential this tenant's operations run under is doing
+            // human work, exactly as `MAY_SUPPLY_A_CREDENTIAL` argues.
+            ("acquisitions", "/api/acquisitions/{connector}/authorize"),
+            // Revoking your **own** delegated credential. A `User` and not an `Operator` because
+            // the route takes no target and cannot be pointed anywhere: a delegated credential is
+            // addressed to one principal, so this destroys the caller's own and there is no other
+            // member's state in reach. Requiring an operator would mean a person could not revoke
+            // a token minted from their own vendor account, which is the wrong way round.
+            ("acquisitions", "/api/acquisitions/{connector}"),
+        ];
 
         let gated: Vec<_> = published()
             .filter(|(_, route)| route.access == Access::User)

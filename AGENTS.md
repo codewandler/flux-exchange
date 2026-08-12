@@ -107,12 +107,16 @@ implies a working service costs more than an honest gap.
 
 ⚠ **Hazardous credential acquisition is fail-closed** (X-74). Unset,
 `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` permits no declared hazard; an unknown entry refuses startup and
-names it. `resource_owner_secret_shared` is the only recognised opt-in. X-75's injectable server seam
-exists, but no released connector declares the acquisition until upstream C-440 lands, so the
-production registry remains empty and the current path is fixture-tested rather than vendor-live.
-Once a released declaration activates it, omitting the opt-in will look like a connection outage:
-the host answers its own `403` refusal naming the connector and hazard before any vendor request,
-distinct from the vendor rejecting credentials.
+names it. `resource_owner_secret_shared` is the only recognised opt-in. **Upstream C-440 has landed**
+(connector 0.21, X-146): `catalog::Credential` now carries `hazard`, and babelforce declares
+`ResourceOwnerSecretShared` on its `access_token`. That is a released declaration — but it does not
+reach this policy yet, because Exchange decides admission from the hazard on X-75's injected
+`AcquisitionBinding` and production still composes an empty `AcquisitionBindings`. So the production
+registry remains empty and the path stays fixture-tested rather than vendor-live, **for a different
+reason than before**: the declaration exists and nothing here reads it. Wiring the catalogue's
+`hazard` into the posture is X-147's neighbourhood, not a formality. Once something does activate it,
+omitting the opt-in will look like a connection outage: the host answers its own `403` refusal naming
+the connector and hazard before any vendor request, distinct from the vendor rejecting credentials.
 
 ## Build / test / run
 
@@ -186,20 +190,27 @@ separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
-**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.19 and
-`connector-pack` links here. What is left is one rule, and it is the one that bites:
+**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.21
+(X-146) and `connector-pack` links here. What is left is one rule, and it is the one that bites:
 
 - **The flux engine line is `0.54`, and it is written down once** — in `[workspace.dependencies]`
   in the root `Cargo.toml`, under the `ENGINE_LINE` marker. Every `codewandler-flux-*` pin carries
   that value, and no member manifest pins one at all.
 - **It is set by what `connector-pack` requires, never by what is newest.** `connector-pack` 0.19.0
-  requires `codewandler-flux-runtime ^0.54`, and that is the whole reason 0.54 is allowed now — the
-  exchange stayed on 0.52 until the compatible connector release was published.
-  `connector_pack::pack` hands out `Arc<dyn flux_runtime::Tool>`, and two engine versions
-  are two incompatible traits with identical names — Cargo resolves both happily and the failure
-  lands at type-check somewhere else entirely.
-- **Both pin sets move in one commit.** `codewandler-flux-*` and `codewandler-connector-*` are one
-  bump, never two. Raising either alone is exactly what puts two engine lines in one lock.
+  through 0.21.0 all require `codewandler-flux-runtime ^0.54`, and that is the whole reason 0.54 is
+  allowed — the exchange stayed on 0.52 until the compatible connector release was published, and it
+  stays on 0.54 now while 0.59.3 is on crates.io. `connector_pack::pack` hands out
+  `Arc<dyn flux_runtime::Tool>`, and two engine versions are two incompatible traits with identical
+  names — Cargo resolves both happily and the failure lands at type-check somewhere else entirely.
+- **The two pin sets must never diverge — which is not the same as always moving together, and
+  X-146 is where that distinction cost real work.** The rule is: raising `codewandler-flux-*` past
+  what the pinned `connector-pack` requires, or raising `codewandler-connector-*` to a release that
+  requires more engine than is pinned, is what puts two engine lines in one lock. A connector release
+  that leaves its own engine requirement alone — as 0.21 did — is a **connector-only bump**, and
+  moving flux to match it is *creating* the divergence rather than avoiding it. **Read
+  `connector-pack`'s requirement out of the crates.io sparse index before you edit a manifest.** X-146
+  was filed asserting connector-pack 0.21 requires `flux-runtime ^0.58`; it requires `^0.54`, and
+  believing the story instead of the index would have reproduced X-11 exactly.
 - Three tests in `crates/exchange-host/tests/engine_line.rs` keep this true rather than review:
   one links `connector_pack::pack` against `flux_web::http::HttpRequestTool` so a divergence that
   touches the seam is a compile error, one reads the manifests so a divergence that does not touch

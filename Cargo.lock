@@ -429,26 +429,27 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "codewandler-connector-address"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdee7fb0d488de4ed97dbd3b8414e04138c122ee36b6f9c97a174bb317913d8c"
+checksum = "65dbef43261a0009f6c68843321ac36f06eab3b195eb2f10c33d98d0968343b9"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "codewandler-connector-catalog"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a7737659b74876b09ff6e09b253402c5bdfcafcbde89373cb76f689bd8ffed2"
+checksum = "c88c13adb47b3a105eb0b1798b35a15978e5e61c752c53e8e44b7d874c9f6f0e"
 
 [[package]]
 name = "codewandler-connector-pack"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e858a844dab8324d42bb83c98c4ffb6823681eb1157ddb96a79d5d7a42cff48"
+checksum = "bfda4109b04d68c8dcb4265470fc96cc20fca3c811cbf2361eb1f65dcf86f2d0"
 dependencies = [
  "async-trait",
+ "codewandler-connector-address",
  "codewandler-connector-catalog",
  "codewandler-connector-secrets",
  "codewandler-flux-core",
@@ -461,9 +462,9 @@ dependencies = [
 
 [[package]]
 name = "codewandler-connector-secrets"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edf98bece86f6364aba3e7dd48c3b7e161146942e9e8450d5dc286143b627717"
+checksum = "5521a8afe9127c0e887beb540e0fc037dd434e86a80935e606551340b8f78cba"
 dependencies = [
  "async-trait",
  "codewandler-connector-address",

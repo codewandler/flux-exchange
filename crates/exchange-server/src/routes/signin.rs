@@ -144,7 +144,7 @@ async fn signin(State(state): State<AppState>) -> Response {
                 (header::LOCATION, authorization.url),
                 (
                     header::SET_COOKIE,
-                    flow::planted_binder(&authorization.binder),
+                    flow::planted_binder(flow::BINDER_COOKIE, &authorization.binder),
                 ),
             ],
         )
@@ -580,7 +580,10 @@ async fn callback(
             )),
         )
             .into_response(),
-        &[session::planted(&token), flow::cleared_binder()],
+        &[
+            session::planted(&token),
+            flow::cleared_binder(flow::BINDER_COOKIE),
+        ],
     )
 }
 

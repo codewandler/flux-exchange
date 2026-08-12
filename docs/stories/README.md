@@ -38,6 +38,7 @@ lockfile and compile-time tests.
 - [X-111 — Host every connector runtime through Exchange (epic)](X-111-rich-connector-runtimes-epic.md) · EPIC — Exchange is the sole official-integration executor: ship the effective catalogue and existing HTTP invoke first, then rich runtimes and lifecycle
 - [X-126 — Publish verified local Exchange binaries for Linux](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — supported Linux Flux can manage a separately released, attested Exchange executable without bundling plugins or trusting PATH
 - [X-134 — Publish owner-bound local onboarding without secret JSON](X-134-publish-owner-bound-local-onboarding.md) · Milestone 1 — Linux OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public Linux release
+- [X-147 — The host performs the authorization code grant on behalf of a signed-in person](X-147-the-host-performs-the-authorization-code-grant.md) · the delegated half of X-72 — the PKCE/state machinery, the callback, the principal-scoped address and the hazard-free binding are delivered against an injected binding; the three criteria that read the connector's own OAuth2 declaration still wait on the 0.21 line (X-146)
 
 ## Next (ready — take the top one unless the user named a story)
 - [X-140 — Repository agents use the installed Board and Fleet operator workflow](X-140-use-installed-board-fleet-operator-workflow.md) · Fleet dogfood — replace private Track workflow and pin the bounded handoff/watch commands a plain agent can run
@@ -47,8 +48,6 @@ lockfile and compile-time tests.
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
-- [X-146 — Adopt the released flux 0.58 and connector 0.21 lines](X-146-adopt-the-released-flux-0-58-and-connector-0-21-lines.md) · Core · blocked: connector 0.21 is NOT published — crates.io's newest connector line is 0.20.0. Both pin sets move as one unit once it ships; two compile breaks are already known (C-531 DispatchId on FlowSink, and ConfigField gaining also_services)
-- [X-147 — The host performs the authorization code grant on behalf of a signed-in person](X-147-the-host-performs-the-authorization-code-grant.md) · the delegated half of X-72 — X-75 redeems a password and redeem_refresh renews, but nothing here can OBTAIN a token by user grant; blocked on the connector line that declares one reaching crates.io (X-146)
 - [X-148 — A delegated token is renewed before it expires, so an unattended run outlives it](X-148-a-delegated-token-is-renewed-before-it-expires.md) · a GitLab OAuth access token expires in about two hours and an autonomous fleet run outlives that; redeem_refresh exists and nothing calls it on a schedule — blocked behind X-147, which first produces a credential to renew
 
 ## Backlog
@@ -57,6 +56,12 @@ lockfile and compile-time tests.
 ### Apps
 - [X-131 — Validate Datasource.kind against published connector datasource members](X-131-validate-datasource-kind-against-published-members.md) · Decision 0006 — put_datasource refuses a kind that is not a published connector datasource member reference; gated on the upstream connector surface
 - [X-132 — Serve the tenant Datasource read seam](X-132-serve-the-tenant-datasource-read-seam.md) · Decision 0006, Milestones 2–3 — schema/list/get for a bound Datasource execute as admitted operations; Exchange-minted opaque cursors, grants stay metadata selectors
+
+### Catalog Artifact
+- [X-151 — Adopt the connector catalog artifact (epic)](X-151-adopt-the-connector-catalog-artifact-epic.md) · EPIC — the Exchange half of Decision 0022 / connectors C-534: settings, verification and invoke read a catalog document instead of re-parsing emitted Flux, and the catalogue arrives as a pack rather than a crate release
+- [X-152 — Settings and verification read the catalog document, not parsed Flux](X-152-settings-and-verification-read-the-catalog-document.md) · the four Rehearsal call sites in settings.rs are Exchange's runtime Flux parse; characterize them first, then swap — the upstream promise is same-signature semantics, which is exactly the kind of promise a characterization test should check rather than trust
+- [X-153 — Load the catalogue as a pack, including one newer than this binary](X-153-load-the-catalogue-as-a-pack-through-the-reader.md) · the reader's `load` constructor is new capability, not a migration: a deployment can serve a catalogue newer than the binary it was built with, so a new provider stops requiring an Exchange release
+- [X-154 — Read the complete OAuth2 declaration from the catalog artifact](X-154-read-the-complete-oauth2-declaration-from-the-artifact.md) · X-147's three unticked criteria need a complete OAuth2 surface; the 0.21 catalog::OAuth2 struct ships empty endpoint and client_id for babelforce, and the artifact is where that stops being true
 
 ### Connections: an address the caller cannot name, and a refusal where the address is incomplete
 - [X-21 — A half connection is distinguishable from a deliberately partial one](X-21-half-connection-visibility.md) · raised by X-18's implementor, 2026-08-01: GET answers 200 for a connection whose delete failed half way, which reads as 'connected' — but a connector may legitimately hold a subset of what it declares, so the two render identically and telling them apart needs a record this module deliberately does not keep
@@ -197,6 +202,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-138 — Bind provider recovery, replay and Linux-native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — retain the exact portable connector-secrets 0.20 identity and prove Exchange-owned recovery on both Linux release targets
 - [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
 - [X-141 — Exchange story workers publish bounded Fleet handoff evidence](X-141-publish-bounded-fleet-handoff-evidence.md) · Fleet dogfood — one deterministic targeted-check receipt without terminal scraping or duplicate full gates
+- [X-146 — Adopt the released connector 0.21 line, which does not move the engine](X-146-adopt-the-released-connector-0-21-line.md) · Core · connector-only bump: connector-pack 0.21 requires flux-runtime ^0.54, the same as 0.20, so no codewandler-flux-* pin moved and ENGINE_LINE stayed 0.54. Adopting flux 0.58+ needs its own story, gated on a connector-pack release that asks for it
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

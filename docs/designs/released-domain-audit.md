@@ -1,14 +1,17 @@
-# Released domain audit: Flux 0.54 and connectors 0.17
+# Released domain audit: Flux 0.54 and connectors 0.21
 
-**Status:** implementation boundary for X-106, updated by X-101
+**Status:** implementation boundary for X-106, updated by X-101 and X-146
 **Observed:** 2026-08-03 from crates.io package metadata and the tagged Flux 0.54 / connector 0.17
-sources; local sibling worktree changes are not treated as released APIs.
+sources, re-observed 2026-08-12 for the connector 0.21.0 line; local sibling worktree changes are
+not treated as released APIs.
 
 ## Decision
 
-Flux Exchange adopts connector 0.17 and the Flux 0.54 engine line as one graph. It uses published
+Flux Exchange adopts the connector line and the Flux 0.54 engine line as one graph. It uses published
 contracts directly, writes only tenant/credential/installation bindings locally, and does not copy
-an upstream runtime.
+an upstream runtime. The connector line has since moved to **0.21** (X-146) while the engine line
+stayed at 0.54, which is the ordinary case rather than an exception: the two are one compatibility
+unit in that they must not diverge, not in that they move together.
 
 The intended top-level Exchange resources remain Connections, Datasources, Apps, Managed Agents,
 Service Accounts, Triggers, Event Deliveries, Model Profiles, Sessions, Runs, Grants and Activity.
@@ -19,7 +22,7 @@ guarded connector-channel host and installed App assembly are shipped.
 
 | Planned concept | Published contract | Classification | Exchange consequence |
 |---|---|---|---|
-| Connector, operation, credential addressing | `codewandler-connector-{catalog,pack,address,secrets}` 0.17.0 | **Direct** | Adopted. The Rust catalogue compatibility type remains `Provider`; Exchange prose says Connector. |
+| Connector, operation, credential addressing | `codewandler-connector-{catalog,pack,address,secrets}` 0.21.0 (0.17.0 when first audited) | **Direct** | Adopted. The Rust catalogue compatibility type remains `Provider`; Exchange prose says Connector. |
 | Services | `connector_catalog::Operation::service` | **Direct metadata** | Service-aware connection settings remain valid. There is no published standalone Service resource to mirror. |
 | Event types and channel bindings | `connector_catalog::Event` and `Channel`; `connector_pack::channel_plan` | **Direct declaration and plan** | X-101–X-105 host generated socket bindings without giving the pack a transport. |
 | Connector datasource | Chartered upstream: flux-roadmap Decision 0006 rule 6 and the connectors vendor-datasource-declarations design; nothing published yet | **Upstream gap, chartered** | Do not invent a connector datasource declaration/backend in Exchange. A tenant Datasource binds the published connector datasource member when it exists (X-131–X-133). |
@@ -49,6 +52,32 @@ The catalogue expansion changed two Exchange safety censuses:
 
 Neither change weakens the credential boundary. They are pinned so the next catalogue expansion is
 again a reviewed diff.
+
+### Connector 0.21, at engine 0.54 (X-146, observed 2026-08-12)
+
+`connector-pack` 0.21.0 requires `codewandler-flux-{core,lang,runtime} ^0.54` and
+`codewandler-flux-spec ^1.3` — identical to 0.20.0. **The engine line did not move**, and neither did
+any `codewandler-flux-*` pin here, notwithstanding that 0.59.3 and `flux-spec` 1.4.0 are published.
+The one structural change in the graph is that `connector-pack` now names `connector-address`
+directly instead of reaching it through `connector-secrets`; `connector-catalog` still has zero
+dependencies.
+
+Same 55 providers, 870 → 878 operations (`github` +4, `gitlab` +2, plus GitLab's new
+`gitlab.oauth_token` credential). **No new service appears**, which is the fact the settings census
+turns on. Four declaration axes are new, and each is either read-only here or fail-closed:
+
+| New in 0.21 | Exchange consequence |
+|---|---|
+| `Operation::direction` (`OperationDirection`) | Read-only metadata; grants still select on risk, effects and idempotency. Not used to decide anything yet. |
+| `Credential::subject` (`Subject`) | Not read. `Unstated` on 58 of 63 credentials means *unreviewed*, not *app* — a consumer that needs the distinction must refuse on it rather than assume, so nothing here may quietly start branching on it. |
+| `Credential::hazard` (`AuthHazard`) | Not read. babelforce is the first released connector to declare one (`ResourceOwnerSecretShared`, upstream C-440). Exchange still decides hazard admission from the injected `AcquisitionBinding`, and production composes an empty `AcquisitionBindings`, so the fail-closed path stays fixture-tested rather than vendor-live. |
+| `Acquisition::OAuth2`, `ConfigField::also_services` | Not acted on. GitLab's three `oauth.*` config bindings are an unrecognised namespace: `DeclaredSetting::parse` returns `None`, the non-secret two render visible-but-unroutable, and the client secret takes the existing refusal that keeps a deployment-owned secret out of the tenant settings store. |
+
+The two censuses are unchanged in what they *produce*: the set of `Acquisition::BasicJoin`
+credentials driving the Basic-username census is identical across 0.20 and 0.21, and every declared
+credential still projects a target. What changed is the surface a future story must build — X-147
+owns the OAuth client-registration surface, and `also_services` becomes load-bearing the moment this
+host composes a URL for a service other than an operation's own.
 
 ## Implementation boundary and order
 

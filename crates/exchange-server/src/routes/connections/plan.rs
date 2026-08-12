@@ -1829,24 +1829,27 @@ mod tests {
         }
     }
 
+    /// The inconsistency under test is **one flag**, so only that flag is authored here.
+    ///
+    /// This fixture used to be an exhaustive `ConfigField` literal, and every catalogue release
+    /// that adds a member to that struct broke it — `also_services` in connector 0.21 (X-146) was
+    /// the second time. `ConfigField` is not `#[non_exhaustive]` and should not be: a *consumer*
+    /// reading a new member wants to be told it exists. A *fixture* does not, because it is not
+    /// making a claim about the shape of the struct. Starting from the provider's own declaration
+    /// and overriding the single field the assertions are about says that, and keeps the fixture
+    /// honest besides — the rest of it is a real shipped declaration rather than plausible text.
     #[test]
     fn a_noncredential_secret_is_visible_but_never_routed_to_settings() {
         let provider = catalogued("jira").expect("jira");
+        let declared = provider
+            .config
+            .iter()
+            .find(|field| field.binds == "endpoint.site")
+            .expect("jira declares its site as a non-secret endpoint field");
+        // A secret flag on a binding that is not a credential: the deliberate inconsistency.
         let field = ConfigField {
-            name: "private_site",
-            service: "default",
-            label: "Private site",
-            help: "A deliberately inconsistent fixture",
-            example: None,
-            format: "text",
-            required: true,
-            default: None,
-            approval: connector_catalog::Approval::None,
             secret: true,
-            docs_url: None,
-            binds: "endpoint.site",
-            also_binds: &[],
-            declaration_json: "{}",
+            ..*declared
         };
         let described = describe_config(provider, &field, &[], false);
         assert!(described.view.secret);

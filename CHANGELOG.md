@@ -8,6 +8,38 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A signed-in person can authorize a connection with their own vendor account** (X-147, the half
+  that needs no unreleased connector metadata). `POST /api/acquisitions/{connector}/authorize` opens
+  one delegated authorization for the calling human and `GET /api/acquisitions/callback` finishes it.
+  PKCE is mandatory and `S256`-only, reusing the sign-in flow's own implementation; `state` is drawn
+  from the OS, bound to the initiating **`Principal`** rather than to a session handle, expires, and
+  is spent exactly once together with a browser binder cookie planted under its own `__Host-` name. A
+  callback whose `state` is unknown, expired, already spent, or presented by a different browser is
+  refused before any vendor is contacted and without consuming anybody else's authorization. The
+  acquired credential is stored under a reserved per-principal service segment, so one member of a
+  tenant cannot resolve another's — `docs/designs/credential-acquisition.md` carries the addressing
+  decision and the alternative it rejected — and `DELETE /api/acquisitions/{connector}` lets the
+  person who authorized it revoke it, refresh token and all. `CredentialAcquirer` gains
+  `redeem_authorization_code` as a **default** method refusing `grant_not_performed`, so no
+  downstream performer breaks, and `AcquisitionBinding`'s hazard becomes `Option<AuthHazard>` so a
+  grant that carries no named weakness runs on the fail-closed default. A new
+  `FLUX_EXCHANGE_ACQUISITION_REDIRECT_URI` is deployment configuration: it is validated at startup,
+  refuses any spelling a URL parser would rewrite, and is the single value that reaches both the
+  authorization URL and the token request — a bound grant that names a different one is refused at
+  composition. It is deliberately not the OIDC sign-in redirect. The pending-authorization bound is
+  per tenant, so one member cannot lock another tenant out. Production still composes an empty
+  acquisition registry: composing the authorize URL from the connector's own `OAuth2` declaration,
+  binding it in production, and refusing an unperformable declared grant all wait on the 0.21
+  connector line (X-146).
+
+### Fixed
+
+- **A request's query string no longer reaches a log line.** `TraceLayer`'s default span records the
+  whole URI, so at `debug` the OIDC sign-in callback's authorization `code` — and, with X-147, the
+  delegated acquisition callback's `code` and `state` — were written to the log by the tracing layer
+  rather than by any handler, which is the opposite of what both routes document. The request span
+  now records the path and the method only. A query string is caller-supplied data and no span needs
+  one, so this is a class rather than a list of exempt routes.
 - **A family renamed, dropped or invented beside a regenerated fixture no longer certifies
   publication** (X-139). The frozen digest only ever refused drift that was *not* regenerated, so the
   inventory itself is now held by name: `NativeEvidenceAuthority::validate` pins the retained
@@ -121,6 +153,27 @@ All notable changes to this project are documented in this file. The format is b
   evidence pins the fixed-descriptor/handle-list ABI; MinGW remains compile-only evidence.
 
 ### Changed
+
+- **The connector line moves to 0.21.0 and the flux engine line deliberately does not move** (X-146).
+  All four `codewandler-connector-*` pins go 0.20 → 0.21; every `codewandler-flux-*` pin stays on the
+  `ENGINE_LINE` 0.54 it was already on, because `connector-pack` 0.21.0 requires
+  `codewandler-flux-runtime ^0.54` — byte for byte what 0.20.0 required — and `flux-spec ^1.3`, so
+  neither floor moved either. `codewandler-flux-runtime` 0.59.3 and `flux-spec` 1.4.0 are published
+  and not adopted: **the engine line is set by what `connector-pack` requires, never by what is
+  newest**, and raising it alone is what puts two `flux_runtime::Tool` traits in one lock. The story
+  was filed asserting connector-pack 0.21 requires `^0.58`; the crates.io sparse index says
+  otherwise, and the manifest, compile-time-seam and lockfile engine-line tests all still pass.
+
+  **For `codewandler-flux-exchange-host` consumers this is a resolver change, not an API change.**
+  Anything constructing `connector_catalog::ConfigField` or `connector_catalog::Credential` will stop
+  compiling — neither is `#[non_exhaustive]`, and 0.21 adds `ConfigField::also_services` plus
+  `Credential::{subject, hazard}`. Exchange itself constructs neither in library code. The catalogue
+  gains `Acquisition::OAuth2`, `Subject`, `OAuthGrant`, `OAuthRedirect` and `Operation::direction`,
+  and grows from 870 to 878 operations across the same 55 providers; **this host reads none of the
+  new axes yet.** GitLab's three new `oauth.*` config bindings are an unrecognised namespace and
+  render visible-but-unroutable, and babelforce's newly declared
+  `AuthHazard::ResourceOwnerSecretShared` — upstream C-440 landing — does not reach the deployment
+  posture, which still decides from an injected `AcquisitionBinding` that production leaves empty.
 
 - **`jsonwebtoken` moves to 11.0.0, and a JWK of a kind this build does not recognise now admits no
   algorithm.** The crate made `AlgorithmParameters` `#[non_exhaustive]` and began parsing an unknown
