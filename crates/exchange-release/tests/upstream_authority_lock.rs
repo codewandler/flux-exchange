@@ -75,7 +75,8 @@ fn the_locked_provider_is_the_artifact_the_c515_authority_describes() {
         .find_map(|line| value_of(line, "checksum"))
         .unwrap_or("<no checksum>");
     assert_eq!(
-        locked_checksum, package.registry_sha256,
+        locked_checksum,
+        package.registry_sha256,
         "Cargo.lock authenticates {name} {locked_version} as {locked_checksum}, but the C-515 \
          evidence authority pins {authority_checksum}. One of them was not read out of the \
          crates.io sparse index. {PROCEDURE}",
