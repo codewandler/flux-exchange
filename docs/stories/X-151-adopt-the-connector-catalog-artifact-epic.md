@@ -1,7 +1,7 @@
 ---
 id: X-151
 title: "Adopt the connector catalog artifact (epic)"
-status: backlog
+status: in-progress
 priority: 2
 epic: catalog-artifact
 areas: [exchange-host, exchange-server, build, docs]

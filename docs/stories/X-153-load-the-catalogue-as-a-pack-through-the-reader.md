@@ -1,7 +1,7 @@
 ---
 id: X-153
 title: "Load the catalogue as a pack, including one newer than this binary"
-status: backlog
+status: ready
 priority: 3
 epic: catalog-artifact
 areas: [exchange-host, exchange-server, deployment]
@@ -59,6 +59,10 @@ from a path. That is this story.
 
 - 2026-08-12: Filed against Decision 0022 / C-537 (the pack and reader) and C-539 (Exchange's
   adoption). Blocked on the reader existing as a published release.
+
+- 2026-08-12: Promoted to ready by the cross-repo coordinator: flux-connectors v0.23.0 published
+  the complete surface this story consumes (documents, pack, reader, DocumentRehearsal, plan
+  API) — the upstream blockers recorded above are closed. X-155 lands the pins first.
 
 ## Notes
 

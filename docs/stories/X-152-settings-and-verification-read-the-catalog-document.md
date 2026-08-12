@@ -1,7 +1,7 @@
 ---
 id: X-152
 title: "Settings and verification read the catalog document, not parsed Flux"
-status: backlog
+status: ready
 priority: 2
 epic: catalog-artifact
 areas: [exchange-host]
@@ -66,6 +66,10 @@ was actually reading.
 
 - 2026-08-12: Filed against Decision 0022 / C-539. Upstream has begun no implementation, so the
   document-backed `Rehearsal` does not exist yet — but the characterization tests do not need it.
+
+- 2026-08-12: Promoted to ready by the cross-repo coordinator: flux-connectors v0.23.0 published
+  the complete surface this story consumes (documents, pack, reader, DocumentRehearsal, plan
+  API) — the upstream blockers recorded above are closed. X-155 lands the pins first.
 
 ## Notes
 
