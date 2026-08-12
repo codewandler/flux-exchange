@@ -138,6 +138,18 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A registered connector's catalogue declaration and this deployment's configuration did not
+    /// compose an acquisition (X-154).
+    ///
+    /// Deliberately distinct from [`StartupRefusal::AcquisitionRedirect`]: that one is a single
+    /// deployment-wide URI an operator retypes, this one names a connector and either a field its
+    /// own declaration is missing or a grant this host will not run — different remedies, and one
+    /// of them is not the operator's to fix at all.
+    CredentialAcquisition {
+        /// The value-free refusal. It names the connector and the missing field, grant or setting.
+        reason: String,
+    },
+
     /// The bind is reachable from outside this machine and nothing could authenticate a caller.
     ReachableBindWithoutIdentity {
         /// The address that was asked for.
@@ -304,7 +316,9 @@ impl fmt::Display for StartupRefusal {
             Self::LocalState { reason } => write!(f, "{reason}"),
             Self::TransactionCoordinator { reason } => write!(f, "{reason}"),
             Self::HostedOrigin { reason } => write!(f, "{reason}"),
-            Self::AcquisitionRedirect { reason } => write!(f, "{reason}"),
+            Self::AcquisitionRedirect { reason } | Self::CredentialAcquisition { reason } => {
+                write!(f, "{reason}")
+            }
             // Names both things that would have worked, because the operator cannot tell from the
             // outside which half of the pair they meant to change.
             Self::ReachableBindWithoutIdentity { bind } => write!(
@@ -378,6 +392,7 @@ impl std::error::Error for StartupRefusal {
             | Self::TransactionCoordinator { .. }
             | Self::HostedOrigin { .. }
             | Self::AcquisitionRedirect { .. }
+            | Self::CredentialAcquisition { .. }
             | Self::CredentialStore { .. }
             | Self::ServiceAccountStore { .. }
             | Self::SettingsStore { .. }

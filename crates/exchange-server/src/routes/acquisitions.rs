@@ -43,14 +43,25 @@
 //! vendor and touched no store. That ordering is copied from `crate::oidc::complete_admission` and
 //! it is the reason the refusals below are cheap.
 //!
-//! # What is not built yet (X-147, and the 0.21 connector line)
+//! # Where the authorization URL comes from (X-154)
 //!
-//! The authorization URL is composed from the **injected** [`DelegatedGrant`] a composition bound,
-//! not from the connector's own `Acquisition::OAuth2` declaration — that metadata is unreleased, and
-//! taking a `path` dependency on the sibling checkout to reach it is refused by `AGENTS.md`. So
-//! production still composes an empty registry and this surface answers `422` for every connector,
-//! exactly as the password acquisition does. The story's two criteria that name the declaration stay
-//! unticked rather than being satisfied against a fixture and called done.
+//! From the connector's own `Acquisition::OAuth2` declaration. `crate::credential_acquisition`
+//! composes the grant this route reads — the authorize path and the scopes are the catalogue's, the
+//! client identity and the redirect URI are the deployment's, and **nothing here is a caller's**.
+//! This route did not change to make that true and did not need to: it composes from the
+//! [`DelegatedGrant`] it is handed, and what changed is who wrote it.
+//!
+//! `tests::the_url_composed_from_gitlabs_declaration_is_the_url_this_route_produces` is what holds
+//! the two together — it drives this route twice, once against a grant composed from GitLab's
+//! released declaration and once against the hand-written grant X-147 was delivered with, and
+//! requires the two URLs to be one. That agreement is what makes the injected seam a faithful
+//! stand-in rather than a claim.
+//!
+//! **One declared fact still comes from outside the generated tables**, and that test is where it is
+//! visible: GitLab's declaration resolves against its `login` service, whose base URL lives in the
+//! canonical document rather than in `catalog::Provider`. `credential_acquisition::endpoint_base`
+//! refuses a named endpoint by name for that reason, so a production deployment that registers
+//! GitLab is refused at startup rather than sent to a host nobody resolved.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -1213,8 +1224,132 @@ mod tests {
         assert_eq!(state.pending_delegations().open(), 0);
     }
 
+    /// GitLab's `login` service base URL, which is the **one** fact this test supplies rather than
+    /// reads (X-154).
+    ///
+    /// The canonical document declares it — `services[].base_url` is `{origin}` for `login` — and
+    /// the connector's own `origin` configuration field declares the default that fills it,
+    /// `https://gitlab.com`. Neither is in the generated `&'static` tables, where
+    /// `catalog::Provider` carries only the *default* service's `{origin}/api/v4`. So
+    /// `credential_acquisition::endpoint_base` refuses `login` by name in production, and this
+    /// constant is what lets the rest of the composition be proven against the real declaration
+    /// meanwhile. When X-153 lands the document, this constant is what goes.
+    const GITLAB_LOGIN_BASE: &str = "https://gitlab.com";
+
+    /// **The end-to-end agreement X-154 exists to prove** (X-147's second criterion).
+    ///
+    /// One authorize URL composed from GitLab's *released declaration* — its `authorize_path` and
+    /// its three declared scopes, read out of `connector_catalog` — and one composed from the
+    /// hand-written [`DelegatedGrant`] X-147 was delivered against. The route produces both, and
+    /// they must be the same string up to the two values that are random by construction (`state`
+    /// and the PKCE challenge).
+    ///
+    /// That is what makes the injected seam a faithful stand-in rather than an assertion: if the
+    /// declaration said something else about the path or the scopes, these two would differ here
+    /// rather than at a vendor.
+    #[tokio::test]
+    async fn the_url_composed_from_gitlabs_declaration_is_the_url_this_route_produces() {
+        use crate::credential_acquisition::{
+            binding_from_declaration, declared_oauth2, OAuthRegistration,
+        };
+
+        let (credential, spec) = declared_oauth2(gitlab()).expect("gitlab declares one OAuth2");
+        // The released declaration, asserted rather than assumed — this test is only evidence if
+        // these are the catalogue's own values.
+        assert_eq!(spec.authorize_path, "/oauth/authorize");
+        assert_eq!(spec.scopes, &["read_api", "read_user", "read_repository"]);
+        assert_eq!(credential.name, "gitlab.oauth_token");
+
+        let registration = OAuthRegistration::new("deployment-client", None);
+        let from_declaration = binding_from_declaration(
+            gitlab().id,
+            credential.name,
+            credential.hazard,
+            spec,
+            GITLAB_LOGIN_BASE,
+            &registration,
+            &redirect(),
+        )
+        .expect("gitlab's declaration composes a delegated binding");
+
+        // X-147's shape: every value stated by hand, which is what the injected seam was.
+        let injected = AcquisitionBinding::new(
+            gitlab().id,
+            credential.name,
+            None,
+            Arc::new(RecordingPerformer {
+                codes: Arc::new(Mutex::new(Vec::new())),
+            }),
+        )
+        .with_delegated_grant(
+            DelegatedGrant::new(
+                "https://gitlab.com/oauth/authorize",
+                "deployment-client",
+                None,
+                [
+                    "read_api".to_owned(),
+                    "read_user".to_owned(),
+                    "read_repository".to_owned(),
+                ],
+                redirect(),
+            )
+            .expect("the grant X-147 was delivered against"),
+        );
+
+        let mut urls = Vec::new();
+        for binding in [from_declaration, injected] {
+            let state = AppState::with_development_identity(Arc::new(
+                DevIdentity::from_roster(ROSTER).expect("a well-formed roster"),
+            ))
+            .with_credential_acquisition(
+                AuthPosture::fail_closed(),
+                Arc::new(
+                    AcquisitionBindings::new([binding], Some(&redirect())).expect("one binding"),
+                ),
+            );
+            let (status, body, _) = authorize_as(&state, "alice").await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            let answered: Value = serde_json::from_str(&body).expect("a JSON answer");
+            urls.push(
+                answered["authorize_url"]
+                    .as_str()
+                    .expect("an authorize URL")
+                    .to_owned(),
+            );
+        }
+
+        // `state` and `code_challenge` are drawn from the OS per authorization, so the comparison
+        // is over everything the declaration and the deployment decide — and it deliberately stops
+        // at `&state=` rather than dropping the two parameters, so a change to the order or to what
+        // precedes them is still a difference.
+        let fixed = |url: &str| {
+            url.split_once("&state=")
+                .expect("the URL carries a state")
+                .0
+                .to_owned()
+        };
+        assert_eq!(
+            fixed(&urls[0]),
+            fixed(&urls[1]),
+            "the URL composed from gitlab's declaration and the one X-147's injected grant \
+             produces must be one URL",
+        );
+        assert_eq!(
+            fixed(&urls[0]),
+            format!(
+                "https://gitlab.com/oauth/authorize?response_type=code&client_id=deployment-client\
+                 &redirect_uri={}&scope=read_api%20read_user%20read_repository",
+                urlencoded(REDIRECT),
+            ),
+            "and it is composed of the declaration's path and scopes and the deployment's identity",
+        );
+        for url in &urls {
+            assert!(url.ends_with("&code_challenge_method=S256"), "{url}");
+        }
+    }
+
     /// A composition with no delegated grant opens nothing and says so, which is what production
-    /// does until the 0.21 connector line lands.
+    /// does for every connector no deployment registered.
     #[tokio::test]
     async fn a_connector_with_no_delegated_grant_opens_nothing() {
         let state = AppState::with_development_identity(Arc::new(
