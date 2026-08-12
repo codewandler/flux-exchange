@@ -59,6 +59,12 @@ the current op grammar can express.
 - [ ] A declaration too incomplete to compose from — an empty endpoint or authorize path where the
       grant needs one — is refused at composition **naming the connector and the missing field**,
       rather than producing a malformed URL a vendor rejects opaquely.
+- [ ] **Registration identity comes from deployment configuration, never from the artifact.** The
+      artifact declares that a `client_id` is *required*; the value resolves alongside the redirect
+      URI. A deployment missing one is refused at startup naming the connector — never defaulted,
+      never read from the catalogue even if a future document carries a non-empty string. A
+      failing-first test drives the refusal, and another asserts a catalogue-supplied value is
+      ignored rather than trusted.
 - [ ] The hazard is read from the declaration rather than from the injected binding. Upstream C-440
       has landed: babelforce declares `hazard: Some(ResourceOwnerSecretShared)`, the first released
       connector to do so, and X-74's gate should now be driven by released metadata rather than only
@@ -79,7 +85,10 @@ the current op grammar can express.
 - Read [[X-151]] for the epic's scope.
 - This is the story that finally closes [[X-72]], the credential-acquisition epic, since X-147's
   remaining criteria are its last open ones and [[X-148]] follows from a credential existing.
-- `client_id` is empty for **both** shipped OAuth2 connectors. Whether it is connector data at all,
-  or deployment configuration like the redirect URI already is, is a real question this story has to
-  answer rather than assume — an OAuth2 client id is per-registration, and two deployments of Exchange
-  against the same GitLab are two registrations.
+- **`client_id` is settled and is not connector data.** Decision 0022 was amended on 2026-08-12
+  (flux-roadmap `02a2ccf`): *"OAuth2 registration identity (`client_id`, `client_secret`, redirect
+  URI) is deployment configuration, not vendor truth… The artifact publishes the registration
+  **requirement**, never a value."* Upstream C-536 refuses to emit one. So this story reads a
+  *requirement* from the artifact and resolves the values from deployment configuration — the same
+  shape the redirect URI already has in [[X-147]], which is now the precedent rather than an
+  exception.

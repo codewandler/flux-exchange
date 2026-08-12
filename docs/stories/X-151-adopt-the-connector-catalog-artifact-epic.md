@@ -51,6 +51,11 @@ Those are the parses C-539 says must reach zero.
 - [ ] Nothing in this epic weakens `no_second_request_path`. Decision 0022 keeps resolution upstream
       with *"its enforcement topology unchanged"*, so Exchange reads document **fields** and never
       composes a request from them.
+- [ ] Exchange consumes the resolver's **engine-free plan API** rather than its `Tool`-returning
+      wrapper, and owns the `Tool`/`ToolSpec` projection itself — the amended Decision 0022 point 3.
+      When that holds, the `ENGINE_LINE` marker and `engine_line.rs`'s three tests describe a
+      constraint that no longer exists and are retired in the same change that removes it, not left
+      standing as folklore.
 
 ## Progress
 
@@ -59,21 +64,33 @@ Those are the parses C-539 says must reach zero.
   characterization tests — writing down what the current parse produces is worth doing before the
   thing that produces it is replaced.
 
-## Notes — one open question that is not ours to answer
+## Notes — the engine line is in scope, and that lands work here
 
-**Decision 0022 does not decouple Exchange from the flux engine line, and it is worth being explicit
-that it was never meant to.** `docs/designs/catalog-artifact.md` says *"`resolve(entry, egress,
-credentials, configuration)` and `project(entry)` keep their signatures"*, and that signature returns
-`flux_core::Result<Arc<dyn flux_runtime::Tool>>`. C-534's own Goal scopes the decoupling to
-*"catalogue **data** … from the crates.io engine-line release train"*.
+Decision 0022 was amended on 2026-08-12 (flux-roadmap `02a2ccf`) to cover the engine line, not only
+the release train. Point 3 now reads:
 
-So after this epic lands, adopting a newer flux in Exchange **still** requires a `connector-pack`
-release that asks for it — the [[X-146]] situation, unchanged. That is a legitimate scope choice, not
-an oversight. But it is the one thing a reader of Decision 0022 is most likely to assume it fixed.
+> **The resolver's published surface is engine-free.** It returns the request plan as data — the same
+> unit the migration gate compares — and dispatch plus the flux `Tool`/`ToolSpec` projection belong
+> to the consumer… after migration the connector publish closure carries no `codewandler-flux-*`
+> dependency, and the decoupling covers the engine line, not only the release train.
 
-If engine-version independence is wanted, the step is small and the migration is its natural moment:
-0022 already defines a **request plan** as the unit the differential gate compares (method, URL,
-headers, query, body, `permission_subjects`, redaction set). Returning that plan instead of a
-`Tool` would move the wrapper — and the engine choice — to Exchange, which depends on flux directly
-anyway for workflows. **That is an upstream decision and belongs in C-534's scope or a successor,
-not here.** Recorded so the question is asked deliberately rather than discovered later.
+**That consumer is us.** Upstream keeps `connector-pack`'s `Tool`-returning surface as a *wrapper*
+until Exchange adopts the plan API, so nothing breaks on the day it ships — but the wrapper is also
+what keeps the coupling alive. Exchange gets engine-version independence only by moving to the plan
+API and owning the `Tool`/`ToolSpec` projection itself.
+
+Two consequences worth stating before anyone starts:
+
+- **This is the end of the [[X-146]] situation.** Once Exchange consumes the plan, adopting a newer
+  flux stops requiring a `connector-pack` release compiled against it. The `ENGINE_LINE` marker, the
+  three `engine_line.rs` tests and the "both pin sets move together" rule exist *because* of the
+  `Arc<dyn flux_runtime::Tool>` return type; when it goes, they are describing a constraint that no
+  longer exists and should be retired deliberately rather than left as folklore.
+- **It is not licence to build a second request path.** Exchange projects a plan into a `Tool`; it
+  does not compose a request. Decision 0022 keeps resolution upstream with *"its enforcement topology
+  unchanged"* — credential resolution ordering, checked redactor registration, scheme placement,
+  endpoint substitution with declared-authority validation. `no_second_request_path.rs` is the guard,
+  and adopting the plan API is exactly the change that should be reviewed against it hardest.
+
+Whether that projection is a fifth child of this epic or a criterion inside [[X-152]] is open, and
+should be decided when the plan API's shape is published rather than guessed now.

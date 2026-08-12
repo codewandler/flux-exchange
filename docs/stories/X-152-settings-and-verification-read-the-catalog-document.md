@@ -29,9 +29,16 @@ that decides whether a connection an operator just made actually works.
 > Exchange's settings/verify paths migrate mechanically.*
 
 **"Same signature semantics" is a promise about behaviour, and this story's job is to check it rather
-than take it.** Upstream's differential gate proves *request plans* are byte-identical across the
-catalogue; it says nothing about what `Rehearsal` reports for a *configuration surface*, which is
-what these four sites consume.
+than take it.**
+
+Upstream agreed and moved: the differential gate now **extends to the configuration surface** —
+endpoint variables, slots and caller path parameters — precisely because Exchange's settings and
+connection-verification paths consume it (flux-connectors `a2c0df25`). That closes the gap, and it
+does not make this story's characterization redundant. Upstream's gate compares its *own* two
+derivations against each other; this one records what Exchange observes, from Exchange, before the
+thing it observes is replaced. C-534 names it as **the independent pre-swap check**, and independent
+is the word doing the work — two derivations that agree can still both differ from what the consumer
+was actually reading.
 
 ## Acceptance
 
