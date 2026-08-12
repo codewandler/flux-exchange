@@ -67,15 +67,42 @@
 //! # What a connector declares, read off the connector and not off its base URL
 //!
 //! [`declared_settings`] answers *what does this connector need configured*, and it answers it from
-//! each operation's own compiled Flux through `connector_pack::Rehearsal` — the same derivation the
-//! pack itself makes when it projects an operation, rather than a second one beside it.
+//! the catalogue's canonical document through `connector_pack::DocumentRehearsal` — the same
+//! derivation the pack itself makes when it projects an operation, rather than a second one beside
+//! it.
 //!
 //! Scanning `base_url` for `{placeholders}` is the obvious cheaper version and it is **wrong**, by
 //! measurement rather than by argument. It finds twelve of the seventeen and misses five: the
 //! endpoint variables of `bitbucket`, `cloudflare`, `contentful` and `vercel` live somewhere in the
-//! operation's Flux other than the base URL, and `twilio` needs only the non-secret user half of a
-//! Basic credential, which no URL scan could find at all. A host enumerating the surface that way
-//! would tell an operator they had supplied everything and then refuse the call.
+//! request other than the base URL, and `twilio` needs only the non-secret user half of a Basic
+//! credential, which no URL scan could find at all. A host enumerating the surface that way would
+//! tell an operator they had supplied everything and then refuse the call.
+//!
+//! # Two Flux parses, and this module holds neither of them any more (X-152)
+//!
+//! Until X-152 every derivation here handed `connector_catalog::Operation::flux` — the operation's
+//! **emitted Flux, as text** — to `connector_pack::Rehearsal`, which compiled it at runtime. That
+//! was a second derivation of somebody else's data: upstream emits the Flux *and* publishes the
+//! same facts in `catalog/<id>.catalog.json`, and a consumer recovering them by re-parsing is a
+//! consumer that can silently disagree with the artifact. The four call sites now read the
+//! document, and `crates/exchange-host/tests/no_connector_flux_parse.rs` keeps the parse from
+//! coming back.
+//!
+//! **That says nothing about X-98's workflow parse, and the distinction is load-bearing.**
+//! `flux_lang` remains a dependency of this crate and `workflow.rs` still compiles a *tenant's own*
+//! draft with it. There is no artifact to read that from — the source was written by a person
+//! minutes ago, and compiling it is the whole feature. What X-152 retired is the **connector**
+//! parse only; a future reader who takes the rule above as an argument against `flux_lang` has read
+//! it as one rule where there are two.
+//!
+//! **The document carries more than the parse did, and what this module does not read is written
+//! down rather than dropped.** Four surfaces — `roles`, `quirks.pagination`, `quirks.rate_limit`
+//! and `graphs` — are published by `catalog/<id>.catalog.json` and consumed nowhere here. Each is
+//! listed with its reason in `no_connector_flux_parse.rs`'s `NOT_CONSUMED`, and a test fails if one
+//! of them quietly acquires a consumer, because that is the moment the reasons need re-deciding.
+//! The blunt half of the reason is common to all four: `connector-pack` publishes no accessor for
+//! any of them, so consuming one is an upstream surface that has to exist before it is a decision
+//! here.
 //!
 //! # Two questions about a value, and only one of them is the pack's
 //!
@@ -309,8 +336,10 @@ impl SettingKind {
 /// **One value a connector asks a tenant for**, at the address it is asked for it.
 ///
 /// Owned rather than borrowed — unlike [`DeclaredCredential`](crate::DeclaredCredential), which is a
-/// view of `&'static` catalogue data — because the endpoint variables are derived by parsing an
-/// operation's Flux rather than read out of a table, so there is no `&'static str` to borrow.
+/// view of `&'static` catalogue data — because the endpoint variables are derived from an
+/// operation's request template rather than read out of a table, so there is no `&'static str` to
+/// borrow. The document behind that template *is* `&'static`, but only the variable names come back
+/// from it; a setting also carries the service and kind this module composes around them.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct DeclaredSetting {
     /// The service this value belongs to — `delivery`, `management`, or the reserved `default` for
@@ -386,14 +415,14 @@ impl DeclaredSetting {
 
 /// **Every value `provider` asks a tenant for**, in stable order.
 ///
-/// Read off each operation's own compiled Flux through `connector_pack::Rehearsal`, which is the
-/// derivation the pack makes when it projects an operation for real — so what this reports is what
-/// that projection will require, rather than a second guess that could disagree with it. See this
-/// module's documentation for the measured reason a `base_url` scan is not an alternative.
+/// Read off each operation's canonical document through `connector_pack::DocumentRehearsal`, which
+/// is the derivation the pack makes when it projects an operation for real — so what this reports is
+/// what that projection will require, rather than a second guess that could disagree with it. See
+/// this module's documentation for the measured reason a `base_url` scan is not an alternative.
 ///
 /// Three kinds are collected, under the service that asks for them:
 ///
-/// - every endpoint variable the operation's Flux carries;
+/// - every endpoint variable the operation's request carries;
 /// - the non-secret user half of every `basic` credential the **connector** declares, which the
 ///   pack requires under each service that authenticates with it.
 /// - non-secret generated-channel query values published by the connector catalogue.
@@ -412,13 +441,13 @@ pub fn declared_settings(
     let mut found = BTreeSet::new();
 
     for entry in provider.operations {
-        let rehearsal =
-            connector_pack::Rehearsal::of(entry.id, provider.id, entry.service, entry.flux)
-                .map_err(|error| SettingsRefusal::Unreadable {
-                    connector: provider.id.to_owned(),
-                    operation: entry.id.to_owned(),
-                    reason: error.to_string(),
-                })?;
+        let rehearsal = connector_pack::DocumentRehearsal::of(entry.id).map_err(|error| {
+            SettingsRefusal::Unreadable {
+                connector: provider.id.to_owned(),
+                operation: entry.id.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
 
         for variable in rehearsal.endpoint_variables() {
             found.insert(DeclaredSetting {
@@ -463,17 +492,21 @@ pub fn declared_settings(
 ///
 /// # Errors
 ///
-/// [`SettingsRefusal::Unreadable`] when the operation's emitted Flux cannot be rehearsed.
+/// [`SettingsRefusal::Unreadable`] when the catalogue carries no document for this operation, or
+/// the document it carries cannot be rehearsed. `provider` is not consulted to find it — the
+/// operation id resolves on its own — but it names the connector in the refusal, which is the half
+/// of the answer an operator can act on.
 pub fn operation_settings(
     provider: &'static connector_catalog::Provider,
     entry: &'static connector_catalog::Operation,
 ) -> Result<Vec<DeclaredSetting>, SettingsRefusal> {
-    let rehearsal = connector_pack::Rehearsal::of(entry.id, provider.id, entry.service, entry.flux)
-        .map_err(|error| SettingsRefusal::Unreadable {
+    let rehearsal = connector_pack::DocumentRehearsal::of(entry.id).map_err(|error| {
+        SettingsRefusal::Unreadable {
             connector: provider.id.to_owned(),
             operation: entry.id.to_owned(),
             reason: error.to_string(),
-        })?;
+        }
+    })?;
     let mut found = BTreeSet::new();
 
     for variable in rehearsal.endpoint_variables() {
@@ -1375,7 +1408,7 @@ mod file {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, RwLock};
 
-    use connector_pack::{ConfigStore, ConfigValue, Configuration, Field, Rehearsal};
+    use connector_pack::{ConfigStore, ConfigValue, Configuration, DocumentRehearsal, Field};
     use serde::{Deserialize, Serialize};
 
     use super::{
@@ -1406,10 +1439,26 @@ mod file {
         provider: String,
         service: String,
         field: String,
-        rehearsal: Rehearsal,
+        /// The verification operation, rehearsed from the catalogue's canonical document.
+        ///
+        /// **This is connection verification** — the derivation that decides whether the origin an
+        /// operator just proposed composes a request at all — and since X-152 it reads the document
+        /// rather than compiling the operation's emitted Flux. Held rather than rebuilt per call
+        /// because a connector that cannot be rehearsed must refuse the *store bind*, not the first
+        /// proposal that happens to arrive.
+        rehearsal: DocumentRehearsal,
     }
 
     impl CatalogueCustomOriginPolicy {
+        /// Every operator-approved origin the released catalogue declares, with the operation that
+        /// verifies it.
+        ///
+        /// Each rule is checked against the connector's *own* verification operation before it is
+        /// admitted: the field has to be a plain non-secret endpoint binding, the connector has to
+        /// declare a verification operation on that service, and that operation has to actually
+        /// consume the field. A rule whose verification operation ignores the origin would approve
+        /// a value nothing ever sends a request to, which is an operator approval that decides
+        /// nothing.
         fn read() -> Result<Self, String> {
             let mut rules = BTreeMap::new();
             for provider in connector_catalog::providers() {
@@ -1454,13 +1503,7 @@ mod file {
                                 provider.id, field.service
                             )
                         })?;
-                    let rehearsal = Rehearsal::of(
-                        operation.id,
-                        provider.id,
-                        operation.service,
-                        operation.flux,
-                    )
-                    .map_err(|error| {
+                    let rehearsal = DocumentRehearsal::of(operation.id).map_err(|error| {
                         format!(
                             "connector `{}` verification operation cannot validate its origin: {error}",
                             provider.id
@@ -3446,8 +3489,8 @@ mod file {
                 .iter()
                 .find(|operation| Some(operation.id) == provider.verify)
                 .expect("GitLab verification operation");
-            let rehearsal = Rehearsal::of(verify.id, provider.id, verify.service, verify.flux)
-                .expect("released verification operation");
+            let rehearsal =
+                DocumentRehearsal::of(verify.id).expect("released verification operation");
             let configuration =
                 Configuration::new(store.clone(), "acme").expect("tenant-bound configuration");
 
