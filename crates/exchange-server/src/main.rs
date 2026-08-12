@@ -17,6 +17,7 @@ mod acquisition_redirect;
 mod audit;
 mod auth_posture;
 mod bind;
+mod catalogue;
 pub mod channel;
 mod connection_guard;
 pub mod credential_acquisition;
@@ -659,8 +660,32 @@ async fn compose(
     // needs none, and the route that would use one refuses by name.
     let acquisition_redirect = acquisition_redirect::configured()
         .map_err(|reason| StartupRefusal::AcquisitionRedirect { reason })?;
+    // **The catalogue, before anything that reads one** (X-153). A configured pack is verified —
+    // container format, digest, document schema — here, so a pack that does not verify is a process
+    // that never opened a socket rather than one serving records nothing vouched for. Unset serves
+    // the catalogue this build embeds, which is what a checkout does.
+    let catalogue = catalogue::configured().map_err(|refusal| StartupRefusal::CataloguePack {
+        reason: refusal.to_string(),
+    })?;
+    match catalogue.path() {
+        Some(path) => info!(
+            path = %path.display(),
+            digest = catalogue.digest(),
+            schema_version = catalogue.schema_version(),
+            providers = catalogue.provider_count(),
+            operations = catalogue.operation_count(),
+            "serving a loaded connector catalogue"
+        ),
+        None => info!(
+            digest = catalogue.digest(),
+            providers = catalogue.provider_count(),
+            operations = catalogue.operation_count(),
+            "serving the connector catalogue this build embeds"
+        ),
+    }
     let mut state = compose_identity(startup)?
         .with_tenancy(startup.tenancy().clone())
+        .with_catalogue(catalogue)
         .with_credential_acquisition(
             auth_posture,
             // **Derived from the released catalogue** (X-154), for the connectors

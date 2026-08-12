@@ -150,6 +150,23 @@ pub enum StartupRefusal {
         reason: String,
     },
 
+    /// A configured connector catalogue pack could not be verified (X-153).
+    ///
+    /// Its own variant rather than a store refusal, because what an operator does about it is
+    /// unlike every other binding here: the remedy is usually to re-fetch a file and check it
+    /// against the release's published `catalog.pack.sha256`, and sometimes to run a newer binary.
+    /// The refusal it carries names which verification failed — readable, container format, digest,
+    /// schema version, structure — so those readings are not left to be guessed between.
+    ///
+    /// **There is no arm that starts anyway.** A pack an operator configured and this host could
+    /// not verify is a refusal, never a reason to serve the embedded catalogue instead: that
+    /// fallback starts the process, answers every request, and reports a catalogue nobody chose.
+    CataloguePack {
+        /// The catalogue refusal, already rendered. It names the configured path — an address — and
+        /// no value out of the file.
+        reason: String,
+    },
+
     /// The bind is reachable from outside this machine and nothing could authenticate a caller.
     ReachableBindWithoutIdentity {
         /// The address that was asked for.
@@ -316,7 +333,9 @@ impl fmt::Display for StartupRefusal {
             Self::LocalState { reason } => write!(f, "{reason}"),
             Self::TransactionCoordinator { reason } => write!(f, "{reason}"),
             Self::HostedOrigin { reason } => write!(f, "{reason}"),
-            Self::AcquisitionRedirect { reason } | Self::CredentialAcquisition { reason } => {
+            Self::AcquisitionRedirect { reason }
+            | Self::CredentialAcquisition { reason }
+            | Self::CataloguePack { reason } => {
                 write!(f, "{reason}")
             }
             // Names both things that would have worked, because the operator cannot tell from the
@@ -393,6 +412,7 @@ impl std::error::Error for StartupRefusal {
             | Self::HostedOrigin { .. }
             | Self::AcquisitionRedirect { .. }
             | Self::CredentialAcquisition { .. }
+            | Self::CataloguePack { .. }
             | Self::CredentialStore { .. }
             | Self::ServiceAccountStore { .. }
             | Self::SettingsStore { .. }

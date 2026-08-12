@@ -106,6 +106,16 @@ const ALLOWED: &[(&str, &str)] = &[
          anything.",
     ),
     (
+        "connector-catalog-reader",
+        "**the catalogue pack's reader, and a reader is not a transport.** It has zero \
+         dependencies — not a client behind a feature flag, none at all — and what it can do is \
+         bounded by that: read the bytes of one local file the composition named at startup, check \
+         a SHA-256 it vendors rather than imports, and hand out `&str` slices of bytes already in \
+         hand. It dials nothing, resolves no name and walks no directory. The thing that would \
+         make it a transport is a path derived from a caller, and there is none: \
+         `ServedCatalogue` is built once by the composition and only read afterwards.",
+    ),
+    (
         "connector-pack",
         "the thing that builds the request, and the whole point. It holds no HTTP client either — \
          its transport is the `Egress` this crate hands it, which is the same port one level down.",

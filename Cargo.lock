@@ -741,6 +741,7 @@ dependencies = [
  "async-trait",
  "codewandler-connector-address",
  "codewandler-connector-catalog",
+ "codewandler-connector-catalog-reader",
  "codewandler-connector-pack",
  "codewandler-connector-secrets",
  "codewandler-flux-core",
