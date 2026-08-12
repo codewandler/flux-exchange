@@ -6,6 +6,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release-readiness authority follows the connector line to 0.23** (X-157). The v0.18.0
+  crates.io publish refused: `check-publication-readiness.sh` and the native-evidence authority
+  pinned the connector family — and connector-secrets' registry checksum, released-commit and a
+  compile-time identity in `native_evidence.rs` — to `0.20.0`, stale since the workspace moved to
+  0.21 (X-146) and 0.23 (X-155). Because the readiness check is release-only, no PR gate exercised
+  it and the drift stayed invisible until a release ran it. All four bindings now name 0.23.0 with
+  the checksum taken from the crates.io index and the released-commit from the v0.23.0 tag; the
+  self-test and the full release-policy suite pass.
+
 ## [0.18.0] - 2026-08-12
 
 ### Added

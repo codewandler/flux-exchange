@@ -726,10 +726,10 @@ fn validate_upstream_package(authority: &NativeEvidenceAuthority) -> Result<()> 
         .find_map(|authority| authority.package.as_ref())
         .ok_or_else(|| Error::Schema("missing inherited upstream package".into()))?;
     if package.name != "codewandler-connector-secrets"
-        || package.version != "0.20.0"
+        || package.version != "0.23.0"
         || package.registry_sha256
-            != "edf98bece86f6364aba3e7dd48c3b7e161146942e9e8450d5dc286143b627717"
-        || package.released_commit != "c764f5c3b8e745cc65e90a298b04851647b76778"
+            != "360225fcfbd3af81248eb4fa449175a4909651612abdf5ffd9a54a09c35a2e14"
+        || package.released_commit != "7f6872c94eba050c556625065618a9f360ed4562"
     {
         return schema("inherited connector-secrets release identity changed");
     }
