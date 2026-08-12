@@ -1,7 +1,7 @@
 ---
 id: X-154
 title: "Read the complete OAuth2 declaration from the catalog artifact"
-status: ready
+status: in-progress
 priority: 1
 epic: catalog-artifact
 areas: [exchange-host, exchange-server]
@@ -83,6 +83,18 @@ the current op grammar can express.
 - 2026-08-12: Promoted to ready by the cross-repo coordinator: flux-connectors v0.23.0 published
   the complete surface this story consumes (documents, pack, reader, DocumentRehearsal, plan
   API) — the upstream blockers recorded above are closed. X-155 lands the pins first.
+
+- 2026-08-12: Round 1 merged (`bf61155`, from `impl/X-154` `edc3b98`) with independent review
+  PASS, zero blocking. Delivered: the whole composition/refusal machinery, registration identity
+  from deployment configuration only (catalogue value structurally discarded), hazard read from
+  the released declaration, the seam-faithfulness e2e, and full secret redaction (all seven
+  rendering surfaces enumerated by the reviewer). Open for round 2, after X-153's
+  served-catalogue seam: gitlab's named `login` endpoint base resolves only from the canonical
+  document and is a templated `{origin}` with a declared default — round 2 decides that
+  resolution (the reviewer's finding: a document lookup alone is not enough), completes
+  acceptance bullets 1/2/6, and carries the review's four minors (two overstating comments, the
+  hazard/credential argument pairing in `binding_from_declaration`, `Unusable.connector` carrying
+  a count where a name is documented).
 
 ## Notes
 
