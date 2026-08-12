@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-08-12
+
 ### Added
 
 - **Delegated authorizations compose from the connector's own declaration** (X-154, closing
