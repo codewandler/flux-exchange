@@ -6,6 +6,18 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- **The connector crates move to the released 0.23 line; the engine does not move** (X-155, the
+  third reading of the X-11/X-146 rule). `connector-pack` 0.23.0 requires flux `^0.54` — byte for
+  byte what 0.21.0 required, read out of the crates.io sparse index before any manifest was
+  edited — so every `codewandler-flux-*` pin stays on 0.54 and `Cargo.lock` still resolves one
+  engine line. What the bump brings into reach is the whole catalog-artifact surface the X-151
+  epic consumes: the canonical per-provider documents, the pack and its dependency-free reader,
+  the document-backed `Rehearsal` equivalent, and the engine-free request-plan API
+  (`codewandler-connector-resolve`, entering the lock transitively now and the dependency graph
+  deliberately only with X-156). Zero API drift: the workspace compiled unchanged.
+
 ### Added
 
 - **A signed-in person can authorize a connection with their own vendor account** (X-147, the half

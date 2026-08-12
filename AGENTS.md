@@ -190,8 +190,9 @@ separate Node build and does not participate in the Cargo workspace.
 
 ## The dependency situation, which will bite you
 
-**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.21
-(X-146) and `connector-pack` links here. What is left is one rule, and it is the one that bites:
+**X-11 closed the engine-line conflict; X-101 moved the line.** The connector crates are on 0.23
+(X-146 took 0.21, X-155 took 0.23 — both connector-only) and `connector-pack` links here. What is
+left is one rule, and it is the one that bites:
 
 - **The flux engine line is `0.54`, and it is written down once** — in `[workspace.dependencies]`
   in the root `Cargo.toml`, under the `ENGINE_LINE` marker. Every `codewandler-flux-*` pin carries
