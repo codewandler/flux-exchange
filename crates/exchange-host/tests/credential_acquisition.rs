@@ -1,6 +1,6 @@
 use exchange_host::{
-    async_trait, AcquiredCredential, AcquisitionRefusal, CredentialAcquirer, PasswordRedemption,
-    RefreshRedemption, Secret,
+    async_trait, AcquiredCredential, AcquisitionRefusal, AuthorizationCodeRedemption,
+    CredentialAcquirer, PasswordRedemption, RefreshRedemption, Secret,
 };
 
 struct RefusingAcquirer;
@@ -55,6 +55,44 @@ async fn the_port_accepts_secrets_without_exposing_transport_or_lifetime_request
     assert!(!source.contains("requested_ttl"));
     assert!(!source.contains("account_id"));
     assert!(!source.contains("endpoint_url"));
+}
+
+/// **X-147.** The delegated leg is a *default* method, and a performer that does not perform it
+/// refuses by name rather than failing to compile.
+///
+/// [`RefusingAcquirer`] above implements only the two legs X-75 declared, exactly as an existing
+/// downstream performer does. That it still satisfies [`CredentialAcquirer`] is the assertion: a
+/// required method here would be a breaking change to a published crate, and the refusal is what a
+/// composition binding an old performer to a connector declaring `authorization_code` gets — before
+/// any vendor request, and naming no value.
+#[tokio::test]
+async fn an_existing_performer_refuses_the_delegated_leg_without_being_rewritten() {
+    let code = Secret::from("authorization-code-never-print-this".to_owned());
+    let verifier = Secret::from("code-verifier-never-print-this".to_owned());
+
+    let refusal = RefusingAcquirer
+        .redeem_authorization_code(AuthorizationCodeRedemption::new(&code, &verifier))
+        .await
+        .expect_err("a performer that does not perform the grant refuses it");
+
+    assert_eq!(refusal, AcquisitionRefusal::GrantNotPerformed);
+    assert_eq!(refusal.code(), "grant_not_performed");
+    for rendered in [
+        format!("{refusal}"),
+        format!("{refusal:?}"),
+        format!("{:?}", AuthorizationCodeRedemption::new(&code, &verifier)),
+    ] {
+        assert!(!rendered.contains("authorization-code-never-print-this"));
+        assert!(!rendered.contains("code-verifier-never-print-this"));
+    }
+
+    // The same rule X-75 wrote for the two legs it declared: the port carries no endpoint, no
+    // redirect and no browser vocabulary. A delegated grant needs all three, and every one of them
+    // is deployment configuration the composing binary owns.
+    let source = include_str!("../src/acquisition.rs");
+    assert!(!source.contains("redirect_uri"));
+    assert!(!source.contains("authorization_endpoint"));
+    assert!(!source.contains("code_challenge"));
 }
 
 #[test]

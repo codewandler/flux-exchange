@@ -13,6 +13,7 @@
 //! resolve a principal is refused at startup**, not warned about and served anyway. See
 //! [`bind::admit_bind`] and `docs/designs/http-surface.md`.
 
+mod acquisition_redirect;
 mod audit;
 mod auth_posture;
 mod bind;
@@ -20,6 +21,7 @@ pub mod channel;
 mod connection_guard;
 pub mod credential_acquisition;
 mod credential_head;
+pub mod delegated_acquisition;
 mod dev_identity;
 pub use flux_exchange::entropy;
 mod execution;
@@ -651,11 +653,26 @@ async fn compose(
         auth_posture::configured().map_err(|source| StartupRefusal::AuthPosture {
             reason: source.to_string(),
         })?;
+    // Read before any store is bound, for the reason the posture above is: a mistyped redirect URI
+    // is a delegated connection that dies at the vendor's last step, and this is the one place this
+    // host is looking. Unset is not an error — a deployment that connects no delegated connector
+    // needs none, and the route that would use one refuses by name.
+    let acquisition_redirect = acquisition_redirect::configured()
+        .map_err(|reason| StartupRefusal::AcquisitionRedirect { reason })?;
     let mut state = compose_identity(startup)?
         .with_tenancy(startup.tenancy().clone())
         .with_credential_acquisition(
             auth_posture,
-            Arc::new(credential_acquisition::AcquisitionBindings::default()),
+            // The redirect is passed to the registry and to nothing else: it is the value every
+            // bound grant is checked against, and `AppState::acquisition_redirect` reads through to
+            // it. Production binds no acquisitions yet, so this registry is empty and carries the
+            // configured redirect forward for the composition that will (X-146).
+            Arc::new(
+                credential_acquisition::AcquisitionBindings::new([], acquisition_redirect.as_ref())
+                    .map_err(|reason| StartupRefusal::AcquisitionRedirect {
+                        reason: reason.to_owned(),
+                    })?,
+            ),
         );
     if let Some(origin) = hosted_origin {
         state = state.with_hosted_origin(origin);

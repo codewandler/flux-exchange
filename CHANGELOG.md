@@ -8,6 +8,38 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A signed-in person can authorize a connection with their own vendor account** (X-147, the half
+  that needs no unreleased connector metadata). `POST /api/acquisitions/{connector}/authorize` opens
+  one delegated authorization for the calling human and `GET /api/acquisitions/callback` finishes it.
+  PKCE is mandatory and `S256`-only, reusing the sign-in flow's own implementation; `state` is drawn
+  from the OS, bound to the initiating **`Principal`** rather than to a session handle, expires, and
+  is spent exactly once together with a browser binder cookie planted under its own `__Host-` name. A
+  callback whose `state` is unknown, expired, already spent, or presented by a different browser is
+  refused before any vendor is contacted and without consuming anybody else's authorization. The
+  acquired credential is stored under a reserved per-principal service segment, so one member of a
+  tenant cannot resolve another's — `docs/designs/credential-acquisition.md` carries the addressing
+  decision and the alternative it rejected — and `DELETE /api/acquisitions/{connector}` lets the
+  person who authorized it revoke it, refresh token and all. `CredentialAcquirer` gains
+  `redeem_authorization_code` as a **default** method refusing `grant_not_performed`, so no
+  downstream performer breaks, and `AcquisitionBinding`'s hazard becomes `Option<AuthHazard>` so a
+  grant that carries no named weakness runs on the fail-closed default. A new
+  `FLUX_EXCHANGE_ACQUISITION_REDIRECT_URI` is deployment configuration: it is validated at startup,
+  refuses any spelling a URL parser would rewrite, and is the single value that reaches both the
+  authorization URL and the token request — a bound grant that names a different one is refused at
+  composition. It is deliberately not the OIDC sign-in redirect. The pending-authorization bound is
+  per tenant, so one member cannot lock another tenant out. Production still composes an empty
+  acquisition registry: composing the authorize URL from the connector's own `OAuth2` declaration,
+  binding it in production, and refusing an unperformable declared grant all wait on the 0.21
+  connector line (X-146).
+
+### Fixed
+
+- **A request's query string no longer reaches a log line.** `TraceLayer`'s default span records the
+  whole URI, so at `debug` the OIDC sign-in callback's authorization `code` — and, with X-147, the
+  delegated acquisition callback's `code` and `state` — were written to the log by the tracing layer
+  rather than by any handler, which is the opposite of what both routes document. The request span
+  now records the path and the method only. A query string is caller-supplied data and no span needs
+  one, so this is a class rather than a list of exempt routes.
 - **A family renamed, dropped or invented beside a regenerated fixture no longer certifies
   publication** (X-139). The frozen digest only ever refused drift that was *not* regenerated, so the
   inventory itself is now held by name: `NativeEvidenceAuthority::validate` pins the retained

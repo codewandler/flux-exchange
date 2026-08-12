@@ -54,9 +54,9 @@ const OPAQUE_BYTES: usize = 32;
 pub const BINDER_COOKIE: &str = "__Host-flux_exchange_signin";
 
 /// How long an unfinished authorization request stays usable.
-const PENDING_TTL: Duration = Duration::from_secs(600);
+pub(crate) const PENDING_TTL: Duration = Duration::from_secs(600);
 
-/// The `Set-Cookie` that plants a binder in the browser opening a sign-in.
+/// The `Set-Cookie` that plants a binder in the browser opening one redirect flow.
 ///
 /// Through [`session::host_cookie`], which is the one place this binary formats a `Set-Cookie`, so
 /// the `__Host-` attributes cannot hold for the session and lapse here.
@@ -66,9 +66,19 @@ const PENDING_TTL: Duration = Duration::from_secs(600);
 /// to. An expiry the browser keeps and the server does not would be the decorative control
 /// `crate::session` argues against — here the server is the one enforcing it, and the attribute only
 /// stops a spent pre-session credential from loitering.
-pub fn planted_binder(binder: &Binder) -> String {
+///
+/// # Why the cookie name is an argument (X-147)
+///
+/// It was [`BINDER_COOKIE`] until this host gained a **second** browser redirect — the delegated
+/// credential acquisition in [`crate::delegated_acquisition`]. The two flows must not share a
+/// cookie: one binds a request that ends in a *session* and the other one that ends in a *vendor
+/// credential*, they are open at the same time whenever somebody connects a connector while signed
+/// in, and one value in one slot means the second flow overwrites the first browser's binding and
+/// the first callback is then refused for want of it. Two names, one formatter, and the `__Host-`
+/// attributes still written once.
+pub fn planted_binder(cookie: &str, binder: &Binder) -> String {
     session::host_cookie(
-        BINDER_COOKIE,
+        cookie,
         binder.as_str(),
         // See [`BINDER_COOKIE`]. The one attribute where this cookie and the session cookie differ,
         // and the whole argument for the difference is written there.
@@ -82,8 +92,8 @@ pub fn planted_binder(binder: &Binder) -> String {
 /// Single use is enforced server-side — [`PendingAuthorizations::claim`] removes the entry — so this
 /// is hygiene rather than the control: it stops a value that can no longer match anything from
 /// sitting in the browser until `Max-Age` elapses.
-pub fn cleared_binder() -> String {
-    session::host_cookie(BINDER_COOKIE, "", SameSite::Lax, Some(0))
+pub fn cleared_binder(cookie: &str) -> String {
+    session::host_cookie(cookie, "", SameSite::Lax, Some(0))
 }
 
 /// The value tying one pending authorization to one browser.
@@ -98,7 +108,12 @@ pub struct Binder(String);
 
 impl Binder {
     /// Draw one.
-    fn draw() -> Result<Self, std::io::Error> {
+    ///
+    /// `pub(crate)` since X-147: [`crate::delegated_acquisition`] opens the other browser redirect
+    /// this host performs and needs the same value with the same protections. A second `Binder`
+    /// type beside this one would be a second place to get the redaction, the entropy source and
+    /// the emptiness rule right.
+    pub(crate) fn draw() -> Result<Self, std::io::Error> {
         entropy::hex::<OPAQUE_BYTES>().map(Self)
     }
 
@@ -117,7 +132,10 @@ impl Binder {
     ///
     /// An empty presented value can never match, which matters because "the caller sent no binder"
     /// must not be representable as "the caller sent a binder that happens to match".
-    fn matches(&self, presented: &str) -> bool {
+    ///
+    /// `pub(crate)` for [`Binder::draw`]'s reason: the delegated acquisition store compares one the
+    /// same way, and the emptiness rule above is exactly the sort of thing a second copy loses.
+    pub(crate) fn matches(&self, presented: &str) -> bool {
         !presented.is_empty() && self.0 == presented
     }
 }
