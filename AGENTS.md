@@ -55,7 +55,7 @@ north star is the sentence every design decision here answers to:
 
 ## Status — read this before believing anything else
 
-**v0.17.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
+**v0.18.0. The service serves health, the catalogue, canonical Service Account lifecycle and bearer
 authentication, a session, a complete OIDC sign-in,
 `POST /api/operations/{operation}/invoke` (X-12) which runs one catalogue operation for the caller's
 tenant, per-connection settings gated to signed-in humans (X-47), and — since X-42 —
@@ -107,16 +107,15 @@ implies a working service costs more than an honest gap.
 
 ⚠ **Hazardous credential acquisition is fail-closed** (X-74). Unset,
 `FLUX_EXCHANGE_ALLOW_AUTH_HAZARDS` permits no declared hazard; an unknown entry refuses startup and
-names it. `resource_owner_secret_shared` is the only recognised opt-in. **Upstream C-440 has landed**
-(connector 0.21, X-146): `catalog::Credential` now carries `hazard`, and babelforce declares
-`ResourceOwnerSecretShared` on its `access_token`. That is a released declaration — but it does not
-reach this policy yet, because Exchange decides admission from the hazard on X-75's injected
-`AcquisitionBinding` and production still composes an empty `AcquisitionBindings`. So the production
-registry remains empty and the path stays fixture-tested rather than vendor-live, **for a different
-reason than before**: the declaration exists and nothing here reads it. Wiring the catalogue's
-`hazard` into the posture is X-147's neighbourhood, not a formality. Once something does activate it,
-omitting the opt-in will look like a connection outage: the host answers its own `403` refusal naming
-the connector and hazard before any vendor request, distinct from the vendor rejecting credentials.
+names it. `resource_owner_secret_shared` is the only recognised opt-in. **Since X-154 the
+declaration reaches this policy**: production composes `AcquisitionBindings` from the served
+catalogue for the connectors `FLUX_EXCHANGE_ACQUISITION_CONNECTORS` registers, and the hazard on a
+composed binding is *read* from the released declaration rather than injected. babelforce declares
+`ResourceOwnerSecretShared` on its `access_token` and is currently refused earlier — at
+composition, on its `password` grant — so no hazardous binding exists to admit yet; the first
+connector that composes with a declared hazard is where the opt-in bites. Omitting it will look
+like a connection outage: the host answers its own `403` refusal naming the connector and hazard
+before any vendor request, distinct from the vendor rejecting credentials.
 
 ## Build / test / run
 

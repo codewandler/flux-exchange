@@ -13,7 +13,7 @@ directory (`<ID>-<slug>.md`); this board indexes them by status. New work? Copy
 
 ## Status
 
-**v0.17.0 — Wave #2: canonical callers, complete public boundaries and instance-bound channels.** The
+**v0.18.0 — the catalog-artifact adoption line: document-backed settings, the served catalogue pack and artifact-composed authorizations.** The
 host serves OIDC, verifier-backed local users and loopback development identity, canonical Service Account
 lifecycle and bearer authentication, tenant connections/settings/grants, ordinary connector invoke,
 immutable workflow publication, durable value-free run activity and live WebSocket subscriptions.
