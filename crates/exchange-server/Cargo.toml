@@ -19,8 +19,9 @@ supervisor-test-wedge = []
 # Process-only acceptance seam. The fixture supplies an already occupied address so the production
 # listener path receives a real OS bind refusal after all stores and safety checks have opened.
 supervisor-test-bind-refusal = []
-# Process-only acceptance seam. It reports the production account-derived root without creating
-# it, so native runners can poison inherited home variables and inspect the real binary decision.
+# Process-only acceptance seams. Native runners can inspect the production account-derived root,
+# crash at durable provider/coordinator boundaries, and pause retained-store recovery before
+# readiness; released binaries recognize none of those test controls.
 native-root-test-seam = []
 # Native CI only: run each production deadline transport with a paused monotonic clock from one
 # dedicated integration-test executable. Released binaries do not recognize these commands.

@@ -8,6 +8,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- **A family renamed, dropped or invented beside a regenerated fixture no longer certifies
+  publication** (X-139). The frozen digest only ever refused drift that was *not* regenerated, so the
+  inventory itself is now held by name: `NativeEvidenceAuthority::validate` pins the retained
+  inherited X-128 obligations and the literal X-134 families, grouped by authority class rather than
+  by what the document calls its own authorities, with counts left to the array lengths.
+  `native-evidence-v1.json` is the sole source and its supported set is exactly
+  `aarch64-unknown-linux-gnu`/`ubuntu-24.04-arm` and `x86_64-unknown-linux-gnu`/`ubuntu-24.04`.
+  X-126's trust, signing and public-verification blockers are untouched.
+
 - **The published native inventory now pins the retained provider recovery, replay and lease
   evidence** (X-138). `NativeEvidenceAuthority::validate` refuses a substituted or dropped
   `real_server_retains_the_c515_lease_through_recovery_and_readiness` or
@@ -17,6 +26,13 @@ All notable changes to this project are documented in this file. The format is b
   the retained-lease assertion join does not select. The upstream 0.20.0 checksum, released commit
   and portable provider evidence are unchanged, and `native-evidence-v1.json` itself stays X-139's
   to finalize.
+- **Provider recovery and its retained lifetime lease now have exact Linux process evidence**
+  (X-138). The real supervised server is crashed after provider prepare, after the durable decision,
+  after provider commit and after every value-free publication step; restart proves the exact
+  abort/state/repeated-commit paths, one receipt under QUERY and byte-identical replay, and no
+  second transaction or semantic revision. A deterministic test-only recovery pause proves the one
+  registry 0.20 `FileStore` excludes another process before readiness as well as after it, then
+  releases on abrupt exit without changing the provider identity or five-method port.
 
 
 - **Isolated Fleet story checks now produce one bounded Exchange-owned receipt** (X-141).
@@ -105,6 +121,19 @@ All notable changes to this project are documented in this file. The format is b
   evidence pins the fixed-descriptor/handle-list ABI; MinGW remains compile-only evidence.
 
 ### Changed
+
+- **`jsonwebtoken` moves to 11.0.0, and a JWK of a kind this build does not recognise now admits no
+  algorithm.** The crate made `AlgorithmParameters` `#[non_exhaustive]` and began parsing an unknown
+  `kty` into a catch-all variant rather than failing the whole key set, so a key kind this build does
+  not implement reaches id-token verification as an ordinary `Jwk` instead of being refused by the
+  parser's accident. `permitted_algorithms` refuses it explicitly: the allowlist is derived from the
+  key precisely so that something is outside it, and defaulting to the RSA families — the shape the
+  compile error invites, since such a JWK often carries a modulus and exponent anyway — would verify
+  a token against semantics nothing here has checked. **The consequence is deliberate and will look
+  like an outage**: a provider that rotates onto a key kind this build predates turns its sign-in off
+  and says so, rather than guessing. `rust-version` is unchanged at 1.88, which both `jsonwebtoken`
+  releases require; no other API this repository uses moved, and the lock's re-resolution unified
+  several `windows-sys 0.59` dependents onto 0.61.
 
 - **Exchange runtime and binary releases now have one exact Linux product boundary** (X-137).
   Release selection, packaging, download policy, workflows and interim native fixtures close over

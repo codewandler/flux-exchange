@@ -26,7 +26,7 @@ const CONNECT_RECEIPT: u16 = 0x0006;
 const PLAN_QUERY: u16 = 0x0007;
 const PLAN_RESPONSE: u16 = 0x0008;
 const ERROR: u16 = 0x7fff;
-const SENTINEL: &[u8] = b"x134-publication-crash-secret-7c81f0";
+const SENTINEL: &[u8] = b"X138-sensitive-quote\"-slash\\-newline\n-end";
 
 #[derive(Clone, Copy)]
 struct CrashCase {
@@ -72,6 +72,7 @@ const CASES: [CrashCase; 5] = [
 struct Fixture {
     owner: PathBuf,
     state: PathBuf,
+    provider_trace: PathBuf,
 }
 
 impl Fixture {
@@ -89,15 +90,36 @@ impl Fixture {
         std::fs::create_dir(&state).expect("state fixture directory");
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
             .expect("owner-only state directory");
-        Self { owner, state }
+        let provider_trace = state.join("provider-recovery.trace");
+        Self {
+            owner,
+            state,
+            provider_trace,
+        }
     }
 
     fn spawn(&self, crash_after: Option<&str>) -> Server {
-        Server::spawn(&self.state, crash_after, None)
+        Server::spawn(&self.state, &self.provider_trace, crash_after, None, None)
     }
 
     fn spawn_with_failure(&self, fail_after: &str) -> Server {
-        Server::spawn(&self.state, None, Some(fail_after))
+        Server::spawn(
+            &self.state,
+            &self.provider_trace,
+            None,
+            Some(fail_after),
+            None,
+        )
+    }
+
+    fn spawn_with_provider_crash(&self, crash_after: &str) -> Server {
+        Server::spawn(
+            &self.state,
+            &self.provider_trace,
+            None,
+            None,
+            Some(crash_after),
+        )
     }
 
     fn image(&self, relative: &str) -> Vec<u8> {
@@ -107,7 +129,17 @@ impl Fixture {
     }
 
     fn assert_value_free(&self) {
-        assert_tree_excludes(&self.state, &self.state.join("credentials"), SENTINEL);
+        assert_tree_excludes(
+            &self.state,
+            &self.state.join("credentials"),
+            &sentinel_forms(),
+        );
+    }
+
+    fn assert_provider_trace(&self, expected: &[&str]) {
+        let trace = std::fs::read_to_string(&self.provider_trace)
+            .expect("test-only provider call trace after the exact crash boundary");
+        assert_eq!(trace.lines().collect::<Vec<_>>(), expected);
     }
 }
 
@@ -142,7 +174,13 @@ struct Server {
 }
 
 impl Server {
-    fn spawn(state: &Path, crash_after: Option<&str>, fail_after: Option<&str>) -> Self {
+    fn spawn(
+        state: &Path,
+        provider_trace: &Path,
+        crash_after: Option<&str>,
+        fail_after: Option<&str>,
+        provider_crash_after: Option<&str>,
+    ) -> Self {
         let readiness = PipeEnds::new();
         let liveness = PipeEnds::new();
         let readiness_source = duplicate_high(readiness.write);
@@ -152,6 +190,7 @@ impl Server {
             .arg("--supervised")
             .env("FLUX_EXCHANGE_STATE", state)
             .env("FLUX_EXCHANGE_TEST_LOCAL_MANAGEMENT_ROOT", state)
+            .env("FLUX_EXCHANGE_TEST_PROVIDER_TRACE", provider_trace)
             .env_remove("FLUX_EXCHANGE_CREDENTIALS")
             .env_remove("FLUX_EXCHANGE_SETTINGS")
             .env_remove("FLUX_EXCHANGE_GRANTS")
@@ -171,6 +210,11 @@ impl Server {
             command.env("FLUX_EXCHANGE_TEST_PUBLICATION_FAIL_AFTER", phase);
         } else {
             command.env_remove("FLUX_EXCHANGE_TEST_PUBLICATION_FAIL_AFTER");
+        }
+        if let Some(phase) = provider_crash_after {
+            command.env("FLUX_EXCHANGE_TEST_PROVIDER_CRASH_AFTER", phase);
+        } else {
+            command.env_remove("FLUX_EXCHANGE_TEST_PROVIDER_CRASH_AFTER");
         }
         // SAFETY: this closure uses only descriptor operations before exec.
         unsafe {
@@ -303,16 +347,6 @@ impl Server {
         self.assert_diagnostics_value_free();
     }
 
-    fn terminate_before_decision(mut self) {
-        self.child
-            .kill()
-            .expect("abrupt pre-decision server termination");
-        let status = self.child.wait().expect("reap pre-decision server");
-        assert!(!status.success(), "pre-decision termination was graceful");
-        self.close_liveness();
-        self.assert_diagnostics_value_free();
-    }
-
     fn finish(mut self) {
         self.close_liveness();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -345,8 +379,9 @@ impl Server {
             .expect("captured stderr")
             .read_to_end(&mut stderr)
             .expect("stderr bytes");
-        assert_excludes(&stdout, SENTINEL);
-        assert_excludes(&stderr, SENTINEL);
+        let forms = sentinel_forms();
+        assert_forms_absent(&stdout, &forms, Path::new("server stdout"));
+        assert_forms_absent(&stderr, &forms, Path::new("server stderr"));
     }
 
     fn close_liveness(&mut self) {
@@ -405,6 +440,7 @@ impl Session {
         self.stream
             .read_exact(&mut payload)
             .expect("complete response payload");
+        assert_forms_absent(&payload, &sentinel_forms(), Path::new("FXLM response"));
         WireFrame { opcode, payload }
     }
 }
@@ -426,36 +462,29 @@ impl WireFrame {
 
 #[test]
 fn unix_connect_crashes_recover_before_readiness_and_replay_one_receipt() {
-    predecision_crash_aborts_without_a_visible_label();
+    provider_prepare_crash_aborts_without_a_visible_label();
+    durable_decision_crash_queries_state_and_repeats_commit();
+    provider_commit_crash_queries_committed_without_a_second_commit();
     every_postdecision_projection_crash_recovers_one_indivisible_publication();
     connection_readers_and_mutations_are_both_guarded_by_pending_publication_state();
     a_live_unresolved_publication_gates_plan_and_mutation_until_same_proposal_replay();
 }
 
-fn predecision_crash_aborts_without_a_visible_label() {
+fn provider_prepare_crash_aborts_without_a_visible_label() {
     let case = CrashCase {
         connector: "github",
         durable_image: "coordinator/transactions.sqlite3",
         label: "predecision-crash",
-        phase: "predecision",
+        phase: "prepare",
     };
     let fixture = Fixture::new(case);
-    let server = fixture.spawn(None);
-    let plan = server.plan(case.connector, None);
+    let mut crashed = fixture.spawn_with_provider_crash(case.phase);
+    let plan = crashed.plan(case.connector, None);
     let begin = connect_begin(&plan, case.label);
-    let mut active = server.session();
-    active.send_control(CONNECT_BEGIN, &begin);
-    let needed = active.read();
-    assert_eq!(needed.opcode, NEED_SECRETS, "pre-decision allocation");
-    assert!(
-        !needed.json()["secrets"]
-            .as_array()
-            .expect("secret needs")
-            .is_empty(),
-        "the abrupt process boundary must follow a real provider allocation"
-    );
-    server.terminate_before_decision();
-    drop(active);
+    let committing = start_commit(&crashed, &begin);
+    crashed.wait_for_injected_crash(case.phase, committing);
+    fixture.assert_provider_trace(&["prepare"]);
+    fixture.assert_value_free();
 
     let restarted = fixture.spawn(None);
     let mut selected = restarted.session();
@@ -466,23 +495,65 @@ fn predecision_crash_aborts_without_a_visible_label() {
     let missing = selected.read();
     assert_eq!(missing.opcode, ERROR, "aborted label became visible");
     assert_eq!(missing.json()["code"], "unknown_label");
-
-    let mut retry = restarted.session();
-    retry.send_control(CONNECT_BEGIN, &begin);
-    let retried = retry.read();
-    assert_eq!(
-        retried.opcode,
-        NEED_SECRETS,
-        "same proposal did not allocate after pre-decision recovery: {}",
-        retried.text()
-    );
-    restarted.terminate_before_decision();
-    drop(retry);
-
-    let stable = fixture.spawn(None);
-    stable.finish();
+    fixture.assert_provider_trace(&["prepare", "abort"]);
+    fixture.assert_value_free();
+    restarted.finish();
     assert_eq!(transaction_row_count(&fixture), 0);
     fixture.assert_value_free();
+}
+
+fn durable_decision_crash_queries_state_and_repeats_commit() {
+    assert_provider_recovery_boundary("decision", &["prepare", "decision", "state", "commit"]);
+}
+
+fn provider_commit_crash_queries_committed_without_a_second_commit() {
+    assert_provider_recovery_boundary("commit", &["prepare", "decision", "commit", "state"]);
+}
+
+fn assert_provider_recovery_boundary(crash_after: &'static str, recovered_trace: &[&str]) {
+    let case = CrashCase {
+        connector: "github",
+        durable_image: "coordinator/transactions.sqlite3",
+        label: crash_after,
+        phase: crash_after,
+    };
+    let fixture = Fixture::new(case);
+    let mut crashed = fixture.spawn_with_provider_crash(crash_after);
+    let plan = crashed.plan(case.connector, None);
+    let begin = connect_begin(&plan, case.label);
+    let committing = start_commit(&crashed, &begin);
+    crashed.wait_for_injected_crash(case.phase, committing);
+    fixture.assert_value_free();
+
+    let recovered = fixture.spawn(None);
+    fixture.assert_provider_trace(recovered_trace);
+    assert_complete_selected_plan(
+        &recovered.plan(case.connector, Some(case.label)),
+        case.label,
+    );
+    let replay = replay_receipt(&recovered, &begin);
+    fixture.assert_value_free();
+    let query = query_receipt(
+        &recovered,
+        replay["receipt_id"].as_str().expect("receipt id"),
+    );
+    assert_eq!(query, replay);
+    fixture.assert_value_free();
+    assert_changed_proposal_conflicts(&recovered, &begin);
+    fixture.assert_provider_trace(recovered_trace);
+    recovered.finish();
+    assert_eq!(transaction_row_count(&fixture), 1);
+
+    let stable = fixture.spawn(None);
+    let stable_replay = replay_receipt(&stable, &begin);
+    assert_eq!(stable_replay["receipt_id"], replay["receipt_id"]);
+    fixture.assert_value_free();
+    let stable_query = query_receipt(&stable, replay["receipt_id"].as_str().expect("receipt id"));
+    assert_eq!(stable_query, replay);
+    fixture.assert_value_free();
+    stable.finish();
+    fixture.assert_provider_trace(recovered_trace);
+    assert_eq!(transaction_row_count(&fixture), 1);
 }
 
 fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
@@ -512,9 +583,14 @@ fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
         // consumes the decision frame, which would make this crash boundary test vacuous.
         let committing = start_commit(&crashed, &begin);
         crashed.wait_for_injected_crash(case.phase, committing);
+        fixture.assert_value_free();
 
         let durable_at_crash = fixture.image(case.durable_image);
-        assert_excludes(&durable_at_crash, SENTINEL);
+        assert_forms_absent(
+            &durable_at_crash,
+            &sentinel_forms(),
+            Path::new(case.durable_image),
+        );
 
         // Startup recovery is itself the visibility barrier: readiness is delivered only after
         // the provider decision and every value-free projection have converged.
@@ -522,6 +598,7 @@ fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
         let selected = recovered.plan(case.connector, Some(case.label));
         assert_complete_selected_plan(&selected, case.label);
         let first_receipt = replay_receipt(&recovered, &begin);
+        fixture.assert_value_free();
         assert_eq!(
             query_receipt(
                 &recovered,
@@ -531,6 +608,7 @@ fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
             "QUERY and same-proposal replay diverged after {}",
             case.phase
         );
+        fixture.assert_value_free();
         assert_changed_proposal_conflicts(&recovered, &begin);
         let recovered_image = fixture.image(case.durable_image);
         if case.durable_image == "settings/store.json" {
@@ -563,12 +641,13 @@ fn every_postdecision_projection_crash_recovers_one_indivisible_publication() {
             "a second restart after {} exposed another public revision",
             case.phase
         );
+        let stable_replay = replay_receipt(&stable, &begin);
         assert_eq!(
-            replay_receipt(&stable, &begin)["receipt_id"],
-            first_receipt["receipt_id"],
+            stable_replay["receipt_id"], first_receipt["receipt_id"],
             "same-proposal replay after {} must retain the first receipt",
             case.phase
         );
+        fixture.assert_value_free();
         stable.finish();
         assert_eq!(
             transaction_row_count(&fixture),
@@ -899,7 +978,7 @@ fn unique_counter() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-fn assert_tree_excludes(root: &Path, credential_store: &Path, needle: &[u8]) {
+fn assert_tree_excludes(root: &Path, credential_store: &Path, forms: &[Vec<u8>]) {
     let mut pending = vec![root.to_path_buf()];
     while let Some(path) = pending.pop() {
         if path == credential_store {
@@ -911,16 +990,68 @@ fn assert_tree_excludes(root: &Path, credential_store: &Path, needle: &[u8]) {
                 pending.push(entry.expect("fixture entry").path());
             }
         } else if metadata.is_file() {
-            assert_excludes(&std::fs::read(&path).expect("fixture file"), needle);
+            assert_forms_absent(&std::fs::read(&path).expect("fixture file"), forms, &path);
         }
     }
 }
 
-fn assert_excludes(haystack: &[u8], needle: &[u8]) {
-    assert!(
-        !haystack
-            .windows(needle.len())
-            .any(|candidate| candidate == needle),
-        "secret sentinel crossed into a value-free surface"
-    );
+fn sentinel_forms() -> Vec<Vec<u8>> {
+    let text = std::str::from_utf8(SENTINEL).expect("fixture sentinel is UTF-8");
+    let json = serde_json::to_string(text).expect("JSON sentinel encoding");
+    vec![
+        SENTINEL.to_vec(),
+        json.as_bytes()[1..json.len() - 1].to_vec(),
+        percent_encode(SENTINEL),
+        base64(SENTINEL),
+    ]
+}
+
+fn percent_encode(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = Vec::with_capacity(bytes.len() * 3);
+    for byte in bytes {
+        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(*byte);
+        } else {
+            encoded.push(b'%');
+            encoded.push(HEX[usize::from(byte >> 4)]);
+            encoded.push(HEX[usize::from(byte & 0x0f)]);
+        }
+    }
+    encoded
+}
+
+fn base64(bytes: &[u8]) -> Vec<u8> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = Vec::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        encoded.push(ALPHABET[usize::from(first >> 2)]);
+        encoded.push(ALPHABET[usize::from(((first & 0x03) << 4) | (second >> 4))]);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[usize::from(((second & 0x0f) << 2) | (third >> 6))]
+        } else {
+            b'='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[usize::from(third & 0x3f)]
+        } else {
+            b'='
+        });
+    }
+    encoded
+}
+
+fn assert_forms_absent(bytes: &[u8], forms: &[Vec<u8>], surface: &Path) {
+    for (index, form) in forms.iter().enumerate() {
+        assert!(
+            !bytes
+                .windows(form.len())
+                .any(|candidate| candidate == form.as_slice()),
+            "secret representation {index} entered value-free surface {}",
+            surface.display()
+        );
+    }
 }

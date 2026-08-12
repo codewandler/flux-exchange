@@ -13,6 +13,12 @@ use exchange_host::{
 use rusqlite::{params, Connection, OptionalExtension as _, TransactionBehavior};
 
 const SCHEMA_VERSION: &str = "exchange.transaction-journal.v1";
+#[cfg(feature = "native-root-test-seam")]
+const PROVIDER_CRASH_AFTER_ENV: &str = "FLUX_EXCHANGE_TEST_PROVIDER_CRASH_AFTER";
+#[cfg(feature = "native-root-test-seam")]
+const PROVIDER_TRACE_ENV: &str = "FLUX_EXCHANGE_TEST_PROVIDER_TRACE";
+#[cfg(feature = "native-root-test-seam")]
+const PROVIDER_RECOVERY_PAUSE_ENV: &str = "FLUX_EXCHANGE_TEST_PROVIDER_RECOVERY_PAUSE";
 
 /// One admitted value-free proposal kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,16 +452,11 @@ impl TransactionCoordinator {
     ) -> Result<SecretTransactionState, CoordinatorRefusal> {
         self.require_phase(allocation, &["allocated", "prepared"])
             .map_err(CoordinatorRefusal::internal_predecision)?;
-        let state = match self
-            .provider
-            .prepare(allocation.id, allocation.proposal, batch)
-            .await
-        {
+        let state = match self.provider_prepare(allocation, batch).await {
             Ok(state) => state,
-            Err(PreparedSecretError::Backend) => match self.provider.state(allocation.id).await {
+            Err(PreparedSecretError::Backend) => match self.provider_state(allocation.id).await {
                 Ok(SecretTransactionState::Absent) => self
-                    .provider
-                    .prepare(allocation.id, allocation.proposal, batch)
+                    .provider_prepare(allocation, batch)
                     .await
                     .map_err(|error| CoordinatorRefusal::provider(error, DecisionPhase::Before))?,
                 Ok(state) => state,
@@ -485,7 +486,9 @@ impl TransactionCoordinator {
     /// Persist the one-way commit decision before asking the provider to publish anything.
     pub fn decide_commit(&self, allocation: Allocation) -> Result<(), CoordinatorRefusal> {
         self.set_phase(allocation, "decided", true)
-            .map_err(CoordinatorRefusal::internal_predecision)
+            .map_err(CoordinatorRefusal::internal_predecision)?;
+        provider_test_observe("decision");
+        Ok(())
     }
 
     /// Roll the provider forward after the durable decision and publish the receipt lookup.
@@ -493,11 +496,11 @@ impl TransactionCoordinator {
         self.require_decided(allocation).map_err(|error| {
             CoordinatorRefusal::internal_postdecision(error, allocation.receipt)
         })?;
-        let state = match self.provider.commit(allocation.id).await {
+        let state = match self.provider_commit(allocation.id).await {
             Ok(state) => state,
-            Err(PreparedSecretError::Backend) => match self.provider.state(allocation.id).await {
+            Err(PreparedSecretError::Backend) => match self.provider_state(allocation.id).await {
                 Ok(SecretTransactionState::Prepared) => {
-                    self.provider.commit(allocation.id).await.map_err(|error| {
+                    self.provider_commit(allocation.id).await.map_err(|error| {
                         CoordinatorRefusal::provider_postdecision(error, allocation.receipt)
                     })?
                 }
@@ -537,8 +540,7 @@ impl TransactionCoordinator {
         self.require_undecided(allocation)
             .map_err(CoordinatorRefusal::internal_predecision)?;
         let state = self
-            .provider
-            .abort(allocation.id)
+            .provider_abort(allocation.id)
             .await
             .map_err(|error| CoordinatorRefusal::provider(error, DecisionPhase::Before))?;
         if state != SecretTransactionState::Absent {
@@ -560,6 +562,7 @@ impl TransactionCoordinator {
 
     /// Recover every unresolved row before readiness. Pre-decision work aborts; decisions commit.
     pub async fn recover(&self) -> Result<(), CoordinatorRefusal> {
+        provider_recovery_pause().map_err(CoordinatorRefusal::internal_predecision)?;
         let rows = self
             .rows()
             .map_err(CoordinatorRefusal::internal_predecision)?;
@@ -571,7 +574,7 @@ impl TransactionCoordinator {
                 self.abort_before_decision(allocation).await?;
                 continue;
             }
-            match self.provider.state(allocation.id).await {
+            match self.provider_state(allocation.id).await {
                 Ok(SecretTransactionState::Committed) => {
                     self.set_phase(allocation, "terminal", true)
                         .map_err(|error| {
@@ -601,8 +604,7 @@ impl TransactionCoordinator {
             .retired_generation()
             .map_err(CoordinatorRefusal::internal_predecision)?
         {
-            self.provider
-                .reclaim(retired)
+            self.provider_reclaim(retired)
                 .await
                 .map_err(|error| CoordinatorRefusal::provider(error, DecisionPhase::Before))?;
         }
@@ -634,10 +636,58 @@ impl TransactionCoordinator {
         if !self.close_reclaim_boundary(maximum)? {
             return Ok(());
         }
-        self.provider
-            .reclaim(through)
+        self.provider_reclaim(through)
             .await
             .map_err(|error| CoordinatorRefusal::provider(error, DecisionPhase::Before))
+    }
+
+    async fn provider_prepare(
+        &self,
+        allocation: Allocation,
+        batch: &SecretBatch,
+    ) -> Result<SecretTransactionState, PreparedSecretError> {
+        let result = self
+            .provider
+            .prepare(allocation.id, allocation.proposal, batch)
+            .await;
+        provider_test_observe("prepare");
+        result
+    }
+
+    async fn provider_state(
+        &self,
+        id: SecretTransactionId,
+    ) -> Result<SecretTransactionState, PreparedSecretError> {
+        let result = self.provider.state(id).await;
+        provider_test_observe("state");
+        result
+    }
+
+    async fn provider_commit(
+        &self,
+        id: SecretTransactionId,
+    ) -> Result<SecretTransactionState, PreparedSecretError> {
+        let result = self.provider.commit(id).await;
+        provider_test_observe("commit");
+        result
+    }
+
+    async fn provider_abort(
+        &self,
+        id: SecretTransactionId,
+    ) -> Result<SecretTransactionState, PreparedSecretError> {
+        let result = self.provider.abort(id).await;
+        provider_test_observe("abort");
+        result
+    }
+
+    async fn provider_reclaim(
+        &self,
+        through: SecretTransactionGeneration,
+    ) -> Result<(), PreparedSecretError> {
+        let result = self.provider.reclaim(through).await;
+        provider_test_observe("reclaim");
+        result
     }
 
     fn close_reclaim_boundary(&self, maximum: u64) -> Result<bool, CoordinatorRefusal> {
@@ -885,6 +935,66 @@ impl TransactionCoordinator {
             source,
         }
     }
+}
+
+#[cfg(feature = "native-root-test-seam")]
+fn provider_test_observe(step: &str) {
+    use std::io::Write as _;
+
+    if let Some(path) = std::env::var_os(PROVIDER_TRACE_ENV) {
+        if let Ok(mut trace) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = trace.write_all(step.as_bytes());
+            let _ = trace.write_all(b"\n");
+            let _ = trace.sync_data();
+        }
+    }
+    if std::env::var(PROVIDER_CRASH_AFTER_ENV).as_deref() == Ok(step) {
+        // This bypasses destructors so the native process test observes the exact durable side of
+        // one provider or decision boundary, never a graceful cleanup path.
+        std::process::exit(87);
+    }
+}
+
+#[cfg(not(feature = "native-root-test-seam"))]
+fn provider_test_observe(_step: &str) {}
+
+#[cfg(feature = "native-root-test-seam")]
+fn provider_recovery_pause() -> Result<(), CoordinatorError> {
+    use std::io::Write as _;
+
+    let Some(root) = std::env::var_os(PROVIDER_RECOVERY_PAUSE_ENV) else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    let active = root.join("active");
+    let resume = root.join("resume");
+    let mut signal = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(active)
+        .map_err(|_| CoordinatorError::Invariant("test recovery pause is unavailable"))?;
+    signal
+        .write_all(b"active")
+        .and_then(|()| signal.sync_all())
+        .map_err(|_| CoordinatorError::Invariant("test recovery pause is unavailable"))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !resume.is_file() {
+        if std::time::Instant::now() >= deadline {
+            return Err(CoordinatorError::Invariant("test recovery pause timed out"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "native-root-test-seam"))]
+fn provider_recovery_pause() -> Result<(), CoordinatorError> {
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

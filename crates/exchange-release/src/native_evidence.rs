@@ -28,6 +28,38 @@ const RETAINED_PROVIDER_TESTS: [&str; 2] = [
 const RETAINED_PROVIDER_OBLIGATIONS: [&str; 2] =
     ["x134-c515-retained-lease", "x134-connect-crash-replay"];
 
+/// The complete inherited X-128 supervision obligations this Linux-only tree retains.
+///
+/// The frozen fixture digest only catches drift that was *not* regenerated. Naming the retained
+/// inventory here instead makes the document its own authority: a family renamed, dropped or
+/// invented alongside a regenerated projection refuses, and the non-Linux obligations X-137 removed
+/// stay absent rather than surviving as a negative or optional list. The counts are the array
+/// lengths the compiler derives, never a number publication compares against.
+const RETAINED_INHERITED_OBLIGATIONS: [&str; 6] = [
+    "x128-expiry-live",
+    "x128-supervisor-sigkill-responsive",
+    "x128-supervisor-sigkill-wedged",
+    "x128-supervisor-unix-normal",
+    "x128-supervisor-unix-wedged",
+    "x128-unix-inherited-abi",
+];
+
+/// The complete literal X-134 obligation families this authority certifies.
+const RETAINED_LITERAL_FAMILIES: [&str; 12] = [
+    "x134-c515-retained-lease",
+    "x134-connect-crash-replay",
+    "x134-four-form-sentinel",
+    "x134-grant-cas",
+    "x134-helper-deadlines",
+    "x134-hosted-origin-and-message-state",
+    "x134-local-management-deadlines",
+    "x134-native-owner-endpoint",
+    "x134-native-private-input",
+    "x134-native-service-account-handoff",
+    "x134-native-stream-framing",
+    "x134-production-root-safety",
+];
+
 /// The applicable published C-515 tests Exchange inherits rather than re-proves.
 ///
 /// The provider release stays portable: Exchange consumes this evidence by name and never restates,
@@ -358,7 +390,38 @@ impl NativeEvidenceAuthority {
         if joins.len() != 1 {
             return schema("native authority requires one cross-cutting assertion join");
         }
+        self.validate_retained_inventory()?;
         self.validate_retained_provider_evidence()
+    }
+
+    /// The retained obligation inventory is exactly the literal and inherited story families.
+    ///
+    /// Obligations are grouped by the class of the authority that owns them, so the contract does
+    /// not depend on what this document happens to call its authorities. Inherited upstream
+    /// obligations are pinned by their exact published tests instead — see
+    /// [`Self::validate_retained_provider_evidence`].
+    fn validate_retained_inventory(&self) -> Result<()> {
+        let mut literal = BTreeSet::new();
+        let mut inherited = BTreeSet::new();
+        for (id, obligation) in &self.obligations {
+            let authority = self.authorities.get(&obligation.authority).ok_or_else(|| {
+                Error::Schema(format!("unknown authority {:?}", obligation.authority))
+            })?;
+            match authority.class {
+                AuthorityClass::LiteralStory => literal.insert(id.as_str()),
+                AuthorityClass::InheritedStory => inherited.insert(id.as_str()),
+                AuthorityClass::InheritedUpstream => true,
+            };
+        }
+        if literal != RETAINED_LITERAL_FAMILIES.into_iter().collect() {
+            return schema("literal story families are not the exact retained X-134 inventory");
+        }
+        if inherited != RETAINED_INHERITED_OBLIGATIONS.into_iter().collect() {
+            return schema(
+                "inherited story obligations are not the exact retained X-128 inventory",
+            );
+        }
+        Ok(())
     }
 
     /// The retained connector-secrets 0.20 recovery, replay and lease evidence, exactly (X-138).
@@ -842,5 +905,53 @@ mod tests {
             .collect();
         reports[0].runner.push_str("-substituted");
         assert!(authority.validate_reports(&reports, source_commit).is_err());
+    }
+
+    /// Regenerating the frozen projection may not launder a changed family inventory. The frozen
+    /// digest only refuses drift that was *not* regenerated, so the retained inherited obligations
+    /// and literal families are held as the document's own contract: renaming, dropping or
+    /// inventing one refuses before anything is frozen or reported.
+    #[test]
+    fn native_evidence_authority_rejects_a_renamed_dropped_or_invented_family() {
+        let authority = NativeEvidenceAuthority::bundled().expect("canonical authority");
+        authority.validate().expect("canonical inventory validates");
+
+        let mut renamed = authority.clone();
+        let family = renamed
+            .obligations
+            .remove("x134-native-stream-framing")
+            .expect("literal stream-framing family");
+        renamed
+            .obligations
+            .insert("x134-native-stream-framing-v2".to_owned(), family);
+        assert!(
+            renamed.validate().is_err(),
+            "a renamed literal family retained publication authority"
+        );
+
+        let mut dropped = authority.clone();
+        dropped
+            .obligations
+            .remove("x128-unix-inherited-abi")
+            .expect("inherited ABI obligation");
+        assert!(
+            dropped.validate().is_err(),
+            "a dropped inherited obligation retained publication authority"
+        );
+
+        let mut invented = authority.clone();
+        let mut family = invented
+            .obligations
+            .get("x134-grant-cas")
+            .cloned()
+            .expect("literal grant CAS family");
+        family.adversarial_cases = vec!["invented-adversarial-case".to_owned()];
+        invented
+            .obligations
+            .insert("x134-extra-family".to_owned(), family);
+        assert!(
+            invented.validate().is_err(),
+            "an invented literal family retained publication authority"
+        );
     }
 }

@@ -17,7 +17,7 @@ exchange-host = { path = "crates/exchange-host", package = "codewandler-flux-exc
 
 async-trait = "0.1"
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 # `fs` is X-83's: the console is served by the host it talks to, because the session cookie is
@@ -100,10 +100,10 @@ connector-secrets = { package = "codewandler-connector-secrets", version = "0.20
 # `rustls-tls` and `default-features = false` keep OpenSSL out of the build, so the binary does not
 # acquire a C toolchain dependency for one HTTPS call. `jsonwebtoken` picks the pure-Rust backend for
 # the same reason.
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 libc = "0.2"
 minisign-verify = "0.2.5"
-minisign = "0.7.9"
+minisign = "0.9.1"
 # TLS: `rustls`, so OpenSSL is genuinely absent and there is only one TLS stack in the tree.
 #
 # It does NOT make this build C-free, and an earlier version of this comment wrongly said it did.
