@@ -6,6 +6,20 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- **The catalogue is served as a versioned, digest-carrying pack — including one newer than this
+  binary** (X-153, Decision 0022's data-not-code half). A deployment may point Exchange at a
+  `catalog.pack` on disk (startup configuration, never request-derived); the digest, container
+  format and schema major version are verified before a single record serves, and each failure
+  refuses at startup distinguishably by name — never a partial load, never a silent fallback to
+  the embedded pack. The onboarding descriptor and the catalogue listing report which catalogue
+  is serving (embedded or loaded) and its digest through one shared projection, so they cannot
+  describe two catalogues. What a loaded pack cannot yet change — settings and verification
+  still answer from the embedded documents — is pinned by a test rather than left implicit, and
+  closes behind upstream C-540. Every release of flux-connectors attaches the pack beside its
+  checksum, so a new provider stops requiring an Exchange rebuild once that gap closes.
+
 ### Changed
 
 - **Settings and connection verification read the catalog document, not parsed Flux** (X-152, the

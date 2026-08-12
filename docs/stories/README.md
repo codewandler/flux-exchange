@@ -49,7 +49,6 @@ lockfile and compile-time tests.
 
 ### Catalog Artifact
 - [X-156 — Adopt the engine-free plan API and own the Tool projection](X-156-adopt-the-engine-free-plan-api.md) · The amended Decision 0022 point 3, resolved from X-151's open question into its own story: Exchange consumes connector-resolve's plan-as-data, owns the Tool/ToolSpec projection, and retires the ENGINE_LINE machinery in the same change — the end of the X-146 situation. Reviewed hardest against no_second_request_path
-- [X-153 — Load the catalogue as a pack, including one newer than this binary](X-153-load-the-catalogue-as-a-pack-through-the-reader.md) · the reader's `load` constructor is new capability, not a migration: a deployment can serve a catalogue newer than the binary it was built with, so a new provider stops requiring an Exchange release
 
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
@@ -204,6 +203,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-141 — Exchange story workers publish bounded Fleet handoff evidence](X-141-publish-bounded-fleet-handoff-evidence.md) · Fleet dogfood — one deterministic targeted-check receipt without terminal scraping or duplicate full gates
 - [X-146 — Adopt the released connector 0.21 line, which does not move the engine](X-146-adopt-the-released-connector-0-21-line.md) · Core · connector-only bump: connector-pack 0.21 requires flux-runtime ^0.54, the same as 0.20, so no codewandler-flux-* pin moved and ENGINE_LINE stayed 0.54. Adopting flux 0.58+ needs its own story, gated on a connector-pack release that asks for it
 - [X-152 — Settings and verification read the catalog document, not parsed Flux](X-152-settings-and-verification-read-the-catalog-document.md) · the four Rehearsal call sites in settings.rs are Exchange's runtime Flux parse; characterize them first, then swap — the upstream promise is same-signature semantics, which is exactly the kind of promise a characterization test should check rather than trust
+- [X-153 — Load the catalogue as a pack, including one newer than this binary](X-153-load-the-catalogue-as-a-pack-through-the-reader.md) · the reader's `load` constructor is new capability, not a migration: a deployment can serve a catalogue newer than the binary it was built with, so a new provider stops requiring an Exchange release
 - [X-155 — Adopt the released connector 0.23 line, which does not move the engine](X-155-adopt-the-released-connector-0-23-line.md) · connector 0.22/0.23 shipped the whole artifact surface X-152/X-153/X-154 consume — the documents, the pack, the reader, DocumentRehearsal and the engine-free plan API. Index-verified 2026-08-12: connector-pack 0.23.0 requires flux ^0.54, the line already pinned, so this is a connector-only bump exactly like X-146
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._

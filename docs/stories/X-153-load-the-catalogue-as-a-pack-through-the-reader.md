@@ -1,7 +1,7 @@
 ---
 id: X-153
 title: "Load the catalogue as a pack, including one newer than this binary"
-status: in-progress
+status: done
 priority: 3
 epic: catalog-artifact
 areas: [exchange-host, exchange-server, deployment]
@@ -88,6 +88,18 @@ from a path. That is this story.
     X-156 territory, not something this host can fix from the outside. The split is asserted rather
     than described, in
     `exchange-server`'s `catalogue::tests::a_loaded_pack_is_reported_but_does_not_yet_change_what_is_served`.
+
+- 2026-08-12: Integrated (`9bf8b78`), coordinator-reviewed inline: the allow-list sentence, the
+  four distinguishable refusals, and the public-API addition read against the acceptance; the
+  implementor's story-file edit (ticks + the Progress note above) was a fence deviation with
+  accurate content, folded rather than bounced. Two deviations accepted as delivered: the report
+  lives on `GET /api/catalogue/connectors` (the route the Acceptance's `GET /api/catalogue`
+  actually resolves to; `/effective`'s v1 protocol body deliberately untouched), and the reader is
+  not re-exported from exchange-host's public API — narrower for a published crate, additive if a
+  consumer needs `Pack` directly. The DocumentRehearsal split (loaded pack counted, settings
+  answering from embedded documents) is pinned by
+  `catalogue::tests::a_loaded_pack_is_reported_but_does_not_yet_change_what_is_served` and
+  closes behind upstream C-540 plus a pack-parameterised rehearsal.
 
 ## Notes
 
