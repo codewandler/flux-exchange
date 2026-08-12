@@ -8,6 +8,19 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- **Settings and connection verification read the catalog document, not parsed Flux** (X-152, the
+  Exchange half of connectors C-539). The four `Rehearsal::of(.., entry.flux)` sites in
+  `settings.rs` — three production, one test; the story's own note had the attribution inverted
+  and measurement corrected it — now derive through `connector_pack::DocumentRehearsal`, so this
+  host holds zero runtime Flux parses of connector artifacts on the settings and verification
+  paths. The swap is proven behaviour-preserving, not trusted: an 892-line characterization
+  golden over all 835 catalogued operations was committed against the old parse first and is
+  byte-identical after the swap, and `no_connector_flux_parse.rs` structurally refuses the parse
+  returning — while stating plainly that workflow Flux parsing (X-98) is a different parse and
+  stays. The document surfaces Exchange deliberately does not consume yet (`roles`,
+  `quirks.pagination`, `quirks.rate_limit`, `graphs`) are recorded with reasons, and a test fails
+  when one silently acquires a consumer.
+
 - **The connector crates move to the released 0.23 line; the engine does not move** (X-155, the
   third reading of the X-11/X-146 rule). `connector-pack` 0.23.0 requires flux `^0.54` — byte for
   byte what 0.21.0 required, read out of the crates.io sparse index before any manifest was
