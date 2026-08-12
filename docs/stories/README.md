@@ -34,7 +34,7 @@ lockfile and compile-time tests.
 - [X-91 — Signing in does not make every member an operator](X-91-signing-in-does-not-make-every-member-an-operator.md) · Preserve organization-wide authentication, but key administrative authority by immutable OIDC sub and fail closed when no operator is configured.
 - [X-92 — Private reporting and protected main](X-92-private-reporting-and-protected-main.md) · Private reporting, protected main and baseline scanning are live; GitHub Free cannot enable validity checks or non-provider patterns.
 - [X-96 — Traffic controls are fair as well as bounded](X-96-traffic-controls-are-fair-as-well-as-bounded.md) · Fair budgets, bounded metrics and edge occupancy controls are ready; live release verification remains.
-- [X-97 — Public credentials leave the file store](X-97-public-credentials-leave-the-file-store.md) · The file store is honest and mode-safe but application-plaintext; the existing SecretStore port is the seam for a managed Vault-class backend.
+- [X-97 — Public credentials leave the file store](X-97-public-credentials-leave-the-file-store.md) · The file store is honest and mode-safe but application-plaintext; the SecretStore port is the seam. The shipped connector-secrets VaultStore is NOT that backend — it refuses references, apply and every prepared transaction.
 - [X-111 — Host every connector runtime through Exchange (epic)](X-111-rich-connector-runtimes-epic.md) · EPIC — Exchange is the sole official-integration executor: ship the effective catalogue and existing HTTP invoke first, then rich runtimes and lifecycle
 - [X-126 — Publish verified local Exchange binaries for Linux](X-126-publish-verified-local-exchange-binaries.md) · Milestone 1 — supported Linux Flux can manage a separately released, attested Exchange executable without bundling plugins or trusting PATH
 - [X-134 — Publish owner-bound local onboarding without secret JSON](X-134-publish-owner-bound-local-onboarding.md) · Milestone 1 — Linux OS-owner management, direct vendor-secret insertion, one-shot Service Account handoff and revisioned grants must ship before the first public Linux release
@@ -45,19 +45,15 @@ lockfile and compile-time tests.
 - [X-150 — Remove the Windows runtime residue the Linux contraction left behind](X-150-remove-the-windows-runtime-residue.md) · X-137 made Exchange Linux-only but left ~9.7k lines of Windows code, including 3,444 lines in three source files no mod declaration compiles and two dangling references that only build.rs's panic keeps hidden
 - [X-149 — Adopt the current vite line in the console](X-149-adopt-the-current-vite-line-in-the-console.md) · vite 6 -> 8 and @vitejs/plugin-vue 5 -> 6 are one change: neither resolves without the other, and vite 8 swaps the bundler from esbuild to rolldown
 
-### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
-
-### Connections: an address the caller cannot name, and a refusal where the address is incomplete
-- [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
-
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
+- [X-146 — Adopt the released flux 0.58 and connector 0.21 lines](X-146-adopt-the-released-flux-0-58-and-connector-0-21-lines.md) · Core · blocked: connector 0.21 is NOT published — crates.io's newest connector line is 0.20.0. Both pin sets move as one unit once it ships; two compile breaks are already known (C-531 DispatchId on FlowSink, and ConfigField gaining also_services)
+- [X-147 — The host performs the authorization code grant on behalf of a signed-in person](X-147-the-host-performs-the-authorization-code-grant.md) · the delegated half of X-72 — X-75 redeems a password and redeem_refresh renews, but nothing here can OBTAIN a token by user grant; blocked on the connector line that declares one reaching crates.io (X-146)
+- [X-148 — A delegated token is renewed before it expires, so an unattended run outlives it](X-148-a-delegated-token-is-renewed-before-it-expires.md) · a GitLab OAuth access token expires in about two hours and an autonomous fleet run outlives that; redeem_refresh exists and nothing calls it on a schedule — blocked behind X-147, which first produces a credential to renew
 
 ## Backlog
 - [X-51 — A broken doc link fails the build instead of hiding among twenty others](X-51-a-broken-doc-link-is-visible.md) · found by X-48, 2026-08-01: `cargo doc --workspace --no-deps` emits ~20 unresolved intra-doc link warnings and is not in the gate, so a genuinely broken link in new code is invisible
-- [X-146 — Adopt the released flux 0.58 and connector 0.21 lines](X-146-adopt-the-released-flux-0-58-and-connector-0-21-lines.md) · Core · post-v0.18.0: both pin sets move as one compatibility unit once connector-pack 0.21 requires flux-runtime ^0.58; the one known compile break in range is the C-531 DispatchId parameter on the flux-lang FlowSink impl
 
 ### Apps
 - [X-131 — Validate Datasource.kind against published connector datasource members](X-131-validate-datasource-kind-against-published-members.md) · Decision 0006 — put_datasource refuses a kind that is not a published connector datasource member reference; gated on the upstream connector surface
