@@ -1,7 +1,7 @@
 ---
 id: X-157
 title: "The release-readiness pin follows the connector line to 0.23"
-status: ready
+status: done
 priority: 0
 areas: [build, release]
 note: "check-publication-readiness.sh and native-evidence-v1.json pin the connector crates and connector-secrets' checksum to 0.20.0; X-146 (0.21) and X-155 (0.23) moved past it invisibly because no release ran the release-only check. The v0.18.0 publish failed on exactly this. Supply-chain checksum authority — verify against the crates.io index, never the lockfile"
@@ -20,12 +20,12 @@ publish refused with `check-publication-readiness: workspace connector-secrets d
 
 ## Acceptance
 
-- [ ] The version expectations in `scripts/check-publication-readiness.sh` move from `0.20.0` to
+- [x] The version expectations in `scripts/check-publication-readiness.sh` move from `0.20.0` to
       `0.23.0` (the direct-dependency accept-set at ~line 104 and the Cargo.lock version check at
       ~line 121), and every `0.20.0`/`0.20` self-test fixture inside the same script moves with
       them so `--self-test` still passes. Grep the whole script for `0.20` and leave none behind
       that names the connector line.
-- [ ] The `inherited_upstream` authority in `crates/exchange-release/native-evidence-v1.json`
+- [x] The `inherited_upstream` authority in `crates/exchange-release/native-evidence-v1.json`
       carries `codewandler-connector-secrets` `0.23.0` and its **`registry_sha256` taken from the
       crates.io sparse index**, not copied from `Cargo.lock` (a checksum copied from the file under
       test proves only that the file agrees with itself). The index value is
@@ -33,12 +33,12 @@ publish refused with `check-publication-readiness: workspace connector-secrets d
       (`curl -s https://index.crates.io/co/de/codewandler-connector-secrets | ... vers==0.23.0`)
       and quote the command. The JSON must stay canonical (the check reserialises it and refuses a
       non-canonical body): `schema` `exchange.native-evidence.v1`, RFC 8785-style compact form.
-- [ ] `bash scripts/check-publication-readiness.sh --self-test` passes, then
+- [x] `bash scripts/check-publication-readiness.sh --self-test` passes, then
       `bash scripts/check-publication-readiness.sh` passes against the real tree — quote both.
-- [ ] The other release-policy checkers still pass: `bash scripts/check-crate-versions.sh`,
+- [x] The other release-policy checkers still pass: `bash scripts/check-crate-versions.sh`,
       `bash scripts/check-current-version.sh`, and `bash scripts/check-local-release.sh` if it
       reads either file. State what ran.
-- [ ] A failing-first note: capture the current refusal message first (it is the seeded failure),
+- [x] A failing-first note: capture the current refusal message first (it is the seeded failure),
       then green — this is the story's proof, since the checkers are their own tests.
 
 ## Progress
