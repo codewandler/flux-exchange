@@ -1,9 +1,15 @@
 //! A deployment's policy over declared weaknesses in credential acquisition.
 //!
-//! No released connector declares an authentication hazard yet: upstream C-440 owns that
-//! declaration. The fixture here therefore stands in for a connector acquisition deliberately.
-//! Keeping the declaration in the fixture is load-bearing — a test that asks the posture about no
-//! hazard would pass for the wrong reason and claim protection over a path it never exercised.
+//! **The fixture below still stands in for a connector acquisition, and the reason changed with
+//! connector 0.21** (X-146). Upstream C-440 has landed: `catalog::Credential` now carries `hazard`
+//! and babelforce declares `ResourceOwnerSecretShared`. What has *not* happened is Exchange reading
+//! it — admission is decided from the hazard on X-75's injected `AcquisitionBinding`, and production
+//! composes an empty `AcquisitionBindings`, so no catalogue declaration reaches this policy.
+//!
+//! Keeping the declaration in the fixture is load-bearing either way — a test that asks the posture
+//! about no hazard would pass for the wrong reason and claim protection over a path it never
+//! exercised. When the catalogue's `hazard` is wired in, this file gains a test that reads it; it
+//! does not lose this one.
 
 use exchange_host::{AuthHazard, AuthPosture, AuthPostureRefusal};
 

@@ -154,6 +154,27 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- **The connector line moves to 0.21.0 and the flux engine line deliberately does not move** (X-146).
+  All four `codewandler-connector-*` pins go 0.20 → 0.21; every `codewandler-flux-*` pin stays on the
+  `ENGINE_LINE` 0.54 it was already on, because `connector-pack` 0.21.0 requires
+  `codewandler-flux-runtime ^0.54` — byte for byte what 0.20.0 required — and `flux-spec ^1.3`, so
+  neither floor moved either. `codewandler-flux-runtime` 0.59.3 and `flux-spec` 1.4.0 are published
+  and not adopted: **the engine line is set by what `connector-pack` requires, never by what is
+  newest**, and raising it alone is what puts two `flux_runtime::Tool` traits in one lock. The story
+  was filed asserting connector-pack 0.21 requires `^0.58`; the crates.io sparse index says
+  otherwise, and the manifest, compile-time-seam and lockfile engine-line tests all still pass.
+
+  **For `codewandler-flux-exchange-host` consumers this is a resolver change, not an API change.**
+  Anything constructing `connector_catalog::ConfigField` or `connector_catalog::Credential` will stop
+  compiling — neither is `#[non_exhaustive]`, and 0.21 adds `ConfigField::also_services` plus
+  `Credential::{subject, hazard}`. Exchange itself constructs neither in library code. The catalogue
+  gains `Acquisition::OAuth2`, `Subject`, `OAuthGrant`, `OAuthRedirect` and `Operation::direction`,
+  and grows from 870 to 878 operations across the same 55 providers; **this host reads none of the
+  new axes yet.** GitLab's three new `oauth.*` config bindings are an unrecognised namespace and
+  render visible-but-unroutable, and babelforce's newly declared
+  `AuthHazard::ResourceOwnerSecretShared` — upstream C-440 landing — does not reach the deployment
+  posture, which still decides from an injected `AcquisitionBinding` that production leaves empty.
+
 - **`jsonwebtoken` moves to 11.0.0, and a JWK of a kind this build does not recognise now admits no
   algorithm.** The crate made `AlgorithmParameters` `#[non_exhaustive]` and began parsing an unknown
   `kty` into a catch-all variant rather than failing the whole key set, so a key kind this build does

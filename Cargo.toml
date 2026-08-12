@@ -41,6 +41,8 @@ time = { version = "0.3.55", features = ["formatting", "parsing"] }
 # both happily and `rustc` rejects them somewhere else entirely. **The engine line is set by what
 # `connector-pack` requires, never by what is newest.** It sat at 0.46 from X-11 until X-67 while
 # 0.47 was already published, and it moved only when a `connector-pack` release asked for more.
+# X-146 is the same reading a third time: `connector-pack` 0.20.0 and 0.21.0 both require
+# `flux-runtime ^0.54`, so the 0.21 catalogue bump left this untouched while 0.59.3 was published.
 #
 # **The two pin sets move together, in one commit.** Raising `codewandler-flux-*` while
 # `codewandler-connector-*` stays a line behind — or the reverse — is exactly what puts both lines
@@ -76,8 +78,16 @@ flux-system = { package = "codewandler-flux-system", version = "0.54" }
 flux-web = { package = "codewandler-flux-web", version = "0.54" }
 flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 
-# The connector crates, all on the 0.20 line. `connector-catalog` has no dependencies at all and
+# The connector crates, all on the 0.21 line. `connector-catalog` has no dependencies at all and
 # `connector-secrets` defaults to no features (its Vault client and reqwest sit behind `vault`).
+#
+# **X-146: 0.21 moved the catalogue, not the engine.** `connector-pack` 0.21.0 requires
+# `codewandler-flux-runtime ^0.54` — byte for byte what 0.20.0 required — so this bump is a
+# connector-only bump and every `codewandler-flux-*` pin above stays where it is. That
+# `codewandler-flux-runtime` is published up to 0.59.3 is not a reason to move: the line is set by
+# what `connector-pack` requires, never by what is newest, and raising it here alone would put two
+# `flux_runtime::Tool` traits in one lock. Adopting a newer engine needs its own story, gated on a
+# `connector-pack` release that asks for it.
 #
 # `connector-address` is the **address vocabulary**, and it replaces `connector-spec` here.
 # That is a reorganisation rather than a rename (upstream C-407): `connector-spec` is the connector
@@ -89,10 +99,10 @@ flux-tools = { package = "codewandler-flux-tools", version = "0.54" }
 #
 # `connector-pack` is an ordinary `exchange-host` dependency: invocation and channel planning both
 # end there, while the composing server owns the guarded transports and never names the pack.
-connector-address = { package = "codewandler-connector-address", version = "0.20" }
-connector-catalog = { package = "codewandler-connector-catalog", version = "0.20" }
-connector-pack = { package = "codewandler-connector-pack", version = "0.20" }
-connector-secrets = { package = "codewandler-connector-secrets", version = "0.20" }
+connector-address = { package = "codewandler-connector-address", version = "0.21" }
+connector-catalog = { package = "codewandler-connector-catalog", version = "0.21" }
+connector-pack = { package = "codewandler-connector-pack", version = "0.21" }
+connector-secrets = { package = "codewandler-connector-secrets", version = "0.21" }
 # The OIDC token exchange, opened up by the X-04 dependency decision (2026-08-01). The family
 # precedent is sibling flux-connectors, which already uses reqwest and jsonwebtoken for exactly this
 # exchange; the alternative was hand-rolling signature verification, which nobody should do.

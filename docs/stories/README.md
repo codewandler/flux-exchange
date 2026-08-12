@@ -48,7 +48,6 @@ lockfile and compile-time tests.
 ## Blocked
 - [X-82 — A deployment a stranger can reach (epic)](X-82-remote-deployment-epic.md) · EPIC — production and Google OIDC sign-in are live; completion waits on connect → grant → invoke and redeploy persistence proof
 - [X-84 — A container, one machine, and the operator's first five minutes](X-84-a-container-and-a-fly-deployment.md) · Google OIDC sign-in is live; blocked on the public connect → grant → invoke walkthrough and redeploy persistence proof
-- [X-146 — Adopt the released flux 0.58 and connector 0.21 lines](X-146-adopt-the-released-flux-0-58-and-connector-0-21-lines.md) · Core · blocked: connector 0.21 is NOT published — crates.io's newest connector line is 0.20.0. Both pin sets move as one unit once it ships; two compile breaks are already known (C-531 DispatchId on FlowSink, and ConfigField gaining also_services)
 - [X-148 — A delegated token is renewed before it expires, so an unattended run outlives it](X-148-a-delegated-token-is-renewed-before-it-expires.md) · a GitLab OAuth access token expires in about two hours and an autonomous fleet run outlives that; redeem_refresh exists and nothing calls it on a schedule — blocked behind X-147, which first produces a credential to renew
 
 ## Backlog
@@ -197,6 +196,7 @@ _`flux` and `flux-connectors` each publish a VitePress site from `web/`, deploye
 - [X-138 — Bind provider recovery, replay and Linux-native C-515 evidence](X-138-bind-provider-recovery-and-native-c515-evidence.md) · X-134 child — retain the exact portable connector-secrets 0.20 identity and prove Exchange-owned recovery on both Linux release targets
 - [X-139 — Canonicalize the two-target Linux native-evidence inventory](X-139-canonicalize-release-native-evidence.md) · X-134 child — one canonical JSON authority and terminal reports for exactly the two Linux release targets
 - [X-141 — Exchange story workers publish bounded Fleet handoff evidence](X-141-publish-bounded-fleet-handoff-evidence.md) · Fleet dogfood — one deterministic targeted-check receipt without terminal scraping or duplicate full gates
+- [X-146 — Adopt the released connector 0.21 line, which does not move the engine](X-146-adopt-the-released-connector-0-21-line.md) · Core · connector-only bump: connector-pack 0.21 requires flux-runtime ^0.54, the same as 0.20, so no codewandler-flux-* pin moved and ENGINE_LINE stayed 0.54. Adopting flux 0.58+ needs its own story, gated on a connector-pack release that asks for it
 
 _See [CHANGELOG.md](../../CHANGELOG.md) for the full released history._
 <!-- END track:board -->

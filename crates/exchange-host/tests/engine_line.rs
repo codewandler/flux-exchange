@@ -240,27 +240,31 @@ fn the_lock_carries_one_engine_line() {
     );
 }
 
-/// X-134 consumes the released C-515 provider line from crates.io, with one copy of each connector
+/// X-134 consumes the released provider line from crates.io, with one copy of each connector
 /// package and the exact audited archive checksums. A path/git source or stale lock is a contract
 /// failure even when the public Rust signatures happen to compile.
+///
+/// **X-146 moved this to 0.21 and moved nothing else.** The checksums below were read out of the
+/// crates.io sparse index before the manifest was edited, not copied out of the lock afterwards —
+/// a checksum taken from the file under test proves only that the file agrees with itself.
 #[test]
-fn the_lock_carries_the_exact_registry_connector_020_line() {
+fn the_lock_carries_the_exact_registry_connector_021_line() {
     const EXPECTED: [(&str, &str); 4] = [
         (
             "codewandler-connector-address",
-            "bdee7fb0d488de4ed97dbd3b8414e04138c122ee36b6f9c97a174bb317913d8c",
+            "65dbef43261a0009f6c68843321ac36f06eab3b195eb2f10c33d98d0968343b9",
         ),
         (
             "codewandler-connector-catalog",
-            "9a7737659b74876b09ff6e09b253402c5bdfcafcbde89373cb76f689bd8ffed2",
+            "c88c13adb47b3a105eb0b1798b35a15978e5e61c752c53e8e44b7d874c9f6f0e",
         ),
         (
             "codewandler-connector-secrets",
-            "edf98bece86f6364aba3e7dd48c3b7e161146942e9e8450d5dc286143b627717",
+            "5521a8afe9127c0e887beb540e0fc037dd434e86a80935e606551340b8f78cba",
         ),
         (
             "codewandler-connector-pack",
-            "8e858a844dab8324d42bb83c98c4ffb6823681eb1157ddb96a79d5d7a42cff48",
+            "bfda4109b04d68c8dcb4265470fc96cc20fca3c811cbf2361eb1f65dcf86f2d0",
         ),
     ];
 
@@ -285,8 +289,8 @@ fn the_lock_carries_the_exact_registry_connector_020_line() {
         let block = matches[0];
         assert_eq!(
             block.lines().find_map(|line| value_of(line, "version")),
-            Some("0.20.0"),
-            "`{name}` is not locked to the released 0.20.0 provider line",
+            Some("0.21.0"),
+            "`{name}` is not locked to the released 0.21.0 provider line",
         );
         assert_eq!(
             block.lines().find_map(|line| value_of(line, "source")),
@@ -304,8 +308,11 @@ fn the_lock_carries_the_exact_registry_connector_020_line() {
 /// The C-515 prepared transaction port is object-safe and shares one concrete store with ordinary
 /// reads. This is the provider API Exchange must retain for the process lifetime; reopening a
 /// second file store for coordinator recovery would violate that ownership boundary.
+///
+/// Deliberately not named after a connector line: the property is about the port, and a name
+/// carrying a version number invites a rename on every release that does not change it.
 #[tokio::test]
-async fn connector_020_prepared_port_is_ready_for_exchange_composition() {
+async fn the_prepared_secret_port_is_ready_for_exchange_composition() {
     let concrete = Arc::new(MemoryStore::new());
     let ordinary: Arc<dyn SecretStore> = concrete.clone();
     let prepared: Arc<dyn PreparedSecretStore> = concrete;

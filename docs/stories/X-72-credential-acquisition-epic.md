@@ -85,6 +85,12 @@ open: none of C-525 or C-531 is *published*. See X-147.
   newest `codewandler-connector-*` line is 0.20.0, which carries only `Static`, `Minted` and
   `BasicJoin`. So the whole epic — X-75's live proof included — is waiting on the same upstream
   release, tracked by [[X-146]].
+- 2026-08-12 (later) — **That upstream release landed and [[X-146]] adopted it.** `connector-*` 0.21.0
+  is on crates.io with `Acquisition::OAuth2`, `Subject`, `OAuthGrant`, `OAuthRedirect` and a
+  `Credential::hazard` carrying babelforce's `ResourceOwnerSecretShared` — C-440 and C-525 both.
+  [[X-147]] and [[X-148]] are no longer waiting on a publication; their `blocked` status is now
+  stale and theirs to move. Note X-146 was a **connector-only** bump: the engine line stayed 0.54,
+  because connector-pack 0.21 requires `flux-runtime ^0.54` exactly as 0.20 did.
 
 ## Notes
 - The design records why `produces_credential` is not the mechanism (C-432 measured it: `connector-flux`
