@@ -384,9 +384,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Prove the fail-closed publication readiness boundary
+      # The self-test proves the checker refuses; the ordinary run points it at this tree. Running
+      # only the first is what let the v0.18.0 tag be the first thing to notice that the connector
+      # pin and the C-515 evidence authority had disagreed since X-146 — CI proved the checker
+      # *could* catch it and then never asked. The check reads files and reaches no network, so the
+      # pull request that causes the drift can afford to be the one that fails; the release
+      # workflows still repeat it, because a tag can be pushed at a commit no run ever covered.
+      - name: Prove the fail-closed publication readiness boundary, then apply it
         run: |
           ./scripts/check-publication-readiness.sh --self-test
+          ./scripts/check-publication-readiness.sh
 
       - name: Install release-verifier toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
