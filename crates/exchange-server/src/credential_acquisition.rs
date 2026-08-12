@@ -20,20 +20,31 @@
 //! exhaustively and names `client_id` as a field it discards — a deployment that supplied none is
 //! refused by name even if a future document carried a non-empty string.
 //!
-//! # The one declared fact the generated tables do not carry
+//! # Resolving the endpoint, through the catalogue this deployment serves
 //!
-//! `catalog::OAuth2::endpoint` is a **service name**, and the base URL it resolves against lives in
-//! the connector's canonical document (`services[].base_url`) — not in the generated `&'static`
-//! tables this crate reads, where `catalog::Provider` carries exactly one `base_url`, its *default*
-//! service's. GitLab's OAuth2 declaration names `login`, whose document base URL is `{origin}`;
-//! `catalog::providers()` cannot answer that, and neither `Provider::base_url`
-//! (`{origin}/api/v4` — the API service, not the login service) nor `ConfigField::also_services`
-//! (which says the *variable* is shared, not what the template is) is the same fact.
+//! `catalog::OAuth2::endpoint` is a **service name**, and the base URL it resolves against is not in
+//! the generated `&'static` tables: `catalog::Provider` carries exactly one `base_url`, its
+//! *default* service's. GitLab's declaration names `login`, and `Provider::base_url` is
+//! `{origin}/api/v4` — the API service, not the authorization host. Round 1 of X-154 measured that
+//! and refused a named endpoint rather than guessing one.
 //!
-//! [`endpoint_base`] therefore **refuses a named endpoint by name** rather than guessing one, so the
-//! gap is a startup refusal an operator reads once instead of a malformed authorize URL. Reading the
-//! canonical document is X-153's pack-and-reader path; when it lands, `endpoint_base` is the one
-//! function that changes.
+//! X-153 closed it. [`endpoint_base`] now reads the service's own `base_url` out of the connector's
+//! canonical document, through [`ServedCatalogue::provider_document`] — **the catalogue this
+//! deployment serves**, not whichever one a call site reached for, so a loaded pack composes the
+//! acquisitions it declares rather than the ones this binary was built with.
+//!
+//! What comes back is a *template*: GitLab's `login` service is `{origin}`. A startup composition
+//! has no tenant, so it resolves a template variable against the **connector's own declared
+//! default** — GitLab declares `https://gitlab.com` on the `origin` field that binds
+//! `endpoint.origin` and names `login` in `also_services` — and refuses, naming the connector and
+//! the variable, when there is no declared default (Zendesk's required `{subdomain}` is the shipped
+//! case). No deployment value fills a template here and no caller reaches one.
+//!
+//! **What that leaves open, stated rather than solved:** a tenant whose connection settings pin an
+//! operator-approved origin — which GitLab's `origin` field exists for — would authorize against
+//! the *declared default* rather than against their own instance. Composing an authorize URL per
+//! request from that tenant's settings is a future story; `docs/designs/credential-acquisition.md`
+//! carries the question and why this composition cannot answer it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -47,11 +58,12 @@ use connector_catalog::{
 use exchange_host::{
     async_trait, AcquiredCredential, AcquisitionRefusal, AuthHazard, AuthPosture,
     AuthPostureRefusal, AuthorizationCodeRedemption, CredentialAcquirer, PasswordRedemption,
-    RefreshRedemption, Secret,
+    RefreshRedemption, Secret, ServedCatalogue,
 };
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url};
 use serde::Deserialize;
+use serde_json::Value;
 
 /// The deployment-owned half of a delegated authorization-code grant.
 ///
@@ -545,24 +557,52 @@ pub enum CompositionRefusal {
         /// The declared field that is empty, in the catalogue's own spelling.
         field: &'static str,
     },
-    /// The declaration names an endpoint the generated catalogue tables carry no base URL for.
+    /// The catalogue being served has no canonical document for this connector.
     ///
-    /// The module documentation has the whole of it: this is a real gap in the *tables*, not in the
-    /// artifact — the canonical document carries `services[].base_url` and X-153 is the story that
-    /// reads it. Refusing by name is what keeps it a startup refusal rather than a malformed URL.
-    UnresolvableEndpoint {
+    /// Reachable when a deployment loads a pack that catalogues fewer connectors than this build
+    /// embeds and registers one of the missing ones. The served catalogue is the authority — a
+    /// fallback to the embedded tables would compose an acquisition for a connector the deployment
+    /// deliberately stopped serving.
+    NoDocument {
+        /// The connector the deployment registered.
+        connector: String,
+    },
+    /// The connector's canonical document is not the shape this composition reads.
+    ///
+    /// Value-free by construction: the document is vendor data and a refusal that quoted it would
+    /// put a catalogue into a startup log.
+    UnreadableDocument {
+        /// The connector whose document could not be read.
+        connector: String,
+        /// Which part of the document was missing or malformed. A field name, never a value.
+        expected: &'static str,
+    },
+    /// The declaration names an endpoint the connector's own document declares no service for.
+    UnknownEndpoint {
         /// The connector whose declaration names it.
         connector: String,
         /// The declared endpoint (service) name. A name, never a URL.
         endpoint: String,
     },
-    /// The declaration's base URL still carries a `{placeholder}` this composition cannot fill.
+    /// A `{variable}` in the resolved base URL has no **declared default** to fill it with.
     ///
-    /// Endpoint variables are per-connection settings resolved for one tenant at request time; a
-    /// startup composition has no tenant, so a templated base URL is refused rather than sent with
-    /// the braces still in it.
+    /// A startup composition has no tenant, so the only value it may use is the one the connector
+    /// itself declares — Zendesk's `{subdomain}` is required and defaults to nothing, so Zendesk
+    /// would be refused here rather than composed against a guess.
+    NoDeclaredDefault {
+        /// The connector whose base URL carries it.
+        connector: String,
+        /// The endpoint variable, in the connector's own spelling. A name, never a value.
+        variable: String,
+    },
+    /// The declaration's base URL carries an unterminated `{`.
+    ///
+    /// A malformed template rather than an unfilled one: [`NoDeclaredDefault`] is the ordinary
+    /// case, and this is the backstop that keeps a half-brace from reaching a vendor as a literal.
+    ///
+    /// [`NoDeclaredDefault`]: CompositionRefusal::NoDeclaredDefault
     TemplatedBaseUrl {
-        /// The connector whose base URL is templated.
+        /// The connector whose base URL is malformed.
         connector: String,
     },
     /// The deployment registered the connector and supplied no client id.
@@ -577,11 +617,28 @@ pub enum CompositionRefusal {
         /// The connector the deployment registered.
         connector: String,
     },
-    /// The composed grant, performer or registry refused the shape the declaration produced.
+    /// The composed grant or performer refused the shape one connector's declaration produced.
     Unusable {
-        /// The connector being composed.
+        /// The connector being composed. **Always a connector id** — see [`Registry`] for the
+        /// refusal that is about the set rather than a member.
+        ///
+        /// [`Registry`]: CompositionRefusal::Registry
         connector: String,
         /// The value-free reason from the constructor that refused.
+        reason: &'static str,
+    },
+    /// [`AcquisitionBindings::new`] refused the **set** of bindings this deployment registered.
+    ///
+    /// Separate from [`Unusable`] because it has no connector to name: a duplicate binding or a
+    /// grant disagreeing with the deployment's redirect is a property of the registry, and round 1
+    /// put a count string in a field whose documentation promised a connector id. Two shapes of
+    /// refusal, two variants.
+    ///
+    /// [`Unusable`]: CompositionRefusal::Unusable
+    Registry {
+        /// How many connector bindings were being composed. A count, never a name or a value.
+        composed: usize,
+        /// The registry's own value-free reason.
         reason: &'static str,
     },
 }
@@ -620,20 +677,40 @@ impl std::fmt::Display for CompositionRefusal {
                 "`{connector}`'s OAuth2 declaration has an empty `{field}`, which is too \
                  incomplete to compose an authorization from",
             ),
-            Self::UnresolvableEndpoint {
+            Self::NoDocument { connector } => write!(
+                f,
+                "the catalogue this deployment serves has no document for `{connector}`, so its \
+                 OAuth2 endpoint resolves against nothing",
+            ),
+            Self::UnreadableDocument {
+                connector,
+                expected,
+            } => write!(
+                f,
+                "`{connector}`'s canonical document carries no readable `{expected}`, so its \
+                 OAuth2 endpoint resolves against nothing",
+            ),
+            Self::UnknownEndpoint {
                 connector,
                 endpoint,
             } => write!(
                 f,
                 "`{connector}`'s OAuth2 declaration resolves against the `{endpoint}` endpoint, \
-                 and the generated catalogue tables carry no base URL for it — only the \
-                 connector's default service has one. The canonical document does; reading it is \
-                 X-153",
+                 and its own document declares no service by that name",
+            ),
+            Self::NoDeclaredDefault {
+                connector,
+                variable,
+            } => write!(
+                f,
+                "`{connector}`'s endpoint base URL needs `{variable}`, and the connector declares \
+                 no default for it; a startup composition has no tenant whose setting could fill \
+                 one, and it will not guess",
             ),
             Self::TemplatedBaseUrl { connector } => write!(
                 f,
-                "`{connector}`'s base URL carries an unresolved `{{placeholder}}`, which is a \
-                 per-connection setting and not something a startup composition can fill",
+                "`{connector}`'s endpoint base URL carries an unterminated `{{`, so no host \
+                 composes from it",
             ),
             Self::NoRegistration { connector, setting } => write!(
                 f,
@@ -649,6 +726,11 @@ impl std::fmt::Display for CompositionRefusal {
             Self::Unusable { connector, reason } => {
                 write!(f, "`{connector}`'s acquisition does not compose: {reason}")
             }
+            Self::Registry { composed, reason } => write!(
+                f,
+                "the {composed} registered acquisition binding(s) do not compose one registry: \
+                 {reason}",
+            ),
         }
     }
 }
@@ -666,15 +748,22 @@ impl std::error::Error for CompositionRefusal {}
 /// registry: a deployment that registered a connector and cannot acquire for it must be told, not
 /// handed a surface that answers `422` for the one connector its operator configured.
 pub fn configured(
+    catalogue: &ServedCatalogue,
     redirect: Option<&AcquisitionRedirect>,
 ) -> Result<AcquisitionBindings, CompositionRefusal> {
-    from_environment(|name| std::env::var(name).ok(), redirect)
+    from_environment(|name| std::env::var(name).ok(), catalogue, redirect)
 }
 
 /// [`configured`], reading by name from an injected source so tests do not mutate process-wide
 /// environment — the shape `crate::auth_posture::read` already uses.
+///
+/// `catalogue` is the one the composition already built and is about to serve, passed in rather
+/// than reached for: a second `ServedCatalogue::embedded()` here would compose acquisitions from
+/// the catalogue this *binary* carries while every other surface answered from the pack the
+/// deployment loaded, which is the two-sources-of-truth defect X-147's review was reworked for.
 fn from_environment(
     lookup: impl Fn(&str) -> Option<String>,
+    catalogue: &ServedCatalogue,
     redirect: Option<&AcquisitionRedirect>,
 ) -> Result<AcquisitionBindings, CompositionRefusal> {
     let mut bindings = Vec::new();
@@ -709,17 +798,17 @@ fn from_environment(
                 connector: connector.to_owned(),
             });
         };
-        bindings.push(binding_from_catalogue(provider, &registration, redirect)?);
+        bindings.push(binding_from_catalogue(
+            catalogue,
+            provider,
+            &registration,
+            redirect,
+        )?);
     }
 
     let composed = bindings.len();
-    AcquisitionBindings::new(bindings, redirect).map_err(|reason| CompositionRefusal::Unusable {
-        // The registry's own refusals are about the set rather than one member, and the set is
-        // empty of members only when nothing was selected — so naming the count is the honest
-        // address here, where naming one connector would be a guess.
-        connector: format!("{composed} registered connector(s)"),
-        reason,
-    })
+    AcquisitionBindings::new(bindings, redirect)
+        .map_err(|reason| CompositionRefusal::Registry { composed, reason })
 }
 
 /// The environment variable one connector's registration half is read from.
@@ -740,21 +829,14 @@ fn registration_variable(prefix: &str, connector: &str) -> String {
 ///
 /// One [`CompositionRefusal`] naming this connector.
 pub fn binding_from_catalogue(
+    catalogue: &ServedCatalogue,
     provider: &'static Provider,
     registration: &OAuthRegistration,
     redirect: &AcquisitionRedirect,
 ) -> Result<AcquisitionBinding, CompositionRefusal> {
-    let (credential, spec) = declared_oauth2(provider)?;
-    let base = endpoint_base(provider.id, provider.base_url, spec)?;
-    binding_from_declaration(
-        provider.id,
-        credential.name,
-        credential.hazard,
-        spec,
-        &base,
-        registration,
-        redirect,
-    )
+    let declared = declared_oauth2(provider)?;
+    let base = endpoint_base(catalogue, provider, declared.1)?;
+    binding_from_declaration(provider.id, declared, &base, registration, redirect)
 }
 
 /// The single OAuth2-acquired credential a connector declares, with its declaration.
@@ -792,35 +874,148 @@ pub fn declared_oauth2(
     Ok(first)
 }
 
-/// The base URL a declaration's `authorize_path` and `token_path` are joined onto.
+/// **The base URL a declaration's `authorize_path` and `token_path` are joined onto**, resolved
+/// through the catalogue this deployment serves (X-154 round 2).
 ///
-/// An **empty** `endpoint` means the connector's own base URL, which is what
-/// `catalog::OAuth2::endpoint` documents. A **named** one is a service, and the generated tables
-/// carry no base URL for a service — see this module's documentation for the measurement and for
-/// what closes it.
+/// Two steps, and they answer two different questions:
+///
+/// 1. **Which template.** A *named* `endpoint` is a service, and its `base_url` is read out of the
+///    connector's canonical document — GitLab's `login` is `{origin}`, which is the fact the
+///    generated tables do not carry. An *empty* `endpoint` means the connector's own base URL,
+///    exactly as `catalog::OAuth2::endpoint` documents it, and that is `Provider::base_url` under
+///    the reserved `default` service.
+/// 2. **Which values.** Any `{variable}` is filled from the **connector's own declared default** —
+///    the `config` entry that binds `endpoint.<variable>` for that service, directly or through
+///    `also_services`. Nothing else may fill one here: a deployment value would be a host named by
+///    configuration, and a tenant's connection setting is not available to a startup composition
+///    at all.
+///
+/// # What this deliberately does not do
+///
+/// It does not read a **tenant's** endpoint setting, so a tenant that pinned an operator-approved
+/// GitLab origin still authorizes against `https://gitlab.com`. That is the open question recorded
+/// in `docs/designs/credential-acquisition.md`: closing it means composing the authorize URL per
+/// request from that tenant's settings, which is a different lifetime from a startup registry and a
+/// story of its own.
 ///
 /// # Errors
 ///
-/// [`CompositionRefusal::UnresolvableEndpoint`] for a named endpoint, and
-/// [`CompositionRefusal::TemplatedBaseUrl`] for a base URL still carrying a `{placeholder}`. Never
-/// a guess: a wrong base URL is an authorization request sent to somebody else's host.
+/// [`CompositionRefusal::NoDocument`], [`CompositionRefusal::UnreadableDocument`],
+/// [`CompositionRefusal::UnknownEndpoint`], [`CompositionRefusal::NoDeclaredDefault`] or
+/// [`CompositionRefusal::TemplatedBaseUrl`] — each naming the connector, and the endpoint or the
+/// variable. Never a guess: a wrong base URL is an authorization request sent to somebody else's
+/// host.
 pub fn endpoint_base(
-    connector: &str,
-    provider_base_url: &str,
+    catalogue: &ServedCatalogue,
+    provider: &'static Provider,
     spec: &OAuth2,
 ) -> Result<String, CompositionRefusal> {
-    if !spec.endpoint.is_empty() {
-        return Err(CompositionRefusal::UnresolvableEndpoint {
+    let connector = provider.id;
+    let Some(document) = catalogue.provider_document(connector) else {
+        return Err(CompositionRefusal::NoDocument {
+            connector: connector.to_owned(),
+        });
+    };
+    let document: Value =
+        serde_json::from_str(document).map_err(|_| CompositionRefusal::UnreadableDocument {
+            connector: connector.to_owned(),
+            expected: "JSON",
+        })?;
+
+    // The reserved name for a provider with a single API surface, which is what an empty endpoint
+    // resolves against — `catalog::Operation::service` documents the reservation.
+    let service = if spec.endpoint.is_empty() {
+        "default"
+    } else {
+        spec.endpoint
+    };
+    let template = if spec.endpoint.is_empty() {
+        provider.base_url
+    } else {
+        service_base_url(&document, service).ok_or_else(|| CompositionRefusal::UnknownEndpoint {
             connector: connector.to_owned(),
             endpoint: spec.endpoint.to_owned(),
-        });
+        })?
+    };
+
+    resolve_declared_defaults(&document, connector, service, template)
+        .map(|resolved| resolved.trim_end_matches('/').to_owned())
+}
+
+/// One service's declared `base_url`, out of a canonical document.
+///
+/// Borrowed out of the parsed document rather than cloned, and looked up by name rather than by
+/// position: a document's `services` array is ordered by the connector's own declaration and
+/// nothing here may depend on that order.
+fn service_base_url<'a>(document: &'a Value, service: &str) -> Option<&'a str> {
+    document
+        .get("services")?
+        .as_array()?
+        .iter()
+        .find(|declared| declared.get("name").and_then(Value::as_str) == Some(service))?
+        .get("base_url")?
+        .as_str()
+}
+
+/// Fill every `{variable}` in `template` from the connector's own declared defaults.
+///
+/// # Errors
+///
+/// [`CompositionRefusal::NoDeclaredDefault`] naming the variable, or
+/// [`CompositionRefusal::TemplatedBaseUrl`] for an unterminated `{`.
+fn resolve_declared_defaults(
+    document: &Value,
+    connector: &str,
+    service: &str,
+    template: &str,
+) -> Result<String, CompositionRefusal> {
+    let mut resolved = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        resolved.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else {
+            return Err(CompositionRefusal::TemplatedBaseUrl {
+                connector: connector.to_owned(),
+            });
+        };
+        let variable = &after[..close];
+        let Some(value) = declared_default(document, service, variable) else {
+            return Err(CompositionRefusal::NoDeclaredDefault {
+                connector: connector.to_owned(),
+                variable: variable.to_owned(),
+            });
+        };
+        resolved.push_str(value);
+        rest = &after[close + 1..];
     }
-    if provider_base_url.contains('{') {
-        return Err(CompositionRefusal::TemplatedBaseUrl {
-            connector: connector.to_owned(),
-        });
-    }
-    Ok(provider_base_url.trim_end_matches('/').to_owned())
+    resolved.push_str(rest);
+    Ok(resolved)
+}
+
+/// The default a connector declares for one endpoint variable of one service.
+///
+/// `also_services` is what makes this work for GitLab: the `origin` field is declared on the
+/// `default` service and names `login` there, so one operator answer fills both services' base
+/// URLs. Upstream documents that a host composing a URL for a sibling service **must** consult it,
+/// and this is that consultation — without it, `login` would look like an unbound placeholder for a
+/// value the connector has already answered.
+fn declared_default<'a>(document: &'a Value, service: &str, variable: &str) -> Option<&'a str> {
+    let binds = format!("endpoint.{variable}");
+    document
+        .get("config")?
+        .as_array()?
+        .iter()
+        .find(|field| {
+            field.get("binds").and_then(Value::as_str) == Some(binds.as_str())
+                && (field.get("service").and_then(Value::as_str) == Some(service)
+                    || field
+                        .get("also_services")
+                        .and_then(Value::as_array)
+                        .is_some_and(|also| also.iter().any(|name| name.as_str() == Some(service))))
+        })?
+        .get("default")?
+        .as_str()
 }
 
 /// Refuse a declared grant list carrying one this composition does not perform.
@@ -944,23 +1139,26 @@ pub fn grant_from_declaration(
 
 /// Compose one binding from a declaration whose endpoint base URL is already resolved.
 ///
-/// Split from [`binding_from_catalogue`] at exactly the seam this module's documentation names: the
-/// base URL is the one declared fact the generated tables do not carry, so it is an argument here
-/// and [`endpoint_base`] is what production has to get it from.
+/// Split from [`binding_from_catalogue`] so the base-URL resolution — the part that reads the
+/// served catalogue's document — is one function a test can drive on its own.
+///
+/// `declared` is the **pair [`declared_oauth2`] returns**, taken whole rather than as a credential
+/// name, a hazard and a spec (X-154 review). Three independent arguments admitted a caller pairing
+/// one credential's name with another's hazard, which would bind a connector's acquisition under a
+/// weakness declared about a different credential — and a fail-closed deployment decides admission
+/// on exactly that value.
 ///
 /// # Errors
 ///
 /// One [`CompositionRefusal`] naming this connector.
-#[allow(clippy::too_many_arguments)]
 pub fn binding_from_declaration(
     connector: &str,
-    credential: &str,
-    hazard: Option<DeclaredHazard>,
-    spec: &OAuth2,
+    declared: (&Credential, &OAuth2),
     base: &str,
     registration: &OAuthRegistration,
     redirect: &AcquisitionRedirect,
 ) -> Result<AcquisitionBinding, CompositionRefusal> {
+    let (credential, spec) = declared;
     let grant = grant_from_declaration(connector, spec, base, registration, redirect)?;
     if spec.token_path.is_empty() {
         return Err(CompositionRefusal::IncompleteDeclaration {
@@ -984,11 +1182,14 @@ pub fn binding_from_declaration(
     })?;
     Ok(AcquisitionBinding::delegating(
         connector,
-        credential,
-        // **Read from the declaration, not stated by the composition** (X-154). babelforce is the
-        // first released connector to declare one, so X-74's gate is now driven by released
-        // metadata rather than only by a fixture.
-        declared_hazard(hazard),
+        credential.name,
+        // **Read from the declaration, and off the same `Credential` the name came from.** GitLab
+        // composes today and declares none, so what a production deployment binds is an absence
+        // this composition *read* rather than one it assumed. babelforce is the connector that
+        // declares one — `Some(ResourceOwnerSecretShared)`, the first released — and it is refused
+        // earlier, on its `password` grant, so no deployment binds it yet; `declared_hazard` is
+        // what would carry it the moment a hazardous connector declares a grant this host performs.
+        declared_hazard(credential.hazard),
         grant,
         performer,
     ))
@@ -1839,6 +2040,11 @@ mod tests {
         connector_catalog::provider(ProviderKey::id(id)).expect("the catalogue declares it")
     }
 
+    /// The catalogue a checkout serves: the pack this build embeds (X-153).
+    fn catalogue() -> ServedCatalogue {
+        ServedCatalogue::embedded()
+    }
+
     /// This deployment's registration identity, which never comes from the catalogue.
     fn registration() -> OAuthRegistration {
         OAuthRegistration::new("deployment-client", None)
@@ -1875,7 +2081,7 @@ mod tests {
 
         // An empty endpoint *is* resolvable — it means the connector's own base URL — so the
         // refusals below are about the grant and the path, not about a base URL nothing could find.
-        let base = endpoint_base(babelforce.id, babelforce.base_url, spec)
+        let base = endpoint_base(&catalogue(), babelforce, spec)
             .expect("an empty endpoint resolves to the connector's own base URL");
         assert_eq!(base, "https://services.babelforce.com");
 
@@ -1958,52 +2164,148 @@ mod tests {
         .expect("the grants this composition performs");
     }
 
-    /// **The generated tables cannot resolve a *named* endpoint, and this refuses rather than
-    /// guessing one** (X-154 finding).
+    /// **GitLab's named endpoint resolves through the catalogue this deployment serves** (X-154
+    /// round 2, closing round 1's finding).
     ///
-    /// GitLab's declaration resolves against the `login` service. `catalog::Provider` carries one
-    /// `base_url` and it is the **default** service's — `{origin}/api/v4`, the API, not the
-    /// authorization host — so there is nothing in the tables to join `/oauth/authorize` onto. The
-    /// canonical document carries `services[].base_url` (`{origin}` for `login`); reading it is
-    /// X-153.
+    /// Three facts have to line up and none of them is in the generated `&'static` tables:
     ///
-    /// A guess here would be an authorization request sent to somebody else's host, so this is a
-    /// refusal that names the connector and the endpoint.
+    /// - the declaration names the `login` service, and `Provider::base_url` is the *default*
+    ///   service's `{origin}/api/v4` — a different service and a different host path;
+    /// - the document's `login` service declares `base_url: "{origin}"`;
+    /// - the `origin` field binds `endpoint.origin`, is declared on `default`, names `login` in
+    ///   `also_services`, and declares the default `https://gitlab.com`.
+    ///
+    /// Resolved, that is `https://gitlab.com` — the authorization host, from vendor data, with no
+    /// deployment value and no caller input anywhere in it.
     #[test]
-    fn a_named_endpoint_has_no_base_url_in_the_generated_tables() {
+    fn gitlabs_login_endpoint_resolves_through_the_served_catalogue() {
         let gitlab = provider("gitlab");
         let (credential, spec) = declared_oauth2(gitlab).expect("gitlab declares one");
 
         assert_eq!(credential.name, "gitlab.oauth_token");
         assert_eq!(spec.endpoint, "login");
-        assert_eq!(gitlab.base_url, "{origin}/api/v4");
+        assert_eq!(
+            gitlab.base_url, "{origin}/api/v4",
+            "the tables carry the default service's base URL and only that one",
+        );
 
-        let refusal = endpoint_base(gitlab.id, gitlab.base_url, spec)
-            .expect_err("a named endpoint is not resolvable from the generated tables");
+        assert_eq!(
+            endpoint_base(&catalogue(), gitlab, spec)
+                .expect("the served catalogue's document resolves `login`"),
+            "https://gitlab.com",
+        );
+
+        // The document is the source, so a catalogue that does not carry the connector refuses
+        // rather than falling back to the tables this binary was built with.
+        assert_eq!(
+            endpoint_base(
+                &catalogue(),
+                gitlab,
+                &OAuth2 {
+                    endpoint: "not-a-service",
+                    ..*spec
+                }
+            )
+            .expect_err("a service the document does not declare must be refused"),
+            CompositionRefusal::UnknownEndpoint {
+                connector: "gitlab".to_owned(),
+                endpoint: "not-a-service".to_owned(),
+            },
+        );
+
+        // And the empty-endpoint case resolves the *connector's own* base URL through the same
+        // declared default — `{origin}/api/v4`, which is the API service and not the login one.
+        assert_eq!(
+            endpoint_base(
+                &catalogue(),
+                gitlab,
+                &OAuth2 {
+                    endpoint: "",
+                    ..*spec
+                }
+            )
+            .expect("the connector's own base URL resolves too"),
+            "https://gitlab.com/api/v4",
+        );
+    }
+
+    /// **A template variable with no declared default is refused, naming the connector and the
+    /// variable** — never guessed, never left as braces.
+    ///
+    /// Zendesk is the released case and it is the right one: `https://{subdomain}.zendesk.com`,
+    /// where `subdomain` is `required` with no default because there is no such thing as a default
+    /// Zendesk. A startup composition has no tenant to ask, so it refuses.
+    #[test]
+    fn an_endpoint_variable_with_no_declared_default_is_refused_naming_it() {
+        let zendesk = provider("zendesk");
+        assert_eq!(zendesk.base_url, "https://{subdomain}.zendesk.com");
+
+        let spec = OAuth2 {
+            endpoint: "",
+            authorize_path: "/oauth/authorizations/new",
+            token_path: "/oauth/tokens",
+            client_id: "",
+            scopes: &["read"],
+            grants: &[OAuthGrant::AuthorizationCode, OAuthGrant::RefreshToken],
+            redirect: None,
+        };
+
+        let refusal = endpoint_base(&catalogue(), zendesk, &spec)
+            .expect_err("a variable with no declared default cannot be filled");
         assert_eq!(
             refusal,
-            CompositionRefusal::UnresolvableEndpoint {
-                connector: "gitlab".to_owned(),
-                endpoint: "login".to_owned(),
+            CompositionRefusal::NoDeclaredDefault {
+                connector: "zendesk".to_owned(),
+                variable: "subdomain".to_owned(),
             },
         );
         let message = refusal.to_string();
-        assert!(message.contains("gitlab"), "{message}");
-        assert!(message.contains("login"), "{message}");
-
-        // The other half of the same gap: even the connector's *own* base URL is templated, and a
-        // startup composition has no tenant whose settings could fill `{origin}`.
-        let unnamed = OAuth2 {
-            endpoint: "",
-            ..*spec
-        };
-        assert_eq!(
-            endpoint_base(gitlab.id, gitlab.base_url, &unnamed)
-                .expect_err("a templated base URL is not a base URL"),
-            CompositionRefusal::TemplatedBaseUrl {
-                connector: "gitlab".to_owned(),
-            },
+        assert!(message.contains("zendesk"), "{message}");
+        assert!(message.contains("subdomain"), "{message}");
+        assert!(
+            !message.contains('{'),
+            "a refusal must not read as a URL somebody could paste: {message}",
         );
+    }
+
+    /// **Production composes a non-empty registry from the artifact** (X-154 acceptance 2, and
+    /// X-147's seventh criterion).
+    ///
+    /// A deployment that registers GitLab and supplies its application id gets a bound delegated
+    /// acquisition whose authorization endpoint was composed from the declaration — the resolved
+    /// `login` base plus the declared `authorize_path` — and whose scopes are the three GitLab
+    /// declares. Nothing here states a URL.
+    #[test]
+    fn a_registered_gitlab_composes_a_non_empty_registry_from_the_artifact() {
+        let bindings = from_environment(
+            |name| match name {
+                ACQUISITION_CONNECTORS_ENV => Some("gitlab".to_owned()),
+                "FLUX_EXCHANGE_OAUTH_CLIENT_ID_GITLAB" => Some("deployment-client".to_owned()),
+                _ => None,
+            },
+            &catalogue(),
+            Some(&redirect()),
+        )
+        .expect("gitlab composes from the served catalogue");
+
+        let binding = bindings
+            .get("gitlab")
+            .expect("the registry is non-empty and holds gitlab");
+        assert_eq!(binding.credential(), "gitlab.oauth_token");
+        assert_eq!(
+            binding.hazard(),
+            None,
+            "gitlab declares none, and this is a value read rather than assumed",
+        );
+
+        let grant = binding.delegated().expect("a delegated grant is bound");
+        assert_eq!(
+            grant.authorization_endpoint(),
+            "https://gitlab.com/oauth/authorize",
+        );
+        assert_eq!(grant.scope(), "read_api read_user read_repository");
+        assert_eq!(grant.client_id(), "deployment-client");
+        assert_eq!(grant.redirect(), &redirect());
     }
 
     /// **The registration identity is this deployment's, and a missing one refuses at startup
@@ -2015,6 +2317,7 @@ mod tests {
                 ACQUISITION_CONNECTORS_ENV => Some("gitlab".to_owned()),
                 _ => None,
             },
+            &catalogue(),
             Some(&redirect()),
         )
         .expect_err("a registered connector with no client id must refuse");
@@ -2042,6 +2345,7 @@ mod tests {
                     "FLUX_EXCHANGE_OAUTH_CLIENT_ID_GITLAB" => Some("   ".to_owned()),
                     _ => None,
                 },
+                &catalogue(),
                 Some(&redirect()),
             ),
             Err(CompositionRefusal::NoRegistration { .. }),
@@ -2053,6 +2357,7 @@ mod tests {
         assert_eq!(
             from_environment(
                 |name| (name == ACQUISITION_CONNECTORS_ENV).then(|| "not-a-connector".to_owned()),
+                &catalogue(),
                 Some(&redirect()),
             )
             .expect_err("an uncatalogued connector must refuse"),
@@ -2063,7 +2368,7 @@ mod tests {
 
         // And a deployment that registered nothing composes an empty registry, which is what a
         // checkout runs as and is not an error.
-        let empty = from_environment(|_| None, Some(&redirect()))
+        let empty = from_environment(|_| None, &catalogue(), Some(&redirect()))
             .expect("registering nothing is not a refusal");
         assert!(empty.get("gitlab").is_none());
         assert_eq!(empty.redirect(), Some(&redirect()));
@@ -2180,7 +2485,9 @@ mod tests {
         const CLIENT_SECRET: &str = "CLIENT-SECRET-NOT-A-REAL-SECRET";
         let registration =
             OAuthRegistration::new("deployment-client", Some(Secret::new(CLIENT_SECRET)));
-        let spec = OAuth2 {
+        // A `static`, because a `Credential` holds its declaration by `&'static` reference — which
+        // is also what makes the pair below one value a caller cannot mismatch.
+        static SPEC: OAuth2 = OAuth2 {
             endpoint: "",
             authorize_path: "/oauth/authorize",
             token_path: "/oauth/token",
@@ -2189,11 +2496,21 @@ mod tests {
             grants: &[OAuthGrant::AuthorizationCode, OAuthGrant::RefreshToken],
             redirect: None,
         };
+        let spec = SPEC;
+        let credential = Credential {
+            name: "fixture.oauth_token",
+            leaf: "oauth_token",
+            acquire: Acquisition::OAuth2(&SPEC),
+            place: connector_catalog::Placement::Header {
+                name: "Authorization",
+                prefix: "Bearer ",
+            },
+            subject: connector_catalog::Subject::User,
+            hazard: None,
+        };
         let binding = binding_from_declaration(
             "fixture",
-            "fixture.oauth_token",
-            None,
-            &spec,
+            (&credential, &SPEC),
             "https://vendor.example.test",
             &registration,
             &redirect(),

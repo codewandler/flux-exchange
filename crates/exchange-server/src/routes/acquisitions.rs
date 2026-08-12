@@ -57,11 +57,13 @@
 //! requires the two URLs to be one. That agreement is what makes the injected seam a faithful
 //! stand-in rather than a claim.
 //!
-//! **One declared fact still comes from outside the generated tables**, and that test is where it is
-//! visible: GitLab's declaration resolves against its `login` service, whose base URL lives in the
-//! canonical document rather than in `catalog::Provider`. `credential_acquisition::endpoint_base`
-//! refuses a named endpoint by name for that reason, so a production deployment that registers
-//! GitLab is refused at startup rather than sent to a host nobody resolved.
+//! The authorization **host** is declared too, and comes from the catalogue this deployment serves:
+//! GitLab's declaration resolves against its `login` service, whose `base_url` lives in the
+//! canonical document X-153 made readable. What a startup composition fills a template variable
+//! with is the connector's **own declared default**, so a tenant that pinned an operator-approved
+//! GitLab origin still authorizes against `https://gitlab.com` — an open question recorded in
+//! `docs/designs/credential-acquisition.md` rather than answered here, because answering it means
+//! composing this URL per request from that tenant's settings.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -1224,53 +1226,45 @@ mod tests {
         assert_eq!(state.pending_delegations().open(), 0);
     }
 
-    /// GitLab's `login` service base URL, which is the **one** fact this test supplies rather than
-    /// reads (X-154).
-    ///
-    /// The canonical document declares it — `services[].base_url` is `{origin}` for `login` — and
-    /// the connector's own `origin` configuration field declares the default that fills it,
-    /// `https://gitlab.com`. Neither is in the generated `&'static` tables, where
-    /// `catalog::Provider` carries only the *default* service's `{origin}/api/v4`. So
-    /// `credential_acquisition::endpoint_base` refuses `login` by name in production, and this
-    /// constant is what lets the rest of the composition be proven against the real declaration
-    /// meanwhile. When X-153 lands the document, this constant is what goes.
-    const GITLAB_LOGIN_BASE: &str = "https://gitlab.com";
-
     /// **The end-to-end agreement X-154 exists to prove** (X-147's second criterion).
     ///
-    /// One authorize URL composed from GitLab's *released declaration* — its `authorize_path` and
-    /// its three declared scopes, read out of `connector_catalog` — and one composed from the
-    /// hand-written [`DelegatedGrant`] X-147 was delivered against. The route produces both, and
-    /// they must be the same string up to the two values that are random by construction (`state`
-    /// and the PKCE challenge).
+    /// One authorize URL composed from GitLab's *released declaration* — its `authorize_path`, its
+    /// three declared scopes, and the base URL its `login` service declares, all read out of the
+    /// catalogue this deployment serves — and one composed from the hand-written
+    /// [`DelegatedGrant`] X-147 was delivered against. The route produces both, and they must be the
+    /// same string up to the two values that are random by construction (`state` and the PKCE
+    /// challenge).
     ///
     /// That is what makes the injected seam a faithful stand-in rather than an assertion: if the
-    /// declaration said something else about the path or the scopes, these two would differ here
-    /// rather than at a vendor.
+    /// declaration said something else about the host, the path or the scopes, these two would
+    /// differ here rather than at a vendor.
+    ///
+    /// **Round 2 removed the last hand-supplied value.** Round 1 passed `GITLAB_LOGIN_BASE` as a
+    /// constant, because the generated tables carry no base URL for a named service; X-153's served
+    /// catalogue carries the document that does, so the composition below now reads all three parts
+    /// and this test states none of them.
     #[tokio::test]
     async fn the_url_composed_from_gitlabs_declaration_is_the_url_this_route_produces() {
         use crate::credential_acquisition::{
-            binding_from_declaration, declared_oauth2, OAuthRegistration,
+            binding_from_declaration, declared_oauth2, endpoint_base, OAuthRegistration,
         };
+        use exchange_host::ServedCatalogue;
 
-        let (credential, spec) = declared_oauth2(gitlab()).expect("gitlab declares one OAuth2");
+        let declared = declared_oauth2(gitlab()).expect("gitlab declares one OAuth2");
+        let (credential, spec) = declared;
         // The released declaration, asserted rather than assumed — this test is only evidence if
         // these are the catalogue's own values.
         assert_eq!(spec.authorize_path, "/oauth/authorize");
         assert_eq!(spec.scopes, &["read_api", "read_user", "read_repository"]);
         assert_eq!(credential.name, "gitlab.oauth_token");
 
+        let catalogue = ServedCatalogue::embedded();
+        let base = endpoint_base(&catalogue, gitlab(), spec)
+            .expect("the served catalogue resolves gitlab's `login` endpoint");
         let registration = OAuthRegistration::new("deployment-client", None);
-        let from_declaration = binding_from_declaration(
-            gitlab().id,
-            credential.name,
-            credential.hazard,
-            spec,
-            GITLAB_LOGIN_BASE,
-            &registration,
-            &redirect(),
-        )
-        .expect("gitlab's declaration composes a delegated binding");
+        let from_declaration =
+            binding_from_declaration(gitlab().id, declared, &base, &registration, &redirect())
+                .expect("gitlab's declaration composes a delegated binding");
 
         // X-147's shape: every value stated by hand, which is what the injected seam was.
         let injected = AcquisitionBinding::new(

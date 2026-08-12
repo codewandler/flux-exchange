@@ -683,27 +683,30 @@ async fn compose(
             "serving the connector catalogue this build embeds"
         ),
     }
+    // **Derived from the catalogue this deployment is about to serve** (X-154), for the connectors
+    // `FLUX_EXCHANGE_ACQUISITION_CONNECTORS` names. The same `Arc` goes to the state below, so the
+    // acquisitions are composed from the pack every other surface answers from — a second
+    // `ServedCatalogue` here would be a deployment whose loaded catalogue served one set of
+    // connectors and acquired for another.
+    //
+    // A deployment that registered nothing composes an empty registry, which is what a checkout
+    // does; one that registered a connector it cannot acquire for **refuses to start** rather than
+    // serving a surface that answers `422` for the one connector its operator configured.
+    let acquisitions =
+        credential_acquisition::configured(&catalogue, acquisition_redirect.as_ref()).map_err(
+            |refusal| StartupRefusal::CredentialAcquisition {
+                reason: refusal.to_string(),
+            },
+        )?;
     let mut state = compose_identity(startup)?
         .with_tenancy(startup.tenancy().clone())
         .with_catalogue(catalogue)
         .with_credential_acquisition(
             auth_posture,
-            // **Derived from the released catalogue** (X-154), for the connectors
-            // `FLUX_EXCHANGE_ACQUISITION_CONNECTORS` names. The redirect is passed to the registry
-            // and to nothing else: it is the value every bound grant is checked against, and
-            // `AppState::acquisition_redirect` reads through to it.
-            //
-            // A deployment that registered nothing composes an empty registry, which is what a
-            // checkout does; one that registered a connector it cannot acquire for **refuses to
-            // start** rather than serving a surface that answers `422` for the one connector its
-            // operator configured.
-            Arc::new(
-                credential_acquisition::configured(acquisition_redirect.as_ref()).map_err(
-                    |refusal| StartupRefusal::CredentialAcquisition {
-                        reason: refusal.to_string(),
-                    },
-                )?,
-            ),
+            // The redirect is passed to the registry and to nothing else: it is the value every
+            // bound grant is checked against, and `AppState::acquisition_redirect` reads through
+            // to it.
+            Arc::new(acquisitions),
         );
     if let Some(origin) = hosted_origin {
         state = state.with_hosted_origin(origin);

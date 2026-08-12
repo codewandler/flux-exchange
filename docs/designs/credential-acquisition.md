@@ -470,6 +470,7 @@ it is one sentence per axis:
 | Value | Decided by | Why |
 |---|---|---|
 | authorize path, token path, scopes, permitted grants | the connector's declaration | vendor truth; a caller names none of them, and a scope absent from the list is one this host does not request |
+| the endpoint's base URL | the served catalogue's document, filled from the connector's declared default | `OAuth2::endpoint` names a *service*, and only that service's document entry says what host it is — see below |
 | declared acquisition hazard | the connector's declaration | X-74's gate is a *property* filter, and babelforce is the first released connector to carry one |
 | `client_id`, `client_secret` | this deployment | Decision 0022, amended 2026-08-12: *"the artifact publishes the registration **requirement**, never a value"*, and upstream C-536 refuses to emit one |
 | redirect URI | this deployment | X-147's rule, unchanged; upstream's `OAuthRedirect` models a loopback port and path, which is the desktop shape |
@@ -484,7 +485,7 @@ declaration, because X-75's lane needs a stated endpoint, an explicit hazard opt
 owner typing a secret — none of which is in a catalogue, and inventing them would stand up the exact
 grant RFC 9700 §2.4 says MUST NOT be used out of vendor metadata.
 
-### The one declared fact the generated tables do not carry
+### Resolving the endpoint — measured in round 1, closed in round 2
 
 `catalog::OAuth2::endpoint` is a **service name**. The base URL it resolves against is in the
 connector's canonical document (`services[].base_url`), and the generated `&'static` tables carry
@@ -497,10 +498,34 @@ the `origin` *variable* is shared with `login`, which is not the same as saying 
 that variable. Deriving one from the other happens to be right for GitLab and is wrong for `default`
 in the same declaration — a guess that reads as a rule.
 
-So `endpoint_base` **refuses a named endpoint by name**, and a deployment that registers GitLab is
-refused at startup rather than sent to a host nobody resolved. That is *refuse; never repair* applied
-to our own missing input. Reading the canonical document is [[X-153]]'s pack-and-reader path, and
-when it lands `endpoint_base` is the single function that changes.
+Round 1 therefore refused a named endpoint by name rather than guessing. [[X-153]] then landed
+`ServedCatalogue`, and `endpoint_base` now reads the service's own `base_url` out of the document
+through `ServedCatalogue::provider_document` — **the catalogue this deployment serves**, threaded in
+from the composition rather than reached for, so a deployment that loaded a newer pack composes the
+acquisitions that pack declares.
+
+`also_services` is consulted after all, for the job upstream documents it for: filling `login`'s
+`{origin}` from the answer declared on `default`.
+
+### What fills a template, and the question that leaves open
+
+A startup composition has no tenant. So the only value it may substitute into a base URL template is
+the **connector's own declared default** — GitLab declares `https://gitlab.com` on the `origin`
+field — and a variable with no declared default is refused, naming the connector and the variable.
+Zendesk is the shipped case: `https://{subdomain}.zendesk.com`, `required`, no default, because
+there is no such thing as a default Zendesk.
+
+**The open question, stated rather than solved.** GitLab's `origin` carries `approval = operator`
+precisely so a deployment can point a connection at a self-managed instance — and a tenant that has
+done so would still be sent to `https://gitlab.com` to authorize, because this registry is composed
+once at startup and that setting is per connection. Nothing here is wrong for the default
+deployment and nothing here is right for that one.
+
+Closing it means composing the authorize URL **per request**, from the resolved principal's tenant
+settings, at the point `routes::acquisitions::authorize` runs — which is a different lifetime from a
+startup registry, needs the settings store the registry does not hold, and has its own question about
+what an operator-approved origin means for a credential already acquired against another one. That
+is a story, not a patch, and it is filed as this one's successor rather than guessed at here.
 
 ## Acceptance / done
 
