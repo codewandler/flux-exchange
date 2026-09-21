@@ -19,6 +19,6 @@
   },
   "dependencies": {
     "@vue-flow/core": "^1.48.2",
-    "vue": "^3.5.41"
+    "vue": "^3.5.43"
   }
 }
